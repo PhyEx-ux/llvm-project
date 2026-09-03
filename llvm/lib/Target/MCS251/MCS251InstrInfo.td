@@ -9,6 +9,20 @@
 def MCS251eret : SDNode<"MCS251ISD::ERET", SDTNone,
                         [SDNPHasChain, SDNPOptInGlue, SDNPVariadic]>;
 
+// Call node (Phase 7), same shape as upstream MSP430's MSP430call: variadic,
+// with operand 0 the callee (a TargetGlobalAddress / TargetExternalSymbol
+// after LowerCall wrapped it) and the remaining operands the physical
+// argument registers (DAG.getRegister, so the selector emits them as implicit
+// uses keeping dpl/dptr live into the call), followed by the register mask
+// (the caller-preserved set from getCallPreservedMask) and the glue that
+// ties the argument CopyToReg chain to the call and the call to the result
+// CopyFromReg chain. SDNPOptInGlue (not SDNPInGlue) because a zero-argument
+// call carries no input glue.
+def SDT_MCS251Call : SDTypeProfile<0, -1, [SDTCisVT<0, iPTR>]>;
+def MCS251call : SDNode<"MCS251ISD::CALL", SDT_MCS251Call,
+                        [SDNPHasChain, SDNPOutGlue, SDNPOptInGlue,
+                         SDNPVariadic]>;
+
 class MCS251Inst<dag Outs, dag Ins, string Asm, list<dag> Pat>
     : Instruction {
   let Namespace = "MCS251";
@@ -39,6 +53,12 @@ def mcs251_imm16 : Operand<i16> { let PrintMethod = "printImm16"; }
 // turns into an MCSymbolRefExpr and MCS251InstPrinter prints as a label
 // (same shape as upstream MSP430's jmptarget).
 def brtarget : Operand<OtherVT>;
+
+// Call target: a TargetGlobalAddress / TargetExternalSymbol that
+// MCS251MCInstLower turns into an MCSymbolRefExpr. The symbol is resolved to
+// a 24-bit address by the sdas251/linker (the 9A-prefix ecall encoding is
+// 4 bytes, addr24), so the compiler never truncates or splits it.
+def calltarget : Operand<iPTR>;
 
 //===----------------------------------------------------------------------===//
 //  Move instructions
@@ -286,6 +306,32 @@ let isBranch = 1, isTerminator = 1, Uses = [PSW], usesCustomInserter = 1 in
 def BRCC8S : MCS251Inst<(outs),
                         (ins GPR8:$lhs, GPR8:$rhs, i8imm:$cc, brtarget:$dst),
                         "", []>;
+
+//===----------------------------------------------------------------------===//
+//  Call instruction
+//===----------------------------------------------------------------------===//
+//
+// Direct call = ecall (opcode 9A + addr24, 4 bytes). The 24-bit target
+// address is filled in by the sdas251/linker from the symbol, so ecall is
+// never truncated or split into an lcall (measurement-verified; symbol
+// addresses above 0xFFFF resolve correctly).
+//
+// Caller-saved modelling: the full clobber set (r0-r9/r12-r15, acc/b,
+// dpl/dph/dpx, psw) is NOT spelled out in a Defs list -- LowerCall attaches
+// a register-mask operand to the MCS251ISD::CALL node (AVR-style), which the
+// selector carries onto the MachineInstr. PSW is additionally listed in Defs
+// (as MSP430 lists SR) so the flag clobber is already visible on the bare
+// instruction before/without the mask operand. DPL/DPH/DPTR deliberately
+// stay out of any preserved set: call results are consumed through
+// CopyFromReg, not preserved across the call.
+let isCall = 1, hasSideEffects = 1, Defs = [PSW] in
+def ECALL : MCS251Inst<(outs), (ins calltarget:$addr), "ecall $addr", []>;
+
+// LowerCall wraps every callee as one of the two target symbol forms below
+// (indirect calls are rejected there), so these two Pats are the only entry
+// points for selecting MCS251ISD::CALL (same shape as MSP430's CALLi Pats).
+def : Pat<(MCS251call (iPTR tglobaladdr:$dst)), (ECALL tglobaladdr:$dst)>;
+def : Pat<(MCS251call (iPTR texternalsym:$dst)), (ECALL texternalsym:$dst)>;
 
 //===----------------------------------------------------------------------===//
 //  Return instruction

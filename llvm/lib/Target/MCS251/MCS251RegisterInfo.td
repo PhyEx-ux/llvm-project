@@ -192,3 +192,42 @@ def GPR16 : RegisterClass<"MCS251", [i16], 8, (add WR0, WR2, WR4, WR6, WR8,
 // dr56 (dpx) and dr60 (spx) are reserved and not allocatable.
 def GPR32 : RegisterClass<"MCS251", [i32], 8, (add DR0, DR4, DR8, DR12, DR16,
                                                DR20, DR24, DR28)>;
+
+// Non-allocatable classes for the fixed SFR ABI locations (dpl/dph and their
+// 16-bit overlay dptr), same pattern as upstream X86's CCR for EFLAGS. They
+// exist so TargetRegisterInfo::getMinimalPhysRegClass() can answer for these
+// registers: the source-level scheduler's CheckForPhysRegDependency calls it
+// whenever a CopyToReg's source is a CopyFromReg of the same physical
+// register -- exactly the `return g();` forwarding shape, where the call
+// result in dpl feeds the caller's own return slot. Without these classes
+// the lookup returns null there (an assert build catches it; a release
+// build dereferences it). CopyCost = -1 marks the pair-of-lanes copy as
+// expensive, so the scheduler models the dependency as a physical-register
+// one and keeps the copy chain ordered; the registers stay reserved in
+// getReservedRegs() and can never be allocated. PSW never needs this: it is
+// only ever referenced implicitly and never through CopyFromReg/CopyToReg.
+let CopyCost = -1, isAllocatable = 0 in {
+  def DP8  : RegisterClass<"MCS251", [i8],  8, (add DPL, DPH)>;
+  def DP16 : RegisterClass<"MCS251", [i16], 8, (add DPTR)>;
+}
+
+//===----------------------------------------------------------------------===//
+//  Call-preserved registers (caller side)
+//===----------------------------------------------------------------------===//
+//
+// The SDCC MCS-251 ABI (measurement-verified, QEMU stc32g144k246): everything
+// is caller-saved across an ecall -- the callee may freely clobber r0-r9 /
+// r12-r15, acc/b, dpl/dph (dptr), dpx (dr56), the dr0..dr28 file and psw.
+// Hence the callee-saved list is EMPTY. The stack pointer dr60 (spx) must of
+// course hold a valid sp when ecall returns; OtherPreserved marks it as
+// preserved-by-the-call-machinery (the bit is set in CSR_MCS251_RegMask)
+// without making it a callee-saved register that prologue/epilogue insertion
+// would try to push/pop -- it is reserved and never allocated.
+//
+// The mask derived from this def is what LowerCall attaches to the
+// MCS251ISD::CALL node (getCallPreservedMask); DPL/DPH/DPTR deliberately
+// have no preserved bits: call results are read out via CopyFromReg, never
+// assumed live across the call.
+def CSR_MCS251 : CalleeSavedRegs<(add)> {
+  let OtherPreserved = (add DR60);
+}

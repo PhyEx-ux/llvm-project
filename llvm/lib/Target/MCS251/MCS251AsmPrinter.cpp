@@ -38,7 +38,7 @@ public:
     MCS251_MC::verifyInstructionPredicates(MI->getOpcode(),
                                            getSubtargetInfo().getFeatureBits());
 
-    MCS251MCInstLower MCInstLowering(OutContext);
+    MCS251MCInstLower MCInstLowering(*this);
     MCInst TmpInst;
     MCInstLowering.Lower(MI, TmpInst);
     EmitToStreamer(*OutStreamer, TmpInst);

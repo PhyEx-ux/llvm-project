@@ -11,7 +11,8 @@ class MCS251Subtarget;
 namespace MCS251ISD {
 enum NodeType : unsigned {
   FIRST_NUMBER = ISD::BUILTIN_OP_END,
-  ERET
+  ERET,
+  CALL
 };
 } // namespace MCS251ISD
 
@@ -32,6 +33,14 @@ public:
                       bool IsVarArg,
                       const SmallVectorImpl<ISD::OutputArg> &Outs,
                       LLVMContext &Context, const Type *RetTy) const override;
+
+  SDValue LowerCall(TargetLowering::CallLoweringInfo &CLI,
+                    SmallVectorImpl<SDValue> &InVals) const override;
+  SDValue LowerCallResult(SDValue Chain, SDValue InGlue,
+                          CallingConv::ID CallConv, bool IsVarArg,
+                          const SmallVectorImpl<ISD::InputArg> &Ins,
+                          const SDLoc &DL, SelectionDAG &DAG,
+                          SmallVectorImpl<SDValue> &InVals) const;
 
   SDValue LowerFormalArguments(
       SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,

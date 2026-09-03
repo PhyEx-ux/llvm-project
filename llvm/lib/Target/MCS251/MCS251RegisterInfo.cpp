@@ -21,6 +21,23 @@ MCS251RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   return NoCalleeSaved;
 }
 
+// The caller-side view of the same ABI fact: which registers survive an
+// ecall. CSR_MCS251 (MCS251RegisterInfo.td) keeps the callee-saved list
+// empty -- everything is caller-saved -- with dr60 (spx) as the sole
+// OtherPreserved register, so the generated CSR_MCS251_RegMask preserves
+// exactly one register (DR60) and its subregisters -- seven bits: DR60,
+// R60-R63 and WR60/WR62. LowerCall attaches this mask to the
+// MCS251ISD::CALL node.
+const uint32_t *MCS251RegisterInfo::getCallPreservedMask(
+    const MachineFunction &MF, CallingConv::ID CC) const {
+  switch (CC) {
+  default:
+    report_fatal_error("Unsupported calling convention");
+  case CallingConv::C:
+    return CSR_MCS251_RegMask;
+  }
+}
+
 BitVector MCS251RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   BitVector Reserved(getNumRegs());
   // DR60 (alias spx) is the extended stack pointer. DR56 (alias dpx) is the

@@ -42,6 +42,8 @@ const char *MCS251TargetLowering::getTargetNodeName(unsigned Opcode) const {
   switch (Opcode) {
   case MCS251ISD::ERET:
     return "MCS251ISD::ERET";
+  case MCS251ISD::CALL:
+    return "MCS251ISD::CALL";
   default:
     return nullptr;
   }
@@ -456,6 +458,169 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
     InVals.push_back(ArgValue);
   }
 
+  return Chain;
+}
+
+//===----------------------------------------------------------------------===//
+//  Call lowering (Phase 7)
+//===----------------------------------------------------------------------===//
+//
+// Direct calls compile to `ecall _sym` (9A + addr24, 4 bytes; the linker
+// fills the 24-bit address, so the symbol is never truncated). Argument
+// loading reuses the Phase 4 ABI slots (i8 -> dpl, i16 -> dptr) via the same
+// CC_MCS251 analysis as LowerFormalArguments, mirrored onto the caller side
+// with CopyToReg. Results come back through the same fixed locations
+// (LowerCallResult's CopyFromReg); a returned value feeding straight into
+// the caller's own return needs no intermediate copy at all -- the
+// phys->virt->phys chain through dpl/dptr coalesces away (dpl/dptr are
+// reserved), the SDCC-equivalent `ecall; eret` tail.
+//
+// CALLSEQ decision: no CALLSEQ_START/END nodes are emitted. The SDCC MCS-251
+// ABI passes no arguments on the stack (stack-auto=0; the single register
+// slot is all this backend supports), so the sequence bounds would always be
+// 0,0. Skipping them entirely (deviation from the MSP430/AVR template, which
+// wraps the call in CALLSEQ nodes and then implements the ADJCALLSTACKDOWN/UP
+// pseudos) avoids two never-anything-but-zero pseudo instructions and the
+// corresponding eliminateCallFramePseudoInstr hook; nothing in the DAG
+// builder requires a LowerCall to produce a call sequence.
+//
+// Known limitation (loud failure, not silent miscompilation): a value live
+// across a call needs a free GPR for greedy RA to keep it in. When no GPR is
+// free, RA spills -- and spilling needs the frame, which only arrives in
+// Phase 9. In practice the run dies before eliminateFrameIndex could ever
+// fire (PEI): the spiller calls storeRegToStackSlot first, and the explicit
+// stub in MCS251InstrInfo reports the fatal error there. Register pressure
+// across calls is therefore unsupported until then, by construction.
+SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
+                                        SmallVectorImpl<SDValue> &InVals) const {
+  SelectionDAG &DAG = CLI.DAG;
+  SDLoc &DL = CLI.DL;
+  SmallVectorImpl<ISD::OutputArg> &Outs = CLI.Outs;
+  SmallVectorImpl<SDValue> &OutVals = CLI.OutVals;
+  SDValue Chain = CLI.Chain;
+  SDValue Callee = CLI.Callee;
+  bool &IsTailCall = CLI.IsTailCall;
+  CallingConv::ID CallConv = CLI.CallConv;
+  bool IsVarArg = CLI.IsVarArg;
+
+  switch (CallConv) {
+  default:
+    report_fatal_error("Unsupported calling convention");
+  case CallingConv::C:
+    break;
+  }
+
+  if (IsVarArg)
+    report_fatal_error("minimal MCS251 backend does not support variadic "
+                       "functions");
+
+  if (IsTailCall)
+    report_fatal_error("MCS251: tail calls are not supported");
+
+  // Only direct calls: the ecall encoding takes a symbolic target address.
+  // A register callee (function pointer) would need an indirect-call
+  // encoding that this phase does not model.
+  if (!isa<GlobalAddressSDNode>(Callee) && !isa<ExternalSymbolSDNode>(Callee))
+    report_fatal_error("MCS251: indirect calls (function pointers) are not "
+                       "supported");
+
+  // Same single-slot restriction as LowerFormalArguments, checked up front
+  // so the error names the real limitation (OSEG overlay) instead of a
+  // generic CC allocation failure.
+  if (Outs.size() > 1 ||
+      (!Outs.empty() && Outs[0].VT != MVT::i8 && Outs[0].VT != MVT::i16))
+    report_fatal_error("MCS251 multi-argument calls need SDCC OSEG overlay "
+                       "slots (not yet supported)");
+
+  SmallVector<CCValAssign, 16> ArgLocs;
+  CCState CCInfo(CallConv, IsVarArg, DAG.getMachineFunction(), ArgLocs,
+                 *DAG.getContext());
+  CCInfo.AnalyzeCallOperands(Outs, CC_MCS251);
+
+  // Copy the arguments into their ABI registers (dpl / dptr), chained and
+  // glued so nothing can be scheduled between the copies and the call.
+  SmallVector<std::pair<unsigned, SDValue>, 4> RegsToPass;
+  SDValue InGlue;
+  for (unsigned I = 0, E = ArgLocs.size(); I != E; ++I) {
+    CCValAssign &VA = ArgLocs[I];
+    // Defensive: CC_MCS251 only ever assigns registers (memory locations
+    // would mean the pre-check above and the CC disagree).
+    if (!VA.isRegLoc() || VA.getLocInfo() != CCValAssign::Full)
+      report_fatal_error("MCS251 multi-argument calls need SDCC OSEG overlay "
+                         "slots (not yet supported)");
+    RegsToPass.emplace_back(VA.getLocReg(), OutVals[I]);
+  }
+  for (const auto &[Reg, Val] : RegsToPass) {
+    Chain = DAG.getCopyToReg(Chain, DL, Reg, Val, InGlue);
+    InGlue = Chain.getValue(1);
+  }
+
+  // Wrap the callee so legalisation cannot hack the address apart: every
+  // direct call reaches here as one of these two node kinds (checked above).
+  // The pointer type follows the DataLayout (MVT::i16 today) so a future
+  // pointer-width change cannot silently truncate the symbol, and a
+  // GlobalAddress with an offset keeps it (MSP430 pattern).
+  if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee))
+    Callee = DAG.getTargetGlobalAddress(G->getGlobal(), DL,
+                                        getPointerTy(DAG.getDataLayout()),
+                                        G->getOffset());
+  else if (auto *S = dyn_cast<ExternalSymbolSDNode>(Callee))
+    Callee = DAG.getTargetExternalSymbol(S->getSymbol(),
+                                         getPointerTy(DAG.getDataLayout()));
+
+  // Build the CALL node: [chain, callee, arg regs..., regmask, glue]. The
+  // getRegister operands become implicit uses on the ECALL MachineInstr,
+  // keeping the ABI registers live into the call; the register mask (from
+  // getCallPreservedMask, everything caller-saved except spx) carries the
+  // clobber set so RA knows nothing else survives.
+  SmallVector<SDValue, 8> Ops;
+  Ops.push_back(Chain);
+  Ops.push_back(Callee);
+  for (const auto &[Reg, Val] : RegsToPass)
+    Ops.push_back(DAG.getRegister(Reg, Val.getValueType()));
+  const uint32_t *RegMask =
+      DAG.getSubtarget().getRegisterInfo()->getCallPreservedMask(
+          DAG.getMachineFunction(), CallConv);
+  Ops.push_back(DAG.getRegisterMask(RegMask));
+  if (InGlue.getNode())
+    Ops.push_back(InGlue);
+
+  Chain = DAG.getNode(MCS251ISD::CALL, DL,
+                      DAG.getVTList(MVT::Other, MVT::Glue), Ops);
+  InGlue = Chain.getValue(1);
+
+  return LowerCallResult(Chain, InGlue, CallConv, IsVarArg, CLI.Ins, DL, DAG,
+                         InVals);
+}
+
+SDValue MCS251TargetLowering::LowerCallResult(
+    SDValue Chain, SDValue InGlue, CallingConv::ID CallConv, bool IsVarArg,
+    const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,
+    SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
+  // Same single-value restriction as CanLowerReturn, checked for the call
+  // site (a call to a declared-but-absurd callee type would otherwise die
+  // inside the generic CC machinery).
+  if (Ins.size() > 1 ||
+      (!Ins.empty() && Ins[0].VT != MVT::i8 && Ins[0].VT != MVT::i16))
+    report_fatal_error(
+        "minimal MCS251 backend only supports i8/i16/void return values");
+
+  SmallVector<CCValAssign, 16> RVLocs;
+  CCState CCInfo(CallConv, IsVarArg, DAG.getMachineFunction(), RVLocs,
+                 *DAG.getContext());
+  CCInfo.AnalyzeCallResult(Ins, RetCC_MCS251);
+
+  // Copy the results out of dpl / dptr into vregs, glued to the call. The
+  // glue keeps the reads adjacent to the ECALL.
+  for (unsigned I = 0, E = RVLocs.size(); I != E; ++I) {
+    assert(RVLocs[I].isRegLoc() && "MCS251 call results must be in "
+                                   "registers");
+    SDValue Val = DAG.getCopyFromReg(Chain, DL, RVLocs[I].getLocReg(),
+                                     RVLocs[I].getValVT(), InGlue);
+    InVals.push_back(Val.getValue(0));
+    Chain = Val.getValue(1);
+    InGlue = Val.getValue(2);
+  }
   return Chain;
 }
 

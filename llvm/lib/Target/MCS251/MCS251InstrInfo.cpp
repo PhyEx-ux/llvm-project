@@ -14,6 +14,32 @@ using namespace llvm;
 MCS251InstrInfo::MCS251InstrInfo(const MCS251Subtarget &STI)
     : MCS251GenInstrInfo(STI, RI), RI() {}
 
+// Spilling is not implemented until the frame arrives (Phase 9), and the
+// generic TargetInstrInfo stubs are UB in a release build (llvm_unreachable
+// optimises away), so a register-pressure spill would turn into a bare
+// segfault. These overrides make the failure loud and diagnostic instead:
+// the reachable trigger is a value live across a call, which cannot stay in
+// any register because every GPR is caller-saved (see LowerCall).
+static void reportNoSpilling() {
+  report_fatal_error("MCS251 register spilling is not implemented; values "
+                     "live across calls (or other register pressure) need "
+                     "the frame, which arrives with Phase 9");
+}
+
+void MCS251InstrInfo::storeRegToStackSlot(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MI, Register SrcReg,
+    bool IsKill, int FrameIndex, const TargetRegisterClass *RC, Register VReg,
+    MachineInstr::MIFlag Flags) const {
+  reportNoSpilling();
+}
+
+void MCS251InstrInfo::loadRegFromStackSlot(
+    MachineBasicBlock &MBB, MachineBasicBlock::iterator MI, Register DestReg,
+    int FrameIndex, const TargetRegisterClass *RC, Register VReg,
+    unsigned SubReg, MachineInstr::MIFlag Flags) const {
+  reportNoSpilling();
+}
+
 void MCS251InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
                                   MachineBasicBlock::iterator MI,
                                   const DebugLoc &DL, Register DestReg,
