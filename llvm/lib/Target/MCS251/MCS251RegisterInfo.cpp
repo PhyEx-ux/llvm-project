@@ -34,6 +34,11 @@ BitVector MCS251RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   Reserved.set(MCS251::DPL);
   Reserved.set(MCS251::DPH);
   Reserved.set(MCS251::DPTR);
+  // PSW is the virtual 8-bit flags register (CY/AC/OV/N/Z; see
+  // MCS251RegisterInfo.td for the PSW/PSW1 physical-layout ruling). It is a
+  // member of no register class and is only ever referenced implicitly via
+  // Defs/Uses. It is call-clobbered.
+  Reserved.set(MCS251::PSW);
   return Reserved;
 }
 

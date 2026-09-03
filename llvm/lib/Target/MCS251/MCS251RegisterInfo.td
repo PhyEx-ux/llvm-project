@@ -140,6 +140,39 @@ let SubRegIndices = [sub_lo8, sub_hi8], CoveredBySubRegs = 1 in
   def DPTR : MCS251RegWithSubRegs<"dptr", 63, [DPL, DPH]>;
 
 //===----------------------------------------------------------------------===//
+//  The condition-flags register PSW
+//===----------------------------------------------------------------------===//
+//
+// Physical layout ruling (Intel 8XC251Sx manual section 5.6 + project
+// ruling, do not change without new measurements):
+//
+//   * CY/AC/RS/OV live at the same bit positions in BOTH PSW (SFR 0xD0) and
+//     PSW1 (SFR 0xD1); N and Z exist only in PSW1.
+//   * Every flag consumer in the current architecture (jcc, and every
+//     flag producer we emit: add/sub/anl/orl/xrl/cmp/inc/dec per
+//     Table 5-10) addresses the flags as one implicit unit -- no
+//     instruction reads or writes an individual bit through an addressable
+//     location in this backend.
+//
+// We therefore model the flags as ONE virtual 8-bit register "PSW"
+// (same approach as upstream MSP430's single SR / AVR's SREG):
+//
+//   * PSW is a member of no register class and is reserved in
+//     getReservedRegs(), so the allocator can never hand it out.
+//   * Flag producers declare Defs = [PSW], flag consumers declare
+//     Uses = [PSW]; ordering between them is additionally pinned with DAG
+//     glue where the pair is built manually (see LowerBR_CC).
+//   * PSW is call-clobbered (getCalleeSavedRegs returns the empty set), so
+//     a future call phase will not need any saving machinery.
+//
+// It is isArtificial so it never participates in sub-register lanemask
+// bookkeeping.
+def PSW : Register<"psw"> {
+  let Namespace = "MCS251";
+  let isArtificial = 1;
+}
+
+//===----------------------------------------------------------------------===//
 //  Register classes
 //===----------------------------------------------------------------------===//
 //

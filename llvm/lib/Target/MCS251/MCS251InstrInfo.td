@@ -35,6 +35,11 @@ class MCS251Inst<dag Outs, dag Ins, string Asm, list<dag> Pat>
 def mcs251_imm8  : Operand<i8>  { let PrintMethod = "printImm8"; }
 def mcs251_imm16 : Operand<i16> { let PrintMethod = "printImm16"; }
 
+// Branch target: the operand is a MachineBasicBlock which MCS251MCInstLower
+// turns into an MCSymbolRefExpr and MCS251InstPrinter prints as a label
+// (same shape as upstream MSP430's jmptarget).
+def brtarget : Operand<OtherVT>;
+
 //===----------------------------------------------------------------------===//
 //  Move instructions
 //===----------------------------------------------------------------------===//
@@ -96,12 +101,14 @@ def MOV8rdph : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, dph", []>;
 //   * The 16-bit add/sub are single instructions operating on the whole wr
 //     register (no byte-wise carry chain).
 //
-// The ALU flags register (psw) is clobbered by all of these but is not
-// modelled yet: nothing in this phase consumes or reasons about flags, so
-// (as with the moves above) no Defs are declared. This must be revisited
-// before compares / conditional branches are added.
+// All of these write the PSW flags (manual Table 5-10: add/sub/anl/orl/xrl/
+// cmp/inc/dec all write CY/OV/AC/N/Z; mov and the jumps/eret do not). Since
+// Phase 6 the flags are modelled as the virtual PSW register, so every ALU
+// form declares Defs = [PSW]; this keeps any scheduler or folder from
+// inserting a flag-writing instruction between a cmp and its jcc. mov stays
+// flag-neutral.
 
-let Constraints = "$lhs = $dst", isCommutable = 1 in {
+let Constraints = "$lhs = $dst", isCommutable = 1, Defs = [PSW] in {
   def ADD8rr : MCS251Inst<(outs GPR8:$dst), (ins GPR8:$lhs, GPR8:$rhs),
                           "add $dst, $rhs",
                           [(set GPR8:$dst, (add GPR8:$lhs, GPR8:$rhs))]>;
@@ -130,7 +137,7 @@ let Constraints = "$lhs = $dst", isCommutable = 1 in {
 }
 
 // sub is not commutable (dst <- dst - src, operand order is significant).
-let Constraints = "$lhs = $dst" in {
+let Constraints = "$lhs = $dst", Defs = [PSW] in {
   def SUB8rr : MCS251Inst<(outs GPR8:$dst), (ins GPR8:$lhs, GPR8:$rhs),
                           "sub $dst, $rhs",
                           [(set GPR8:$dst, (sub GPR8:$lhs, GPR8:$rhs))]>;
@@ -143,7 +150,7 @@ let Constraints = "$lhs = $dst" in {
 // (printImm8/printImm16) emit the SDCC-style `#0x..` prefix, so the same
 // operand is used by MOV8ri/MOV16ri above. The imm patterns cover the full
 // i8/i16 value range, so no extra predicates are needed.
-let Constraints = "$lhs = $dst" in {
+let Constraints = "$lhs = $dst", Defs = [PSW] in {
   def ADD8ri : MCS251Inst<(outs GPR8:$dst), (ins GPR8:$lhs, mcs251_imm8:$imm),
                           "add $dst, $imm",
                           [(set GPR8:$dst, (add GPR8:$lhs, imm:$imm))]>;
@@ -181,6 +188,104 @@ let Constraints = "$lhs = $dst" in {
                            "xrl $dst, $imm",
                            [(set GPR16:$dst, (xor GPR16:$lhs, imm:$imm))]>;
 }
+
+//===----------------------------------------------------------------------===//
+//  Compare instructions (flags only, no result register)
+//===----------------------------------------------------------------------===//
+//
+// cmp computes lhs - rhs and only writes the PSW flags, hence the empty outs
+// and Defs = [PSW]. Encodings (Intel 8XC251Sx manual A-4 + sdas251 TSV
+// gold, source-mode, the two sources agree; note: BC/BD/BE, NOT 9C/9E):
+//
+//   cmp r,r     -> cmp r5,r3        (BC md ms)
+//   cmp r,#imm8 -> cmp r5,#0x5a     (BE m,0000 imm)
+//   cmp wr,wr   -> cmp wr6,wr4      (BD jd/2 js/2)
+//   cmp wr,#16  -> cmp wr6,#0x1234  (BE j/2,0100 hi lo)
+//
+// No Patterns: there is no value-producing compare in this backend (SETCC
+// is unsupported in Phase 6), so compares are only ever emitted manually by
+// LowerBR_CC, glued to the BRCC pseudo that consumes the flags.
+let Defs = [PSW] in {
+  def CMP8rr  : MCS251Inst<(outs), (ins GPR8:$lhs, GPR8:$rhs),
+                           "cmp $lhs, $rhs", []>;
+  def CMP8ri  : MCS251Inst<(outs), (ins GPR8:$lhs, mcs251_imm8:$imm),
+                           "cmp $lhs, $imm", []>;
+  def CMP16rr : MCS251Inst<(outs), (ins GPR16:$lhs, GPR16:$rhs),
+                           "cmp $lhs, $rhs", []>;
+  def CMP16ri : MCS251Inst<(outs), (ins GPR16:$lhs, mcs251_imm16:$imm),
+                           "cmp $lhs, $imm", []>;
+}
+
+//===----------------------------------------------------------------------===//
+//  Control-flow instructions
+//===----------------------------------------------------------------------===//
+//
+// Encodings (manual A-4 + sdas251 TSV): every conditional jump is a 2-byte
+// rel8 form (+/-128 bytes); sjmp rel8 is opcode 80; ejmp addr24 is opcode
+// 8A and reaches anywhere.
+//
+// Because a conditional jump is limited to rel8, a conditional branch is
+// always expanded into the three-part long-branch sequence
+//
+//     jCCinv  skip      (rel8: the ejmp is 4 bytes away, always in range)
+//     ejmp    target    (24-bit reach)
+//   skip:
+//
+// via the BRCC/BRCC8S pseudos below (expanded by FinalizeISel, which runs
+// after SelectionDAGISel when the full machine CFG already exists). This is
+// the conservative-but-always-correct scheme for a backend with no branch
+// relaxation infrastructure (SDCC emits the same shape).
+
+// Conditional jumps. Semantics (cmp a,b computes a-b; QEMU-run-verified,
+// manual truth tables agree):
+//   je  Z=1 | jne Z=0 | jc CY=1 | jnc CY=0
+//   jg  Z=0 and CY=0        (ugt)   | jle  Z=1 or CY=1   (ule)
+//   jsl N<>OV               (slt)   | jsge N=OV          (sge)
+//   jsg Z=0 and N=OV        (sgt)   | jsle Z=1 or N<>OV  (sle)
+let isBranch = 1, isTerminator = 1, Uses = [PSW] in {
+  def JE   : MCS251Inst<(outs), (ins brtarget:$dst), "je $dst",   []>;
+  def JNE  : MCS251Inst<(outs), (ins brtarget:$dst), "jne $dst",  []>;
+  def JC   : MCS251Inst<(outs), (ins brtarget:$dst), "jc $dst",   []>;
+  def JNC  : MCS251Inst<(outs), (ins brtarget:$dst), "jnc $dst",  []>;
+  def JG   : MCS251Inst<(outs), (ins brtarget:$dst), "jg $dst",   []>;
+  def JLE  : MCS251Inst<(outs), (ins brtarget:$dst), "jle $dst",  []>;
+  def JSL  : MCS251Inst<(outs), (ins brtarget:$dst), "jsl $dst",  []>;
+  def JSGE : MCS251Inst<(outs), (ins brtarget:$dst), "jsge $dst", []>;
+  def JSG  : MCS251Inst<(outs), (ins brtarget:$dst), "jsg $dst",  []>;
+  def JSLE : MCS251Inst<(outs), (ins brtarget:$dst), "jsle $dst", []>;
+}
+
+// Unconditional jumps. The compiler uses ejmp uniformly for LowerBR (SDCC
+// does the same); sjmp exists for the assembler's sake and future peephole
+// use, it is never emitted by the compiler in this phase.
+let isBranch = 1, isTerminator = 1, isBarrier = 1 in {
+  def SJMP : MCS251Inst<(outs), (ins brtarget:$dst), "sjmp $dst", []>;
+  def EJMP : MCS251Inst<(outs), (ins brtarget:$dst), "ejmp $dst",
+                        [(br bb:$dst)]>;
+}
+
+// BRCC pseudo (built by LowerBR_CC, expanded by FinalizeISel): the cmp has
+// already been emitted by LowerBR_CC and glued to this pseudo. $cc is a raw
+// ISD::CondCode.
+let isBranch = 1, isTerminator = 1, Uses = [PSW], usesCustomInserter = 1 in
+def BRCC : MCS251Inst<(outs), (ins i8imm:$cc, brtarget:$dst), "", []>;
+
+// BRCC8S pseudo: signed i8 compare. The N-flag behaviour of 8-bit width
+// operations has not been measured, so the comparison is conservatively
+// widened to 16 bits: both operands are placed in a fresh wr as 0x00:(x^0x80)
+// (offset-binary: x <s y  <=>  flip(x) <u flip(y) with
+// flip(t) = t ^ 0x80 = (t + 0x80) mod 256), which gives the exact
+// sign-extend-both-operands-and-compare-with-CMP16 semantics using only
+// already-verified encodings (mov r,#imm / mov r,r / xrl r,#imm / cmp
+// wr,wr). The whole sequence (extension + cmp + branch) is built by the
+// custom inserter because the byte-into-word lane assembly is only
+// expressible at MIR level. Uses = [PSW] mirrors BRCC for symmetry; it has
+// no runtime effect because the inserter expands the pseudo before register
+// allocation.
+let isBranch = 1, isTerminator = 1, Uses = [PSW], usesCustomInserter = 1 in
+def BRCC8S : MCS251Inst<(outs),
+                        (ins GPR8:$lhs, GPR8:$rhs, i8imm:$cc, brtarget:$dst),
+                        "", []>;
 
 //===----------------------------------------------------------------------===//
 //  Return instruction

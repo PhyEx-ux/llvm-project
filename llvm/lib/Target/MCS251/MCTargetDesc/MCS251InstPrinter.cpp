@@ -4,6 +4,7 @@
 #include "MCS251MCTargetDesc.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
@@ -29,7 +30,10 @@ void MCS251InstPrinter::printOperand(const MCInst *MI, unsigned OpNo,
     O << "#0x" << Twine::utohexstr(Op.getImm());
     return;
   }
-  llvm_unreachable("MCS251InstPrinter: unsupported operand kind");
+  // Branch targets (MCSymbolRefExpr of the block label), same shape as
+  // upstream MSP430's printOperand.
+  assert(Op.isExpr() && "unknown operand kind in printOperand");
+  MAI.printExpr(O, *Op.getExpr());
 }
 
 void MCS251InstPrinter::printImm8(const MCInst *MI, unsigned OpNo,

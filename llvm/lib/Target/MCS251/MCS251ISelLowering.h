@@ -21,6 +21,13 @@ public:
 
   const char *getTargetNodeName(unsigned Opcode) const override;
 
+  SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
+  SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
+
+  MachineBasicBlock *
+  EmitInstrWithCustomInserter(MachineInstr &MI,
+                              MachineBasicBlock *MBB) const override;
+
   bool CanLowerReturn(CallingConv::ID CallConv, MachineFunction &MF,
                       bool IsVarArg,
                       const SmallVectorImpl<ISD::OutputArg> &Outs,
@@ -35,6 +42,18 @@ public:
                       const SmallVectorImpl<ISD::OutputArg> &Outs,
                       const SmallVectorImpl<SDValue> &OutVals,
                       const SDLoc &DL, SelectionDAG &DAG) const override;
+
+private:
+  // Expands a BRCC/BRCC8S pseudo into the three-part long conditional
+  // branch `jCCinv SkipMBB; ejmp TrueMBB; SkipMBB:` (jcc only reaches rel8;
+  // the skip target is the 4-byte ejmp directly below, always in range).
+  // Everything after the pseudo (the EJMP of the explicit false edge) moves
+  // into SkipMBB, and every CFG successor except the true edge transfers to
+  // SkipMBB. Returns SkipMBB for the FinalizeISel scan to continue in.
+  MachineBasicBlock *
+  expandLongConditionalBranch(MachineInstr &MI, MachineBasicBlock *BB,
+                              MachineBasicBlock *TrueMBB,
+                              unsigned SkipBranchOpcode) const;
 };
 } // namespace llvm
 
