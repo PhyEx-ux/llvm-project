@@ -1,6 +1,7 @@
 //===-- MCS251AsmPrinter.cpp - MCS-251 assembly writer -------------------===//
 
 #include "MCS251.h"
+#include "MCS251MCInstLower.h"
 #include "MCS251TargetMachine.h"
 #include "TargetInfo/MCS251TargetInfo.h"
 #include "llvm/CodeGen/AsmPrinter.h"
@@ -34,11 +35,13 @@ public:
   }
 
   void emitInstruction(const MachineInstr *MI) override {
-    assert(MI->getNumExplicitOperands() == 0 &&
-           "minimal MCS251 printer only supports operand-free instructions");
-    MCInst OutMI;
-    OutMI.setOpcode(MI->getOpcode());
-    OutStreamer->emitInstruction(OutMI, getSubtargetInfo());
+    MCS251_MC::verifyInstructionPredicates(MI->getOpcode(),
+                                           getSubtargetInfo().getFeatureBits());
+
+    MCS251MCInstLower MCInstLowering(OutContext);
+    MCInst TmpInst;
+    MCInstLowering.Lower(MI, TmpInst);
+    EmitToStreamer(*OutStreamer, TmpInst);
   }
 };
 } // namespace

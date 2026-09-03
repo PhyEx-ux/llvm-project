@@ -3,6 +3,7 @@
 include "llvm/Target/Target.td"
 
 include "MCS251RegisterInfo.td"
+include "MCS251CallingConv.td"
 include "MCS251InstrInfo.td"
 
 defm : RemapAllTargetPseudoPointerOperands<GPR16>;

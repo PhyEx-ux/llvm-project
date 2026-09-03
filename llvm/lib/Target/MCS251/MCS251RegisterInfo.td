@@ -110,6 +110,36 @@ let SubRegIndices = [sub_lo16, sub_hi16], CoveredBySubRegs = 1,
 }
 
 //===----------------------------------------------------------------------===//
+//  Special-function registers dpl/dph and the 16-bit dptr pair
+//===----------------------------------------------------------------------===//
+//
+// DPL (SFR 0x82) and DPH (SFR 0x83) are the ABI return-value locations:
+// i8 results are returned in dpl, i16 results in the dpl:dph pair
+// (dpl = low byte, dph = high byte; QEMU-measured SDCC behaviour).
+//
+// DPTR models the dpl:dph overlay so the calling-convention machinery has a
+// single 16-bit location to assign i16 returns to. In the hardware (and in
+// the SDCC assembler) dptr is a degenerate register: it may only appear as
+// the destination of a 16-bit immediate load and is never a source or
+// destination of a register-to-register move. We therefore never allocate it
+// and only use it as a copyPhysReg destination that is immediately split
+// into its dpl/dph lanes. SubRegs are least-significant-first per the byte
+// order ruling at the top of this file: dptr = [dpl (low), dph (high)].
+//
+// Value-semantics note: dptr aliases the low 16 bits of dr56 (dpx). The
+// alias is deliberately not modelled in the register file -- both registers
+// are reserved, so no allocation conflict can arise.
+//
+// The HWEncoding values are placeholders: dpl/dph/dptr have no r/wr/dr-style
+// encoding (the assembler reaches them through the SFR direct addresses
+// 0x82/0x83), and this phase has no code emitter.
+def DPL : MCS251Reg<"dpl", 61>;
+def DPH : MCS251Reg<"dph", 62>;
+
+let SubRegIndices = [sub_lo8, sub_hi8], CoveredBySubRegs = 1 in
+  def DPTR : MCS251RegWithSubRegs<"dptr", 63, [DPL, DPH]>;
+
+//===----------------------------------------------------------------------===//
 //  Register classes
 //===----------------------------------------------------------------------===//
 //

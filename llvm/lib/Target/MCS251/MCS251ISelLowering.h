@@ -21,6 +21,11 @@ public:
 
   const char *getTargetNodeName(unsigned Opcode) const override;
 
+  bool CanLowerReturn(CallingConv::ID CallConv, MachineFunction &MF,
+                      bool IsVarArg,
+                      const SmallVectorImpl<ISD::OutputArg> &Outs,
+                      LLVMContext &Context, const Type *RetTy) const override;
+
   SDValue LowerFormalArguments(
       SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
       const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,

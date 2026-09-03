@@ -15,6 +15,12 @@ using namespace llvm;
 #define GET_INSTRINFO_MC_DESC
 #include "MCS251GenInstrInfo.inc"
 
+// Instantiates MCS251_MC::verifyInstructionPredicates(), used by the
+// assembly printer before lowering an instruction to the MC layer.
+#define ENABLE_INSTR_PREDICATE_VERIFIER
+#define GET_INSTRINFO_MC_HELPERS
+#include "MCS251GenInstrInfo.inc"
+
 #define GET_REGINFO_MC_DESC
 #include "MCS251GenRegisterInfo.inc"
 

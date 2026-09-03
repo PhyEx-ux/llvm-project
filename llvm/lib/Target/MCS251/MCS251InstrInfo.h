@@ -18,6 +18,11 @@ class MCS251InstrInfo final : public MCS251GenInstrInfo {
 public:
   explicit MCS251InstrInfo(const MCS251Subtarget &STI);
   const MCS251RegisterInfo &getRegisterInfo() const { return RI; }
+
+  void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
+                   const DebugLoc &DL, Register DestReg, Register SrcReg,
+                   bool KillSrc, bool RenamableDest = false,
+                   bool RenamableSrc = false) const override;
 };
 } // namespace llvm
 

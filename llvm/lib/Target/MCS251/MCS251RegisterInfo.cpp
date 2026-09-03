@@ -28,6 +28,12 @@ BitVector MCS251RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   // alias machinery keeps wr56-wr62 and r56-r63 unallocatable as well.
   Reserved.set(MCS251::DR60);
   Reserved.set(MCS251::DR56);
+  // DPL/DPH are the ABI return-value locations and DPTR is their 16-bit
+  // overlay; none of them belong to an allocatable register class. Reserve
+  // them anyway so that no allocator can ever hand them out.
+  Reserved.set(MCS251::DPL);
+  Reserved.set(MCS251::DPH);
+  Reserved.set(MCS251::DPTR);
   return Reserved;
 }
 

@@ -9,6 +9,7 @@
 #include "MCS251GenRegisterInfo.inc"
 
 #define GET_INSTRINFO_ENUM
+#define GET_INSTRINFO_MC_HELPER_DECLS
 #include "MCS251GenInstrInfo.inc"
 
 #define GET_SUBTARGETINFO_ENUM
