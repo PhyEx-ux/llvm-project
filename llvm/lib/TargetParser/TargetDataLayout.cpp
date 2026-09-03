@@ -600,6 +600,10 @@ std::string Triple::computeDataLayout(StringRef ABIName) const {
   case Triple::mips64:
   case Triple::mips64el:
     return computeMipsDataLayout(*this, ABIName);
+  case Triple::mcs251:
+    // Bring-up ABI: use 16-bit pointers until the 24-bit memory model is
+    // implemented in the target lowering.
+    return "e-m:e-p:16:8-i8:8-i16:8-i32:8-n8:16-S8";
   case Triple::msp430:
     return "e-m:e-p:16:16-i32:16-i64:16-f32:16-f64:16-a:8-n8:16-S16";
   case Triple::ppc:
