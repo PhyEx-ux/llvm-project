@@ -56,5 +56,33 @@ void MCS251InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     return;
   }
 
+  // Reads of the fixed SFR argument locations (parameter live-ins produced
+  // by LowerFormalArguments). MOV8rdpl/MOV8rdph declare their source only
+  // via Uses, so the implicit dpl/dph use operand is attached automatically
+  // on construction; operand 1 is that implicit use and carries the kill
+  // flag, since operand 0 is the explicit destination.
+  if (SrcReg == MCS251::DPL && MCS251::GPR8RegClass.contains(DestReg)) {
+    auto MIB = BuildMI(MBB, MI, DL, get(MCS251::MOV8rdpl), DestReg);
+    MIB->getOperand(1).setIsKill(KillSrc);
+    return;
+  }
+  if (SrcReg == MCS251::DPH && MCS251::GPR8RegClass.contains(DestReg)) {
+    auto MIB = BuildMI(MBB, MI, DL, get(MCS251::MOV8rdph), DestReg);
+    MIB->getOperand(1).setIsKill(KillSrc);
+    return;
+  }
+
+  if (SrcReg == MCS251::DPTR && MCS251::GPR16RegClass.contains(DestReg)) {
+    // Mirror of the DPTR write direction above: the pair is never a source
+    // of a 16-bit register-to-register move, so read the lanes separately
+    // (sub_lo8 -> dpl, sub_hi8 -> dph) and kill on the last lane read.
+    Register Lo = RI.getSubReg(DestReg, MCS251::sub_lo8);
+    Register Hi = RI.getSubReg(DestReg, MCS251::sub_hi8);
+    BuildMI(MBB, MI, DL, get(MCS251::MOV8rdpl), Lo);
+    auto MIB = BuildMI(MBB, MI, DL, get(MCS251::MOV8rdph), Hi);
+    MIB->getOperand(1).setIsKill(KillSrc);
+    return;
+  }
+
   llvm_unreachable("unsupported MCS251 register copy");
 }
