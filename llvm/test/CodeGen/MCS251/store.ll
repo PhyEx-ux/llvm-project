@@ -6,8 +6,13 @@
 ; lane to mem[base+0x0001]. The store16 tests lock that mapping by pairing
 ; dph/dpl (the i16 argument's hi/lo bytes) with the displacements.
 
-@gv8  = global i8  7
-@gv16 = global i16 4660    ; 0x1234
+; The globals below are external on purpose: these tests lock the symbol
+; address materialization encodings, which are identical for external and
+; defined globals, and defined global data is (loudly) rejected until data
+; areas exist -- see global-data-error.ll.
+
+@gv8  = external global i8
+@gv16 = external global i16
 
 ;-----------------------------------------------------------------------------
 ; Byte stores

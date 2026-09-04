@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 
-"""Run one SDCC reference image and one LLVM replacement image on QEMU."""
+"""Run one SDCC reference image and one LLVM replacement image on QEMU.
+
+The LLVM replacement path is zero-text-processing (Phase 12, Step 1): llc
+emits a complete ASxxxx (sdas251) dialect module that is assembled and linked
+as-is.  SDCC is only used to build the reference image, the harness/crt0
+sides of the replacement image, and to drive the board linker.
+"""
 
 from __future__ import annotations
 
@@ -166,6 +172,44 @@ def extract_optsdcc(sdcc_asm: Path) -> str:
     return matches[0]
 
 
+# Directives sdas251 rejects; llc's ASxxxx output must not contain any of
+# them (defense-in-depth for the Step 1 zero-text-processing guarantee).
+BANNED_DIRECTIVE_RE = re.compile(
+    r"^[ \t]*\.(?:text|section|p2align|align|type|size|ident|space|"
+    r"long|short|quad|zero|fill|file|weak|end)(?:[ \t]|$)",
+    re.MULTILINE,
+)
+
+# The locked ABI signature llc embeds in every module (Phase 12 specimen).
+LLVM_OPTSDCC = (
+    ".optsdcc stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small "
+    "stack-auto=0 xstack=0 intlong-reent=0 float-reent=0 reg-params=1 "
+    "all-callee-saves=0 sdcccall=2 regset=r0-r9,r12-r15 "
+    "compiler-build=mcs251-abi1.0-r1"
+)
+
+
+def check_asxxxx_module(text: str, asm: Path) -> None:
+    """Check that an llc output is a complete, self-contained sdas251 module."""
+    banned = BANNED_DIRECTIVE_RE.findall(text)
+    if banned:
+        raise RuntimeError(
+            f"{asm}: contains directives sdas251 rejects: {sorted(banned)}"
+        )
+    required = [
+        r"(?m)^[ \t]*\.module[ \t]+\S",
+        r"(?m)^[ \t]*\.source[ \t]*$",
+        f"(?m)^{re.escape(LLVM_OPTSDCC)}$",
+        r"(?m)^[ \t]*\.area CSEG \(CODE\)[ \t]*$",
+    ]
+    for pattern in required:
+        if re.search(pattern, text) is None:
+            raise RuntimeError(
+                f"{asm}: missing required ASxxxx module element "
+                f"matching {pattern}"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--toolchain", type=Path, default=DEFAULT_TOOLCHAIN)
@@ -287,7 +331,10 @@ def main() -> int:
         print(f"SDCC image:    {sdcc_image}")
         return 0
 
-    llvm_asm = build_dir / "probe-llvm.s"
+    # ---- LLVM replacement path: llc output is assembled verbatim ---------
+    # Step 1 (Phase 12): llc emits the complete ASxxxx module; no extraction
+    # or wrapping happens between llc and sdas251.
+    llvm_asm = build_dir / "probe-llvm.asm"
     assert llc is not None
     run([
         str(llc),
@@ -298,23 +345,13 @@ def main() -> int:
         str(llvm_asm),
         str(SOURCE_DIR / "probe.ll"),
     ])
+    check_asxxxx_module(llvm_asm.read_text(), llvm_asm)
     llvm_return = extract_return_instruction(llvm_asm, require_symbol=True)
     if llvm_return != sdcc_return:
         raise RuntimeError(
             "LLVM return instruction does not match the SDCC MCS-251 ABI: "
             f"LLVM emitted {llvm_return}, SDCC emitted {sdcc_return}"
         )
-
-    llvm_wrapper = build_dir / "probe-llvm.asm"
-    llvm_wrapper.write_text(
-        ".module mcs251_llvm_probe\n"
-        ".source\n"
-        f"        {abi_signature}\n"
-        ".area CSEG (CODE)\n"
-        ".globl _mcs251_probe\n"
-        "_mcs251_probe::\n"
-        f"        {llvm_return}\n"
-    )
 
     llvm_probe_rel = build_dir / "probe-llvm.rel"
     llvm_image = build_dir / "smoke-llvm.hex"
@@ -323,7 +360,7 @@ def main() -> int:
         "-plosgffw",
         "-o",
         str(llvm_probe_rel),
-        str(llvm_wrapper),
+        str(llvm_asm),
     ], env=env)
     run([
         str(sdcc),

@@ -12,8 +12,13 @@
 ; lo lane / sub_lo8). The load16 tests lock that order: displacement 0x0000
 ; must land in the register that reaches dph (i16 return: dpl=lo, dph=hi).
 
-@gv8  = global i8  42
-@gv16 = global i16 4660    ; 0x1234
+; The globals below are external on purpose: these tests lock the symbol
+; address materialization encodings, which are identical for external and
+; defined globals, and defined global data is (loudly) rejected until data
+; areas exist -- see global-data-error.ll.
+
+@gv8  = external global i8
+@gv16 = external global i16
 
 ;-----------------------------------------------------------------------------
 ; Byte loads
