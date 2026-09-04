@@ -193,6 +193,15 @@ def GPR16 : RegisterClass<"MCS251", [i16], 8, (add WR0, WR2, WR4, WR6, WR8,
 def GPR32 : RegisterClass<"MCS251", [i32], 8, (add DR0, DR4, DR8, DR12, DR16,
                                                DR20, DR24, DR28)>;
 
+// Non-allocatable class holding the two stack-addressing bases: dr60 (spx,
+// the default frame reference) and dr56 (dpx, the frame anchor used when the
+// function has variable-sized objects, see MCS251FrameLowering). The stack
+// access instructions (MOV8rmS etc.) take their base from this class so
+// eliminateFrameIndex can substitute either register via ChangeToRegister.
+// Same isAllocatable=0 pattern as DP8/DP16 below.
+let isAllocatable = 0 in
+def SPBASE : RegisterClass<"MCS251", [i32], 8, (add DR60, DR56)>;
+
 // Non-allocatable classes for the fixed SFR ABI locations (dpl/dph and their
 // 16-bit overlay dptr), same pattern as upstream X86's CCR for EFLAGS. They
 // exist so TargetRegisterInfo::getMinimalPhysRegClass() can answer for these

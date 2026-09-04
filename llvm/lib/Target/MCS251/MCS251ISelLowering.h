@@ -22,11 +22,24 @@ public:
 
   const char *getTargetNodeName(unsigned Opcode) const override;
 
+  // The DAG combiner's consecutive-store merge would fuse i8 stores into
+  // i32 stores (e.g. an alloca'd byte array initialised element by
+  // element). There is no i32 memory instruction and i32 stores are a
+  // deliberate loud rejection, so the merge is turned off entirely --
+  // the merged-to type would only be legal at i8 anyway.
+  bool canMergeStoresTo(unsigned AS, EVT MemVT,
+                        const MachineFunction &MF) const override {
+    return false;
+  }
+
   SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
   SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerLoad(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerStore(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerExtend(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerDynamicStackAlloc(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerSTACKSAVE(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerSTACKRESTORE(SDValue Op, SelectionDAG &DAG) const;
 
   MachineBasicBlock *
   EmitInstrWithCustomInserter(MachineInstr &MI,

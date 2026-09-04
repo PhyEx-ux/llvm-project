@@ -457,3 +457,172 @@ def : Pat<(MCS251call (iPTR texternalsym:$dst)), (ECALL texternalsym:$dst)>;
 
 let isReturn = 1, isTerminator = 1, isBarrier = 1 in
 def ERET : MCS251Inst<(outs), (ins), "eret", [(MCS251eret)]>;
+
+//===----------------------------------------------------------------------===//
+// Stack frame instructions (Phase 9)
+//===----------------------------------------------------------------------===//
+//
+// THE STACK GROWS UP on the MCS-251 (measurement-verified, do not change):
+// push pre-increments SP (SPX+1 then store), ecall pushes the 3-byte return
+// address with SPX+3, and eret pops [SPX-2..SPX] with SPX-3. SPX therefore
+// points at the TOP (highest used address) of the stack, and a frame's
+// objects start at SPX_entry+1 -- the byte at SPX_entry itself holds the
+// return address. This drives the whole frame model:
+//
+//   * prologue:  inc spx,#N          -> SPX_after = SPX_entry + N
+//   * an object at PEI offset O (LocalAreaOffset = 1, so O in [1,N]) lives
+//     at address SPX_entry + O, i.e. at displacement  O - N  from SPX_after
+//     (a NEGATIVE displacement, the SDCC `@spx-0x....` house style).
+//   * epilogue:  dec spx,#N restores SPX_entry so eret can pop the return
+//     address.
+//
+// Variable-sized objects (dynamic allocas) move SPX at the alloca site, so
+// the static frame can no longer be addressed relative to SPX. Those
+// functions set hasFP() and anchor the frame top in dr56 (dpx):
+//
+//   prologue:  push dr56 / inc spx,#N / mov dr56,dr60
+//   epilogue:  mov dr60,dr56 / dec spx,#N / pop dr56
+//
+// dr56 is not preserved across calls by the SDCC ABI, so a var-sized callee
+// saves/restores it itself. A nested call to another function with
+// variable-sized objects must not destroy the caller's anchor. push/pop dr56
+// move 4 bytes (the QEMU DR-slot width), and the anchor is taken AFTER the
+// push, so the O - N displacement formula above stays valid relative to the
+// anchor as well (both the concept addresses and the anchor shift by the same
+// 4 bytes).
+//
+// Encodings (sdas251 V05.50.4 + QEMU stc32g144k246 run-verified, see
+// /tmp/mcs251-p9 forms.asm): inc/dec dr60,#1/2/4 (the ONLY legal immediates
+// -- a frame adjustment is emitted as a sequence of these steps, the SDCC
+// prologue template), mov dr56,dr60 / mov dr60,dr56 (DR<->DR moves, the
+// same encoding family as the measured mov dr0,dr60), push/pop dr56 (same
+// DR push/pop family as the measured push dr12).
+
+// SP adjustment steps. inc/dec are ALU operations and write PSW (manual
+// Table 5-10); they also read the old SPX (RMW).
+let hasSideEffects = 1, Uses = [DR60], Defs = [DR60, PSW] in {
+  def INCSPX4 : MCS251Inst<(outs), (ins), "inc spx, #0x4", []>;
+  def INCSPX2 : MCS251Inst<(outs), (ins), "inc spx, #0x2", []>;
+  def INCSPX1 : MCS251Inst<(outs), (ins), "inc spx, #0x1", []>;
+  def DECSPX4 : MCS251Inst<(outs), (ins), "dec spx, #0x4", []>;
+  def DECSPX2 : MCS251Inst<(outs), (ins), "dec spx, #0x2", []>;
+  def DECSPX1 : MCS251Inst<(outs), (ins), "dec spx, #0x1", []>;
+}
+
+// Frame-anchor moves (only emitted when hasFP(): variable-sized objects).
+let hasSideEffects = 1, Uses = [DR60], Defs = [DR56] in
+def MOV56 : MCS251Inst<(outs), (ins), "mov dr56, dr60", []>;
+let hasSideEffects = 1, Uses = [DR56], Defs = [DR60] in
+def MOV60 : MCS251Inst<(outs), (ins), "mov dr60, dr56", []>;
+
+// Anchor save/restore. push dr56 advances SPX by 4 (a full DR slot).
+let hasSideEffects = 1, Uses = [DR56], Defs = [DR60] in
+def PUSH56 : MCS251Inst<(outs), (ins), "push dr56", []>;
+let hasSideEffects = 1, Uses = [DR60], Defs = [DR56, DR60] in
+def POP56 : MCS251Inst<(outs), (ins), "pop dr56", []>;
+
+// Stack-slot address operand: @dr60-0x002c style. The displacement prints
+// SDCC-style: zero prints nothing (`@dr60`), positive as +0x%04x, negative
+// as -0x%04x (a two's-complement 0xfffc displacement would be parsed as a
+// POSITIVE displacement by sdas251 -- the 24-bit @DRk displacement is
+// unsigned in the assembler's eyes -- so the sign must be explicit, mir-
+// roring SDCC's own output). MIOperandInfo describes the eliminated form
+// (base register + displacement); while a frame index is unresolved the
+// displacement slot carries (FI, offset) instead, one extra operand, and
+// eliminateFrameIndex folds them.
+def mcs251_stack : Operand<i16> {
+  let MIOperandInfo = (ops SPBASE, i16imm);
+  let PrintMethod = "printStackAddr";
+}
+
+// Frame-relative loads/stores. Base is an SPBASE register (dr60 normally,
+// dr56 when the function has a frame anchor); displacement is resolved by
+// eliminateFrameIndex to O - StackSize (negative, see the model above).
+// There is deliberately ONE word-granular access pair: mov wr,@dr60+dis and
+// mov @dr60+dis,wr are single instructions (TSV-verified) and are the
+// required form for i16 spills -- do not decompose them into byte pairs.
+let mayLoad = 1 in {
+  def MOV8rmS  : MCS251Inst<(outs GPR8:$dst),
+                            (ins mcs251_stack:$addr),
+                            "mov $dst, $addr", []>;
+  def MOV16rmS : MCS251Inst<(outs GPR16:$dst),
+                            (ins mcs251_stack:$addr),
+                            "mov $dst, $addr", []>;
+}
+let mayStore = 1 in {
+  def MOV8mrS  : MCS251Inst<(outs),
+                            (ins mcs251_stack:$addr, GPR8:$src),
+                            "mov $addr, $src", []>;
+  def MOV16mrS : MCS251Inst<(outs),
+                            (ins mcs251_stack:$addr, GPR16:$src),
+                            "mov $addr, $src", []>;
+}
+
+// i16 memory objects on the frame: same lane-decomposition pseudos as
+// LD16/ST16/ST16T, but frame-relative. Expanded by the custom inserter
+// (FinalizeISel) into two MOV8rmS/MOV8mrS whose displacements are FI+0 and
+// FI+1; PEI later resolves each against the frame base. Explicit operand
+// order: LD16S [dst, addr], ST16S/ST16TS [addr, val].
+let mayLoad = 1, usesCustomInserter = 1 in
+def LD16S : MCS251Inst<(outs GPR16:$dst),
+                       (ins mcs251_stack:$addr), "", []>;
+let mayStore = 1, usesCustomInserter = 1 in
+def ST16S : MCS251Inst<(outs),
+                       (ins mcs251_stack:$addr, GPR16:$val), "", []>;
+let mayStore = 1, usesCustomInserter = 1 in
+def ST16TS : MCS251Inst<(outs),
+                        (ins mcs251_stack:$addr, GPR16:$val), "", []>;
+
+// Frame-index pointer materialisation (`lea FI`). Selected by the
+// ISelDAGToDAG Select hook (AVR-style select<FrameIndex>): operand $src
+// carries the TargetFrameIndex until the custom inserter expands to
+//
+//   %lo = MOV8di 0x81        ; SFR-direct read of SP (low byte)
+//   %hi = MOV8di 0x85        ; SFR-direct read of SPH (high byte, this
+//                            ;  platform's SPH -- QEMU-arbitrated, NOT 0xbe)
+//   %sp = REG_SEQUENCE %hi:sub_hi8, %lo:sub_lo8
+//   %dst = ADD16fi %sp, <FI> ; displacement folded by PEI
+//
+// Reading SPX into a WR has no single instruction (mov wr,dr60 is illegal:
+// width mismatch), so the two SFR-direct byte reads are the only path (both
+// assembler- and run-verified). ADD16fi keeps the frame index alive until
+// PEI (the displacement depends on StackSize, unknown at ISel time);
+// eliminateFrameIndex rewrites it into a plain ADD16ri. In a function without
+// an FP, SPX is invariant throughout the function: there are no
+// ADJCALLSTACKs, and push only appears in a hasFP prologue. FIADDR can
+// therefore carry no chain and be freely scheduled. It is only valid without
+// a frame anchor: with variable-sized objects SPX has moved by the time the
+// sequence runs, and there is no way to read dr56 into a WR -- rejected
+// loudly there.
+let usesCustomInserter = 1, hasSideEffects = 0 in
+def FIADDR : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$src), "", []>;
+
+// add wr, <frame displacement>: operand 1 is the unresolved frame index
+// (FI, offset) pair; eliminateFrameIndex replaces it with the folded
+// displacement and retargets the opcode to ADD16ri. add wr,#imm16 wraps
+// mod 2^16, which is the correct region-00 semantics for a negative
+// displacement (Phase 8 ruling).
+let Constraints = "$lhs = $dst", Defs = [PSW] in
+def ADD16fi : MCS251Inst<(outs GPR16:$dst),
+                         (ins GPR16:$lhs, mcs251_stack:$addr),
+                         "add $dst, $addr", []>;
+
+// Dynamic alloca (DYNAMIC_STACKALLOC). The whole size-adjust-readback
+// sequence is MIR-only (REG_SEQUENCE), so it rides a pseudo expanded by
+// the custom inserter:
+//
+//   %lo = MOV8di 0x81 / %hi = MOV8di 0x85      ; read current SPX
+//   %sp = REG_SEQUENCE %hi:sub_hi8, %lo:sub_lo8
+//   %new = ADD16rr %sp, %size                  ; new stack top (wr math:
+//                                               ;  `add dr60,wr` is an
+//                                               ;  illegal width mix)
+//   MOV8id 0x85, hi(%new) / MOV8id 0x81, lo(%new)  ; write SPX back via
+//                                               ;  SFR-direct stores, hi first
+//   %dst = ADD16ri %sp, #1                     ; object base = old top+1
+//
+// The returned pointer is the FIRST byte of the object (old SPX+1): on an
+// up-growing stack whose SPX points at the top-most used byte, a new
+// object occupies [oldSPX+1 .. oldSPX+size]. Alignment > 1 is rejected in
+// the lowering (the stack is byte-aligned; no padding is ever emitted).
+let usesCustomInserter = 1, hasSideEffects = 1, Uses = [DR60], Defs = [DR60] in
+def DYNALLOCA : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$size), "", []>;

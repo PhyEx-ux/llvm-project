@@ -15,6 +15,8 @@ class MCS251Subtarget;
 class MCS251InstrInfo final : public MCS251GenInstrInfo {
   const MCS251RegisterInfo RI;
 
+  [[noreturn]] void reportBadSpillClass(const TargetRegisterClass *RC) const;
+
 public:
   explicit MCS251InstrInfo(const MCS251Subtarget &STI);
   const MCS251RegisterInfo &getRegisterInfo() const { return RI; }

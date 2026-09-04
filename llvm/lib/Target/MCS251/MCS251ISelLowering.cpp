@@ -4,6 +4,7 @@
 #include "MCS251.h"
 #include "MCS251Subtarget.h"
 #include "llvm/CodeGen/CallingConvLower.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -86,11 +87,21 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::ZERO_EXTEND, MVT::i32, Custom);
   setOperationAction(ISD::ANY_EXTEND, MVT::i32, Custom);
   setOperationAction(ISD::SIGN_EXTEND, MVT::i32, Custom);
-  // Dynamic (VLA) allocas would need stack manipulation; static allocas
-  // surface as FrameIndexSDNode pointers rejected in parseAddress. Both
-  // arrive with Phase 9.
+  // Stack allocations (Phase 9): static allocas surface as FrameIndexSDNode
+  // pointers handled by parseAddress (direct @dr60 access) and the FIADDR
+  // Select hook (escaping pointer values); variable-length allocas lower
+  // through DYNAMIC_STACKALLOC into the DYNALLOCA pseudo.
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i8, Custom);
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i16, Custom);
+  // Loop VLAs use stacksave/stackrestore to recover the pre-iteration SPX.
+  // They cannot use the generic Copy{From,To}Reg expansion because DR60 is a
+  // 32-bit register while pointers are i16.
+  setOperationAction(ISD::STACKSAVE, MVT::i16, Custom);
+  setOperationAction(ISD::STACKRESTORE, MVT::i16, Custom);
+  // STACKSAVE/RESTORE are legalized through MVT::Other despite their i16
+  // pointer payload, so register that lookup form as well.
+  setOperationAction(ISD::STACKSAVE, MVT::Other, Custom);
+  setOperationAction(ISD::STACKRESTORE, MVT::Other, Custom);
   // Atomics are separate opcodes (not flags on ISD::LOAD/STORE); route them
   // to a loud rejection -- "Cannot select" gives no hint what is missing.
   for (MVT VT : {MVT::i8, MVT::i16, MVT::i32}) {
@@ -134,8 +145,11 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
         "MCS251: Phase 6 supports only BR_CC (branch on icmp); "
         "SETCC/BRCOND arrive in a later phase");
   case ISD::DYNAMIC_STACKALLOC:
-    report_fatal_error("MCS251: variable-length allocas need the stack "
-                       "(arrives with Phase 9)");
+    return LowerDynamicStackAlloc(Op, DAG);
+  case ISD::STACKSAVE:
+    return LowerSTACKSAVE(Op, DAG);
+  case ISD::STACKRESTORE:
+    return LowerSTACKRESTORE(Op, DAG);
   case ISD::ATOMIC_LOAD:
   case ISD::ATOMIC_STORE:
     report_fatal_error("MCS251: atomic memory operations are not supported");
@@ -246,10 +260,10 @@ static SDValue materializeImm(SDValue N, const SDLoc &DL, SelectionDAG &DAG) {
       0);
 }
 
-// Known limitation: -O0 (fast regalloc) crashes on any function with
-// cross-block live vregs: FastRA spills via loadRegFromStackSlot, and
-// stack/frame support only arrives in Phase 9. Use -O2/-O1 (greedy) until
-// then.
+// Known limitation resolved (Phase 9): -O0's fast register allocator spills
+// cross-block live vregs through loadRegFromStackSlot/storeRegFromStackSlot,
+// which the frame now provides; the entry-block COPY shape below no longer
+// needs any special care.
 SDValue MCS251TargetLowering::LowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
   SDValue Chain = Op.getOperand(0);
   ISD::CondCode CC = cast<CondCodeSDNode>(Op.getOperand(1))->get();
@@ -387,6 +401,159 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     return expandLongConditionalBranch(
         MI, BB, MI.getOperand(3).getMBB(),
         getSkipBranchOpcode8S((ISD::CondCode)MI.getOperand(2).getImm()));
+  }
+  case MCS251::LD16S:
+  case MCS251::ST16S:
+  case MCS251::ST16TS: {
+    // Phase 9 frame-relative memory pseudos, mirror images of
+    // LD16/ST16/ST16T with the address carried as an unresolved
+    // (placeholder base, FrameIndex, offset) triple. Explicit operand
+    // order: LD16S [dst, base, FI, off], ST16S/ST16TS [base, FI, off, val].
+    // The displacement handed to the expanded MOV8rmS/MOV8mrS stays an
+    // (FI, off) pair -- PEI resolves each against the frame top.
+    MachineFunction *MF = BB->getParent();
+    MachineRegisterInfo &MRI = MF->getRegInfo();
+    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+
+    bool IsLoad = MI.getOpcode() == MCS251::LD16S;
+    bool IsWideStore = MI.getOpcode() == MCS251::ST16S;
+    unsigned BaseOp = IsLoad ? 1 : 0;
+    int FI = MI.getOperand(BaseOp + 1).getIndex();
+    uint64_t Disp = MI.getOperand(BaseOp + 2).getImm() & 0xffff;
+    MachineMemOperand *MMO =
+        MI.memoperands_empty() ? nullptr : *MI.memoperands_begin();
+    assert(MMO && "load/store custom inserter requires a MachineMemOperand");
+
+    auto SplitMMO = [&](uint64_t Off) {
+      return MF->getMachineMemOperand(MMO, Off, /*Size=*/1);
+    };
+    // MOV8rmS/MOV8mrS with an unresolved frame address (the placeholder
+    // base is re-attached per instruction; eliminateFrameIndex replaces it
+    // with the real frame base register).
+    auto BuildFrameMI = [&](unsigned Opc, uint64_t Off) {
+      return BuildMI(*BB, MI, DL, TII->get(Opc))
+          .addReg(MCS251::DR60)
+          .addFrameIndex(FI)
+          .addImm(Off);
+    };
+
+    if (IsLoad) {
+      Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+      Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8rmS), Hi)
+          .addReg(MCS251::DR60)
+          .addFrameIndex(FI)
+          .addImm(Disp)
+          .setMemRefs(SplitMMO(0));
+      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8rmS), Lo)
+          .addReg(MCS251::DR60)
+          .addFrameIndex(FI)
+          .addImm(Disp + 1)
+          .setMemRefs(SplitMMO(1));
+      BuildMI(*BB, MI, DL, TII->get(TargetOpcode::REG_SEQUENCE),
+              MI.getOperand(0).getReg())
+          .addReg(Hi)
+          .addImm(MCS251::sub_hi8)
+          .addReg(Lo)
+          .addImm(MCS251::sub_lo8);
+    } else {
+      // Stores extract the lanes from the GPR16 value with sub-register
+      // COPYs (def before use, keeping every temporary single-def).
+      Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+      BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), Lo)
+          .addReg(MI.getOperand(3).getReg(), RegState::NoFlags,
+                  MCS251::sub_lo8);
+      if (IsWideStore) {
+        Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+        BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), Hi)
+            .addReg(MI.getOperand(3).getReg(), RegState::NoFlags,
+                    MCS251::sub_hi8);
+        BuildFrameMI(MCS251::MOV8mrS, Disp).addReg(Hi).setMemRefs(SplitMMO(0));
+      }
+      BuildFrameMI(MCS251::MOV8mrS, IsWideStore ? Disp + 1 : Disp)
+          .addReg(Lo)
+          .setMemRefs(IsWideStore ? SplitMMO(1) : MMO);
+    }
+
+    MI.eraseFromParent();
+    return BB;
+  }
+  case MCS251::FIADDR: {
+    // Frame-index pointer materialisation: read SPX through the two SFR
+    // direct addresses (0x81 = SP, 0x85 = SPH on this platform), assemble
+    // the WR, and let ADD16fi carry the frame index to PEI, where the final
+    // displacement (depends on StackSize) is folded.
+    MachineFunction *MF = BB->getParent();
+    MachineRegisterInfo &MRI = MF->getRegInfo();
+    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+    int FI = MI.getOperand(1).getIndex();
+
+    Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    Register Sp = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8di), Lo)
+        .addImm(0x81); // SP (SFR direct)
+    BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8di), Hi)
+        .addImm(0x85); // SPH (SFR direct, QEMU-arbitrated address)
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::REG_SEQUENCE), Sp)
+        .addReg(Hi)
+        .addImm(MCS251::sub_hi8)
+        .addReg(Lo)
+        .addImm(MCS251::sub_lo8);
+    BuildMI(*BB, MI, DL, TII->get(MCS251::ADD16fi),
+            MI.getOperand(0).getReg())
+        .addReg(Sp)
+        .addFrameIndex(FI)
+        .addImm(0);
+    MI.eraseFromParent();
+    return BB;
+  }
+  case MCS251::DYNALLOCA: {
+    // Dynamic alloca (SFR-direct SPX read/modify/write -- `add dr60,wr` is
+    // an illegal width mix; see the DYNALLOCA comment in
+    // MCS251InstrInfo.td). The returned pointer is the object base =
+    // oldSPX+1 (up-growing stack, SPX at the top-most used byte).
+    MachineFunction *MF = BB->getParent();
+    MachineRegisterInfo &MRI = MF->getRegInfo();
+    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+    Register Size = MI.getOperand(1).getReg();
+
+    Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    Register Sp = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    Register New = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    Register NewLo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    Register NewHi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8di), Lo).addImm(0x81);
+    BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8di), Hi).addImm(0x85);
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::REG_SEQUENCE), Sp)
+        .addReg(Hi)
+        .addImm(MCS251::sub_hi8)
+        .addReg(Lo)
+        .addImm(MCS251::sub_lo8);
+    BuildMI(*BB, MI, DL, TII->get(MCS251::ADD16rr), New)
+        .addReg(Sp)
+        .addReg(Size);
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), NewLo)
+        .addReg(New, RegState::NoFlags, MCS251::sub_lo8);
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), NewHi)
+        .addReg(New, RegState::NoFlags, MCS251::sub_hi8);
+    // Write SPX back high byte first: if a mid-update interrupt fires, the
+    // transient SPX (newHi:oldLo) is >= the new stack top, so the interrupt
+    // push lands above the new object instead of overwriting live frames.
+    // The reverse order would transiently drop SPX below the old top whenever
+    // the new value carries into the high byte (crossing a 256-byte page).
+    BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8id)).addImm(0x85).addReg(NewHi);
+    BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8id)).addImm(0x81).addReg(NewLo);
+    BuildMI(*BB, MI, DL, TII->get(MCS251::ADD16ri),
+            MI.getOperand(0).getReg())
+        .addReg(Sp)
+        .addImm(1);
+    MI.eraseFromParent();
+    return BB;
   }
   case MCS251::LD16:
   case MCS251::ST16:
@@ -620,8 +787,34 @@ struct MCS251Address {
   // (0x80-0xff) -- see the trap above.
   bool IsDirect = false;
   uint64_t DirectAddr = 0;
+  // Frame-relative addressing (Phase 9): the base is a stack object. The
+  // displacement is carried as an unresolved (FrameIndex, offset) pair into
+  // the mcs251_stack operand; PEI folds it against the frame top
+  // (@dr60-0x.... normally, @dr56 when the function has dynamic allocas).
+  bool IsStack = false;
+  int StackFI = 0;
 };
 } // namespace
+
+// Materialises a frame-index pointer as a plain GPR16 value (the FIADDR
+// pseudo; the custom inserter builds the SFR-direct SP reads). Only used
+// when a frame pointer participates in REGISTER arithmetic (alloca[i]):
+// a direct load/store base stays frame-relative and never materialises.
+static SDValue materializeFrameIndex(int FrameIdx, int64_t Off,
+                                     const SDLoc &DL, SelectionDAG &DAG) {
+  if (DAG.getMachineFunction().getFrameInfo().hasVarSizedObjects())
+    report_fatal_error("MCS251: taking the address of a frame object in a "
+                       "function with dynamic allocas is not supported "
+                       "(needs an anchor read, not yet implemented)");
+  SDValue TFI = DAG.getTargetFrameIndex(FrameIdx, MVT::i16);
+  SDValue P(DAG.getMachineNode(MCS251::FIADDR, DL, MVT::i16, TFI), 0);
+  if (Off == 0)
+    return P;
+  return SDValue(DAG.getMachineNode(
+                     MCS251::ADD16ri, DL, MVT::i16,
+                     {P, DAG.getTargetConstant(Off & 0xffff, DL, MVT::i16)}),
+                 0);
+}
 
 // Materialise a 16-bit constant into a GPR16 vreg.
 static SDValue buildMOV16ri(uint64_t Imm, const SDLoc &DL, SelectionDAG &DAG) {
@@ -670,21 +863,37 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
       continue;
     }
     // Register + register: materialise one 16-bit add. Recursing keeps
-    // nested folded offsets (add (add p, 1), q) out of the operands.
+    // nested folded offsets (add (add p, 1), q) out of the operands. A
+    // frame-index side leaves the frame-relative form here: it becomes a
+    // plain pointer (materializeFrameIndex) so the register add covers it
+    // (this is the alloca[i] shape).
     MCS251Address L = parseAddress(LHS, DL, DAG, /*AllowDirect=*/false);
     MCS251Address R = parseAddress(RHS, DL, DAG, /*AllowDirect=*/false);
     assert(!L.IsDirect && !R.IsDirect && "direct requires AllowDirect");
-    Ptr = SDValue(DAG.getMachineNode(
-                      MCS251::ADD16rr, DL, MVT::i16,
-                      {foldDispIntoBase(L.Base, L.Disp, DL, DAG),
-                       foldDispIntoBase(R.Base, R.Disp, DL, DAG)}),
+    SDValue LBase =
+        L.IsStack ? materializeFrameIndex(L.StackFI, L.Disp, DL, DAG)
+                  : foldDispIntoBase(L.Base, L.Disp, DL, DAG);
+    SDValue RBase =
+        R.IsStack ? materializeFrameIndex(R.StackFI, R.Disp, DL, DAG)
+                  : foldDispIntoBase(R.Base, R.Disp, DL, DAG);
+    Ptr = SDValue(DAG.getMachineNode(MCS251::ADD16rr, DL, MVT::i16,
+                                     {LBase, RBase}),
                   0);
     break;
   }
 
-  if (isa<FrameIndexSDNode>(Ptr))
-    report_fatal_error("MCS251: stack objects (alloca) require the frame, "
-                       "which arrives with Phase 9");
+  // A stack object used directly as the access base: stay frame-relative
+  // (one @dr60 access, no pointer materialisation). The peeled offset rides
+  // the frame displacement; the same 0..0xfffe range as dis16 applies.
+  if (auto *FIN = dyn_cast<FrameIndexSDNode>(Ptr)) {
+    A.IsStack = true;
+    A.StackFI = FIN->getIndex();
+    if (Off < 0 || Off > 0xfffe)
+      report_fatal_error("MCS251: frame object access offset out of the "
+                         "16-bit displacement range");
+    A.Disp = Off;
+    return A;
+  }
 
   // Symbolic bases: `mov wr,#_sym` (symbolic immediate, Phase 8
   // measurement: sdas251 accepts it and sdld resolves the relocation; an
@@ -760,7 +969,15 @@ static SDValue buildByteLoad(const MCS251Address &A, const SDLoc &DL,
                              MachineMemOperand *MMO) {
   SDVTList ResTys = DAG.getVTList(MVT::i8, MVT::Other);
   SDNode *N;
-  if (A.IsDirect)
+  if (A.IsStack) {
+    // mov rX, @dr60+<FI+off>: unresolved (placeholder base, FI, offset)
+    // operands; PEI folds the displacement (see eliminateFrameIndex).
+    N = DAG.getMachineNode(
+        MCS251::MOV8rmS, DL, ResTys,
+        {DAG.getRegister(MCS251::DR60, MVT::i16),
+         DAG.getTargetFrameIndex(A.StackFI, MVT::i16),
+         DAG.getTargetConstant(A.Disp, DL, MVT::i16), Chain});
+  } else if (A.IsDirect)
     N = DAG.getMachineNode(MCS251::MOV8di, DL, ResTys,
                            {DAG.getTargetConstant(A.DirectAddr, DL, MVT::i8),
                             Chain});
@@ -800,9 +1017,19 @@ SDValue MCS251TargetLowering::LowerLoad(SDValue Op, SelectionDAG &DAG) const {
     // Two byte loads + REG_SEQUENCE via the LD16 pseudo (big-endian: the
     // pseudo's disp 0 lane is the hi lane). The pseudo carries the full MMO
     // (size 2); the split MMOs are attached by the custom inserter.
-    SDNode *N = DAG.getMachineNode(
-        MCS251::LD16, DL, DAG.getVTList(MVT::i16, MVT::Other),
-        {A.Base, DAG.getTargetConstant(A.Disp, DL, MVT::i16), LD->getChain()});
+    SDNode *N;
+    if (A.IsStack) {
+      N = DAG.getMachineNode(
+          MCS251::LD16S, DL, DAG.getVTList(MVT::i16, MVT::Other),
+          {DAG.getRegister(MCS251::DR60, MVT::i16),
+           DAG.getTargetFrameIndex(A.StackFI, MVT::i16),
+           DAG.getTargetConstant(A.Disp, DL, MVT::i16), LD->getChain()});
+    } else {
+      N = DAG.getMachineNode(
+          MCS251::LD16, DL, DAG.getVTList(MVT::i16, MVT::Other),
+          {A.Base, DAG.getTargetConstant(A.Disp, DL, MVT::i16),
+           LD->getChain()});
+    }
     DAG.setNodeMemRefs(cast<MachineSDNode>(N), {LD->getMemOperand()});
     return SDValue(N, 0);
   }
@@ -836,7 +1063,14 @@ static SDValue buildByteStore(const MCS251Address &A, SDValue Val,
                               const SDLoc &DL, SelectionDAG &DAG,
                               SDValue Chain, MachineMemOperand *MMO) {
   SDNode *N;
-  if (A.IsDirect)
+  if (A.IsStack) {
+    // mov @dr60+<FI+off>, rX -- mirror of the load path.
+    N = DAG.getMachineNode(
+        MCS251::MOV8mrS, DL, MVT::Other,
+        {DAG.getRegister(MCS251::DR60, MVT::i16),
+         DAG.getTargetFrameIndex(A.StackFI, MVT::i16),
+         DAG.getTargetConstant(A.Disp, DL, MVT::i16), Val, Chain});
+  } else if (A.IsDirect)
     N = DAG.getMachineNode(
         MCS251::MOV8id, DL, MVT::Other,
         {DAG.getTargetConstant(A.DirectAddr, DL, MVT::i8), Val, Chain});
@@ -872,10 +1106,20 @@ SDValue MCS251TargetLowering::LowerStore(SDValue Op, SelectionDAG &DAG) const {
     // materialised here.
     if (isa<ConstantSDNode>(Val))
       Val = buildMOV16ri(cast<ConstantSDNode>(Val)->getZExtValue(), DL, DAG);
-    SDNode *N = DAG.getMachineNode(
-        MCS251::ST16, DL, MVT::Other,
-        {A.Base, DAG.getTargetConstant(A.Disp, DL, MVT::i16), Val,
-         ST->getChain()});
+    SDNode *N;
+    if (A.IsStack) {
+      N = DAG.getMachineNode(
+          MCS251::ST16S, DL, MVT::Other,
+          {DAG.getRegister(MCS251::DR60, MVT::i16),
+           DAG.getTargetFrameIndex(A.StackFI, MVT::i16),
+           DAG.getTargetConstant(A.Disp, DL, MVT::i16), Val,
+           ST->getChain()});
+    } else {
+      N = DAG.getMachineNode(
+          MCS251::ST16, DL, MVT::Other,
+          {A.Base, DAG.getTargetConstant(A.Disp, DL, MVT::i16), Val,
+           ST->getChain()});
+    }
     DAG.setNodeMemRefs(cast<MachineSDNode>(N), {ST->getMemOperand()});
     return SDValue(N, 0);
   }
@@ -889,12 +1133,18 @@ SDValue MCS251TargetLowering::LowerStore(SDValue Op, SelectionDAG &DAG) const {
     // Non-constant i16 value: the low-lane extraction is MIR-only. A
     // direct-classified address keeps the dir8 form via ST16TD -- falling
     // back to @wr would silently retarget 0x80-0xff from the SFR space to
-    // region-00 edata (the address-space trap).
+    // region-00 edata (the address-space trap). A frame-relative address
+    // likewise stays frame-relative (ST16TS).
     SmallVector<SDValue, 4> Ops;
     unsigned Opc;
     if (A.IsDirect) {
       Opc = MCS251::ST16TD;
       Ops.push_back(DAG.getTargetConstant(A.DirectAddr, DL, MVT::i8));
+    } else if (A.IsStack) {
+      Opc = MCS251::ST16TS;
+      Ops.push_back(DAG.getRegister(MCS251::DR60, MVT::i16));
+      Ops.push_back(DAG.getTargetFrameIndex(A.StackFI, MVT::i16));
+      Ops.push_back(DAG.getTargetConstant(A.Disp, DL, MVT::i16));
     } else {
       Opc = MCS251::ST16T;
       Ops.push_back(A.Base);
@@ -920,6 +1170,98 @@ SDValue MCS251TargetLowering::LowerExtend(SDValue Op, SelectionDAG &DAG) const {
   assert(Src.getValueType() == MVT::i8 && "only i8->i16 extension is routed "
                                           "here");
   return SDValue(DAG.getMachineNode(MCS251::ZEXT8, DL, MVT::i16, Src), 0);
+}
+
+//===----------------------------------------------------------------------===//
+// Dynamic alloca lowering (Phase 9)
+//===----------------------------------------------------------------------===//
+//
+// DYNAMIC_STACKALLOC becomes the DYNALLOCA machine pseudo (value + chain);
+// the custom inserter builds the full SFR-direct read/add/write sequence
+// (see the DYNALLOCA comment in MCS251InstrInfo.td). The stack grows up
+// and the returned pointer is the object base (old SPX + 1), so nothing
+// else is needed here beyond alignment policing and size normalisation.
+
+// STACKSAVE/STACKRESTORE use the same SFR-direct SPX representation as
+// DYNALLOCA. DR60 cannot be copied to/from a pointer-sized WR directly: its
+// low 16 bits are exposed only as SFR bytes 0x81 (SP) and 0x85 (SPH).
+SDValue MCS251TargetLowering::LowerSTACKSAVE(SDValue Op,
+                                             SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue Chain = Op.getOperand(0);
+  SDVTList ByteWithChain = DAG.getVTList(MVT::i8, MVT::Other);
+
+  SDValue Lo(DAG.getMachineNode(
+                 MCS251::MOV8di, DL, ByteWithChain,
+                 {DAG.getTargetConstant(0x81, DL, MVT::i8), Chain}),
+             0);
+  SDValue Hi(DAG.getMachineNode(
+                 MCS251::MOV8di, DL, ByteWithChain,
+                 {DAG.getTargetConstant(0x85, DL, MVT::i8), Lo.getValue(1)}),
+             0);
+  SmallVector<SDValue, 5> Ops = {
+      DAG.getTargetConstant(MCS251::GPR16RegClassID, DL, MVT::i32), Hi,
+      DAG.getTargetConstant(MCS251::sub_hi8, DL, MVT::i32), Lo,
+      DAG.getTargetConstant(MCS251::sub_lo8, DL, MVT::i32)};
+  SDValue SPX(DAG.getMachineNode(TargetOpcode::REG_SEQUENCE, DL, MVT::i16,
+                                 Ops),
+              0);
+  return DAG.getMergeValues({SPX, Hi.getValue(1)}, DL);
+}
+
+SDValue MCS251TargetLowering::LowerSTACKRESTORE(SDValue Op,
+                                                SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue Chain = Op.getOperand(0);
+  SDValue SavedSPX = Op.getOperand(1);
+  SDValue Hi = DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8,
+                                           SavedSPX);
+  SDValue Lo = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8,
+                                           SavedSPX);
+  // Keep the writes chained and write high first. The transient (newHi:oldLo)
+  // lies at or above the final stack top, so an interrupt cannot overwrite
+  // the object being restored away.
+  SDValue HiWrite(DAG.getMachineNode(
+                      MCS251::MOV8id, DL, MVT::Other,
+                      {DAG.getTargetConstant(0x85, DL, MVT::i8), Hi, Chain}),
+                  0);
+  return SDValue(DAG.getMachineNode(
+                     MCS251::MOV8id, DL, MVT::Other,
+                     {DAG.getTargetConstant(0x81, DL, MVT::i8), Lo, HiWrite}),
+                 0);
+}
+
+SDValue MCS251TargetLowering::LowerDynamicStackAlloc(SDValue Op,
+                                                     SelectionDAG &DAG) const {
+  SDValue Chain = Op.getOperand(0);
+  SDValue Size = Op.getOperand(1);
+  SDLoc DL(Op);
+
+  // The result is a pointer; only the i16 pointer type exists.
+  if (Op.getValueType() != MVT::i16)
+    report_fatal_error("MCS251: only 16-bit pointers are supported");
+  if (Size.getValueType() == MVT::i8) {
+    // Widen a byte-sized allocation amount to the 16-bit add.
+    Size = SDValue(DAG.getMachineNode(MCS251::ZEXT8, DL, MVT::i16, Size), 0);
+  }
+  if (auto *C = dyn_cast<ConstantSDNode>(Op.getOperand(2))) {
+    if (C->getZExtValue() > 1)
+      report_fatal_error("MCS251: dynamic alloca alignment > 1 is not "
+                         "supported (the stack is byte-aligned, no padding "
+                         "is ever emitted)");
+  } else {
+    llvm_unreachable("DYNAMIC_STACKALLOC alignment must be a constant");
+  }
+  // Defensive: a constant size should never reach here (the IR builder
+  // turns constant-sized allocas into frame indices), but if it does,
+  // materialise it so the register operand of DYNALLOCA is a real vreg.
+  if (isa<ConstantSDNode>(Size))
+    Size = buildMOV16ri(cast<ConstantSDNode>(Size)->getZExtValue(), DL, DAG);
+
+  return SDValue(DAG.getMachineNode(
+                     MCS251::DYNALLOCA, DL,
+                     DAG.getVTList(MVT::i16, MVT::Other), {Size, Chain}),
+                 0);
 }
 
 SDValue MCS251TargetLowering::LowerFormalArguments(
@@ -1025,13 +1367,11 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
 // corresponding eliminateCallFramePseudoInstr hook; nothing in the DAG
 // builder requires a LowerCall to produce a call sequence.
 //
-// Known limitation (loud failure, not silent miscompilation): a value live
-// across a call needs a free GPR for greedy RA to keep it in. When no GPR is
-// free, RA spills -- and spilling needs the frame, which only arrives in
-// Phase 9. In practice the run dies before eliminateFrameIndex could ever
-// fire (PEI): the spiller calls storeRegToStackSlot first, and the explicit
-// stub in MCS251InstrInfo reports the fatal error there. Register pressure
-// across calls is therefore unsupported until then, by construction.
+// Register pressure across calls: since Phase 9 the spiller has real frame
+// slots (storeRegToStackSlot/loadRegFromStackSlot -> @dr60 displacement
+// accesses), so values live across a call are spilled to the frame instead
+// of being a hard error. A mixed dynamic-alloca function references its
+// static slots through the dr56 anchor, so those spills stay correct too.
 SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                                         SmallVectorImpl<SDValue> &InVals) const {
   SelectionDAG &DAG = CLI.DAG;

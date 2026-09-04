@@ -14,30 +14,109 @@ using namespace llvm;
 MCS251InstrInfo::MCS251InstrInfo(const MCS251Subtarget &STI)
     : MCS251GenInstrInfo(STI, RI), RI() {}
 
-// Spilling is not implemented until the frame arrives (Phase 9), and the
-// generic TargetInstrInfo stubs are UB in a release build (llvm_unreachable
-// optimises away), so a register-pressure spill would turn into a bare
-// segfault. These overrides make the failure loud and diagnostic instead:
-// the reachable trigger is a value live across a call, which cannot stay in
-// any register because every GPR is caller-saved (see LowerCall).
-static void reportNoSpilling() {
-  report_fatal_error("MCS251 register spilling is not implemented; values "
-                     "live across calls (or other register pressure) need "
-                     "the frame, which arrives with Phase 9");
+// Spill/reload (Phase 9). The slot address is emitted in its unresolved
+// frame-index form -- the mcs251_stack displacement operand carries the
+// (FI, offset) pair and a placeholder dr60 base, and PEI folds it into the
+// final @dr60/@dr56 displacement (see MCS251RegisterInfo::
+// eliminateFrameIndex). Word-granular spill slots use the single WR form
+// (mov @dr60+dis,wr / mov wr,@dr60+dis): i16 values MUST spill as one
+// instruction pair, never as byte lanes.
+[[noreturn]] void
+MCS251InstrInfo::reportBadSpillClass(const TargetRegisterClass *RC) const {
+  report_fatal_error(Twine("MCS251: cannot spill a value of register class ") +
+                     RI.getRegClassName(RC));
 }
 
 void MCS251InstrInfo::storeRegToStackSlot(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MI, Register SrcReg,
     bool IsKill, int FrameIndex, const TargetRegisterClass *RC, Register VReg,
     MachineInstr::MIFlag Flags) const {
-  reportNoSpilling();
+  DebugLoc DL = MI != MBB.end() ? MI->getDebugLoc() : DebugLoc();
+
+  if (RC == &MCS251::GPR8RegClass) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV8mrS))
+        .addReg(MCS251::DR60) // placeholder base; PEI substitutes
+        .addFrameIndex(FrameIndex)
+        .addImm(0)
+        .addReg(SrcReg, getKillRegState(IsKill))
+        .setMIFlag(Flags);
+    return;
+  }
+  if (RC == &MCS251::GPR16RegClass) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrS))
+        .addReg(MCS251::DR60)
+        .addFrameIndex(FrameIndex)
+        .addImm(0)
+        .addReg(SrcReg, getKillRegState(IsKill))
+        .setMIFlag(Flags);
+    return;
+  }
+  if (RC == &MCS251::GPR32RegClass) {
+    // A dr value is stored as its two WR halves with the big-endian object
+    // layout used everywhere else (mem[base] = most significant first):
+    // sub_hi16 at +0, sub_lo16 at +2.
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrS))
+        .addReg(MCS251::DR60)
+        .addFrameIndex(FrameIndex)
+        .addImm(0)
+        .addReg(SrcReg, RegState::NoFlags, MCS251::sub_hi16)
+        .setMIFlag(Flags);
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrS))
+        .addReg(MCS251::DR60)
+        .addFrameIndex(FrameIndex)
+        .addImm(2)
+        .addReg(SrcReg, getKillRegState(IsKill), MCS251::sub_lo16)
+        .setMIFlag(Flags);
+    return;
+  }
+  reportBadSpillClass(RC);
 }
 
 void MCS251InstrInfo::loadRegFromStackSlot(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MI, Register DestReg,
     int FrameIndex, const TargetRegisterClass *RC, Register VReg,
     unsigned SubReg, MachineInstr::MIFlag Flags) const {
-  reportNoSpilling();
+  DebugLoc DL = MI != MBB.end() ? MI->getDebugLoc() : DebugLoc();
+  assert(SubReg == 0 && "no sub-register reload path in this backend");
+
+  if (RC == &MCS251::GPR8RegClass) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV8rmS), DestReg)
+        .addReg(MCS251::DR60)
+        .addFrameIndex(FrameIndex)
+        .addImm(0)
+        .setMIFlag(Flags);
+    return;
+  }
+  if (RC == &MCS251::GPR16RegClass) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmS), DestReg)
+        .addReg(MCS251::DR60)
+        .addFrameIndex(FrameIndex)
+        .addImm(0)
+        .setMIFlag(Flags);
+    return;
+  }
+  if (RC == &MCS251::GPR32RegClass) {
+    // Mirror of the GPR32 store: define the two WR halves directly as
+    // sub-registers of DestReg. A REG_SEQUENCE is illegal here -- this runs
+    // inside/after register allocation (FastRA never assigns freshly created
+    // vregs, and the greedy spiller never builds intervals for them), so the
+    // halves must be written straight into DestReg's lanes. big-endian layout:
+    // sub_hi16 at +0, sub_lo16 at +2.
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmS))
+        .addReg(DestReg, RegState::DefineNoRead, MCS251::sub_hi16)
+        .addReg(MCS251::DR60)
+        .addFrameIndex(FrameIndex)
+        .addImm(0)
+        .setMIFlag(Flags);
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmS))
+        .addReg(DestReg, RegState::Define, MCS251::sub_lo16)
+        .addReg(MCS251::DR60)
+        .addFrameIndex(FrameIndex)
+        .addImm(2)
+        .setMIFlag(Flags);
+    return;
+  }
+  reportBadSpillClass(RC);
 }
 
 void MCS251InstrInfo::copyPhysReg(MachineBasicBlock &MBB,

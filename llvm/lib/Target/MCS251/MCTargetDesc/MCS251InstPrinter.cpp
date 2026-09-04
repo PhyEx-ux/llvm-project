@@ -92,6 +92,29 @@ void MCS251InstPrinter::printDir8(const MCInst *MI, unsigned OpNo,
   O << format("0x%02x", MI->getOperand(OpNo).getImm() & 0xff);
 }
 
+// Frame-slot address (mcs251_stack operand): OpNo is the base register
+// (dr60 or dr56), OpNo+1 the signed 16-bit displacement. Prints SDCC-style:
+// a zero displacement prints nothing (`@dr60`), otherwise +0x%04x / -0x%04x.
+// The SIGN IS LOAD-BEARING: sdas251 parses an @DRk displacement as a
+// positive 24-bit value, so a negative displacement must never be emitted
+// as its two's-complement bit pattern (which is why printDis16's
+// & 0xffff masking is wrong here).
+void MCS251InstPrinter::printStackAddr(const MCInst *MI, unsigned OpNo,
+                                       raw_ostream &O) {
+  const MCOperand &Base = MI->getOperand(OpNo);
+  const MCOperand &Disp = MI->getOperand(OpNo + 1);
+  assert(Base.isReg() && Disp.isImm() && "stack address is reg+imm");
+  O << '@';
+  printRegName(O, Base.getReg());
+  int64_t D = (int16_t)Disp.getImm();
+  if (D == 0)
+    return;
+  if (D > 0)
+    O << format("+0x%04x", (unsigned)D);
+  else
+    O << format("-0x%04x", (unsigned)-D);
+}
+
 void MCS251InstPrinter::printInst(const MCInst *MI, uint64_t Address,
                                   StringRef Annot,
                                   const MCSubtargetInfo &STI,
