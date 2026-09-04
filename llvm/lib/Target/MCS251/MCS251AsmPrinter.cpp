@@ -43,12 +43,14 @@
 #include "MCS251.h"
 #include "MCS251MCInstLower.h"
 #include "MCS251TargetMachine.h"
+#include "MCTargetDesc/MCS251ABISignature.h"
 #include "TargetInfo/MCS251TargetInfo.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/IR/Module.h"
+#include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -67,11 +69,10 @@ using namespace llvm;
 // Phase 12 specimen
 // (/tmp/mcs251-p12/sample/llvm-mcs251-asxxxx-specimen.asm), which was
 // assembled, linked and executed under QEMU to validate the exact string.
-static constexpr const char *OptsdccSignature =
-    ".optsdcc stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small "
-    "stack-auto=0 xstack=0 intlong-reent=0 float-reent=0 reg-params=1 "
-    "all-callee-saves=0 sdcccall=2 regset=r0-r9,r12-r15 "
-    "compiler-build=mcs251-abi1.0-r1";
+// The payload is shared with the object writer's O record
+// (MCTargetDesc/MCS251ABISignature.h).
+static const std::string OptsdccSignature =
+    (".optsdcc " + std::string(MCS251::ABISignaturePayload));
 
 // Derive the ASxxxx module name the way SDCC does: the stem of the source
 // file name, with anything outside [A-Za-z0-9_] mapped to '_' and a '_'
@@ -123,11 +124,20 @@ public:
     // ASxxxx module prologue.  ".source" is emitted bare, exactly like the
     // validated specimen and the smoke crt0 template (sdas251 accepts it
     // without a file argument; a filename argument was never exercised).
-    OutStreamer->emitRawText("\t.module " + getMCS251ModuleName(M));
+    const std::string ModuleName = getMCS251ModuleName(M);
+    OutStreamer->emitRawText("\t.module " + ModuleName);
     OutStreamer->emitRawText("\t.source");
     OutStreamer->emitRawText(OptsdccSignature);
     OutStreamer->emitRawText("");
     OutStreamer->emitRawText("\t.area CSEG (CODE)");
+
+    // Object path (Phase 13a): the MCS251ObjectStreamer deliberately
+    // swallows the raw-text prologue above and the REL writer regenerates
+    // the equivalent M/O/A records.  The writer has no access to the Module,
+    // so bridge the sanitized module name through the MCContext (the only
+    // other MainFileName consumer is DWARF line-table setup, which this
+    // target never enables).
+    OutStreamer->getContext().setMainFileName(ModuleName);
   }
 
   // Defined global data is rejected until data-area emission exists
