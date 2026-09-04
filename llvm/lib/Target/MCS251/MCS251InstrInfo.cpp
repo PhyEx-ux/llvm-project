@@ -136,6 +136,12 @@ void MCS251InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
     return;
   }
 
+  if (MCS251::GPR32RegClass.contains(DestReg, SrcReg)) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV32rr), DestReg)
+        .addReg(SrcReg, getKillRegState(KillSrc));
+    return;
+  }
+
   // Moves into the fixed SFR return-value locations.
   if (DestReg == MCS251::DPL && MCS251::GPR8RegClass.contains(SrcReg)) {
     BuildMI(MBB, MI, DL, get(MCS251::MOV8dpl))
@@ -144,6 +150,16 @@ void MCS251InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
   }
   if (DestReg == MCS251::DPH && MCS251::GPR8RegClass.contains(SrcReg)) {
     BuildMI(MBB, MI, DL, get(MCS251::MOV8dph))
+        .addReg(SrcReg, getKillRegState(KillSrc));
+    return;
+  }
+  if (DestReg == MCS251::A && MCS251::GPR8RegClass.contains(SrcReg)) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV8a))
+        .addReg(SrcReg, getKillRegState(KillSrc));
+    return;
+  }
+  if (DestReg == MCS251::B && MCS251::GPR8RegClass.contains(SrcReg)) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV8b))
         .addReg(SrcReg, getKillRegState(KillSrc));
     return;
   }
@@ -173,6 +189,16 @@ void MCS251InstrInfo::copyPhysReg(MachineBasicBlock &MBB,
   }
   if (SrcReg == MCS251::DPH && MCS251::GPR8RegClass.contains(DestReg)) {
     auto MIB = BuildMI(MBB, MI, DL, get(MCS251::MOV8rdph), DestReg);
+    MIB->getOperand(1).setIsKill(KillSrc);
+    return;
+  }
+  if (SrcReg == MCS251::A && MCS251::GPR8RegClass.contains(DestReg)) {
+    auto MIB = BuildMI(MBB, MI, DL, get(MCS251::MOV8ra), DestReg);
+    MIB->getOperand(1).setIsKill(KillSrc);
+    return;
+  }
+  if (SrcReg == MCS251::B && MCS251::GPR8RegClass.contains(DestReg)) {
+    auto MIB = BuildMI(MBB, MI, DL, get(MCS251::MOV8rb), DestReg);
     MIB->getOperand(1).setIsKill(KillSrc);
     return;
   }

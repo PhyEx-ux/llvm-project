@@ -48,6 +48,7 @@ class MCS251Inst<dag Outs, dag Ins, string Asm, list<dag> Pat>
 
 def mcs251_imm8  : Operand<i8>  { let PrintMethod = "printImm8"; }
 def mcs251_imm16 : Operand<i16> { let PrintMethod = "printImm16"; }
+def mcs251_imm32 : Operand<i32>;
 
 // Constant displacement of an @wr+dis16 address. NOT an immediate operand of
 // its own: it is part of the address syntax (`mov r10, @wr6+0x1234`), so it
@@ -80,6 +81,33 @@ def MOV8rr  : MCS251Inst<(outs GPR8:$dst), (ins GPR8:$src),
                          "mov $dst, $src", []>;
 def MOV16rr : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$src),
                          "mov $dst, $src", []>;
+def MOV32rr : MCS251Inst<(outs GPR32:$dst), (ins GPR32:$src),
+                         "mov $dst, $src", []>;
+
+// DR immediate forms. MOV writes the low 16 bits and clears the high 16;
+// MOVH writes only the high 16 bits. MOV32ri is a pseudo expanded into these
+// two instructions by the custom inserter.
+let isReMaterializable = 1, isAsCheapAsAMove = 1 in
+  def MOVDRri : MCS251Inst<(outs GPR32:$dst), (ins mcs251_imm16:$imm),
+                           "mov $dst, $imm", []>;
+def MOVHDRi : MCS251Inst<(outs GPR32:$dst),
+                          (ins GPR32:$old, mcs251_imm16:$imm),
+                          "movh $dst, $imm", []> {
+  let Constraints = "$old = $dst";
+}
+let usesCustomInserter = 1 in
+  def MOV32ri : MCS251Inst<(outs GPR32:$dst), (ins mcs251_imm32:$imm), "",
+                           [(set GPR32:$dst, imm:$imm)]>;
+
+// DR-lane instructions operate on the complete 32-bit register.
+let Constraints = "$lhs = $dst", Defs = [PSW] in {
+  def ADD32rr : MCS251Inst<(outs GPR32:$dst), (ins GPR32:$lhs, GPR32:$rhs),
+                           "add $dst, $rhs",
+                           [(set GPR32:$dst, (add GPR32:$lhs, GPR32:$rhs))]>;
+  def SUB32rr : MCS251Inst<(outs GPR32:$dst), (ins GPR32:$lhs, GPR32:$rhs),
+                           "sub $dst, $rhs",
+                           [(set GPR32:$dst, (sub GPR32:$lhs, GPR32:$rhs))]>;
+}
 
 // Immediate materialisation.
 let isReMaterializable = 1, isAsCheapAsAMove = 1 in {
@@ -111,6 +139,17 @@ let Uses = [DPL] in
 def MOV8rdpl : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, dpl", []>;
 let Uses = [DPH] in
 def MOV8rdph : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, dph", []>;
+
+// ACC/B fixed SFR byte moves (A=0xe0, B=0xf0). These are deliberately
+// separate from R11/R10, whose byte-slot aliases are not allocatable.
+let Defs = [A] in
+def MOV8a : MCS251Inst<(outs), (ins GPR8:$src), "mov a, $src", []>;
+let Defs = [B] in
+def MOV8b : MCS251Inst<(outs), (ins GPR8:$src), "mov b, $src", []>;
+let Uses = [A] in
+def MOV8ra : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, a", []>;
+let Uses = [B] in
+def MOV8rb : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, b", []>;
 
 //===----------------------------------------------------------------------===//
 //  Memory instructions (load/store, Phase 8)

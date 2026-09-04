@@ -55,6 +55,10 @@ BitVector MCS251RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   Reserved.set(MCS251::DPL);
   Reserved.set(MCS251::DPH);
   Reserved.set(MCS251::DPTR);
+  // A (ACC, SFR 0xe0) and B (SFR 0xf0) are fixed ABI byte locations.
+  // They intentionally remain separate from their R11/R10 byte aliases.
+  Reserved.set(MCS251::A);
+  Reserved.set(MCS251::B);
   // PSW is the virtual 8-bit flags register (CY/AC/OV/N/Z; see
   // MCS251RegisterInfo.td for the PSW/PSW1 physical-layout ruling). It is a
   // member of no register class and is only ever referenced implicitly via

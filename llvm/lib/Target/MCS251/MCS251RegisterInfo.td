@@ -136,6 +136,15 @@ let SubRegIndices = [sub_lo16, sub_hi16], CoveredBySubRegs = 1,
 def DPL : MCS251Reg<"dpl", 61>;
 def DPH : MCS251Reg<"dph", 62>;
 
+// ACC (A, SFR 0xe0) and B (SFR 0xf0) are independent fixed ABI registers.
+// Their byte-slot aliases R11 (ACC) and R10 (B) are intentionally not modeled
+// as register-file aliases: R10/R11 remain excluded from GPR8, while A/B are
+// reserved SFR names reached only by MOV8a/MOV8b and MOV8ra/MOV8rb. Their
+// HWEncoding values 58/59 are placeholders -- the actual SFR addresses are
+// 0xe0/0xf0 -- following the DPL/DPH 61/62 placeholder convention above.
+def A : MCS251Reg<"a", 58>;
+def B : MCS251Reg<"b", 59>;
+
 let SubRegIndices = [sub_lo8, sub_hi8], CoveredBySubRegs = 1 in
   def DPTR : MCS251RegWithSubRegs<"dptr", 63, [DPL, DPH]>;
 
@@ -218,6 +227,7 @@ def SPBASE : RegisterClass<"MCS251", [i32], 8, (add DR60, DR56)>;
 let CopyCost = -1, isAllocatable = 0 in {
   def DP8  : RegisterClass<"MCS251", [i8],  8, (add DPL, DPH)>;
   def DP16 : RegisterClass<"MCS251", [i16], 8, (add DPTR)>;
+  def AB8  : RegisterClass<"MCS251", [i8],  8, (add A, B)>;
 }
 
 //===----------------------------------------------------------------------===//

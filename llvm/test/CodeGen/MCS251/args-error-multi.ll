@@ -7,7 +7,7 @@
 ; (report_fatal_error aborts, hence --crash; lit pipelines are pipefail.)
 
 define i16 @addw(i16 %a, i16 %b) {
-; CHECK: LLVM ERROR: minimal MCS251 backend only supports zero or one i8/i16 argument; SDCC multi-arg ABI uses static OSEG overlay slots (not yet supported)
+; CHECK: LLVM ERROR: minimal MCS251 backend only supports zero or one i8/i16/i32 argument; SDCC multi-arg ABI uses static OSEG overlay slots (not yet supported)
   %t = add i16 %a, %b
   ret i16 %t
 }

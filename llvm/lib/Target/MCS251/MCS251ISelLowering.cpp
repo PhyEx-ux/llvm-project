@@ -44,6 +44,14 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::BR_CC, MVT::i8, Custom);
   setOperationAction(ISD::BR_CC, MVT::i16, Custom);
   setOperationAction(ISD::BRCOND, MVT::Other, Custom);
+
+  // DR has native arithmetic, while logical operations are custom-lowered to
+  // the two WR lanes (the ISA has no DR-DR anl/orl/xrl form).
+  setOperationAction(ISD::ADD, MVT::i32, Custom);
+  setOperationAction(ISD::SUB, MVT::i32, Custom);
+  setOperationAction(ISD::AND, MVT::i32, Custom);
+  setOperationAction(ISD::OR, MVT::i32, Custom);
+  setOperationAction(ISD::XOR, MVT::i32, Custom);
   setOperationAction(ISD::SETCC, MVT::i8, Custom);
   setOperationAction(ISD::SETCC, MVT::i16, Custom);
 
@@ -128,6 +136,17 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     llvm_unreachable("custom operation has no registered lowering");
   case ISD::BR_CC:
     return LowerBR_CC(Op, DAG);
+  case ISD::ADD:
+  case ISD::SUB:
+    if (Op.getValueType() == MVT::i32)
+      return LowerArithmetic32(Op, DAG);
+    llvm_unreachable("unexpected arithmetic type");
+  case ISD::AND:
+  case ISD::OR:
+  case ISD::XOR:
+    if (Op.getValueType() == MVT::i32)
+      return LowerLogical32(Op, DAG);
+    llvm_unreachable("unexpected logical type");
   case ISD::LOAD:
     return LowerLoad(Op, DAG);
   case ISD::STORE:
@@ -252,12 +271,78 @@ static SDValue materializeImm(SDValue N, const SDLoc &DL, SelectionDAG &DAG) {
             DAG.getTargetConstant(C->getAPIntValue().trunc(8).getZExtValue(),
                                   DL, MVT::i8)),
         0);
-  return SDValue(
-      DAG.getMachineNode(
-          MCS251::MOV16ri, DL, MVT::i16,
-          DAG.getTargetConstant(C->getAPIntValue().trunc(16).getZExtValue(),
-                                DL, MVT::i16)),
-      0);
+  if (N.getValueType() == MVT::i16)
+    return SDValue(
+        DAG.getMachineNode(
+            MCS251::MOV16ri, DL, MVT::i16,
+            DAG.getTargetConstant(C->getAPIntValue().trunc(16).getZExtValue(),
+                                  DL, MVT::i16)),
+        0);
+  assert(N.getValueType() == MVT::i32 && "unexpected immediate type");
+  return SDValue(DAG.getMachineNode(
+                     MCS251::MOV32ri, DL, MVT::i32,
+                     DAG.getTargetConstant(C->getAPIntValue().trunc(32), DL,
+                                           MVT::i32)),
+                 0);
+}
+
+static SDValue extractLane(SDValue V, unsigned SR, const SDLoc &DL,
+                           SelectionDAG &DAG) {
+  return DAG.getTargetExtractSubreg(SR, DL, MVT::i16, V);
+}
+
+static SDValue makeWord(SDValue Hi, SDValue Lo, const SDLoc &DL,
+                        SelectionDAG &DAG) {
+  SmallVector<SDValue, 5> Ops = {
+      DAG.getTargetConstant(MCS251::GPR16RegClassID, DL, MVT::i32), Hi,
+      DAG.getTargetConstant(MCS251::sub_hi8, DL, MVT::i32), Lo,
+      DAG.getTargetConstant(MCS251::sub_lo8, DL, MVT::i32)};
+  return SDValue(DAG.getMachineNode(TargetOpcode::REG_SEQUENCE, DL, MVT::i16,
+                                    Ops),
+                 0);
+}
+
+static SDValue makeDR(SDValue Hi, SDValue Lo, const SDLoc &DL,
+                      SelectionDAG &DAG) {
+  SmallVector<SDValue, 5> Ops = {
+      DAG.getTargetConstant(MCS251::GPR32RegClassID, DL, MVT::i32), Lo,
+      DAG.getTargetConstant(MCS251::sub_lo16, DL, MVT::i32), Hi,
+      DAG.getTargetConstant(MCS251::sub_hi16, DL, MVT::i32)};
+  return SDValue(DAG.getMachineNode(TargetOpcode::REG_SEQUENCE, DL, MVT::i32,
+                                    Ops),
+                 0);
+}
+
+// i32 ABI byte-register order is least-significant byte first: DPL, DPH, B,
+// A. CC_MCS251/RetCC_MCS251 use DPL only as a single-value gatekeeper; all four
+// lanes are explicitly transferred by splitI32ToBytes/combineI32FromBytes and
+// the i32 formal/call/return lowering below.
+static const MCPhysReg I32ABIRegs[] = {MCS251::DPL, MCS251::DPH, MCS251::B,
+                                       MCS251::A};
+
+static void splitI32ToBytes(SDValue Value, const SDLoc &DL, SelectionDAG &DAG,
+                            SmallVectorImpl<SDValue> &Parts) {
+  if (isa<ConstantSDNode>(Value))
+    Value = materializeImm(Value, DL, DAG);
+  SDValue Lo = extractLane(Value, MCS251::sub_lo16, DL, DAG);
+  SDValue Hi = extractLane(Value, MCS251::sub_hi16, DL, DAG);
+  // ABI order is low byte first: DPL, DPH, B, A.
+  Parts.push_back(DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8,
+                                             Lo));
+  Parts.push_back(DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8,
+                                             Lo));
+  Parts.push_back(DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8,
+                                             Hi));
+  Parts.push_back(DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8,
+                                             Hi));
+}
+
+static SDValue combineI32FromBytes(ArrayRef<SDValue> Parts, const SDLoc &DL,
+                                   SelectionDAG &DAG) {
+  assert(Parts.size() == 4 && "i32 ABI values have four byte parts");
+  SDValue Lo = makeWord(Parts[1], Parts[0], DL, DAG);
+  SDValue Hi = makeWord(Parts[3], Parts[2], DL, DAG);
+  return makeDR(Hi, Lo, DL, DAG);
 }
 
 // Known limitation resolved (Phase 9): -O0's fast register allocator spills
@@ -343,6 +428,23 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   switch (MI.getOpcode()) {
   default:
     llvm_unreachable("unknown custom inserter opcode");
+  case MCS251::MOV32ri: {
+    MachineFunction *MF = BB->getParent();
+    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+    Register Dst = MI.getOperand(0).getReg();
+    uint32_t Value = (uint32_t)MI.getOperand(1).getImm();
+    // MOV must precede MOVH: MOV clears the high word, whereas MOVH writes
+    // only the high word, so the two instructions are not interchangeable.
+    BuildMI(*BB, MI, DL, TII->get(MCS251::MOVDRri), Dst)
+        .addImm(Value & 0xffff);
+    if (Value >> 16)
+      BuildMI(*BB, MI, DL, TII->get(MCS251::MOVHDRi), Dst)
+          .addReg(Dst)
+          .addImm(Value >> 16);
+    MI.eraseFromParent();
+    return BB;
+  }
   case MCS251::BRCC:
     return expandLongConditionalBranch(
         MI, BB, MI.getOperand(1).getMBB(),
@@ -1172,6 +1274,76 @@ SDValue MCS251TargetLowering::LowerExtend(SDValue Op, SelectionDAG &DAG) const {
   return SDValue(DAG.getMachineNode(MCS251::ZEXT8, DL, MVT::i16, Src), 0);
 }
 
+SDValue MCS251TargetLowering::LowerArithmetic32(SDValue Op,
+                                                SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue LHS = Op.getOperand(0);
+  SDValue RHS = Op.getOperand(1);
+  bool IsSub = Op.getOpcode() == ISD::SUB;
+
+  // DAGCombiner canonicalises `sub x, C` as `add x, -C` before this custom
+  // lowering runs. Recover native DR subtraction for a negative addend;
+  // both forms have identical modulo-2^32 value semantics.
+  if (!IsSub)
+    if (auto *C = dyn_cast<ConstantSDNode>(RHS))
+      if (C->getAPIntValue().isNegative()) {
+        RHS = DAG.getConstant(-C->getAPIntValue(), DL, MVT::i32);
+        IsSub = true;
+      }
+
+  if (isa<ConstantSDNode>(LHS))
+    LHS = materializeImm(LHS, DL, DAG);
+  if (isa<ConstantSDNode>(RHS))
+    RHS = materializeImm(RHS, DL, DAG);
+  unsigned Opc = IsSub ? MCS251::SUB32rr : MCS251::ADD32rr;
+  return SDValue(DAG.getMachineNode(Opc, DL, MVT::i32, {LHS, RHS}), 0);
+}
+
+SDValue MCS251TargetLowering::LowerLogical32(SDValue Op,
+                                             SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue LHS = Op.getOperand(0);
+  SDValue RHS = Op.getOperand(1);
+
+  // Keep the two words of an i32 constant in independent GPR16 vregs. At -O0,
+  // materializing a constant as MOV32ri and then extracting both DR lanes
+  // produces two subregister COPYs from the same DR vreg. FastRA incorrectly
+  // coalesces those copies as the high lane, losing the low word. Constants
+  // therefore bypass the DR representation here; non-constants retain the
+  // normal subregister extraction path.
+  auto SplitOperand = [&](SDValue V, SDValue &Hi, SDValue &Lo) {
+    if (auto *C = dyn_cast<ConstantSDNode>(V)) {
+      uint32_t Value = C->getZExtValue();
+      Hi = buildMOV16ri(Value >> 16, DL, DAG);
+      Lo = buildMOV16ri(Value, DL, DAG);
+      return;
+    }
+    Hi = extractLane(V, MCS251::sub_hi16, DL, DAG);
+    Lo = extractLane(V, MCS251::sub_lo16, DL, DAG);
+  };
+
+  unsigned Opc;
+  switch (Op.getOpcode()) {
+  case ISD::AND:
+    Opc = MCS251::AND16rr;
+    break;
+  case ISD::OR:
+    Opc = MCS251::OR16rr;
+    break;
+  case ISD::XOR:
+    Opc = MCS251::XOR16rr;
+    break;
+  default:
+    llvm_unreachable("not an i32 logical operation");
+  }
+  SDValue LHi, LLo, RHi, RLo;
+  SplitOperand(LHS, LHi, LLo);
+  SplitOperand(RHS, RHi, RLo);
+  SDValue Hi(DAG.getMachineNode(Opc, DL, MVT::i16, {LHi, RHi}), 0);
+  SDValue Lo(DAG.getMachineNode(Opc, DL, MVT::i16, {LLo, RLo}), 0);
+  return makeDR(Hi, Lo, DL, DAG);
+}
+
 //===----------------------------------------------------------------------===//
 // Dynamic alloca lowering (Phase 9)
 //===----------------------------------------------------------------------===//
@@ -1291,52 +1463,49 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
   // otherwise die inside CCState::AnalyzeFormalArguments with the generic
   // "unable to allocate function argument" message instead of pointing at
   // the real (OSEG) limitation.
-  if (Ins.size() > 1 || (Ins[0].VT != MVT::i8 && Ins[0].VT != MVT::i16))
+  if (Ins.size() > 1 ||
+      (Ins[0].VT != MVT::i8 && Ins[0].VT != MVT::i16 &&
+       Ins[0].VT != MVT::i32))
     report_fatal_error("minimal MCS251 backend only supports zero or one "
-                       "i8/i16 argument; SDCC multi-arg ABI uses static "
+                       "i8/i16/i32 argument; SDCC multi-arg ABI uses static "
                        "OSEG overlay slots (not yet supported)");
 
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CallConv, IsVarArg, MF, ArgLocs, *DAG.getContext());
   CCInfo.AnalyzeFormalArguments(Ins, CC_MCS251);
 
+  // The argument arrives in a reserved SFR (DPL/DPH/DPTR, and A/B for i32).
+  // addLiveIn hands its value to the DAG as a virtual register of the matching
+  // allocatable class; it emits no copy itself. At the end of instruction
+  // selection, SelectionDAGISel calls MachineRegisterInfo::EmitLiveInCopies
+  // to materialise the phys-to-virt COPY in the entry block. The coalescer
+  // cannot merge that COPY because the SFR is reserved and outside GPR8/GPR16,
+  // so it survives register allocation and ExpandPostRAPseudos lowers it via
+  // copyPhysReg (TargetInstrInfo::lowerCopy). A/B follow exactly the same path
+  // as DPL/DPH.
+  if (Ins[0].VT == MVT::i32) {
+    SmallVector<SDValue, 4> Parts;
+    for (MCPhysReg Reg : I32ABIRegs) {
+      Register VReg = MF.addLiveIn(Reg, &MCS251::GPR8RegClass);
+      SDValue Part = DAG.getCopyFromReg(Chain, DL, VReg, MVT::i8);
+      Parts.push_back(Part);
+      Chain = Part.getValue(1);
+    }
+    InVals.push_back(combineI32FromBytes(Parts, DL, DAG));
+    return Chain;
+  }
+
   for (unsigned I = 0, E = ArgLocs.size(); I != E; ++I) {
     CCValAssign &VA = ArgLocs[I];
-    // Defensive: CC_MCS251 assigns every handled argument to a register;
-    // a memory location would mean the CC and the pre-check above disagree.
     if (!VA.isRegLoc())
       report_fatal_error(
-          "minimal MCS251 backend only supports zero or one i8/i16 argument; "
-          "SDCC multi-arg ABI uses static OSEG overlay slots (not yet "
-          "supported)");
-
-    // The argument arrives in a reserved SFR (dpl / dptr); addLiveIn hands
-    // its value to the DAG as a virtual register of the allocatable class.
-    // It does not emit any copy by itself: SelectionDAGISel calls
-    // MachineRegisterInfo::EmitLiveInCopies at the end of instruction
-    // selection, which materialises a phys-to-virt COPY ($dpl/$dptr -> the
-    // live-in vreg) at the top of the entry block. The coalescer cannot join
-    // that COPY (dpl/dptr are reserved and not in GPR8/GPR16), so it survives
-    // register allocation and is expanded through copyPhysReg by
-    // ExpandPostRAPseudos (TargetInstrInfo::lowerCopy).
-    const TargetRegisterClass *RC;
-    switch (VA.getLocVT().SimpleTy) {
-    case MVT::i8:
-      RC = &MCS251::GPR8RegClass;
-      break;
-    case MVT::i16:
-      RC = &MCS251::GPR16RegClass;
-      break;
-    default:
-      report_fatal_error(
-          "minimal MCS251 backend only supports zero or one i8/i16 argument; "
-          "SDCC multi-arg ABI uses static OSEG overlay slots (not yet "
-          "supported)");
-    }
-
+          "minimal MCS251 backend only supports zero or one i8/i16/i32 "
+          "argument; SDCC multi-arg ABI uses static OSEG overlay slots (not "
+          "yet supported)");
+    const TargetRegisterClass *RC = VA.getLocVT() == MVT::i8
+                                        ? &MCS251::GPR8RegClass
+                                        : &MCS251::GPR16RegClass;
     Register VReg = MF.addLiveIn(VA.getLocReg(), RC);
-    // No Glue on the argument path (unlike returns, nothing needs to keep
-    // these copies adjacent to a terminator).
     SDValue ArgValue = DAG.getCopyFromReg(Chain, DL, VReg, VA.getLocVT());
     InVals.push_back(ArgValue);
   }
@@ -1409,7 +1578,8 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // so the error names the real limitation (OSEG overlay) instead of a
   // generic CC allocation failure.
   if (Outs.size() > 1 ||
-      (!Outs.empty() && Outs[0].VT != MVT::i8 && Outs[0].VT != MVT::i16))
+      (!Outs.empty() && Outs[0].VT != MVT::i8 && Outs[0].VT != MVT::i16 &&
+       Outs[0].VT != MVT::i32))
     report_fatal_error("MCS251 multi-argument calls need SDCC OSEG overlay "
                        "slots (not yet supported)");
 
@@ -1418,18 +1588,23 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                  *DAG.getContext());
   CCInfo.AnalyzeCallOperands(Outs, CC_MCS251);
 
-  // Copy the arguments into their ABI registers (dpl / dptr), chained and
-  // glued so nothing can be scheduled between the copies and the call.
+  // Copy the arguments into their ABI registers, chained and glued so nothing
+  // can be scheduled between the copies and the call.
   SmallVector<std::pair<unsigned, SDValue>, 4> RegsToPass;
   SDValue InGlue;
-  for (unsigned I = 0, E = ArgLocs.size(); I != E; ++I) {
-    CCValAssign &VA = ArgLocs[I];
-    // Defensive: CC_MCS251 only ever assigns registers (memory locations
-    // would mean the pre-check above and the CC disagree).
-    if (!VA.isRegLoc() || VA.getLocInfo() != CCValAssign::Full)
-      report_fatal_error("MCS251 multi-argument calls need SDCC OSEG overlay "
-                         "slots (not yet supported)");
-    RegsToPass.emplace_back(VA.getLocReg(), OutVals[I]);
+  if (!Outs.empty() && Outs[0].VT == MVT::i32) {
+    SmallVector<SDValue, 4> Parts;
+    splitI32ToBytes(OutVals[0], DL, DAG, Parts);
+    for (unsigned I = 0; I < 4; ++I)
+      RegsToPass.emplace_back(I32ABIRegs[I], Parts[I]);
+  } else {
+    for (unsigned I = 0, E = ArgLocs.size(); I != E; ++I) {
+      CCValAssign &VA = ArgLocs[I];
+      if (!VA.isRegLoc() || VA.getLocInfo() != CCValAssign::Full)
+        report_fatal_error("MCS251 multi-argument calls need SDCC OSEG overlay "
+                           "slots (not yet supported)");
+      RegsToPass.emplace_back(VA.getLocReg(), OutVals[I]);
+    }
   }
   for (const auto &[Reg, Val] : RegsToPass) {
     Chain = DAG.getCopyToReg(Chain, DL, Reg, Val, InGlue);
@@ -1482,9 +1657,22 @@ SDValue MCS251TargetLowering::LowerCallResult(
   // site (a call to a declared-but-absurd callee type would otherwise die
   // inside the generic CC machinery).
   if (Ins.size() > 1 ||
-      (!Ins.empty() && Ins[0].VT != MVT::i8 && Ins[0].VT != MVT::i16))
+      (!Ins.empty() && Ins[0].VT != MVT::i8 && Ins[0].VT != MVT::i16 &&
+       Ins[0].VT != MVT::i32))
     report_fatal_error(
-        "minimal MCS251 backend only supports i8/i16/void return values");
+        "minimal MCS251 backend only supports i8/i16/i32/void return values");
+
+  if (!Ins.empty() && Ins[0].VT == MVT::i32) {
+    SmallVector<SDValue, 4> Parts;
+    for (MCPhysReg Reg : I32ABIRegs) {
+      SDValue Val = DAG.getCopyFromReg(Chain, DL, Reg, MVT::i8, InGlue);
+      Parts.push_back(Val.getValue(0));
+      Chain = Val.getValue(1);
+      InGlue = Val.getValue(2);
+    }
+    InVals.push_back(combineI32FromBytes(Parts, DL, DAG));
+    return Chain;
+  }
 
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, IsVarArg, DAG.getMachineFunction(), RVLocs,
@@ -1515,11 +1703,15 @@ bool MCS251TargetLowering::CanLowerReturn(
     // actual limitation here rather than talking about return values.
     report_fatal_error("minimal MCS251 backend does not support variadic "
                        "functions");
+  if (Outs.size() > 1)
+    report_fatal_error("minimal MCS251 backend only supports zero or one "
+                       "i8/i16/i32 return value; multi-value returns are not "
+                       "supported");
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, IsVarArg, MF, RVLocs, Context);
   if (!CCInfo.CheckReturn(Outs, RetCC_MCS251))
     report_fatal_error(
-        "minimal MCS251 backend only supports i8/i16/void return values");
+        "minimal MCS251 backend only supports i8/i16/i32/void return values");
   return true;
 }
 
@@ -1528,25 +1720,34 @@ SDValue MCS251TargetLowering::LowerReturn(
     const SmallVectorImpl<ISD::OutputArg> &Outs,
     const SmallVectorImpl<SDValue> &OutVals, const SDLoc &DL,
     SelectionDAG &DAG) const {
-  // Assign the return values to the ABI locations: dpl for i8, the
-  // dpl:dph pair (modelled as dptr) for i16. Anything else has already
-  // been rejected by CanLowerReturn.
+  // Assign the return values to the ABI locations: dpl for i8, dpl:dph for
+  // i16, and dpl/dph/b/a for i32. The i32 value is split explicitly because
+  // the CC assignment records are one logical value while the ABI has four
+  // byte registers.
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, IsVarArg, DAG.getMachineFunction(), RVLocs,
                  *DAG.getContext());
   CCInfo.AnalyzeReturn(Outs, RetCC_MCS251);
 
   SDValue Glue;
-  SmallVector<SDValue, 4> RetOps(1, Chain);
-
-  // Copy the result values into the return registers.
-  for (unsigned I = 0, E = RVLocs.size(); I != E; ++I) {
-    CCValAssign &VA = RVLocs[I];
-    assert(VA.isRegLoc() && "MCS251 return values must go to registers");
-    Chain = DAG.getCopyToReg(Chain, DL, VA.getLocReg(), OutVals[I], Glue);
-    // Keep the copies stuck together so nothing gets scheduled in between.
-    Glue = Chain.getValue(1);
-    RetOps.push_back(DAG.getRegister(VA.getLocReg(), VA.getLocVT()));
+  SmallVector<SDValue, 8> RetOps(1, Chain);
+  if (!Outs.empty() && Outs[0].VT == MVT::i32) {
+    assert(Outs.size() == 1 && "MCS251 supports only one return value");
+    SmallVector<SDValue, 4> Parts;
+    splitI32ToBytes(OutVals[0], DL, DAG, Parts);
+    for (unsigned I = 0; I < 4; ++I) {
+      Chain = DAG.getCopyToReg(Chain, DL, I32ABIRegs[I], Parts[I], Glue);
+      Glue = Chain.getValue(1);
+      RetOps.push_back(DAG.getRegister(I32ABIRegs[I], MVT::i8));
+    }
+  } else {
+    for (unsigned I = 0, E = RVLocs.size(); I != E; ++I) {
+      CCValAssign &VA = RVLocs[I];
+      assert(VA.isRegLoc() && "MCS251 return values must go to registers");
+      Chain = DAG.getCopyToReg(Chain, DL, VA.getLocReg(), OutVals[I], Glue);
+      Glue = Chain.getValue(1);
+      RetOps.push_back(DAG.getRegister(VA.getLocReg(), VA.getLocVT()));
+    }
   }
 
   RetOps[0] = Chain;
