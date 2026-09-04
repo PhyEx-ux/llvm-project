@@ -6,6 +6,7 @@
 #include "llvm/MC/MCInstPrinter.h"
 
 namespace llvm {
+class MCExpr;
 class MCS251InstPrinter final : public MCInstPrinter {
 public:
   MCS251InstPrinter(const MCAsmInfo &MAI, const MCInstrInfo &MII,
@@ -20,6 +21,9 @@ public:
   void printOperand(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printImm8(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printImm16(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+  void printDis16(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+  void printDir8(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+  void printSymbolImm(raw_ostream &O, const MCExpr *Expr);
 
   void printRegName(raw_ostream &O, MCRegister Reg) override;
   void printInst(const MCInst *MI, uint64_t Address, StringRef Annot,
