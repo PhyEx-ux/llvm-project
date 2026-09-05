@@ -74,8 +74,9 @@ BOOT = `mov spx,#0x2fff` → `ecall _main` → 返回后 `<post-main>` → 自�
 
 - SPX=0x2FFF 沿用 crt0 取值（edata 16K @0x000000–0x3FFF 内）[实测沿用值；
   取值的自由度未探究，非关键]。
-- `__start__stack`/SSEG 等价物：**不需要**（§1-5 零引用）[实测]。兼容
-  条款：未来混链 SDCC 模块若引用之，补 1 字节 SSEG 定义即可 [推断，§5-2]。
+- `__start__stack`/SSEG 等价物：**不需要**（§1-5 零引用 [实测]；§5-2
+  普查确认 plain/stack-auto/reentrant 均无引用路径 [实测]）。若未来某
+  SDCC 模块携带 SSEG 定义，Def-only 无害共存。
 - [已实测回填，§5-1] 三 ERET 桩：**混链 SDCC 模块时刚需**（缺桩链接
   rc=2 不出镜像；引用来自 SDCC 无条件 .globl，非真实调用点）；纯
   LLVM/asm 链不需要（crt-selfstart.asm 无桩实测跑通）。crt0.asm 原样
@@ -135,9 +136,11 @@ BOOT = `mov spx,#0x2fff` → `ecall _main` → 返回后 `<post-main>` → 自�
 [实测]：现状契约全部 7 项（§1）；向量留槽布局+自有启动全链 `MS`；默认
 向量兜网 `MS!`/裸 `!`；llc 全局数据报错；`-b` 未定义区报错；指令编码表；
 ecall/eret 24 位帧平衡（T4）；混链缺桩 rc=2 拒出镜像（§5-1）；漏 -b
-两级失败形态（§5-3）；loader 拒载 flash 窗外记录（§5-4）。
-[推断]：SSEG 兼容条款（§5-2）、自有 INIT 区格式、exec-ram 别名可加载性
-（§5-6）。
+两级失败形态（§5-3）；loader 拒载 flash 窗外记录（§5-4，含 exec-ram
+别名 §5-6）；`__start__stack` 无任何代码生成路径引用（§5-2）；UART1
+电平 IRQ RETI-不清即风暴、兜网不 RETI 故单发（§5-5）。
+[推断]：自有 INIT 区格式（待后端数据区落地后定稿）——§5 六项至此全部
+闭环，唯一遗留推断项即此。
 
 ## 5. 最小实测清单（按价值排序，均小成本）
 
@@ -173,10 +176,26 @@ ecall/eret 24 位帧平衡（T4）；混链缺桩 rc=2 拒出镜像（§5-1）�
    （0x030000 数据别名，未实测，列入开放项）。
 
 仍开放：
-2. `__start__stack` 引用场景普查：SDCC `--stack-auto`/reentrant 函数是否
-   生成对它的引用（编译一个带 reentrant 的 C 看 .rel）。
-5. 兜网与 UART1 电平 IRQ：stray TI 落 `isr_unhandled` 后 TI 未清，中断
-   是否重复触发（不影响兜网正确性，影响 transcript 形态——写进测试注意
-   清单）。
-6. （新增，来自 4 号回填）exec-ram 数据别名窗口 0x030000 是否被 loader
-   接受；若接受，小块初始化数据可经加载器预置。
+2. **[已实测回填]** `__start__stack` 引用普查：plain / `--stack-auto` /
+   `__reentrant` / 两者叠加四种变体的 .rel 全部 **Ref=0**（且这些简单
+   模块连 SSEG 定义都不产生）；用现 SDCC（4.6.0 #16555）重编译
+   harness-template.c 仍发射 SSEG，但同样 **Ref=0 Def=1**（只定义无引用）。
+   SSEG 的发射触发条件未完全定位（多参/多字节参数/extern 调用均不触发，
+   harness-template 形态触发），但因 Def-only 而无害。结论：没有任何代码
+   生成路径引用该符号，自有启动**确认无需** `__start__stack` 等价物；
+   原兼容条款降级为纯理论预案。
+5. **[已实测回填]** 兜网 × UART1 电平 IRQ：
+   - E5a（默认兜网）：main 开 EA|ES 后写 SBUF 置 TI → IRQ 落 VECS
+     0xFF0023 → `isr_unhandled` 打印 '!' 自旋 → transcript **`M!`，
+     '!' 恰好一次**（兜网永不 RETI，电平 pending 无法再入）。
+   - E5b（对照：handler 打印 '?' 后 RETI 且不清 TI）：transcript
+     **`M` + 16801 个 '?'**（5 秒窗口）——电平 IRQ 在 RETI 后立即重触发。
+   测试注意清单条目：UART1 IRQ 电平型、入场不自动清 pending，ISR 在
+   RETI 前必须自清 TI/RI（t4-probes d2_uint 即此模式）；兜网
+   `isr_unhandled` 永不 RETI 是其 transcript 稳定（恰好一个 '!'）的
+   设计原因，改动兜网形态时不得引入 RETI。
+6. **[已实测回填]** exec-ram 数据别名 0x030000：loader **同样拒载**
+   （`Unable to load Intel HEX firmware image`）；0x030000 复位态读
+   0x00（@dpx 通路顺带验证）。结论：loader 只接受 flash 窗口
+   （0xFC2800–0xFFFFFF），任何"加载器预置 RAM"路线均不可行，数据初始化
+   只有运行时 COPY 一条路。
