@@ -21,6 +21,9 @@ public:
   MCS251TargetLowering(const TargetMachine &TM, const MCS251Subtarget &STI);
 
   const char *getTargetNodeName(unsigned Opcode) const override;
+  EVT getSetCCResultType(const DataLayout &, LLVMContext &, EVT) const override {
+    return MVT::i8;
+  }
 
   // The DAG combiner's consecutive-store merge would fuse i8 stores into
   // i32 stores (e.g. an alloca'd byte array initialised element by
@@ -34,6 +37,7 @@ public:
 
   SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
   SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerLoad(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerStore(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerExtend(SDValue Op, SelectionDAG &DAG) const;

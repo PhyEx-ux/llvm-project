@@ -52,8 +52,12 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::AND, MVT::i32, Custom);
   setOperationAction(ISD::OR, MVT::i32, Custom);
   setOperationAction(ISD::XOR, MVT::i32, Custom);
-  setOperationAction(ISD::SETCC, MVT::i8, Custom);
-  setOperationAction(ISD::SETCC, MVT::i16, Custom);
+  setOperationAction(ISD::BR_CC, MVT::i32, Custom);
+  for (MVT VT : {MVT::i8, MVT::i16, MVT::i32}) {
+    setOperationAction(ISD::SETCC, VT, Custom);
+    setOperationAction(ISD::SELECT, VT, Expand);
+    setOperationAction(ISD::SELECT_CC, VT, Custom);
+  }
 
   // Phase 8: loads and stores. Custom (not MSP430-style pattern matching,
   // which works there because MSP430 has native 16-bit load/store
@@ -89,6 +93,8 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   // the ZEXT8 pseudo (zero hi lane + REG_SEQUENCE); anyext has the same
   // legal expansion. Sign extension has no instruction sequence yet and is
   // rejected in LowerOperation.
+  setOperationAction(ISD::TRUNCATE, MVT::i8, Custom);
+  setOperationAction(ISD::TRUNCATE, MVT::i16, Custom);
   setOperationAction(ISD::ZERO_EXTEND, MVT::i16, Custom);
   setOperationAction(ISD::ANY_EXTEND, MVT::i16, Custom);
   setOperationAction(ISD::SIGN_EXTEND, MVT::i16, Custom);
@@ -151,6 +157,15 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     return LowerLoad(Op, DAG);
   case ISD::STORE:
     return LowerStore(Op, DAG);
+  case ISD::TRUNCATE: {
+    SDLoc DL(Op);
+    SDValue V = Op.getOperand(0);
+    if (V.getValueType() == MVT::i32)
+      V = DAG.getTargetExtractSubreg(MCS251::sub_lo16, DL, MVT::i16, V);
+    if (Op.getValueType() == MVT::i8)
+      V = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, V);
+    return V;
+  }
   case ISD::ZERO_EXTEND:
   case ISD::ANY_EXTEND:
     return LowerExtend(Op, DAG);
@@ -158,11 +173,24 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     report_fatal_error(
         "MCS251: sign extension is not supported (no 8-to-16 bit sign "
         "extension sequence yet)");
-  case ISD::BRCOND:
-  case ISD::SETCC:
-    report_fatal_error(
-        "MCS251: Phase 6 supports only BR_CC (branch on icmp); "
-        "SETCC/BRCOND arrive in a later phase");
+  case ISD::BRCOND: {
+    SDLoc DL(Op);
+    SDValue Cond = Op.getOperand(1);
+    return LowerBR_CC(DAG.getNode(
+        ISD::BR_CC, DL, MVT::Other, Op.getOperand(0),
+        DAG.getCondCode(ISD::SETNE), Cond,
+        DAG.getConstant(0, DL, Cond.getValueType()), Op.getOperand(2)), DAG);
+  }
+  case ISD::SETCC: {
+    SDLoc DL(Op);
+    EVT VT = Op.getValueType();
+    return LowerSELECT_CC(DAG.getNode(
+        ISD::SELECT_CC, DL, VT, Op.getOperand(0), Op.getOperand(1),
+        DAG.getConstant(1, DL, VT), DAG.getConstant(0, DL, VT),
+        Op.getOperand(2)), DAG);
+  }
+  case ISD::SELECT_CC:
+    return LowerSELECT_CC(Op, DAG);
   case ISD::DYNAMIC_STACKALLOC:
     return LowerDynamicStackAlloc(Op, DAG);
   case ISD::STACKSAVE:
@@ -366,6 +394,17 @@ SDValue MCS251TargetLowering::LowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
 
   SDValue CCVal = DAG.getTargetConstant(CC, DL, MVT::i8);
 
+  if (LHS.getValueType() == MVT::i32) {
+    if (isa<ConstantSDNode>(LHS))
+      LHS = materializeImm(LHS, DL, DAG);
+    if (isa<ConstantSDNode>(RHS))
+      RHS = materializeImm(RHS, DL, DAG);
+    SDValue Glue(DAG.getMachineNode(MCS251::CMP32rr, DL, MVT::Glue,
+                                    {LHS, RHS}), 0);
+    return SDValue(DAG.getMachineNode(MCS251::BRCC, DL, MVT::Other,
+                                      {CCVal, Dest, Chain, Glue}), 0);
+  }
+
   if (LHS.getValueType() == MVT::i8 && isSignedIntegerCond(CC)) {
     // Signed i8 compare: the N-flag behaviour at 8-bit width has not been
     // measured, so the comparison is conservatively widened to 16 bits
@@ -422,12 +461,88 @@ SDValue MCS251TargetLowering::LowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
                  0);
 }
 
+// SELECT_CC and materialised SETCC share a flags producer and a small CFG
+// diamond. The result PHI is a real register-class value (including pointers).
+SDValue MCS251TargetLowering::LowerSELECT_CC(SDValue Op,
+                                           SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue LHS = Op.getOperand(0), RHS = Op.getOperand(1);
+  SDValue True = Op.getOperand(2), False = Op.getOperand(3);
+  ISD::CondCode CC = cast<CondCodeSDNode>(Op.getOperand(4))->get();
+  if (isa<ConstantSDNode>(LHS))
+    LHS = materializeImm(LHS, DL, DAG);
+  if (isa<ConstantSDNode>(RHS))
+    RHS = materializeImm(RHS, DL, DAG);
+  if (isa<ConstantSDNode>(True))
+    True = materializeImm(True, DL, DAG);
+  if (isa<ConstantSDNode>(False))
+    False = materializeImm(False, DL, DAG);
+  EVT CmpVT = LHS.getValueType();
+  if (CmpVT == MVT::i8 && isSignedIntegerCond(CC)) {
+    auto Flip = [&](SDValue V) {
+      SDValue X(DAG.getMachineNode(MCS251::XOR8ri, DL, MVT::i8,
+          {V, DAG.getTargetConstant(0x80, DL, MVT::i8)}), 0);
+      return SDValue(DAG.getMachineNode(MCS251::ZEXT8, DL, MVT::i16, X), 0);
+    };
+    LHS = Flip(LHS);
+    RHS = Flip(RHS);
+    switch (CC) {
+    case ISD::SETLT: CC = ISD::SETULT; break;
+    case ISD::SETLE: CC = ISD::SETULE; break;
+    case ISD::SETGT: CC = ISD::SETUGT; break;
+    case ISD::SETGE: CC = ISD::SETUGE; break;
+    default: llvm_unreachable("expected signed condition");
+    }
+    CmpVT = MVT::i16;
+  }
+  unsigned CmpOpc = CmpVT == MVT::i32 ? MCS251::CMP32rr
+                      : CmpVT == MVT::i16 ? MCS251::CMP16rr : MCS251::CMP8rr;
+  SDValue Glue(DAG.getMachineNode(CmpOpc, DL, MVT::Glue, {LHS, RHS}), 0);
+  EVT VT = Op.getValueType();
+  unsigned Opc = VT == MVT::i32 ? MCS251::SELECT32
+                  : VT == MVT::i16 ? MCS251::SELECT16 : MCS251::SELECT8;
+  return SDValue(DAG.getMachineNode(Opc, DL, VT,
+      {True, False, DAG.getTargetConstant(CC, DL, MVT::i8), Glue}), 0);
+}
+
 MachineBasicBlock *
 MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
                                                   MachineBasicBlock *BB) const {
   switch (MI.getOpcode()) {
   default:
     llvm_unreachable("unknown custom inserter opcode");
+  case MCS251::SELECT8:
+  case MCS251::SELECT16:
+  case MCS251::SELECT32: {
+    MachineFunction *MF = BB->getParent();
+    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+    MachineBasicBlock *FalseBB = MF->CreateMachineBasicBlock();
+    MachineBasicBlock *TrueBB = MF->CreateMachineBasicBlock();
+    MachineBasicBlock *MergeBB = MF->CreateMachineBasicBlock();
+    auto Next = std::next(BB->getIterator());
+    MF->insert(Next, FalseBB);
+    MF->insert(Next, TrueBB);
+    MF->insert(Next, MergeBB);
+    MergeBB->splice(MergeBB->end(), BB, std::next(MI.getIterator()), BB->end());
+    MergeBB->transferSuccessorsAndUpdatePHIs(BB);
+    unsigned Skip = getSkipBranchOpcode(
+        (ISD::CondCode)MI.getOperand(3).getImm());
+    BuildMI(BB, DL, TII->get(Skip)).addMBB(FalseBB);
+    BuildMI(BB, DL, TII->get(MCS251::EJMP)).addMBB(TrueBB);
+    BB->addSuccessor(FalseBB);
+    BB->addSuccessor(TrueBB);
+    BuildMI(FalseBB, DL, TII->get(MCS251::EJMP)).addMBB(MergeBB);
+    FalseBB->addSuccessor(MergeBB);
+    BuildMI(TrueBB, DL, TII->get(MCS251::EJMP)).addMBB(MergeBB);
+    TrueBB->addSuccessor(MergeBB);
+    BuildMI(*MergeBB, MergeBB->begin(), DL, TII->get(TargetOpcode::PHI),
+            MI.getOperand(0).getReg())
+        .addReg(MI.getOperand(1).getReg()).addMBB(TrueBB)
+        .addReg(MI.getOperand(2).getReg()).addMBB(FalseBB);
+    MI.eraseFromParent();
+    return MergeBB;
+  }
   case MCS251::MOV32ri: {
     MachineFunction *MF = BB->getParent();
     const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
@@ -436,11 +551,14 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     uint32_t Value = (uint32_t)MI.getOperand(1).getImm();
     // MOV must precede MOVH: MOV clears the high word, whereas MOVH writes
     // only the high word, so the two instructions are not interchangeable.
-    BuildMI(*BB, MI, DL, TII->get(MCS251::MOVDRri), Dst)
+    Register Low = Value >> 16
+                       ? MF->getRegInfo().createVirtualRegister(&MCS251::GPR32RegClass)
+                       : Dst;
+    BuildMI(*BB, MI, DL, TII->get(MCS251::MOVDRri), Low)
         .addImm(Value & 0xffff);
     if (Value >> 16)
       BuildMI(*BB, MI, DL, TII->get(MCS251::MOVHDRi), Dst)
-          .addReg(Dst)
+          .addReg(Low)
           .addImm(Value >> 16);
     MI.eraseFromParent();
     return BB;
@@ -543,12 +661,12 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     if (IsLoad) {
       Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
       Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8rmS), Hi)
+      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8rmF), Hi)
           .addReg(MCS251::DR60)
           .addFrameIndex(FI)
           .addImm(Disp)
           .setMemRefs(SplitMMO(0));
-      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8rmS), Lo)
+      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8rmF), Lo)
           .addReg(MCS251::DR60)
           .addFrameIndex(FI)
           .addImm(Disp + 1)
@@ -571,9 +689,9 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
         BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), Hi)
             .addReg(MI.getOperand(3).getReg(), RegState::NoFlags,
                     MCS251::sub_hi8);
-        BuildFrameMI(MCS251::MOV8mrS, Disp).addReg(Hi).setMemRefs(SplitMMO(0));
+        BuildFrameMI(MCS251::MOV8mrF, Disp).addReg(Hi).setMemRefs(SplitMMO(0));
       }
-      BuildFrameMI(MCS251::MOV8mrS, IsWideStore ? Disp + 1 : Disp)
+      BuildFrameMI(MCS251::MOV8mrF, IsWideStore ? Disp + 1 : Disp)
           .addReg(Lo)
           .setMemRefs(IsWideStore ? SplitMMO(1) : MMO);
     }
@@ -1075,7 +1193,7 @@ static SDValue buildByteLoad(const MCS251Address &A, const SDLoc &DL,
     // mov rX, @dr60+<FI+off>: unresolved (placeholder base, FI, offset)
     // operands; PEI folds the displacement (see eliminateFrameIndex).
     N = DAG.getMachineNode(
-        MCS251::MOV8rmS, DL, ResTys,
+        MCS251::MOV8rmF, DL, ResTys,
         {DAG.getRegister(MCS251::DR60, MVT::i16),
          DAG.getTargetFrameIndex(A.StackFI, MVT::i16),
          DAG.getTargetConstant(A.Disp, DL, MVT::i16), Chain});
@@ -1168,7 +1286,7 @@ static SDValue buildByteStore(const MCS251Address &A, SDValue Val,
   if (A.IsStack) {
     // mov @dr60+<FI+off>, rX -- mirror of the load path.
     N = DAG.getMachineNode(
-        MCS251::MOV8mrS, DL, MVT::Other,
+        MCS251::MOV8mrF, DL, MVT::Other,
         {DAG.getRegister(MCS251::DR60, MVT::i16),
          DAG.getTargetFrameIndex(A.StackFI, MVT::i16),
          DAG.getTargetConstant(A.Disp, DL, MVT::i16), Val, Chain});

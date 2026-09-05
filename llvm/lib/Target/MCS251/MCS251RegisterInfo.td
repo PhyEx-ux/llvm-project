@@ -198,9 +198,12 @@ def GPR8 : RegisterClass<"MCS251", [i8], 8, (add R0, R1, R2, R3, R4, R5, R6,
 def GPR16 : RegisterClass<"MCS251", [i16], 8, (add WR0, WR2, WR4, WR6, WR8,
                                                WR12, WR14)>;
 
-// dr56 (dpx) and dr60 (spx) are reserved and not allocatable.
-def GPR32 : RegisterClass<"MCS251", [i32], 8, (add DR0, DR4, DR8, DR12, DR16,
-                                               DR20, DR24, DR28)>;
+// Keep the allocatable DR set closed under word/byte lane extraction and
+// spilling. DR8 overlaps the fixed A/B ABI locations through R10/R11; DR16+
+// have no encodable byte-register lanes. Allocating them for a PHI/spill
+// bypasses the DAG subregister constraints and would silently corrupt values.
+// DR56 (DPX) and DR60 (SPX) remain reserved.
+def GPR32 : RegisterClass<"MCS251", [i32], 8, (add DR0, DR4, DR12)>;
 
 // Non-allocatable class holding the two stack-addressing bases: dr60 (spx,
 // the default frame reference) and dr56 (dpx, the frame anchor used when the

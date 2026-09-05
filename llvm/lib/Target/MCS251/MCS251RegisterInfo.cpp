@@ -115,10 +115,18 @@ bool MCS251RegisterInfo::eliminateFrameIndex(
   switch (MI.getOpcode()) {
   default:
     report_fatal_error("MCS251: unknown instruction with a frame index");
-  case MCS251::MOV8rmS:
-  case MCS251::MOV8mrS:
-  case MCS251::MOV16rmS:
-  case MCS251::MOV16mrS:
+  case MCS251::MOV8rmF:
+  case MCS251::MOV8mrF:
+  case MCS251::MOV16rmF:
+  case MCS251::MOV16mrF: {
+    unsigned Opc;
+    switch (MI.getOpcode()) {
+    case MCS251::MOV8rmF: Opc = MCS251::MOV8rmS; break;
+    case MCS251::MOV8mrF: Opc = MCS251::MOV8mrS; break;
+    case MCS251::MOV16rmF: Opc = MCS251::MOV16rmS; break;
+    default: Opc = MCS251::MOV16mrS; break;
+    }
+    MI.setDesc(MF.getSubtarget().getInstrInfo()->get(Opc));
     // [.., base(placeholder dr60), FI, off, ..] -> [.., FrameReg, dis, ..]
     assert(MI.getOperand(FIOperandNum - 1).isReg() &&
            "frame base must precede the frame-index operand");
@@ -126,6 +134,7 @@ bool MCS251RegisterInfo::eliminateFrameIndex(
     MI.getOperand(FIOperandNum).ChangeToImmediate(Dis);
     MI.removeOperand(FIOperandNum + 1);
     return false;
+  }
   case MCS251::ADD16fi:
     // Frame-index pointer materialisation: morph into the plain immediate
     // form. add wr,#imm16 wraps mod 2^16, which is the correct region-00

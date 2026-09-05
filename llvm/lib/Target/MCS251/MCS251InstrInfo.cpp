@@ -33,8 +33,8 @@ void MCS251InstrInfo::storeRegToStackSlot(
     MachineInstr::MIFlag Flags) const {
   DebugLoc DL = MI != MBB.end() ? MI->getDebugLoc() : DebugLoc();
 
-  if (RC == &MCS251::GPR8RegClass) {
-    BuildMI(MBB, MI, DL, get(MCS251::MOV8mrS))
+  if (MCS251::GPR8RegClass.hasSubClassEq(RC)) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV8mrF))
         .addReg(MCS251::DR60) // placeholder base; PEI substitutes
         .addFrameIndex(FrameIndex)
         .addImm(0)
@@ -42,8 +42,8 @@ void MCS251InstrInfo::storeRegToStackSlot(
         .setMIFlag(Flags);
     return;
   }
-  if (RC == &MCS251::GPR16RegClass) {
-    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrS))
+  if (MCS251::GPR16RegClass.hasSubClassEq(RC)) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrF))
         .addReg(MCS251::DR60)
         .addFrameIndex(FrameIndex)
         .addImm(0)
@@ -51,21 +51,23 @@ void MCS251InstrInfo::storeRegToStackSlot(
         .setMIFlag(Flags);
     return;
   }
-  if (RC == &MCS251::GPR32RegClass) {
+  if (MCS251::GPR32RegClass.hasSubClassEq(RC)) {
     // A dr value is stored as its two WR halves with the big-endian object
     // layout used everywhere else (mem[base] = most significant first):
     // sub_hi16 at +0, sub_lo16 at +2.
-    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrS))
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrF))
         .addReg(MCS251::DR60)
         .addFrameIndex(FrameIndex)
         .addImm(0)
-        .addReg(SrcReg, RegState::NoFlags, MCS251::sub_hi16)
+        .addReg(SrcReg.isPhysical() ? Register(RI.getSubReg(SrcReg, MCS251::sub_hi16)) : SrcReg,
+                RegState::NoFlags, SrcReg.isPhysical() ? 0 : MCS251::sub_hi16)
         .setMIFlag(Flags);
-    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrS))
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrF))
         .addReg(MCS251::DR60)
         .addFrameIndex(FrameIndex)
         .addImm(2)
-        .addReg(SrcReg, getKillRegState(IsKill), MCS251::sub_lo16)
+        .addReg(SrcReg.isPhysical() ? Register(RI.getSubReg(SrcReg, MCS251::sub_lo16)) : SrcReg,
+                getKillRegState(IsKill), SrcReg.isPhysical() ? 0 : MCS251::sub_lo16)
         .setMIFlag(Flags);
     return;
   }
@@ -79,37 +81,40 @@ void MCS251InstrInfo::loadRegFromStackSlot(
   DebugLoc DL = MI != MBB.end() ? MI->getDebugLoc() : DebugLoc();
   assert(SubReg == 0 && "no sub-register reload path in this backend");
 
-  if (RC == &MCS251::GPR8RegClass) {
-    BuildMI(MBB, MI, DL, get(MCS251::MOV8rmS), DestReg)
+  if (MCS251::GPR8RegClass.hasSubClassEq(RC)) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV8rmF), DestReg)
         .addReg(MCS251::DR60)
         .addFrameIndex(FrameIndex)
         .addImm(0)
         .setMIFlag(Flags);
     return;
   }
-  if (RC == &MCS251::GPR16RegClass) {
-    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmS), DestReg)
+  if (MCS251::GPR16RegClass.hasSubClassEq(RC)) {
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmF), DestReg)
         .addReg(MCS251::DR60)
         .addFrameIndex(FrameIndex)
         .addImm(0)
         .setMIFlag(Flags);
     return;
   }
-  if (RC == &MCS251::GPR32RegClass) {
+  if (MCS251::GPR32RegClass.hasSubClassEq(RC)) {
     // Mirror of the GPR32 store: define the two WR halves directly as
     // sub-registers of DestReg. A REG_SEQUENCE is illegal here -- this runs
     // inside/after register allocation (FastRA never assigns freshly created
     // vregs, and the greedy spiller never builds intervals for them), so the
     // halves must be written straight into DestReg's lanes. big-endian layout:
     // sub_hi16 at +0, sub_lo16 at +2.
-    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmS))
-        .addReg(DestReg, RegState::DefineNoRead, MCS251::sub_hi16)
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmF))
+        .addReg(DestReg.isPhysical() ? Register(RI.getSubReg(DestReg, MCS251::sub_hi16)) : DestReg,
+                DestReg.isPhysical() ? RegState::Define : RegState::DefineNoRead,
+                DestReg.isPhysical() ? 0 : MCS251::sub_hi16)
         .addReg(MCS251::DR60)
         .addFrameIndex(FrameIndex)
         .addImm(0)
         .setMIFlag(Flags);
-    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmS))
-        .addReg(DestReg, RegState::Define, MCS251::sub_lo16)
+    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmF))
+        .addReg(DestReg.isPhysical() ? Register(RI.getSubReg(DestReg, MCS251::sub_lo16)) : DestReg,
+                RegState::Define, DestReg.isPhysical() ? 0 : MCS251::sub_lo16)
         .addReg(MCS251::DR60)
         .addFrameIndex(FrameIndex)
         .addImm(2)

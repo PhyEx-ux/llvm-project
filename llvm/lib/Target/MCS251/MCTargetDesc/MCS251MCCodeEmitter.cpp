@@ -358,6 +358,8 @@ void MCS251MCCodeEmitter::encodeInstruction(
     B(0x1bc); put8(RR(MI, 0, 1), CB); break;
   case MCS251::CMP16rr:
     B(0x1bd); put8(RR(MI, 0, 1), CB); break;
+  case MCS251::CMP32rr:
+    B(0x1bf); put8(RR(MI, 0, 1), CB); break;
   case MCS251::CMP8ri:
     B(0x1be); put8(R(MI, 0) << 4, CB); putImm8(MI.getOperand(1), CB); break;
   case MCS251::CMP16ri:

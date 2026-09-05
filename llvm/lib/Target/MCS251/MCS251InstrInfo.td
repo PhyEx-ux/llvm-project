@@ -387,6 +387,9 @@ let Defs = [PSW] in {
                            "cmp $lhs, $rhs", []>;
   def CMP8ri  : MCS251Inst<(outs), (ins GPR8:$lhs, mcs251_imm8:$imm),
                            "cmp $lhs, $imm", []>;
+  // CMP32 flags verified by Inputs/phase11-qemu.py, including signed overflow.
+  def CMP32rr : MCS251Inst<(outs), (ins GPR32:$lhs, GPR32:$rhs),
+                           "cmp $lhs, $rhs", []>;
   def CMP16rr : MCS251Inst<(outs), (ins GPR16:$lhs, GPR16:$rhs),
                            "cmp $lhs, $rhs", []>;
   def CMP16ri : MCS251Inst<(outs), (ins GPR16:$lhs, mcs251_imm16:$imm),
@@ -439,6 +442,16 @@ let isBranch = 1, isTerminator = 1, isBarrier = 1 in {
   def SJMP : MCS251Inst<(outs), (ins brtarget:$dst), "sjmp $dst", []>;
   def EJMP : MCS251Inst<(outs), (ins brtarget:$dst), "ejmp $dst",
                         [(br bb:$dst)]>;
+}
+
+// Flag-consuming selects expand into a long-branch diamond with a PHI.
+let Uses = [PSW], usesCustomInserter = 1 in {
+  def SELECT8 : MCS251Inst<(outs GPR8:$dst),
+      (ins GPR8:$true, GPR8:$false, i8imm:$cc), "", []>;
+  def SELECT16 : MCS251Inst<(outs GPR16:$dst),
+      (ins GPR16:$true, GPR16:$false, i8imm:$cc), "", []>;
+  def SELECT32 : MCS251Inst<(outs GPR32:$dst),
+      (ins GPR32:$true, GPR32:$false, i8imm:$cc), "", []>;
 }
 
 // BRCC pseudo (built by LowerBR_CC, expanded by FinalizeISel): the cmp has
@@ -597,6 +610,20 @@ let mayStore = 1 in {
                             "mov $addr, $src", []>;
 }
 
+// Unresolved frame references have a distinct, verifier-correct descriptor.
+// PEI changes these into the two-operand-address S forms above.
+def mcs251_frame : Operand<i32> {
+  let MIOperandInfo = (ops SPBASE, i32imm, i16imm);
+}
+let mayLoad = 1, isPseudo = 1 in {
+  def MOV8rmF : MCS251Inst<(outs GPR8:$dst), (ins mcs251_frame:$addr), "", []>;
+  def MOV16rmF : MCS251Inst<(outs GPR16:$dst), (ins mcs251_frame:$addr), "", []>;
+}
+let mayStore = 1, isPseudo = 1 in {
+  def MOV8mrF : MCS251Inst<(outs), (ins mcs251_frame:$addr, GPR8:$src), "", []>;
+  def MOV16mrF : MCS251Inst<(outs), (ins mcs251_frame:$addr, GPR16:$src), "", []>;
+}
+
 // i16 memory objects on the frame: same lane-decomposition pseudos as
 // LD16/ST16/ST16T, but frame-relative. Expanded by the custom inserter
 // (FinalizeISel) into two MOV8rmS/MOV8mrS whose displacements are FI+0 and
@@ -604,13 +631,13 @@ let mayStore = 1 in {
 // order: LD16S [dst, addr], ST16S/ST16TS [addr, val].
 let mayLoad = 1, usesCustomInserter = 1 in
 def LD16S : MCS251Inst<(outs GPR16:$dst),
-                       (ins mcs251_stack:$addr), "", []>;
+                       (ins mcs251_frame:$addr), "", []>;
 let mayStore = 1, usesCustomInserter = 1 in
 def ST16S : MCS251Inst<(outs),
-                       (ins mcs251_stack:$addr, GPR16:$val), "", []>;
+                       (ins mcs251_frame:$addr, GPR16:$val), "", []>;
 let mayStore = 1, usesCustomInserter = 1 in
 def ST16TS : MCS251Inst<(outs),
-                        (ins mcs251_stack:$addr, GPR16:$val), "", []>;
+                        (ins mcs251_frame:$addr, GPR16:$val), "", []>;
 
 // Frame-index pointer materialisation (`lea FI`). Selected by the
 // ISelDAGToDAG Select hook (AVR-style select<FrameIndex>): operand $src

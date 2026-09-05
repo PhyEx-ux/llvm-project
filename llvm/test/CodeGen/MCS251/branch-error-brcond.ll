@@ -1,15 +1,14 @@
-; RUN: not --crash llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs < %s | FileCheck %s
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 < %s | FileCheck %s
 
-; Phase 6 only lowers BR_CC, i.e. a branch whose condition is a single icmp
-; that the DAG combiner folds into the branch. A branch on any other i1
-; value keeps a materialised compare (SETCC, which this backend cannot
-; select) and/or a BRCOND, both of which are rejected with a clear message
-; until a later phase adds them. Here the condition is the xor of two
-; icmps, so neither compare folds into the branch.
-; (report_fatal_error aborts, hence --crash; lit pipelines are pipefail.)
+; Former rejection: Phase 11 materialises SETCC and lowers non-icmp BRCOND.
+; Keep the xor of two independent conditions to exercise both paths.
 
 define i8 @brcond_xor(i8 %x) {
-; CHECK: LLVM ERROR: MCS251: Phase 6 supports only BR_CC (branch on icmp); SETCC/BRCOND arrive in a later phase
+; CHECK-LABEL: brcond_xor:
+; CHECK: cmp
+; CHECK: cmp
+; CHECK: eret
 entry:
   %c1 = icmp eq i8 %x, 5
   %c2 = icmp ult i8 %x, 100
