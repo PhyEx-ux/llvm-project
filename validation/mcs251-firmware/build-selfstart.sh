@@ -1,20 +1,16 @@
 #!/bin/bash
 # build-selfstart.sh - Step 4 self-start image builder (v2).
 # Usage: build-selfstart.sh <image-name> <c-source> [extra .rel files...]
-# Environment (frozen tools):
-#   clang  /home/liu/mcs251-alice4/v1/bin-frozen/0260312e/clang
-#   llc    /home/liu/mcs251-alice4/v1/bin-frozen/43739468/llc   (md5 43739468...)
-#   sdas251 /home/liu/build-sdcc/bin/sdas251   (crt/data asm only - the single
-#             remaining SDCC-tool dependency, see STEP4-SELFSTART-DESIGN.md)
-#   ld     validation/mcs251-ld/mcs251_ld.py --mcs251-abi
-#   qemu   /home/liu/mcs251-clang/bin-frozen/6b9edfd0/qemu-system-mcs251
+# Environment overrides: CLANG, LLC, SDAS, LD, QEMU. Defaults remain the
+# frozen validation tools; globals development passes the isolated llc/linker
+# explicitly. sdas251 is used for the hand-written crt only.
 set -u
-CLANG=/home/liu/mcs251-alice4/v1/bin-frozen/0260312e/clang
-LLC=/home/liu/mcs251-alice4/v1/bin-frozen/43739468/llc
-SDAS=/home/liu/build-sdcc/bin/sdas251
-LD=/mnt/c/Prj/LLVM/MCS251/validation/mcs251-ld/mcs251_ld.py
-QEMU=/home/liu/mcs251-clang/bin-frozen/6b9edfd0/qemu-system-mcs251
+CLANG=${CLANG:-/home/liu/mcs251-alice4/v1/bin-frozen/0260312e/clang}
+LLC=${LLC:-/home/liu/mcs251-alice4/v1/bin-frozen/43739468/llc}
+SDAS=${SDAS:-/home/liu/build-sdcc/bin/sdas251}
+QEMU=${QEMU:-/home/liu/mcs251-clang/bin-frozen/6b9edfd0/qemu-system-mcs251}
 HERE=$(cd "$(dirname "$0")" && pwd)          # dir of this script
+LD=${LD:-$HERE/../mcs251-ld/mcs251_ld.py}
 IMG=$1; SRC=$2; shift 2
 CRT=$HERE/crt-selfstart.asm
 LKTMPL=$HERE/link-selfstart.lk

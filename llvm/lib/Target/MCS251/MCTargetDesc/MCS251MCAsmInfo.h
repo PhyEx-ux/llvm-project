@@ -25,17 +25,17 @@ class Triple;
 //    MCAsmInfoELF finalizes it with ELF syntax.  MCAsmStreamer funnels
 //    every section switch it prints through this hook (".text" for the
 //    first switch, ".section ..." afterwards), so the base no-op is what
-//    keeps all ELF section directives out of the ASxxxx output.  The one
-//    code area is opened explicitly by MCS251AsmPrinter::emitStartOfAsmFile
-//    (".area CSEG (CODE)") and nothing else is ever printed.
+//    keeps all ELF section directives out of the ASxxxx output. The printer
+//    explicitly opens CSEG and emits target `.area` spellings for DSEG/XINIT
+//    when their native MCSections are selected.
 //
 //  - MCAsmInfo::getStackSection returns nullptr, which suppresses the
 //    trailing ".section .note.GNU-stack" that AsmPrinter::doFinalization
 //    would otherwise switch to; MCAsmInfoELF returns that section.
 //
-// The TargetMachine still uses a TargetLoweringObjectFileELF internally
-// (the codegen machinery needs MCSection objects); only the *printed
-// syntax* is ASxxxx.
+// The TargetMachine uses an MCS251 TargetLoweringObjectFile derived from ELF
+// (the codegen machinery needs MCSection objects); only the printed syntax is
+// ASxxxx.
 class MCS251MCAsmInfo final : public MCAsmInfo {
 public:
   MCS251MCAsmInfo(const Triple &TT, const MCTargetOptions &Options);

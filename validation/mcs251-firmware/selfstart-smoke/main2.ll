@@ -3,7 +3,7 @@
 ; any TF0 handler.  The default-vector table in crt-selfstart.asm must
 ; catch the overflow: isr_unhandled prints '!'.  Expected transcript: MS!
 ; (M = main ran, S = main returned, ! = default TF0 slot dispatched)
-define void @_main() {
+define void @main() {
 entry:
   store volatile i8 77, ptr inttoptr(i32 153 to ptr)   ; 'M' -> SBUF 0x99
   store volatile i8 1, ptr inttoptr(i32 137 to ptr)    ; TMOD 0x89 = 0x01

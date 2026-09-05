@@ -1,13 +1,13 @@
 ; pass-main.ll - selfstart-check case 1 (pass phase).
 ; B banner, three successful checks (u8/u16/u32) with markers r/w/d,
 ; then _harness_pass.  Expected transcript: BrwdPASS\n
-@_harness_expect8  = external global i8
-@_harness_expect16 = external global i16
-@_harness_expect32 = external global i32
-declare void @_harness_check_u8(i8)
-declare void @_harness_check_u16(i16)
-declare void @_harness_check_u32(i32)
-declare void @_harness_pass()
+@harness_expect8  = external global i8
+@harness_expect16 = external global i16
+@harness_expect32 = external global i32
+declare void @harness_check_u8(i8)
+declare void @harness_check_u16(i16)
+declare void @harness_check_u32(i32)
+declare void @harness_pass()
 
 define internal i8 @produce8() {
   %r = add i8 100, 65            ; 0xA5 through a real call+ALU path
@@ -22,21 +22,21 @@ define internal i32 @produce32() {
   ret i32 %r
 }
 
-define void @_main() {
+define void @main() {
 entry:
   store volatile i8 66, ptr inttoptr(i32 153 to ptr)   ; 'B'
   store volatile i8 114, ptr inttoptr(i32 153 to ptr)  ; 'r'
-  store volatile i8 165, ptr @_harness_expect8         ; expected 0xA5
+  store volatile i8 165, ptr @harness_expect8         ; expected 0xA5
   %g8 = call i8 @produce8()
-  call void @_harness_check_u8(i8 %g8)
+  call void @harness_check_u8(i8 %g8)
   store volatile i8 119, ptr inttoptr(i32 153 to ptr)  ; 'w'
-  store volatile i16 4951, ptr @_harness_expect16      ; expected 0x1357
+  store volatile i16 4951, ptr @harness_expect16      ; expected 0x1357
   %g16 = call i16 @produce16()
-  call void @_harness_check_u16(i16 %g16)
+  call void @harness_check_u16(i16 %g16)
   store volatile i8 100, ptr inttoptr(i32 153 to ptr)  ; 'd'
-  store volatile i32 305419896, ptr @_harness_expect32 ; expected 0x12345678
+  store volatile i32 305419896, ptr @harness_expect32 ; expected 0x12345678
   %g32 = call i32 @produce32()
-  call void @_harness_check_u32(i32 %g32)
-  call void @_harness_pass()
+  call void @harness_check_u32(i32 %g32)
+  call void @harness_pass()
   ret void                  ; unreachable: _harness_pass spins
 }

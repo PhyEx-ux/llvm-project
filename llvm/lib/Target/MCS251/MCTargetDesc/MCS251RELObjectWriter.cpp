@@ -21,9 +21,9 @@
 //   S <name> Ref%06X / S <name> Def%06X    undefined/defined globals; the
 //                                          record order assigns the R-record
 //                                          reference indices
-//   A <name> size %X flags %X addr %X      _CODE (0, empty) and CSEG (CODE,
-//                                          flags 0x20) exactly as sdas emits
-//                                          them for ".area CSEG (CODE)"
+//   A <name> size %X flags %X addr %X      _CODE/CSEG plus target sections:
+//                                          DSEG reservations (flags 0) and
+//                                          XINIT ROM data (flags 0x20)
 //   T <addr24> <bytes...> area-relative payload, max 16 bytes per line, never
 //                         splitting a relocation field across lines (sdas's
 //                         outchk NTXT/NREL rule)
@@ -46,8 +46,9 @@
 //     write_rmode); the two modes used here (0x00/0x02, 0x80/0x82) never
 //     escape.
 //
-// Scope limits are loud, not silent: more than one non-empty code section,
-// symbol-difference fixups and absolute symbols are fatal errors. Phase 11
+// Scope limits are loud, not silent: more than one non-empty CSEG section,
+// unknown allocated sections, symbol-difference fixups and absolute symbols
+// are fatal errors. Phase 11
 // also supports byte-of24 lo/mid/hi relocations, whose 3-byte T placeholders
 // shrink to one code byte at link time (see the payload builder below).
 //
@@ -182,6 +183,7 @@ class MCS251RELObjectWriter final : public MCObjectWriter {
 
   static unsigned relocationWidth(MCFixupKind Kind) {
     switch (Kind) {
+    case FK_Data_2:
     case MCS251::fixup_mcs251_16:
       return 2;
     case MCS251::fixup_mcs251_24:
@@ -220,7 +222,8 @@ class MCS251RELObjectWriter final : public MCObjectWriter {
 
       uint64_t Mode;
       unsigned Ref;
-      if (Rel.Fixup.getKind() == MCS251::fixup_mcs251_16)
+      if (Rel.Fixup.getKind() == FK_Data_2 ||
+          Rel.Fixup.getKind() == MCS251::fixup_mcs251_16)
         Mode = 0x00;
       else if (Rel.Fixup.getKind() == MCS251::fixup_mcs251_24)
         Mode = 0x80;
@@ -270,8 +273,9 @@ public:
 
   void recordRelocation(const MCFragment &F, const MCFixup &Fixup,
                         MCValue Target, uint64_t &FixedValue) override {
-    if (Fixup.getKind() < MCS251::fixup_mcs251_16 ||
-        Fixup.getKind() >= MCS251::NumTargetFixupKinds)
+    if (Fixup.getKind() != FK_Data_2 &&
+        (Fixup.getKind() < MCS251::fixup_mcs251_16 ||
+         Fixup.getKind() >= MCS251::NumTargetFixupKinds))
       report_fatal_error("MCS251 REL writer: unsupported relocation kind "
                          "(expected a word/address or byte-of24 ASxxxx relocation)");
     if (Target.getSubSym())
@@ -290,10 +294,13 @@ public:
 
     std::vector<SectionData> Sections;
     uint64_t TotalSize = 0;
+    bool HasSlots = false;
     for (const MCSection &Section : *Asm) {
-      bool Overlay = Section.getName().starts_with(".mcs251.OSEG.");
-      bool Static = Section.getName().starts_with(".mcs251.DSEG.");
-      if (Overlay || Static) {
+      StringRef Name = Section.getName();
+      bool Overlay = Name.starts_with(".mcs251.OSEG.");
+      bool StaticSlot = Name.starts_with(".mcs251.DSEG.");
+      bool MutableData = Name == ".mcs251.dseg";
+      if (Overlay || StaticSlot || MutableData) {
         SectionData Data;
         Data.Section = &Section;
         Data.Size = Asm->getSectionAddressSize(Section);
@@ -301,6 +308,7 @@ public:
         Data.Flags = Overlay ? 4 : 0;
         Data.NoLoad = true;
         Sections.push_back(std::move(Data));
+        HasSlots |= Overlay || StaticSlot || MutableData;
         continue;
       }
       if (Section.isBssSection())
@@ -312,29 +320,32 @@ public:
         continue;
       SectionData Data;
       Data.Section = &Section;
-      Data.Base = TotalSize;
       Data.Bytes.assign(Storage.begin(), Storage.end());
       Data.Size = Data.Bytes.size();
-      TotalSize += Data.Size;
+      if (Name == ".mcs251.xinit") {
+        Data.AreaName = "XINIT";
+        Data.Flags = 0x20;
+      } else {
+        Data.Base = TotalSize;
+        TotalSize += Data.Size;
+      }
       Sections.push_back(std::move(Data));
     }
 
-    // This implementation deliberately supports the one code section emitted
-    // by MCS251AsmPrinter. Rejecting other allocated sections prevents silently
-    // producing an object whose addresses disagree with its linker area.
+    // One CSEG MCSection and one XINIT MCSection are the complete loadable
+    // model. Everything else must be an explicitly recognized reservation.
     if (llvm::count_if(Sections, [](const SectionData &S) {
-          return !S.NoLoad;
+          return !S.NoLoad && S.AreaName == "CSEG";
         }) > 1)
-      report_fatal_error("MCS251 REL writer: multiple code sections are "
-                        "not supported yet");
-    // CSEG stays index 1 for compatibility with existing objects. Each
-    // parameter frame has an independent A record: OSEG frames overlay,
-    // DSEG frames concatenate, even when they belong to one LLVM module.
+      report_fatal_error("MCS251 REL writer: multiple CSEG sections are "
+                         "not supported yet");
+    // CSEG stays index 1 for compatibility. XINIT and every parameter/global
+    // reservation receive independent A records; same-named DSEG records
+    // concatenate in the linker while OSEG records overlay.
     unsigned NextArea = 2;
     for (SectionData &Sec : Sections)
-      if (Sec.NoLoad)
+      if (Sec.AreaName != "CSEG")
         Sec.AreaIndex = NextArea++;
-    bool HasSlots = NextArea != 2;
 
     std::vector<const MCSymbol *> Globals;
     for (const MCSymbol &S : Asm->symbols())
@@ -434,7 +445,7 @@ public:
     };
     EmitDefinitions(1);
     for (const SectionData &Sec : Sections) {
-      if (!Sec.NoLoad)
+      if (Sec.AreaName == "CSEG")
         continue;
       OS << "A " << Sec.AreaName << " size ";
       hexMin(OS, Sec.Size);

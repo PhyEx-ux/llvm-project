@@ -693,6 +693,14 @@ class Linker(object):
 
     def new_area(self, head, name, size, flags, addr):
         """lkarea.c:114 newarea (sdld 8051-like path: flags then addr)."""
+        # These two areas are a load/run pair owned by the LLVM globals ABI.
+        # A mismatched flag would either load bytes into internal RAM or reserve
+        # the ROM image as NOLOAD, both silent firmware corruption. Reject it
+        # before layout instead of inheriting sdld's permissive merge behavior.
+        expected = {"DSEG": A_DATA, "XINIT": A_CODE}.get(name)
+        if expected is not None and flags != expected:
+            raise LinkError("?ASlink-Error-MCS251 %s area flags 0x%X do not "
+                            "match required 0x%X" % (name, flags, expected))
         area, ax = self.lkparea(name, head)
         ax.size = size
         if len(area.areaxs) == 1:
@@ -1227,7 +1235,57 @@ class Linker(object):
         self.image = {}
         for path in self.inputs:
             self._relocate_file(path)
+        self._validate_mcs251_xinit()
         self._write_ihx(out_path)
+
+    def _validate_mcs251_xinit(self):
+        """Validate the sparse LLVM load-image protocol when its runtime is
+        linked. A generic SDCC image may use XINIT differently, so the check is
+        gated on the self-start runtime's defining symbol."""
+        runtime = self.symtab.get("__mcs251_globals_init")
+        if runtime is None or not runtime.defined:
+            return
+        xinit = self.area_by_name.get("XINIT")
+        dseg = self.area_by_name.get("DSEG")
+        if xinit is None or dseg is None:
+            raise LinkError("?ASlink-Error-MCS251 globals runtime requires "
+                            "DSEG and XINIT areas")
+        if xinit.size > 0xFFFF:
+            raise LinkError("?ASlink-Error-MCS251 XINIT size 0x%X exceeds "
+                            "the 16-bit startup counter" % xinit.size)
+        pos = xinit.addr
+        end = pos + xinit.size
+        dseg_ranges = [(ax.addr, ax.addr + ax.size) for ax in dseg.areaxs
+                       if ax.size]
+        while pos < end:
+            if end - pos < 6:
+                raise LinkError("?ASlink-Error-truncated MCS251 XINIT record "
+                                "at 0x%06X" % pos)
+            try:
+                target = (self.image[pos] << 8) | self.image[pos + 1]
+                obj_size = (self.image[pos + 2] << 8) | self.image[pos + 3]
+                payload = (self.image[pos + 4] << 8) | self.image[pos + 5]
+            except KeyError:
+                raise LinkError("?ASlink-Error-hole in MCS251 XINIT record "
+                                "at 0x%06X" % pos)
+            if obj_size == 0 or payload not in (0, obj_size):
+                raise LinkError("?ASlink-Error-invalid MCS251 XINIT sizes "
+                                "object=%d payload=%d at 0x%06X"
+                                % (obj_size, payload, pos))
+            if pos + 6 + payload > end:
+                raise LinkError("?ASlink-Error-truncated MCS251 XINIT payload "
+                                "at 0x%06X" % pos)
+            if target + obj_size > 0x10000 or not any(
+                    lo <= target and target + obj_size <= hi
+                    for lo, hi in dseg_ranges):
+                raise LinkError("?ASlink-Error-MCS251 XINIT target "
+                                "0x%04X..0x%04X is outside its DSEG slice"
+                                % (target, target + obj_size))
+            for addr in range(pos + 6, pos + 6 + payload):
+                if addr not in self.image:
+                    raise LinkError("?ASlink-Error-hole in MCS251 XINIT "
+                                    "payload at 0x%06X" % addr)
+            pos += 6 + payload
 
     def _relocate_file(self, path):
         lines = self._read_lines(path)

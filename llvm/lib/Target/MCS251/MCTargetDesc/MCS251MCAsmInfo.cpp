@@ -28,7 +28,7 @@
 //     beats trying to map MCAsmStreamer::emitAlignmentDirective onto
 //     .bndry, because the backend simply never needs alignment.
 //   - 16-bit data is .word and zero fill is .ds (ASxxxx spellings;
-//     sdas251 rejects .short/.zero), for the day data emission lands.
+//     sdas251 rejects .short/.zero); DSEG/XINIT global emission uses both.
 //
 //===----------------------------------------------------------------------===//
 

@@ -8,6 +8,7 @@
 
 #include "MCS251TargetMachine.h"
 #include "MCS251.h"
+#include "MCS251TargetObjectFile.h"
 #include "MCTargetDesc/MCS251MCTargetDesc.h"
 #include "MCTargetDesc/MCS251RELObjectWriter.h"
 #include "TargetInfo/MCS251TargetInfo.h"
@@ -38,7 +39,7 @@ MCS251TargetMachine::MCS251TargetMachine(
     : CodeGenTargetMachineImpl(T, TT.computeDataLayout(), TT, CPU, FS, Options,
                                getEffectiveRelocModel(RM),
                                getEffectiveCodeModel(CM, CodeModel::Small), OL),
-      TLOF(std::make_unique<TargetLoweringObjectFileELF>()),
+      TLOF(std::make_unique<MCS251TargetObjectFile>()),
       Subtarget(TT, std::string(CPU), std::string(FS), *this) {
   // ASxxxx REL has no address-significance table; accept the flag as a no-op.
   this->Options.EmitAddrsig = false;

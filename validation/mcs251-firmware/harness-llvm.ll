@@ -7,9 +7,9 @@
 ;   1. a volatile store of `expected` into a fixed idata cell, and
 ;   2. a single-argument call _harness_check_uN(got).
 ; Call-site shape in a test _main.ll:
-;   store volatile i8 165, ptr @_harness_expect8     ; expected = 0xA5
+;   store volatile i8 165, ptr @harness_expect8     ; expected = 0xA5
 ;   %g = call i8 @kernel_under_test()
-;   call void @_harness_check_u8(i8 %g)
+;   call void @harness_check_u8(i8 %g)
 ; The cells live in harness-llvm-cells.asm (absolute idata equates,
 ; provider.asm _p13_mem pattern).  Marker characters and the 'B' banner are
 ; the test module's own one-line SBUF stores (see selfstart-check/).
@@ -29,9 +29,9 @@
 ; All serial output via fixed-address volatile store to SBUF (0x99), the
 ; T2-proven idiom.  No SDCC asset is required anywhere in the image.
 
-@_harness_expect8  = external global i8
-@_harness_expect16 = external global i16
-@_harness_expect32 = external global i32
+@harness_expect8  = external global i8
+@harness_expect16 = external global i16
+@harness_expect32 = external global i32
 
 define internal void @hputc(i8 %c) {
   store volatile i8 %c, ptr inttoptr(i32 153 to ptr)  ; SBUF
@@ -68,7 +68,7 @@ done:
   ret i8 %q
 }
 
-define void @_harness_hex8(i8 %v) {
+define void @harness_hex8(i8 %v) {
   %hi = call i8 @div16(i8 %v)
   call void @hnib(i8 %hi)
   %lo = and i8 %v, 15
@@ -76,7 +76,7 @@ define void @_harness_hex8(i8 %v) {
   ret void
 }
 
-define void @_harness_hex16(i16 %v) {
+define void @harness_hex16(i16 %v) {
 entry:
   br label %loop
 loop:
@@ -90,14 +90,14 @@ body:
   br label %loop
 done:
   %hib = trunc i16 %hi to i8
-  call void @_harness_hex8(i8 %hib)
+  call void @harness_hex8(i8 %hib)
   %lo16 = and i16 %r, 255
   %lob = trunc i16 %lo16 to i8
-  call void @_harness_hex8(i8 %lob)
+  call void @harness_hex8(i8 %lob)
   ret void
 }
 
-define void @_harness_hex32(i32 %v) {
+define void @harness_hex32(i32 %v) {
 entry:
   br label %l3
 l3:                                                 ; byte3 = v / 2^24
@@ -111,7 +111,7 @@ p3:
   br label %l3
 d3:
   %b3t = trunc i32 %b3 to i8
-  call void @_harness_hex8(i8 %b3t)
+  call void @harness_hex8(i8 %b3t)
   br label %l2
 l2:                                                 ; byte2 = rem / 2^16
   %b2 = phi i32 [ 0, %d3 ], [ %b2n, %p2 ]
@@ -124,7 +124,7 @@ p2:
   br label %l2
 d2:
   %b2t = trunc i32 %b2 to i8
-  call void @_harness_hex8(i8 %b2t)
+  call void @harness_hex8(i8 %b2t)
   br label %l1
 l1:                                                 ; byte1 = rem / 256
   %b1 = phi i32 [ 0, %d2 ], [ %b1n, %p1 ]
@@ -137,9 +137,9 @@ p1:
   br label %l1
 d1:
   %b1t = trunc i32 %b1 to i8
-  call void @_harness_hex8(i8 %b1t)
+  call void @harness_hex8(i8 %b1t)
   %b0 = trunc i32 %r1 to i8                         ; remainder is byte0
-  call void @_harness_hex8(i8 %b0)
+  call void @harness_hex8(i8 %b0)
   ret void
 }
 
@@ -183,36 +183,36 @@ spin:                       ;  before a bare label; no fall-through blocks)
 
 define internal void @fail8(i8 %got) {
   call void @fail_pre()
-  %e = load volatile i8, ptr @_harness_expect8
-  call void @_harness_hex8(i8 %e)
+  %e = load volatile i8, ptr @harness_expect8
+  call void @harness_hex8(i8 %e)
   call void @fail_mid()
-  call void @_harness_hex8(i8 %got)
+  call void @harness_hex8(i8 %got)
   call void @fail_end()
   ret void                  ; unreachable (fail_end spins)
 }
 
 define internal void @fail16(i16 %got) {
   call void @fail_pre()
-  %e = load volatile i16, ptr @_harness_expect16
-  call void @_harness_hex16(i16 %e)
+  %e = load volatile i16, ptr @harness_expect16
+  call void @harness_hex16(i16 %e)
   call void @fail_mid()
-  call void @_harness_hex16(i16 %got)
+  call void @harness_hex16(i16 %got)
   call void @fail_end()
   ret void                  ; unreachable
 }
 
 define internal void @fail32(i32 %got) {
   call void @fail_pre()
-  %e = load volatile i32, ptr @_harness_expect32
-  call void @_harness_hex32(i32 %e)
+  %e = load volatile i32, ptr @harness_expect32
+  call void @harness_hex32(i32 %e)
   call void @fail_mid()
-  call void @_harness_hex32(i32 %got)
+  call void @harness_hex32(i32 %got)
   call void @fail_end()
   ret void                  ; unreachable
 }
 
-define void @_harness_check_u8(i8 %got) {
-  %e = load volatile i8, ptr @_harness_expect8
+define void @harness_check_u8(i8 %got) {
+  %e = load volatile i8, ptr @harness_expect8
   %ok = icmp eq i8 %e, %got
   br i1 %ok, label %good, label %bad
 good:
@@ -222,8 +222,8 @@ bad:
   ret void                  ; unreachable
 }
 
-define void @_harness_check_u16(i16 %got) {
-  %e = load volatile i16, ptr @_harness_expect16
+define void @harness_check_u16(i16 %got) {
+  %e = load volatile i16, ptr @harness_expect16
   %ok = icmp eq i16 %e, %got
   br i1 %ok, label %good, label %bad
 good:
@@ -233,8 +233,8 @@ bad:
   ret void                  ; unreachable
 }
 
-define void @_harness_check_u32(i32 %got) {
-  %e = load volatile i32, ptr @_harness_expect32
+define void @harness_check_u32(i32 %got) {
+  %e = load volatile i32, ptr @harness_expect32
   %ok = icmp eq i32 %e, %got
   br i1 %ok, label %good, label %bad
 good:
@@ -244,7 +244,7 @@ bad:
   ret void                  ; unreachable
 }
 
-define void @_harness_pass() {
+define void @harness_pass() {
   call void @hputc(i8 80)   ; P
   call void @hputc(i8 65)   ; A
   call void @hputc(i8 83)   ; S

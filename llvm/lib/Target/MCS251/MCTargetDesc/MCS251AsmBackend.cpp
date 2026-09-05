@@ -80,7 +80,8 @@ public:
                   bool IsResolved) override {
     if (!IsResolved) {
       uint64_t V = Value;
-      if (Fixup.getKind() == MCS251::fixup_mcs251_16) {
+      if (Fixup.getKind() == FK_Data_2 ||
+          Fixup.getKind() == MCS251::fixup_mcs251_16) {
         Data[0] = uint8_t(V >> 8);
         Data[1] = uint8_t(V);
       } else if (Fixup.getKind() == MCS251::fixup_mcs251_24) {

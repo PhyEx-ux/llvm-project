@@ -25,15 +25,12 @@
 //    .globl/labels/comments match, and the file just ends after the last
 //    instruction (ASxxxx needs no .end).
 //
-//  - Sections: the TargetMachine still uses TargetLoweringObjectFileELF
-//    because the codegen internals need MCSection objects to reason about,
-//    but no section switching directive can ever reach the output:
-//    MCS251MCAsmInfo::printSwitchToSection is a no-op, so the ".text" the
-//    first MCAsmStreamer::switchSection would print is suppressed and all
-//    functions flow into the single CSEG area opened here.  A custom TLOF
-//    returning a bespoke MCSection subclass would be the heavier-handed
-//    alternative (MCSectionELF is final, so it would mean a new section
-//    variant); suppressing the printed directive is the minimal change.
+//  - Sections use a target TargetLoweringObjectFile backed by native
+//    MCSectionELF objects: text/read-only data select CSEG, mutable storage
+//    selects NOBITS `.mcs251.dseg`, and its ROM load image selects PROGBITS
+//    `.mcs251.xinit`. MCS251MCAsmInfo still suppresses generic ELF directives;
+//    this printer emits the corresponding ASxxxx `.area` spellings while the
+//    object writer maps the same MCSections to A records.
 //
 //  - The trailing ".section .note.GNU-stack" from AsmPrinter::doFinalization
 //    is suppressed by MCS251MCAsmInfo::getStackSection returning nullptr.
@@ -43,6 +40,7 @@
 #include "MCS251.h"
 #include "MCS251MCInstLower.h"
 #include "MCS251TargetMachine.h"
+#include "MCS251TargetObjectFile.h"
 #include "MCTargetDesc/MCS251ABISignature.h"
 #include "TargetInfo/MCS251TargetInfo.h"
 #include "llvm/ADT/StringSet.h"
@@ -52,10 +50,12 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Module.h"
-#include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -101,6 +101,81 @@ namespace {
 class MCS251AsmPrinter final : public AsmPrinter {
   StringSet<> LocalParameterSlots;
   StringSet<> DeclaredExternalSymbols;
+
+  static bool isSupportedMutableType(Type *Ty) {
+    if (Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32))
+      return true;
+    if (auto *AT = dyn_cast<ArrayType>(Ty)) {
+      return AT->getNumElements() &&
+             isSupportedMutableType(AT->getElementType());
+    }
+    if (auto *ST = dyn_cast<StructType>(Ty)) {
+      if (ST->isOpaque() || ST->getNumElements() == 0)
+        return false;
+      return llvm::all_of(ST->elements(), isSupportedMutableType);
+    }
+    return false;
+  }
+
+  static bool isSupportedMutableInitializer(const Constant *C) {
+    Type *Ty = C->getType();
+    if (!isSupportedMutableType(Ty))
+      return false;
+    if (isa<ConstantAggregateZero>(C))
+      return true;
+    if (isa<ConstantInt>(C))
+      return true;
+    if (!isa<ArrayType>(Ty) && !isa<StructType>(Ty))
+      return false;
+    unsigned Elements = Ty->isArrayTy()
+                            ? cast<ArrayType>(Ty)->getNumElements()
+                            : cast<StructType>(Ty)->getNumElements();
+    for (unsigned I = 0; I != Elements; ++I) {
+      const Constant *Element = C->getAggregateElement(I);
+      if (!Element || !isSupportedMutableInitializer(Element))
+        return false;
+    }
+    return true;
+  }
+
+  void emitInitializerZeros(uint64_t Count) {
+    // XINIT is a ROM image. ASxxxx `.ds` advances a CODE-area location
+    // counter without materializing bytes, so emit literal zero bytes here.
+    while (Count--)
+      OutStreamer->emitIntValue(0, 1);
+  }
+
+  void emitMutableInitializer(const DataLayout &DL, const Constant *C) {
+    Type *Ty = C->getType();
+    if (isa<ConstantAggregateZero>(C)) {
+      emitInitializerZeros(DL.getTypeStoreSize(Ty));
+      return;
+    }
+    if (auto *CI = dyn_cast<ConstantInt>(C)) {
+      OutStreamer->emitIntValue(CI->getZExtValue(),
+                               DL.getTypeStoreSize(Ty));
+      return;
+    }
+    if (auto *AT = dyn_cast<ArrayType>(Ty)) {
+      uint64_t StoreSize = DL.getTypeStoreSize(AT->getElementType());
+      uint64_t Stride = DL.getTypeAllocSize(AT->getElementType());
+      for (unsigned I = 0; I != AT->getNumElements(); ++I) {
+        emitMutableInitializer(DL, C->getAggregateElement(I));
+        emitInitializerZeros(Stride - StoreSize);
+      }
+      return;
+    }
+    auto *ST = cast<StructType>(Ty);
+    const StructLayout *Layout = DL.getStructLayout(ST);
+    uint64_t Pos = 0;
+    for (unsigned I = 0; I != ST->getNumElements(); ++I) {
+      uint64_t Offset = Layout->getElementOffset(I);
+      emitInitializerZeros(Offset - Pos);
+      emitMutableInitializer(DL, C->getAggregateElement(I));
+      Pos = Offset + DL.getTypeStoreSize(ST->getElementType(I));
+    }
+    emitInitializerZeros(DL.getTypeStoreSize(ST) - Pos);
+  }
 
 public:
   static char ID;
@@ -198,6 +273,8 @@ public:
     OutStreamer->getContext().setMainFileName(ModuleName);
     if (llvm::any_of(M, [](const Function &F) {
           return !F.isDeclaration() && F.arg_size() > 1;
+        }) || llvm::any_of(M.globals(), [](const GlobalVariable &GV) {
+          return !GV.isDeclaration() && !GV.isConstant();
         })) {
       // The object writer emits the matching reservation as an A record.
       OutStreamer->emitRawText("\t.area REG_BANK_0 (OVR,DATA)\n\t.ds 8\n"
@@ -214,27 +291,28 @@ public:
     }
   }
 
-  // The initial data path is deliberately read-only and shares the one CSEG
-  // section with functions. Region-qualified MOVADDR32 accesses can read ROM;
-  // using an ELF .rodata section would instead violate the REL writer's
-  // single-section contract. Mutable data needs a separate area and startup
-  // initialization, neither of which is implied by accepting constants here.
   void emitGlobalVariable(const GlobalVariable *GV) override {
     if (GV->isDeclaration()) {
       AsmPrinter::emitGlobalVariable(GV);
       return;
     }
 
-    auto Reject = []() {
+    auto Reject = [GV]() {
+      if (GV->isConstant())
+        report_fatal_error(
+            "MCS251: defined global data requires a byte-aligned read-only "
+            "CSEG i8/i16/i32 scalar or nonempty initialized integer array; "
+            "mutable data, zeroinitializers, custom sections, TLS, weak/COMDAT, "
+            "aggregates and initializer relocations are not supported");
       report_fatal_error(
-          "MCS251: defined global data requires a byte-aligned read-only "
-          "CSEG i8/i16/i32 scalar or nonempty initialized integer array; "
-          "mutable data, zeroinitializers, custom sections, TLS, weak/COMDAT, "
-          "aggregates and initializer relocations are not supported");
+          "MCS251: defined global data requires byte-aligned default-address-"
+          "space i8/i16/i32 scalar, array, or struct storage with a fully "
+          "defined integer initializer; custom sections, TLS, weak/COMDAT, "
+          "empty aggregates and initializer relocations are not supported");
     };
     const DataLayout &DL = GV->getDataLayout();
-    if (!GV->isConstant() || GV->isThreadLocal() || GV->getAddressSpace() != 0 ||
-        GV->hasSection() || GV->hasComdat() ||
+    if (GV->isThreadLocal() || GV->getAddressSpace() != 0 || GV->hasSection() ||
+        GV->hasComdat() ||
         (!GV->hasExternalLinkage() && !GV->hasLocalLinkage()) ||
         GV->getVisibility() != GlobalValue::DefaultVisibility ||
         GV->getDLLStorageClass() != GlobalValue::DefaultStorageClass ||
@@ -243,6 +321,43 @@ public:
       Reject();
 
     const Constant *Init = GV->getInitializer();
+    MCSymbol *Sym = getSymbol(GV);
+    if (!GV->isConstant()) {
+      if (!isSupportedMutableInitializer(Init))
+        Reject();
+      uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
+      if (!Size || Size > UINT16_MAX)
+        report_fatal_error("MCS251: mutable global size must fit in 16 bits");
+
+      const auto &TLOF =
+          static_cast<const MCS251TargetObjectFile &>(getObjFileLowering());
+      OutStreamer->switchSection(TLOF.getDSEGSection());
+      OutStreamer->emitRawText("\t.area DSEG (DATA)");
+      emitLinkage(GV, Sym);
+      OutStreamer->emitLabel(Sym);
+      OutStreamer->emitZeros(Size);
+
+      // XINIT is a compact ROM-side table, not a second definition of the
+      // object. Each independently linkable record is:
+      //   u16 DSEG address, u16 object size, u16 payload size, payload bytes.
+      // A zero payload means "clear only", so a large BSS object consumes six
+      // ROM bytes. Nonzero records carry the complete target-endian byte image.
+      // This sparse form remains correct when DSEG has register-bank/bit-area
+      // holes or when several modules contribute independently placed slices.
+      OutStreamer->switchSection(TLOF.getXINITSection());
+      OutStreamer->emitRawText("\t.area XINIT (CODE)");
+      OutStreamer->emitValue(MCSymbolRefExpr::create(Sym, OutContext), 2);
+      OutStreamer->emitIntValue(Size, 2);
+      bool HasPayload = !Init->isNullValue();
+      OutStreamer->emitIntValue(HasPayload ? Size : 0, 2);
+      if (HasPayload)
+        emitMutableInitializer(DL, Init);
+
+      OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
+      OutStreamer->emitRawText("\t.area CSEG (CODE)");
+      return;
+    }
+
     auto IsSupportedInt = [](Type *Ty) {
       return Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32);
     };
@@ -250,7 +365,6 @@ public:
       if (!AT->getNumElements() || !IsSupportedInt(AT->getElementType()) ||
           (!isa<ConstantDataArray>(Init) && !isa<ConstantArray>(Init)))
         Reject();
-      // Validate the whole initializer before emitting any label or data.
       for (uint64_t I = 0; I != AT->getNumElements(); ++I)
         if (!isa_and_nonnull<ConstantInt>(Init->getAggregateElement(I)))
           Reject();
@@ -258,15 +372,11 @@ public:
       Reject();
     }
 
+    // Read-only globals and string literals stay in the established CSEG path.
     OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
-    MCSymbol *Sym = getSymbol(GV);
     emitLinkage(GV, Sym);
     OutStreamer->emitLabel(Sym);
     if (auto *AT = dyn_cast<ArrayType>(Init->getType())) {
-      // Emit elements, not .ascii/.asciz/.fill: those generic optimizations
-      // use GAS spellings/escaping which are not the sdas251 string dialect.
-      // emitIntValue preserves the MCAsmInfo big-endian .word fallback for
-      // i32 and emits actual zero bytes for embedded NULs (not reservations).
       unsigned Bytes = DL.getTypeStoreSize(AT->getElementType());
       for (uint64_t I = 0; I != AT->getNumElements(); ++I)
         OutStreamer->emitIntValue(

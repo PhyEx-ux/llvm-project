@@ -1,14 +1,13 @@
 ; RUN: not --crash llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
 
-; Mutable defined data still requires a writable area and initialization.
-; The minimal read-only CSEG path must not silently place it in ROM.
-; (report_fatal_error aborts, hence --crash; lit pipelines are pipefail.)
-; External declarations are fine: see load.ll/store.ll.
+; Mutable integer scalars/arrays/structs are supported by global-data.ll.
+; Pointer initializers still require a relocation-bearing data ABI and must fail
+; loudly instead of silently truncating a canonical 32-bit address into DSEG.
 
-@g = global i16 42
+@g = global ptr null, align 1
 
-define i16 @read_g() {
-; CHECK: LLVM ERROR: MCS251: defined global data requires a byte-aligned read-only CSEG
-  %v = load i16, ptr @g
-  ret i16 %v
+define ptr @read_g() {
+; CHECK: LLVM ERROR: MCS251: defined global data requires byte-aligned default-address-space
+  %v = load ptr, ptr @g
+  ret ptr %v
 }
