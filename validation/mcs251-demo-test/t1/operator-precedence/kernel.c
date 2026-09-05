@@ -4,7 +4,7 @@ typedef unsigned short u16;
 #if defined(__SDCC_mcs251)
 typedef unsigned long u32;
 #else
-typedef unsigned int u32;
+typedef unsigned long u32;
 #endif
 #define LEVEL_BIGGER 0u
 #define LEVEL_SMALLER 1u

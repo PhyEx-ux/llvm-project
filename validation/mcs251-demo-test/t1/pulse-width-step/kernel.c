@@ -1,10 +1,10 @@
 /* Extracted T1 kernel: one timer tick of demo-05 pulse-width FSM. */
 typedef unsigned char u8;
-typedef unsigned int u16;
+typedef unsigned short u16;
 #if defined(__SDCC_mcs251)
 typedef unsigned long u32;
 #else
-typedef unsigned int u32;
+typedef unsigned long u32;
 #endif
 
 static u16 pulse_count;

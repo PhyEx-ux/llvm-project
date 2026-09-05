@@ -123,3 +123,30 @@ L0 提取，不做外设行为测试。
 
 T1 内核与判定逻辑在 Step 4（自建 crt0/HOME/_main）后原样存活——只换 harness
 生产方式，不换 oracle 与用例；本测试体系因此同时是 de-SDCC 的验收基准。
+
+## 7. 实施记录（追加区）
+
+- 2026-09-05（Shizuku，T1 首批落地）：run-tests.py + t1/TEMPLATE.md +
+  RESULTS.md 交付。7 个 pilot 用例，双 oracle（Oracle-A gcc host ==
+  Oracle-B SDCC→sdld→QEMU）7/7 逐字符一致；DUT 三角判定见 RESULTS.md
+  （基线重置后最新数字以 RESULTS.md 为准）。要点：
+  - 前端路线（用户拍板）：系统 clang 19.1.7 产 IR（clang19→llc24 顺向
+    auto-upgrade 零摩擦）；自建 clang 脚本（build-clang.sh）留作备胎。
+  - 全用例 clang -O0：-O1 会把 if/else 合成 switch（br_jt 无 ISel）并
+    删除空延时循环（smoke 回归失效）。
+  - 两个可退役垫片（runner --no-ir-shims 可整体关闭，退役条件见
+    TEMPLATE.md）：符号适配 @name→@_name；常量移位 lowering（含
+    volatile alloca 屏障——DAG combiner 会把 or/select 位重建链折叠
+    回移位，甚至产生可选择但语义错误的静默错码形态）。
+  - 链级标准布线新增：lk 注入 `-b CONST = 0xFC8000`（QEMU 对 0xFFxxxx
+    窗口数据读返回 0、执行正常；CONST 默认顺排 HOME 后 0xFF0001）。
+  - 基线重置（PM 令，2026-09-05 晚）：0x1234→0x1212 经 Alice 差异矩阵
+    定性为 commit 1c59ad49f 修掉的 trunc(load i16) 旧端序 bug；llc
+    重冻结至 post-1c59ad49f/e098d07d2（md5 67a17057...，版本化目录
+    bin-frozen/67a17057/）。快照纪律：冻结必记源码 commit + 版本化
+    子目录，不覆盖他人在用副本。
+  - 探针材料库 /home/liu/mcs251-demo-test/probes/：endianness-fail
+    （修复前复现存档，Bl12h12）、endianness（read/write 对照）、
+    combiner-fold、nec-frame2（取证冻结）。
+  - Momo batch 提取（kernel.c+EXTRACT.md）由 runner 容错为
+    pending-instantiation，按 t1/TEMPLATE.md 机械化实例化。
