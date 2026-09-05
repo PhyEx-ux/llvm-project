@@ -1,0 +1,1500 @@
+[==========] Running 700 tests from 26 test suites.
+[----------] Global test environment set-up.
+[----------] 4 tests from AtomicScopeTest
+[ RUN      ] AtomicScopeTest.AbiValues
+[       OK ] AtomicScopeTest.AbiValues (0 ms)
+[ RUN      ] AtomicScopeTest.UnknownStringIsNone
+[       OK ] AtomicScopeTest.UnknownStringIsNone (0 ms)
+[ RUN      ] AtomicScopeTest.NonGPUTargetIsNone
+[       OK ] AtomicScopeTest.NonGPUTargetIsNone (0 ms)
+[ RUN      ] AtomicScopeTest.RoundTrip
+[       OK ] AtomicScopeTest.RoundTrip (0 ms)
+[----------] 4 tests from AtomicScopeTest (0 ms total)
+
+[----------] 56 tests from TargetParserTest
+[ RUN      ] TargetParserTest.testCSKYCPUArchList
+[       OK ] TargetParserTest.testCSKYCPUArchList (0 ms)
+[ RUN      ] TargetParserTest.testInvalidCSKYArch
+[       OK ] TargetParserTest.testInvalidCSKYArch (0 ms)
+[ RUN      ] TargetParserTest.testCSKYArch
+[       OK ] TargetParserTest.testCSKYArch (0 ms)
+[ RUN      ] TargetParserTest.CSKYFPUVersion
+[       OK ] TargetParserTest.CSKYFPUVersion (0 ms)
+[ RUN      ] TargetParserTest.CSKYExtensionFeatures
+[       OK ] TargetParserTest.CSKYExtensionFeatures (0 ms)
+[ RUN      ] TargetParserTest.CSKYFPUFeatures
+[       OK ] TargetParserTest.CSKYFPUFeatures (0 ms)
+[ RUN      ] TargetParserTest.CSKYArchExtFeature
+[       OK ] TargetParserTest.CSKYArchExtFeature (0 ms)
+[ RUN      ] TargetParserTest.RISCVPrintEnabledExtensions
+[       OK ] TargetParserTest.RISCVPrintEnabledExtensions (0 ms)
+[ RUN      ] TargetParserTest.testARMCPUArchList
+[       OK ] TargetParserTest.testARMCPUArchList (0 ms)
+[ RUN      ] TargetParserTest.testInvalidARMArch
+[       OK ] TargetParserTest.testInvalidARMArch (0 ms)
+[ RUN      ] TargetParserTest.testARMArch
+[       OK ] TargetParserTest.testARMArch (0 ms)
+[ RUN      ] TargetParserTest.testARMExtension
+[       OK ] TargetParserTest.testARMExtension (0 ms)
+[ RUN      ] TargetParserTest.ARMFPUVersion
+[       OK ] TargetParserTest.ARMFPUVersion (0 ms)
+[ RUN      ] TargetParserTest.ARMFPUNeonSupportLevel
+[       OK ] TargetParserTest.ARMFPUNeonSupportLevel (0 ms)
+[ RUN      ] TargetParserTest.ARMFPURestriction
+[       OK ] TargetParserTest.ARMFPURestriction (0 ms)
+[ RUN      ] TargetParserTest.ARMExtensionFeatures
+[       OK ] TargetParserTest.ARMExtensionFeatures (0 ms)
+[ RUN      ] TargetParserTest.ARMFPUFeatures
+[       OK ] TargetParserTest.ARMFPUFeatures (0 ms)
+[ RUN      ] TargetParserTest.ARMArchExtFeature
+[       OK ] TargetParserTest.ARMArchExtFeature (0 ms)
+[ RUN      ] TargetParserTest.ARMArchExtDependencies
+[       OK ] TargetParserTest.ARMArchExtDependencies (0 ms)
+[ RUN      ] TargetParserTest.ARMparseHWDiv
+[       OK ] TargetParserTest.ARMparseHWDiv (0 ms)
+[ RUN      ] TargetParserTest.ARMparseArchEndianAndISA
+[       OK ] TargetParserTest.ARMparseArchEndianAndISA (0 ms)
+[ RUN      ] TargetParserTest.ARMparseArchProfile
+[       OK ] TargetParserTest.ARMparseArchProfile (0 ms)
+[ RUN      ] TargetParserTest.ARMparseArchVersion
+[       OK ] TargetParserTest.ARMparseArchVersion (0 ms)
+[ RUN      ] TargetParserTest.getARMCPUForArch
+[       OK ] TargetParserTest.getARMCPUForArch (0 ms)
+[ RUN      ] TargetParserTest.ARMPrintSupportedExtensions
+[       OK ] TargetParserTest.ARMPrintSupportedExtensions (0 ms)
+[ RUN      ] TargetParserTest.testAArch64CPUArchList
+[       OK ] TargetParserTest.testAArch64CPUArchList (0 ms)
+[ RUN      ] TargetParserTest.testAArch64Arch
+[       OK ] TargetParserTest.testAArch64Arch (0 ms)
+[ RUN      ] TargetParserTest.testAArch64Extension
+[       OK ] TargetParserTest.testAArch64Extension (0 ms)
+[ RUN      ] TargetParserTest.AArch64ExtensionFeatures
+[       OK ] TargetParserTest.AArch64ExtensionFeatures (0 ms)
+[ RUN      ] TargetParserTest.AArch64ArchFeatures
+[       OK ] TargetParserTest.AArch64ArchFeatures (0 ms)
+[ RUN      ] TargetParserTest.AArch64ArchPartialOrder
+[       OK ] TargetParserTest.AArch64ArchPartialOrder (0 ms)
+[ RUN      ] TargetParserTest.AArch64ArchExtFeature
+[       OK ] TargetParserTest.AArch64ArchExtFeature (0 ms)
+[ RUN      ] TargetParserTest.AArch64PrintSupportedExtensions
+[       OK ] TargetParserTest.AArch64PrintSupportedExtensions (0 ms)
+[ RUN      ] TargetParserTest.testAArch64ReconstructFromParsedFeatures
+[       OK ] TargetParserTest.testAArch64ReconstructFromParsedFeatures (0 ms)
+[ RUN      ] TargetParserTest.checkFindSinglePrecisionFPU
+[       OK ] TargetParserTest.checkFindSinglePrecisionFPU (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUArch
+[       OK ] TargetParserTest.testAMDGPUArch (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetMajorSubArch
+[       OK ] TargetParserTest.testAMDGPUgetMajorSubArch (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUisSubArchCompatible
+[       OK ] TargetParserTest.testAMDGPUisSubArchCompatible (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUisCPUValidForSubArch
+[       OK ] TargetParserTest.testAMDGPUisCPUValidForSubArch (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUparseArchR600
+[       OK ] TargetParserTest.testAMDGPUparseArchR600 (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUfillAMDGPUFeatureMap
+[       OK ] TargetParserTest.testAMDGPUfillAMDGPUFeatureMap (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetFeatureBitset
+[       OK ] TargetParserTest.testAMDGPUgetFeatureBitset (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUfillValidArchListAMDGCN
+[       OK ] TargetParserTest.testAMDGPUfillValidArchListAMDGCN (1 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetGPUKindFromSubArch
+[       OK ] TargetParserTest.testAMDGPUgetGPUKindFromSubArch (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetSubArchFromGPUName
+[       OK ] TargetParserTest.testAMDGPUgetSubArchFromGPUName (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetIsaVersionFromSubArch
+[       OK ] TargetParserTest.testAMDGPUgetIsaVersionFromSubArch (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetNumSGPRs
+[       OK ] TargetParserTest.testAMDGPUgetNumSGPRs (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetSGPRAllocGranule
+[       OK ] TargetParserTest.testAMDGPUgetSGPRAllocGranule (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetVGPRAllocGranule
+[       OK ] TargetParserTest.testAMDGPUgetVGPRAllocGranule (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetMaxHWAddressableLocalMemorySize
+[       OK ] TargetParserTest.testAMDGPUgetMaxHWAddressableLocalMemorySize (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetNumWorkGroupSIMDs
+[       OK ] TargetParserTest.testAMDGPUgetNumWorkGroupSIMDs (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetLDSBankCount
+[       OK ] TargetParserTest.testAMDGPUgetLDSBankCount (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUgetMaxWavesPerEU
+[       OK ] TargetParserTest.testAMDGPUgetMaxWavesPerEU (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUParseTargetIDString
+[       OK ] TargetParserTest.testAMDGPUParseTargetIDString (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUTargetIDProvidesFor
+[       OK ] TargetParserTest.testAMDGPUTargetIDProvidesFor (0 ms)
+[ RUN      ] TargetParserTest.testAMDGPUTargetIDEquivalent
+[       OK ] TargetParserTest.testAMDGPUTargetIDEquivalent (0 ms)
+[----------] 56 tests from TargetParserTest (2 ms total)
+
+[----------] 4 tests from getLinuxHostCPUName
+[ RUN      ] getLinuxHostCPUName.ARM
+[       OK ] getLinuxHostCPUName.ARM (0 ms)
+[ RUN      ] getLinuxHostCPUName.AArch64
+[       OK ] getLinuxHostCPUName.AArch64 (0 ms)
+[ RUN      ] getLinuxHostCPUName.s390x
+[       OK ] getLinuxHostCPUName.s390x (0 ms)
+[ RUN      ] getLinuxHostCPUName.RISCV
+[       OK ] getLinuxHostCPUName.RISCV (0 ms)
+[----------] 4 tests from getLinuxHostCPUName (0 ms total)
+
+[----------] 5 tests from HostTest
+[ RUN      ] HostTest.DummyRunAndGetCommandOutputUse
+[       OK ] HostTest.DummyRunAndGetCommandOutputUse (0 ms)
+[ RUN      ] HostTest.getMacOSHostVersion
+/mnt/c/Prj/LLVM/MCS251/llvm/unittests/TargetParser/Host.cpp:540: Skipped
+
+
+[  SKIPPED ] HostTest.getMacOSHostVersion (0 ms)
+[ RUN      ] HostTest.AIXHostVersionDetect
+/mnt/c/Prj/LLVM/MCS251/llvm/unittests/TargetParser/Host.cpp:586: Skipped
+
+
+[  SKIPPED ] HostTest.AIXHostVersionDetect (0 ms)
+[ RUN      ] HostTest.AIXTargetVersionDetect
+/mnt/c/Prj/LLVM/MCS251/llvm/unittests/TargetParser/Host.cpp:612: Skipped
+
+
+[  SKIPPED ] HostTest.AIXTargetVersionDetect (0 ms)
+[ RUN      ] HostTest.AIXHostCPUDetect
+/mnt/c/Prj/LLVM/MCS251/llvm/unittests/TargetParser/Host.cpp:635: Skipped
+
+
+[  SKIPPED ] HostTest.AIXHostCPUDetect (0 ms)
+[----------] 5 tests from HostTest (0 ms total)
+
+[----------] 5 tests from NVPTXTargetParserTest
+[ RUN      ] NVPTXTargetParserTest.ParseArch
+[       OK ] NVPTXTargetParserTest.ParseArch (0 ms)
+[ RUN      ] NVPTXTargetParserTest.ArchNames
+[       OK ] NVPTXTargetParserTest.ArchNames (0 ms)
+[ RUN      ] NVPTXTargetParserTest.SmVersion
+[       OK ] NVPTXTargetParserTest.SmVersion (0 ms)
+[ RUN      ] NVPTXTargetParserTest.ArchSuffix
+[       OK ] NVPTXTargetParserTest.ArchSuffix (0 ms)
+[ RUN      ] NVPTXTargetParserTest.RoundTrip
+[       OK ] NVPTXTargetParserTest.RoundTrip (0 ms)
+[----------] 5 tests from NVPTXTargetParserTest (0 ms total)
+
+[----------] 12 tests from ParseNormalizedArchString
+[ RUN      ] ParseNormalizedArchString.RejectsInvalidChars
+[       OK ] ParseNormalizedArchString.RejectsInvalidChars (0 ms)
+[ RUN      ] ParseNormalizedArchString.RejectsInvalidBaseISA
+[       OK ] ParseNormalizedArchString.RejectsInvalidBaseISA (0 ms)
+[ RUN      ] ParseNormalizedArchString.RejectsMalformedInputs
+[       OK ] ParseNormalizedArchString.RejectsMalformedInputs (0 ms)
+[ RUN      ] ParseNormalizedArchString.RejectsOnlyVersion
+[       OK ] ParseNormalizedArchString.RejectsOnlyVersion (0 ms)
+[ RUN      ] ParseNormalizedArchString.RejectsBadZ
+[       OK ] ParseNormalizedArchString.RejectsBadZ (0 ms)
+[ RUN      ] ParseNormalizedArchString.RejectsBadS
+[       OK ] ParseNormalizedArchString.RejectsBadS (0 ms)
+[ RUN      ] ParseNormalizedArchString.RejectsBadX
+[       OK ] ParseNormalizedArchString.RejectsBadX (0 ms)
+[ RUN      ] ParseNormalizedArchString.DuplicateExtension
+[       OK ] ParseNormalizedArchString.DuplicateExtension (0 ms)
+[ RUN      ] ParseNormalizedArchString.AcceptsValidBaseISAsAndSetsXLen
+[       OK ] ParseNormalizedArchString.AcceptsValidBaseISAsAndSetsXLen (0 ms)
+[ RUN      ] ParseNormalizedArchString.AcceptsArbitraryExtensionsAndVersions
+[       OK ] ParseNormalizedArchString.AcceptsArbitraryExtensionsAndVersions (0 ms)
+[ RUN      ] ParseNormalizedArchString.UpdatesFLenMinVLenMaxELen
+[       OK ] ParseNormalizedArchString.UpdatesFLenMinVLenMaxELen (0 ms)
+[ RUN      ] ParseNormalizedArchString.AcceptsUnknownMultiletter
+[       OK ] ParseNormalizedArchString.AcceptsUnknownMultiletter (0 ms)
+[----------] 12 tests from ParseNormalizedArchString (0 ms total)
+
+[----------] 36 tests from ParseArchString
+[ RUN      ] ParseArchString.RejectsInvalidChars
+[       OK ] ParseArchString.RejectsInvalidChars (0 ms)
+[ RUN      ] ParseArchString.RejectsInvalidBaseISA
+[       OK ] ParseArchString.RejectsInvalidBaseISA (0 ms)
+[ RUN      ] ParseArchString.RejectsInvalidYPosition
+[       OK ] ParseArchString.RejectsInvalidYPosition (0 ms)
+[ RUN      ] ParseArchString.MissingBaseISA
+[       OK ] ParseArchString.MissingBaseISA (0 ms)
+[ RUN      ] ParseArchString.RejectsUnsupportedBaseISA
+[       OK ] ParseArchString.RejectsUnsupportedBaseISA (0 ms)
+[ RUN      ] ParseArchString.AcceptsSupportedBaseISAsAndSetsXLenAndFLen
+[       OK ] ParseArchString.AcceptsSupportedBaseISAsAndSetsXLenAndFLen (0 ms)
+[ RUN      ] ParseArchString.RejectsUnrecognizedExtensionNamesByDefault
+[       OK ] ParseArchString.RejectsUnrecognizedExtensionNamesByDefault (0 ms)
+[ RUN      ] ParseArchString.AcceptsVersionInLongOrShortForm
+[       OK ] ParseArchString.AcceptsVersionInLongOrShortForm (0 ms)
+[ RUN      ] ParseArchString.RejectsUnrecognizedExtensionVersionsByDefault
+[       OK ] ParseArchString.RejectsUnrecognizedExtensionVersionsByDefault (0 ms)
+[ RUN      ] ParseArchString.AcceptsUnderscoreSplittingExtensions
+[       OK ] ParseArchString.AcceptsUnderscoreSplittingExtensions (0 ms)
+[ RUN      ] ParseArchString.AcceptsRelaxSingleLetterExtensions
+[       OK ] ParseArchString.AcceptsRelaxSingleLetterExtensions (0 ms)
+[ RUN      ] ParseArchString.AcceptsRelaxMixedLetterExtensions
+[       OK ] ParseArchString.AcceptsRelaxMixedLetterExtensions (0 ms)
+[ RUN      ] ParseArchString.AcceptsAmbiguousFromRelaxExtensions
+[       OK ] ParseArchString.AcceptsAmbiguousFromRelaxExtensions (0 ms)
+[ RUN      ] ParseArchString.RejectsRelaxExtensionsNotStartWithEorIorG
+[       OK ] ParseArchString.RejectsRelaxExtensionsNotStartWithEorIorG (0 ms)
+[ RUN      ] ParseArchString.RejectsMultiLetterExtensionFollowBySingleLetterExtensions
+[       OK ] ParseArchString.RejectsMultiLetterExtensionFollowBySingleLetterExtensions (0 ms)
+[ RUN      ] ParseArchString.RejectsDoubleOrTrailingUnderscore
+[       OK ] ParseArchString.RejectsDoubleOrTrailingUnderscore (0 ms)
+[ RUN      ] ParseArchString.RejectsDuplicateExtensionNames
+[       OK ] ParseArchString.RejectsDuplicateExtensionNames (0 ms)
+[ RUN      ] ParseArchString.RejectsExperimentalExtensionsIfNotEnableExperimentalExtension
+[       OK ] ParseArchString.RejectsExperimentalExtensionsIfNotEnableExperimentalExtension (0 ms)
+[ RUN      ] ParseArchString.AcceptsExperimentalExtensionsIfEnableExperimentalExtension
+[       OK ] ParseArchString.AcceptsExperimentalExtensionsIfEnableExperimentalExtension (0 ms)
+[ RUN      ] ParseArchString.RequiresExplicitVersionNumberForExperimentalExtensionByDefault
+[       OK ] ParseArchString.RequiresExplicitVersionNumberForExperimentalExtensionByDefault (0 ms)
+[ RUN      ] ParseArchString.AcceptsUnrecognizedVersionIfNotExperimentalExtensionVersionCheck
+[       OK ] ParseArchString.AcceptsUnrecognizedVersionIfNotExperimentalExtensionVersionCheck (0 ms)
+[ RUN      ] ParseArchString.RejectsUnrecognizedVersionForExperimentalExtension
+[       OK ] ParseArchString.RejectsUnrecognizedVersionForExperimentalExtension (0 ms)
+[ RUN      ] ParseArchString.RejectsExtensionVersionForG
+[       OK ] ParseArchString.RejectsExtensionVersionForG (0 ms)
+[ RUN      ] ParseArchString.AddsImpliedExtensions
+[       OK ] ParseArchString.AddsImpliedExtensions (0 ms)
+[ RUN      ] ParseArchString.RejectsConflictingExtensions
+[       OK ] ParseArchString.RejectsConflictingExtensions (0 ms)
+[ RUN      ] ParseArchString.MissingDepency
+[       OK ] ParseArchString.MissingDepency (0 ms)
+[ RUN      ] ParseArchString.RejectsUnrecognizedProfileNames
+[       OK ] ParseArchString.RejectsUnrecognizedProfileNames (0 ms)
+[ RUN      ] ParseArchString.RejectsProfilesWithUnseparatedExtraExtensions
+[       OK ] ParseArchString.RejectsProfilesWithUnseparatedExtraExtensions (0 ms)
+[ RUN      ] ParseArchString.AcceptsBareProfileNames
+[       OK ] ParseArchString.AcceptsBareProfileNames (0 ms)
+[ RUN      ] ParseArchString.RejectsProfilesWithAdditionalExtensionsGivenAlreadyInProfile
+[       OK ] ParseArchString.RejectsProfilesWithAdditionalExtensionsGivenAlreadyInProfile (0 ms)
+[ RUN      ] ParseArchString.RejectsExperimentalProfilesIfEnableExperimentalExtensionsNotSet
+[       OK ] ParseArchString.RejectsExperimentalProfilesIfEnableExperimentalExtensionsNotSet (0 ms)
+[ RUN      ] ParseArchString.ZceImplication
+[       OK ] ParseArchString.ZceImplication (0 ms)
+[ RUN      ] ParseArchString.ZcaImpliesC
+[       OK ] ParseArchString.ZcaImpliesC (0 ms)
+[ RUN      ] ParseArchString.RVYZcaImpliesC
+[       OK ] ParseArchString.RVYZcaImpliesC (0 ms)
+[ RUN      ] ParseArchString.RVYFeatureImplicationC
+[       OK ] ParseArchString.RVYFeatureImplicationC (0 ms)
+[ RUN      ] ParseArchString.ZcaZcbZcmpZcmtImpliesZce
+[       OK ] ParseArchString.ZcaZcbZcmpZcmtImpliesZce (0 ms)
+[----------] 36 tests from ParseArchString (2 ms total)
+
+[----------] 1 test from ParseArchSTring
+[ RUN      ] ParseArchSTring.AcceptsProfileNamesWithSeparatedAdditionalExtensions
+[       OK ] ParseArchSTring.AcceptsProfileNamesWithSeparatedAdditionalExtensions (0 ms)
+[----------] 1 test from ParseArchSTring (0 ms total)
+
+[----------] 4 tests from ToFeatures
+[ RUN      ] ToFeatures.IIsDroppedAndExperimentalExtensionsArePrefixed
+[       OK ] ToFeatures.IIsDroppedAndExperimentalExtensionsArePrefixed (0 ms)
+[ RUN      ] ToFeatures.UnsupportedExtensionsAreDropped
+[       OK ] ToFeatures.UnsupportedExtensionsAreDropped (0 ms)
+[ RUN      ] ToFeatures.UnsupportedExtensionsAreKeptIfIgnoreUnknownIsFalse
+[       OK ] ToFeatures.UnsupportedExtensionsAreKeptIfIgnoreUnknownIsFalse (0 ms)
+[ RUN      ] ToFeatures.AddAllExtensionsAddsNegativeExtensions
+[       OK ] ToFeatures.AddAllExtensionsAddsNegativeExtensions (0 ms)
+[----------] 4 tests from ToFeatures (0 ms total)
+
+[----------] 1 test from OrderedExtensionMap
+[ RUN      ] OrderedExtensionMap.ExtensionsAreCorrectlyOrdered
+[       OK ] OrderedExtensionMap.ExtensionsAreCorrectlyOrdered (0 ms)
+[----------] 1 test from OrderedExtensionMap (0 ms total)
+
+[----------] 1 test from ComputeDefaultABI
+[ RUN      ] ComputeDefaultABI.SelectsExpectedABI
+[       OK ] ComputeDefaultABI.SelectsExpectedABI (0 ms)
+[----------] 1 test from ComputeDefaultABI (0 ms total)
+
+[----------] 1 test from isSupportedExtensionWithVersion
+[ RUN      ] isSupportedExtensionWithVersion.AcceptsSingleExtensionWithVersion
+[       OK ] isSupportedExtensionWithVersion.AcceptsSingleExtensionWithVersion (0 ms)
+[----------] 1 test from isSupportedExtensionWithVersion (0 ms total)
+
+[----------] 1 test from getTargetFeatureForExtension
+[ RUN      ] getTargetFeatureForExtension.RetrieveTargetFeatureFromOneExt
+[       OK ] getTargetFeatureForExtension.RetrieveTargetFeatureFromOneExt (0 ms)
+[----------] 1 test from getTargetFeatureForExtension (0 ms total)
+
+[----------] 1 test from RiscvExtensionsHelp
+[ RUN      ] RiscvExtensionsHelp.CheckExtensions
+[       OK ] RiscvExtensionsHelp.CheckExtensions (0 ms)
+[----------] 1 test from RiscvExtensionsHelp (0 ms total)
+
+[----------] 2 tests from RISCVVType
+[ RUN      ] RISCVVType.CheckSameRatioLMUL
+[       OK ] RISCVVType.CheckSameRatioLMUL (0 ms)
+[ RUN      ] RISCVVType.IMEVTypeFields
+[       OK ] RISCVVType.IMEVTypeFields (0 ms)
+[----------] 2 tests from RISCVVType (0 ms total)
+
+[----------] 6 tests from RISCVTuneFeature
+[ RUN      ] RISCVTuneFeature.AllTuneFeatures
+[       OK ] RISCVTuneFeature.AllTuneFeatures (0 ms)
+[ RUN      ] RISCVTuneFeature.LegalTuneFeatureStrings
+[       OK ] RISCVTuneFeature.LegalTuneFeatureStrings (0 ms)
+[ RUN      ] RISCVTuneFeature.IgnoreUnrecognizedTuneFeature
+[       OK ] RISCVTuneFeature.IgnoreUnrecognizedTuneFeature (0 ms)
+[ RUN      ] RISCVTuneFeature.DuplicatedFeatures
+[       OK ] RISCVTuneFeature.DuplicatedFeatures (0 ms)
+[ RUN      ] RISCVTuneFeature.ProcConfigurableFeatures
+[       OK ] RISCVTuneFeature.ProcConfigurableFeatures (0 ms)
+[ RUN      ] RISCVTuneFeature.AllProcConfigurableFeatures
+[       OK ] RISCVTuneFeature.AllProcConfigurableFeatures (0 ms)
+[----------] 6 tests from RISCVTuneFeature (0 ms total)
+
+[----------] 1 test from FeatureBitsetTest
+[ RUN      ] FeatureBitsetTest.Iterator
+[       OK ] FeatureBitsetTest.Iterator (0 ms)
+[----------] 1 test from FeatureBitsetTest (0 ms total)
+
+[----------] 31 tests from TripleTest
+[ RUN      ] TripleTest.BasicParsing
+[       OK ] TripleTest.BasicParsing (0 ms)
+[ RUN      ] TripleTest.ParsedIDs
+[       OK ] TripleTest.ParsedIDs (0 ms)
+[ RUN      ] TripleTest.EnumConstructor
+[       OK ] TripleTest.EnumConstructor (0 ms)
+[ RUN      ] TripleTest.DefaultFloatABI
+[       OK ] TripleTest.DefaultFloatABI (0 ms)
+[ RUN      ] TripleTest.DefaultLongDoubleFormat
+[       OK ] TripleTest.DefaultLongDoubleFormat (0 ms)
+[ RUN      ] TripleTest.Normalization
+[       OK ] TripleTest.Normalization (25 ms)
+[ RUN      ] TripleTest.MutateName
+[       OK ] TripleTest.MutateName (0 ms)
+[ RUN      ] TripleTest.BitWidthChecks
+[       OK ] TripleTest.BitWidthChecks (0 ms)
+[ RUN      ] TripleTest.BitWidthArchVariants
+[       OK ] TripleTest.BitWidthArchVariants (0 ms)
+[ RUN      ] TripleTest.EndianArchVariants
+[       OK ] TripleTest.EndianArchVariants (0 ms)
+[ RUN      ] TripleTest.XROS
+[       OK ] TripleTest.XROS (0 ms)
+[ RUN      ] TripleTest.BridgeOS
+[       OK ] TripleTest.BridgeOS (0 ms)
+[ RUN      ] TripleTest.getOSVersion
+[       OK ] TripleTest.getOSVersion (0 ms)
+[ RUN      ] TripleTest.getEnvironmentVersion
+[       OK ] TripleTest.getEnvironmentVersion (0 ms)
+[ RUN      ] TripleTest.isMacOSVersionLT
+[       OK ] TripleTest.isMacOSVersionLT (0 ms)
+[ RUN      ] TripleTest.isMacOSVersionGE
+[       OK ] TripleTest.isMacOSVersionGE (0 ms)
+[ RUN      ] TripleTest.CanonicalizeOSVersion
+[       OK ] TripleTest.CanonicalizeOSVersion (0 ms)
+[ RUN      ] TripleTest.CheckValidOSVersion
+[       OK ] TripleTest.CheckValidOSVersion (0 ms)
+[ RUN      ] TripleTest.FileFormat
+[       OK ] TripleTest.FileFormat (0 ms)
+[ RUN      ] TripleTest.DefaultExceptionHandling
+[       OK ] TripleTest.DefaultExceptionHandling (0 ms)
+[ RUN      ] TripleTest.NormalizeWindows
+[       OK ] TripleTest.NormalizeWindows (0 ms)
+[ RUN      ] TripleTest.NormalizeAndroid
+[       OK ] TripleTest.NormalizeAndroid (0 ms)
+[ RUN      ] TripleTest.NormalizeARM
+[       OK ] TripleTest.NormalizeARM (0 ms)
+[ RUN      ] TripleTest.ParseARMArch
+[       OK ] TripleTest.ParseARMArch (0 ms)
+[ RUN      ] TripleTest.isArmT32
+[       OK ] TripleTest.isArmT32 (0 ms)
+[ RUN      ] TripleTest.isArmMClass
+[       OK ] TripleTest.isArmMClass (0 ms)
+[ RUN      ] TripleTest.DXILNormaizeWithVersion
+[       OK ] TripleTest.DXILNormaizeWithVersion (0 ms)
+[ RUN      ] TripleTest.isCompatibleWith
+[       OK ] TripleTest.isCompatibleWith (0 ms)
+[ RUN      ] TripleTest.Merge
+[       OK ] TripleTest.Merge (0 ms)
+[ RUN      ] TripleTest.WindowsOrUEFI
+[       OK ] TripleTest.WindowsOrUEFI (0 ms)
+[ RUN      ] TripleTest.DefaultWCharSize
+[       OK ] TripleTest.DefaultWCharSize (0 ms)
+[----------] 31 tests from TripleTest (26 ms total)
+
+[----------] 4 tests from DataLayoutTest
+[ RUN      ] DataLayoutTest.MCS251
+[       OK ] DataLayoutTest.MCS251 (0 ms)
+[ RUN      ] DataLayoutTest.UEFI
+[       OK ] DataLayoutTest.UEFI (0 ms)
+[ RUN      ] DataLayoutTest.NVPTX
+[       OK ] DataLayoutTest.NVPTX (0 ms)
+[ RUN      ] DataLayoutTest.CheriRISCV32
+[       OK ] DataLayoutTest.CheriRISCV32 (0 ms)
+[----------] 4 tests from DataLayoutTest (0 ms total)
+
+[----------] 145 tests from CSKYCPUTests/CSKYCPUTestFixture
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/0
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/0 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/1
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/1 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/2
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/2 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/3
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/3 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/4
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/4 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/5
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/5 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/6
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/6 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/7
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/7 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/8
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/8 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/9
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/9 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/10
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/10 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/11
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/11 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/12
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/12 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/13
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/13 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/14
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/14 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/15
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/15 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/16
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/16 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/17
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/17 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/18
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/18 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/19
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/19 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/20
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/20 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/21
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/21 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/22
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/22 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/23
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/23 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/24
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/24 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/25
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/25 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/26
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/26 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/27
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/27 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/28
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/28 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/29
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/29 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/30
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/30 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/31
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/31 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/32
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/32 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/33
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/33 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/34
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/34 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/35
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/35 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/36
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/36 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/37
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/37 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/38
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/38 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/39
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/39 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/40
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/40 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/41
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/41 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/42
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/42 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/43
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/43 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/44
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/44 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/45
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/45 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/46
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/46 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/47
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/47 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/48
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/48 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/49
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/49 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/50
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/50 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/51
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/51 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/52
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/52 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/53
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/53 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/54
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/54 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/55
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/55 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/56
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/56 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/57
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/57 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/58
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/58 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/59
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/59 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/60
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/60 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/61
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/61 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/62
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/62 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/63
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/63 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/64
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/64 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/65
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/65 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/66
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/66 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/67
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/67 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/68
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/68 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/69
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/69 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/70
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/70 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/71
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/71 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/72
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/72 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/73
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/73 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/74
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/74 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/75
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/75 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/76
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/76 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/77
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/77 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/78
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/78 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/79
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/79 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/80
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/80 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/81
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/81 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/82
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/82 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/83
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/83 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/84
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/84 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/85
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/85 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/86
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/86 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/87
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/87 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/88
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/88 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/89
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/89 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/90
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/90 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/91
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/91 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/92
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/92 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/93
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/93 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/94
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/94 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/95
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/95 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/96
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/96 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/97
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/97 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/98
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/98 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/99
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/99 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/100
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/100 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/101
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/101 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/102
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/102 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/103
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/103 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/104
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/104 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/105
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/105 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/106
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/106 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/107
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/107 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/108
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/108 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/109
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/109 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/110
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/110 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/111
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/111 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/112
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/112 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/113
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/113 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/114
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/114 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/115
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/115 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/116
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/116 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/117
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/117 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/118
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/118 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/119
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/119 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/120
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/120 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/121
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/121 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/122
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/122 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/123
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/123 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/124
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/124 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/125
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/125 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/126
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/126 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/127
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/127 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/128
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/128 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/129
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/129 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/130
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/130 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/131
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/131 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/132
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/132 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/133
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/133 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/134
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/134 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/135
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/135 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/136
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/136 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/137
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/137 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/138
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/138 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/139
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/139 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/140
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/140 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/141
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/141 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/142
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/142 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/143
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/143 (0 ms)
+[ RUN      ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/144
+[       OK ] CSKYCPUTests/CSKYCPUTestFixture.CSKYCPUTests/144 (0 ms)
+[----------] 145 tests from CSKYCPUTests/CSKYCPUTestFixture (0 ms total)
+
+[----------] 44 tests from ARMCPUTestsPart1/ARMCPUTestFixture
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/invalid
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/invalid (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/generic
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/generic (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm8
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm8 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm810
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm810 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/strongarm
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/strongarm (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/strongarm110
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/strongarm110 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/strongarm1100
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/strongarm1100 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/strongarm1110
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/strongarm1110 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm7tdmi
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm7tdmi (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm7tdmi_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm7tdmi_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm710t
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm710t (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm720t
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm720t (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm9
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm9 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm9tdmi
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm9tdmi (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm920
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm920 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm920t
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm920t (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm922t
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm922t (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm940t
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm940t (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/ep9312
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/ep9312 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm10tdmi
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm10tdmi (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1020t
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1020t (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm9e
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm9e (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm946e_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm946e_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm966e_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm966e_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm968e_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm968e_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm10e
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm10e (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1020e
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1020e (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1022e
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1022e (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm926ej_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm926ej_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1136j_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1136j_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1136jf_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1136jf_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1176jz_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1176jz_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/mpcore
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/mpcore (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/mpcorenovfp
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/mpcorenovfp (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1176jzf_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1176jzf_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1156t2_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1156t2_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1156t2f_s
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/arm1156t2f_s (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_m0
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_m0 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_m0plus
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_m0plus (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_m1
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_m1 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/sc000
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/sc000 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_a5
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_a5 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_a7
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_a7 (0 ms)
+[ RUN      ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_a8
+[       OK ] ARMCPUTestsPart1/ARMCPUTestFixture.ARMCPUTests/cortex_a8 (0 ms)
+[----------] 44 tests from ARMCPUTestsPart1/ARMCPUTestFixture (0 ms total)
+
+[----------] 52 tests from ARMCPUTestsPart2/ARMCPUTestFixture
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a9
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a9 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a12
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a12 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a15
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a15 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a17
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a17 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/krait
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/krait (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r4
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r4 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r4f
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r4f (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r5
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r5 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r7
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r7 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r8
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r8 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r52
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r52 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r52plus
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_r52plus (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/sc300
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/sc300 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m3
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m3 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m4
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m4 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m7
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m7 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a32
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a32 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a35
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a35 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a53
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a53 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a55
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a55 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a57
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a57 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a72
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a72 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a73
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a73 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a75
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a75 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a76
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a76 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a76ae
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a76ae (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a78c
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a78c (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a510
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a510 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a710
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a710 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a77
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a77 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a78
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a78 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a78ae
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_a78ae (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_x1
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_x1 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_x1c
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_x1c (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/neoverse_n1
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/neoverse_n1 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/neoverse_n2
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/neoverse_n2 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/neoverse_v1
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/neoverse_v1 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cyclone
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cyclone (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/exynos_m3
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/exynos_m3 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/exynos_m4
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/exynos_m4 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/exynos_m5
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/exynos_m5 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m23
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m23 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m33
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m33 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/star_mc1
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/star_mc1 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m35p
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m35p (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m55
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m55 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m85
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m85 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m52
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/cortex_m52 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/star_mc3
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/star_mc3 (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/iwmmxt
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/iwmmxt (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/xscale
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/xscale (0 ms)
+[ RUN      ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/swift
+[       OK ] ARMCPUTestsPart2/ARMCPUTestFixture.ARMCPUTests/swift (0 ms)
+[----------] 52 tests from ARMCPUTestsPart2/ARMCPUTestFixture (0 ms total)
+
+[----------] 98 tests from AArch64CPUTests/AArch64CPUTestFixture
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a34
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a34 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a35
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a35 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a320
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a320 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a53
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a53 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a55
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a55 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a510
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a510 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a520
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a520 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a520ae
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a520ae (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a57
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a57 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a65
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a65 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a65ae
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a65ae (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a72
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a72 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a73
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a73 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a75
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a75 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a76
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a76 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a76ae
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a76ae (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a77
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a77 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a78
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a78 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a78ae
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a78ae (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a78c
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a78c (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a710
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a710 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a715
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a715 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a720
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a720 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a720ae
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a720ae (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a725
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_a725 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_v1
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_v1 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_v2
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_v2 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_v3
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_v3 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_v3ae
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_v3ae (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/armagicpu
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/armagicpu (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_r82
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_r82 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_r82ae
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_r82ae (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x1
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x1 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x1c
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x1c (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x2
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x2 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x3
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x3 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x4
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x4 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x925
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cortex_x925 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/c1_nano
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/c1_nano (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/c1_premium
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/c1_premium (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/c1_pro
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/c1_pro (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/c1_ultra
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/c1_ultra (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cyclone
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/cyclone (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a7
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a7 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a8
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a8 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a9
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a9 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a10
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a10 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a11
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a11 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a12
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a12 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s4
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s4 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s5
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s5 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a13
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a13 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s6
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s6 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s7
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s7 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s8
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s8 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a14
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a14 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_m1
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_m1 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a15
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a15 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_m2
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_m2 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a16
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a16 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_m3
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_m3 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s9
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s9 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s10
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_s10 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a17
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a17 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_m4
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_m4 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a18
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_a18 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_m5
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/apple_m5 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/exynos_m3
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/exynos_m3 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/exynos_m4
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/exynos_m4 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/exynos_m5
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/exynos_m5 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/falkor
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/falkor (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/kryo
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/kryo (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_e1
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_e1 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_n1
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_n1 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_n2
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_n2 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_n3
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_n3 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/ampere1
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/ampere1 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/ampere1a
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/ampere1a (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/ampere1b
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/ampere1b (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/ampere1c
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/ampere1c (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_512tvb
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/neoverse_512tvb (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderx2t99
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderx2t99 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderx3t110
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderx3t110 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderx
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderx (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderxt81
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderxt81 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderxt83
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderxt83 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderxt88
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/thunderxt88 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/tsv110
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/tsv110 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/hip12
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/hip12 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/a64fx
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/a64fx (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/fujitsu_monaka
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/fujitsu_monaka (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/carmel
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/carmel (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/gb10
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/gb10 (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/grace
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/grace (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/olympus
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/olympus (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/rigel
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/rigel (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/saphira
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/saphira (0 ms)
+[ RUN      ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/oryon_1
+[       OK ] AArch64CPUTests/AArch64CPUTestFixture.testAArch64CPU/oryon_1 (0 ms)
+[----------] 98 tests from AArch64CPUTests/AArch64CPUTestFixture (0 ms total)
+
+[----------] 9 tests from AArch64CPUAliasTests/AArch64CPUAliasTestFixture
+[ RUN      ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/neoverse_n2
+[       OK ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/neoverse_n2 (0 ms)
+[ RUN      ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a7
+[       OK ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a7 (0 ms)
+[ RUN      ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a12
+[       OK ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a12 (0 ms)
+[ RUN      ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a13
+[       OK ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a13 (0 ms)
+[ RUN      ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a14
+[       OK ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a14 (0 ms)
+[ RUN      ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a15
+[       OK ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a15 (0 ms)
+[ RUN      ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a16
+[       OK ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_a16 (0 ms)
+[ RUN      ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_m4
+[       OK ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_m4 (0 ms)
+[ RUN      ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_m5
+[       OK ] AArch64CPUAliasTests/AArch64CPUAliasTestFixture.testCPUAlias/apple_m5 (0 ms)
+[----------] 9 tests from AArch64CPUAliasTests/AArch64CPUAliasTestFixture (0 ms total)
+
+[----------] 172 tests from AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/0
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/0 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/1
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/1 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/2
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/2 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/3
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/3 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/4
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/4 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/5
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/5 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/6
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/6 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/7
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/7 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/8
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/8 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/9
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/9 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/10
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/10 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/11
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/11 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/12
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/12 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/13
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/13 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/14
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/14 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/15
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/15 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/16
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/16 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/17
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/17 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/18
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/18 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/19
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/19 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/20
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/20 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/21
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/21 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/22
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/22 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/23
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/23 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/24
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/24 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/25
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/25 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/26
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/26 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/27
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/27 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/28
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/28 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/29
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/29 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/30
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/30 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/31
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/31 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/32
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/32 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/33
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/33 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/34
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/34 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/35
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/35 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/36
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/36 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/37
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/37 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/38
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/38 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/39
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/39 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/40
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/40 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/41
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/41 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/42
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/42 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/43
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/43 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/44
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/44 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/45
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/45 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/46
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/46 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/47
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/47 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/48
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/48 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/49
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/49 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/50
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/50 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/51
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/51 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/52
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/52 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/53
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/53 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/54
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/54 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/55
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/55 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/56
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/56 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/57
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/57 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/58
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/58 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/59
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/59 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/60
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/60 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/61
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/61 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/62
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/62 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/63
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/63 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/64
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/64 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/65
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/65 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/66
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/66 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/67
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/67 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/68
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/68 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/69
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/69 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/70
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/70 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/71
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/71 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/72
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/72 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/73
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/73 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/74
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/74 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/75
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/75 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/76
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/76 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/77
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/77 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/78
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/78 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/79
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/79 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/80
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/80 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/81
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/81 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/82
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/82 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/83
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/83 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/84
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/84 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/85
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/85 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/86
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/86 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/87
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/87 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/88
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/88 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/89
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/89 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/90
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/90 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/91
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/91 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/92
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/92 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/93
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/93 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/94
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/94 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/95
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/95 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/96
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/96 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/97
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/97 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/98
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/98 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/99
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/99 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/100
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/100 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/101
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/101 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/102
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/102 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/103
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/103 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/104
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/104 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/105
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/105 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/106
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/106 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/107
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/107 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/108
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/108 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/109
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/109 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/110
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/110 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/111
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/111 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/112
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/112 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/113
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/113 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/114
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/114 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/115
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/115 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/116
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/116 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/117
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/117 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/118
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/118 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/119
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/119 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/120
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/120 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/121
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/121 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/122
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/122 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/123
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/123 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/124
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/124 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/125
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/125 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/126
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/126 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/127
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/127 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/128
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/128 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/129
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/129 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/130
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/130 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/131
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/131 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/132
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/132 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/133
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/133 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/134
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/134 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/135
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/135 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/136
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/136 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/137
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/137 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/138
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/138 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/139
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/139 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/140
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/140 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/141
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/141 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/142
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/142 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/143
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/143 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/144
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/144 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/145
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/145 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/146
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/146 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/147
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/147 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/148
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/148 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/149
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/149 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/150
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/150 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/151
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/151 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/152
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/152 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/153
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/153 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/154
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/154 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/155
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/155 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/156
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/156 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/157
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/157 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/158
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/158 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/159
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/159 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/160
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/160 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/161
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/161 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/162
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/162 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/163
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/163 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/164
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/164 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/165
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/165 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/166
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/166 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/167
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/167 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/168
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/168 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/169
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/169 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/170
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/170 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/171
+[       OK ] AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture.AArch64ExtensionDependenciesBaseArch/171 (0 ms)
+[----------] 172 tests from AArch64ExtensionDependenciesBaseArch/AArch64ExtensionDependenciesBaseArchTestFixture (2 ms total)
+
+[----------] 4 tests from AArch64ExtensionDependenciesBaseCPU/AArch64ExtensionDependenciesBaseCPUTestFixture
+[ RUN      ] AArch64ExtensionDependenciesBaseCPU/AArch64ExtensionDependenciesBaseCPUTestFixture.AArch64ExtensionDependenciesBaseCPU/0
+[       OK ] AArch64ExtensionDependenciesBaseCPU/AArch64ExtensionDependenciesBaseCPUTestFixture.AArch64ExtensionDependenciesBaseCPU/0 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseCPU/AArch64ExtensionDependenciesBaseCPUTestFixture.AArch64ExtensionDependenciesBaseCPU/1
+[       OK ] AArch64ExtensionDependenciesBaseCPU/AArch64ExtensionDependenciesBaseCPUTestFixture.AArch64ExtensionDependenciesBaseCPU/1 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseCPU/AArch64ExtensionDependenciesBaseCPUTestFixture.AArch64ExtensionDependenciesBaseCPU/2
+[       OK ] AArch64ExtensionDependenciesBaseCPU/AArch64ExtensionDependenciesBaseCPUTestFixture.AArch64ExtensionDependenciesBaseCPU/2 (0 ms)
+[ RUN      ] AArch64ExtensionDependenciesBaseCPU/AArch64ExtensionDependenciesBaseCPUTestFixture.AArch64ExtensionDependenciesBaseCPU/3
+[       OK ] AArch64ExtensionDependenciesBaseCPU/AArch64ExtensionDependenciesBaseCPUTestFixture.AArch64ExtensionDependenciesBaseCPU/3 (0 ms)
+[----------] 4 tests from AArch64ExtensionDependenciesBaseCPU/AArch64ExtensionDependenciesBaseCPUTestFixture (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 700 tests from 26 test suites ran. (36 ms total)
+[  PASSED  ] 696 tests.
+[  SKIPPED ] 4 tests, listed below:
+[  SKIPPED ] HostTest.getMacOSHostVersion
+[  SKIPPED ] HostTest.AIXHostVersionDetect
+[  SKIPPED ] HostTest.AIXTargetVersionDetect
+[  SKIPPED ] HostTest.AIXHostCPUDetect

@@ -3955,6 +3955,15 @@ TEST(TripleTest, Merge) {
                 .merge(Triple(Triple::normalize("amdgpu9-amd-amdhsa"))));
 }
 
+TEST(DataLayoutTest, MCS251) {
+  Triple TT("mcs251-unknown-none");
+  EXPECT_FALSE(TT.isLittleEndian());
+  EXPECT_EQ(Triple::mcs251, TT.getBigEndianArchVariant().getArch());
+  EXPECT_EQ(Triple::UnknownArch, TT.getLittleEndianArchVariant().getArch());
+  EXPECT_EQ("E-m:e-p:32:8-i8:8-i16:8-i32:8-n8:16:32-S8",
+            TT.computeDataLayout());
+}
+
 TEST(DataLayoutTest, UEFI) {
   Triple TT = Triple("x86_64-unknown-uefi");
 

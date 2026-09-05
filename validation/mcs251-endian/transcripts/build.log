@@ -1,0 +1,31 @@
+ninja: Entering directory `/home/liu/build-mcs251'
+[1/30] Building CXX object lib/Extensions/CMakeFiles/LLVMExtensions.dir/Extensions.cpp.o
+[2/30] Building CXX object lib/TargetParser/CMakeFiles/LLVMTargetParser.dir/TargetDataLayout.cpp.o
+[3/30] Building CXX object lib/Target/MCS251/MCTargetDesc/CMakeFiles/LLVMMCS251Desc.dir/MCS251MCAsmInfo.cpp.o
+[4/30] Linking CXX static library lib/libLLVMExtensions.a
+[5/30] Building CXX object lib/TargetParser/CMakeFiles/LLVMTargetParser.dir/Triple.cpp.o
+[6/30] Linking CXX static library lib/libLLVMTargetParser.a
+[7/30] Linking CXX static library lib/libLLVMMCS251Desc.a
+[8/30] Building CXX object lib/Testing/Support/CMakeFiles/LLVMTestingSupport.dir/Error.cpp.o
+[9/30] Building CXX object third-party/unittest/CMakeFiles/llvm_gtest.dir/googlemock/src/gmock-all.cc.o
+[10/30] Building CXX object lib/Testing/Support/CMakeFiles/LLVMTestingSupport.dir/SupportHelpers.cpp.o
+[11/30] Building CXX object third-party/unittest/CMakeFiles/llvm_gtest_main.dir/UnitTestMain/TestMain.cpp.o
+[12/30] Building CXX object tools/opt/CMakeFiles/opt.dir/opt.cpp.o
+[13/30] Building CXX object third-party/unittest/CMakeFiles/llvm_gtest.dir/googletest/src/gtest-all.cc.o
+[14/30] Linking CXX static library lib/libllvm_gtest.a
+[15/30] Linking CXX static library lib/libLLVMTestingSupport.a
+[16/30] Linking CXX static library lib/libllvm_gtest_main.a
+[17/30] Building CXX object unittests/TargetParser/CMakeFiles/TargetParserTests.dir/AtomicScopeTest.cpp.o
+[18/30] Building CXX object tools/opt/CMakeFiles/LLVMOptDriver.dir/NewPMDriver.cpp.o
+[19/30] Building CXX object unittests/TargetParser/CMakeFiles/TargetParserTests.dir/Host.cpp.o
+[20/30] Building CXX object tools/opt/CMakeFiles/LLVMOptDriver.dir/optdriver.cpp.o
+[21/30] Linking CXX static library lib/libLLVMOptDriver.a
+[22/30] Building CXX object unittests/TargetParser/CMakeFiles/TargetParserTests.dir/CSKYTargetParserTest.cpp.o
+[23/30] Building CXX object unittests/TargetParser/CMakeFiles/TargetParserTests.dir/NVPTXTargetParserTest.cpp.o
+[24/30] Building CXX object unittests/TargetParser/CMakeFiles/TargetParserTests.dir/RISCVTargetParserTest.cpp.o
+[25/30] Linking CXX executable bin/llc
+[26/30] Linking CXX executable bin/opt
+[27/30] Building CXX object unittests/TargetParser/CMakeFiles/TargetParserTests.dir/RISCVISAInfoTest.cpp.o
+[28/30] Building CXX object unittests/TargetParser/CMakeFiles/TargetParserTests.dir/TargetParserTest.cpp.o
+[29/30] Building CXX object unittests/TargetParser/CMakeFiles/TargetParserTests.dir/TripleTest.cpp.o
+[30/30] Linking CXX executable unittests/TargetParser/TargetParserTests

@@ -2091,7 +2091,6 @@ Triple Triple::getBigEndianArchVariant() const {
   case Triple::kalimba:
   case Triple::loongarch32:
   case Triple::loongarch64:
-  case Triple::mcs251:
   case Triple::msp430:
   case Triple::nvptx64:
   case Triple::nvptx:
@@ -2168,6 +2167,7 @@ Triple Triple::getLittleEndianArchVariant() const {
   case Triple::sparcv9:
   case Triple::systemz:
   case Triple::m68k:
+  case Triple::mcs251:
 
   // ARM is intentionally unsupported here, changing the architecture would
   // drop any arch suffixes.
@@ -2232,7 +2232,6 @@ bool Triple::isLittleEndian() const {
   case Triple::loongarch64:
   case Triple::mips64el:
   case Triple::mipsel:
-  case Triple::mcs251:
   case Triple::msp430:
   case Triple::nvptx64:
   case Triple::nvptx:

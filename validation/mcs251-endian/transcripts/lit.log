@@ -1,0 +1,118 @@
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find lli in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-objcopy in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-strip in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-install-name-tool in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-bitcode-strip in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-extract-bundle-entry in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find split-file in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find dsymutil in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find lli in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find lli-child-target in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llubi in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-ar in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-as in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-addr2line in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-bcanalyzer in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-bitcode-strip in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-cas in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-cgdata in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-cov in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-ctxprof-util in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-cxxdump in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-cvtres in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-debuginfod-find in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-debuginfo-analyzer in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-diff in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-dis in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-dwarfdump in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-dwarfutil in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-dwp in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-dlltool in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-exegesis in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-extract in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-extract-bundle-entry in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-ir2vec in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-isel-fuzzer in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-ifs in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-install-name-tool in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-jitlink in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-opt-fuzzer in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-lib in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-link in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-lto in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-lto2 in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-mc in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-mca in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-modextract in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-nm in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-objcopy in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-objdump in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-otool in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-pdbutil in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-profdata in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-profgen in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-ranlib in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-rc in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-readelf in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-rtdyld in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-size in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-split in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-stress in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-strings in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-strip in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-readtapi in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-undname in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-windres in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-c-test in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-cxxfilt in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-xray in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find yaml2obj in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find obj2yaml in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find yaml-bench in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find verify-uselistorder in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-symbolizer in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find sancov in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find sanstats in /home/liu/build-mcs251/bin
+llvm-lit: /mnt/c/Prj/LLVM/MCS251/llvm/utils/lit/lit/llvm/subst.py:130: note: Did not find llvm-remarkutil in /home/liu/build-mcs251/bin
+-- Testing: 36 tests, 12 workers --
+PASS: LLVM :: CodeGen/MCS251/global-data-error.ll (1 of 36)
+PASS: LLVM :: CodeGen/MCS251/branch.ll (2 of 36)
+PASS: LLVM :: CodeGen/MCS251/branch-error-brcond.ll (3 of 36)
+PASS: LLVM :: CodeGen/MCS251/load.ll (4 of 36)
+PASS: LLVM :: CodeGen/MCS251/loadstore-error-i32-store.ll (5 of 36)
+PASS: LLVM :: CodeGen/MCS251/endian-prefix.ll (6 of 36)
+PASS: LLVM :: CodeGen/MCS251/args-error-multi.ll (7 of 36)
+PASS: LLVM :: CodeGen/MCS251/alu.ll (8 of 36)
+PASS: LLVM :: CodeGen/MCS251/call-error-multi-arg.ll (9 of 36)
+PASS: LLVM :: CodeGen/MCS251/args-error-varargs.ll (10 of 36)
+PASS: LLVM :: CodeGen/MCS251/endian-fold.ll (11 of 36)
+PASS: LLVM :: CodeGen/MCS251/loadstore-error-sextload.ll (12 of 36)
+PASS: LLVM :: CodeGen/MCS251/store.ll (13 of 36)
+PASS: LLVM :: CodeGen/MCS251/pointer-regressions.ll (14 of 36)
+PASS: LLVM :: CodeGen/MCS251/endian-memory.ll (15 of 36)
+PASS: LLVM :: CodeGen/MCS251/call-error-tail.ll (16 of 36)
+PASS: LLVM :: CodeGen/MCS251/i32.ll (17 of 36)
+PASS: LLVM :: CodeGen/MCS251/call.ll (18 of 36)
+PASS: LLVM :: CodeGen/MCS251/return-error-aggregate.ll (19 of 36)
+PASS: LLVM :: CodeGen/MCS251/loadstore-error-atomic.ll (20 of 36)
+PASS: LLVM :: CodeGen/MCS251/i32-compare.ll (21 of 36)
+PASS: LLVM :: CodeGen/MCS251/call-error-indirect.ll (22 of 36)
+PASS: LLVM :: CodeGen/MCS251/loadstore-error-i32-load.ll (23 of 36)
+PASS: LLVM :: CodeGen/MCS251/delay_ms.ll (24 of 36)
+PASS: LLVM :: CodeGen/MCS251/alloca.ll (25 of 36)
+PASS: LLVM :: CodeGen/MCS251/frame.ll (26 of 36)
+PASS: LLVM :: CodeGen/MCS251/return-error-multi-i32.ll (27 of 36)
+PASS: LLVM :: CodeGen/MCS251/pointer32.ll (28 of 36)
+PASS: LLVM :: CodeGen/MCS251/args.ll (29 of 36)
+PASS: LLVM :: CodeGen/MCS251/frame-o0.ll (30 of 36)
+PASS: LLVM :: CodeGen/MCS251/call-mir.ll (31 of 36)
+PASS: LLVM :: CodeGen/MCS251/asxxxx-header.ll (32 of 36)
+PASS: LLVM :: CodeGen/MCS251/branch-signed16.ll (33 of 36)
+PASS: LLVM :: CodeGen/MCS251/spill-across-call.ll (34 of 36)
+PASS: LLVM :: CodeGen/MCS251/asxxxx-obj.ll (35 of 36)
+PASS: LLVM :: CodeGen/MCS251/return.ll (36 of 36)
+
+Testing Time: 0.30s
+
+Total Discovered Tests: 36
+  Passed: 36 (100.00%)

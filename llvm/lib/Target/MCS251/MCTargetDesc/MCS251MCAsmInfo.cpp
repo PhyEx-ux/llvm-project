@@ -58,7 +58,13 @@ MCS251MCAsmInfo::MCS251MCAsmInfo(const Triple &TT,
   // Suppress .p2align/.align in function headers (see file comment).
   HasFunctionAlignment = false;
 
-  // ASxxxx data directives.
+  // Match the big-endian data layout and sdas251's MSB-first .word.
+  // ASxxxx has no .long/.quad: let MCAsmStreamer split wider constants
+  // into supported directives, most-significant piece first. This also
+  // applies to function prefix/prologue data, not just future globals.
+  IsLittleEndian = false;
   Data16bitsDirective = "\t.word\t";
+  Data32bitsDirective = nullptr;
+  Data64bitsDirective = nullptr;
   ZeroDirective = "\t.ds\t";
 }
