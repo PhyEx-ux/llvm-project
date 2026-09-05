@@ -1,14 +1,13 @@
-; RUN: not --crash llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -filetype=obj < %s 2>&1 | FileCheck %s
 
-; The ecall/eret ABI keeps no frame of its own (no return-address bookkeeping
-; beyond the hardware stack), so a tail call -- replacing the caller's own
-; return -- has no lowering here and is rejected explicitly.
-; (report_fatal_error aborts, hence --crash; lit pipelines are pipefail.)
+; Unlike optional tail hints, musttail cannot fall back to ecall/eret.
+; Reject it explicitly with exit 1 rather than a compiler crash.
 
 declare void @pv()
 
 define void @tc() {
-; CHECK: LLVM ERROR: MCS251: tail calls are not supported
+; CHECK: LLVM ERROR: MCS251: musttail calls are not supported
   musttail call void @pv()
   ret void
 }

@@ -10,6 +10,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
@@ -1572,8 +1573,11 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     report_fatal_error("minimal MCS251 backend does not support variadic "
                        "functions");
 
-  if (IsTailCall)
-    report_fatal_error("MCS251: tail calls are not supported");
+  if (CLI.CB && CLI.CB->isMustTailCall())
+    report_fatal_error("MCS251: musttail calls are not supported",
+                       /*gen_crash_diag=*/false);
+  // Ordinary tail hints, including calls without an IR CallBase, are optional.
+  IsTailCall = false;
 
   // Canonical function pointers use the same GPR32 values as data pointers.
   // ECALLr consumes the complete region-qualified address (not a WR offset).

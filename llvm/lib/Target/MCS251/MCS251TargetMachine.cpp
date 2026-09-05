@@ -40,6 +40,8 @@ MCS251TargetMachine::MCS251TargetMachine(
                                getEffectiveCodeModel(CM, CodeModel::Small), OL),
       TLOF(std::make_unique<TargetLoweringObjectFileELF>()),
       Subtarget(TT, std::string(CPU), std::string(FS), *this) {
+  // ASxxxx REL has no address-significance table; accept the flag as a no-op.
+  this->Options.EmitAddrsig = false;
   initAsmInfo();
 }
 

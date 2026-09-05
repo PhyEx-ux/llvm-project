@@ -5,17 +5,23 @@
 // RUN: not %clang --target=mcs251-unknown-none -### -c -fno-integrated-as %s 2>&1 | FileCheck %s --check-prefix=EXTERNAL-AS
 // RUN: %clang --target=mcs251-unknown-none -dM -E %s | FileCheck %s --check-prefix=MACROS
 // RUN: %clang --target=mcs251-unknown-none -fsyntax-only %s
-// RUN: %clang --target=mcs251-unknown-none -### -c %s 2>&1 | FileCheck %s --check-prefix=NO-ADDRSIG
-// RUN: not %clang --target=mcs251-unknown-none -### -c -faddrsig %s 2>&1 | FileCheck %s --check-prefix=ADDRSIG
+// RUN: %clang --target=mcs251-unknown-none -### -c %s 2>&1 | FileCheck %s --check-prefix=ADDRSIG --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -### -c -faddrsig %s 2>&1 | FileCheck %s --check-prefix=ADDRSIG --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -### -c -fno-addrsig %s 2>&1 | FileCheck %s --check-prefix=NO-ADDRSIG --implicit-check-not=error:
 
-// RUN: %clang --target=mcs251-unknown-none -### -O2 -c %s 2>&1 | FileCheck %s --check-prefix=NO-TAIL
-// RUN: not %clang --target=mcs251-unknown-none -### -O2 -c -foptimize-sibling-calls %s 2>&1 | FileCheck %s --check-prefix=TAIL
+// RUN: %clang --target=mcs251-unknown-none -### -O2 -c %s 2>&1 | FileCheck %s --check-prefix=TAIL --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -### -O2 -c -foptimize-sibling-calls %s 2>&1 | FileCheck %s --check-prefix=TAIL --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -### -O2 -c -fno-optimize-sibling-calls %s 2>&1 | FileCheck %s --check-prefix=NO-TAIL --implicit-check-not=error:
 
+// TAIL: "-cc1"
+// TAIL-NOT: "-fno-optimize-sibling-calls"
+// TAIL: "-faddrsig"
+// TAIL-NOT: "-fno-optimize-sibling-calls"
 // NO-TAIL: "-fno-optimize-sibling-calls"
-// TAIL: error: unsupported option '-foptimize-sibling-calls' for target 'mcs251-unknown-none'
+// ADDRSIG: "-cc1"
+// ADDRSIG: "-faddrsig"
 // NO-ADDRSIG: "-cc1"
 // NO-ADDRSIG-NOT: "-faddrsig"
-// ADDRSIG: error: unsupported option '-faddrsig' for target 'mcs251-unknown-none'
 
 // COMPILE: "-cc1" "-triple" "mcs251-unknown-none"
 // COMPILE-SAME: "-emit-obj"

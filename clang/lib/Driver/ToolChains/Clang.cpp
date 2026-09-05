@@ -6226,12 +6226,8 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   Args.addOptInFlag(CmdArgs, options::OPT_fforce_emit_vtables,
                     options::OPT_fno_force_emit_vtables);
   if (!Args.hasFlag(options::OPT_foptimize_sibling_calls,
-                    options::OPT_fno_optimize_sibling_calls,
-                    Triple.getArch() != llvm::Triple::mcs251))
+                    options::OPT_fno_optimize_sibling_calls, true))
     CmdArgs.push_back("-fno-optimize-sibling-calls");
-  else if (Triple.getArch() == llvm::Triple::mcs251)
-    D.Diag(diag::err_drv_unsupported_opt_for_target)
-        << "-foptimize-sibling-calls" << Triple.str();
   Args.addOptOutFlag(CmdArgs, options::OPT_fescaping_block_tail_calls,
                      options::OPT_fno_escaping_block_tail_calls);
 
@@ -8574,17 +8570,8 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                        !TC.getTriple().isPS4() && !TC.getTriple().isVE() &&
                        !TC.getTriple().isOSNetBSD() &&
                        !Distro(D.getVFS(), TC.getTriple()).IsGentoo() &&
-                       !TC.getTriple().isAndroid() &&
-                       TC.getTriple().getArch() != llvm::Triple::mcs251 &&
-                       TC.useIntegratedAs())) {
-    // MCS251 uses ASxxxx REL despite the triple's internal ELF classification.
-    // Neither sdas251 nor the REL writer implements ELF address-significance.
-    if (Triple.getArch() == llvm::Triple::mcs251)
-      D.Diag(diag::err_drv_unsupported_opt_for_target)
-          << "-faddrsig" << Triple.str();
-    else
-      CmdArgs.push_back("-faddrsig");
-  }
+                       !TC.getTriple().isAndroid() && TC.useIntegratedAs()))
+    CmdArgs.push_back("-faddrsig");
 
   const bool HasDefaultDwarf2CFIASM =
       (Triple.isOSBinFormatELF() || Triple.isOSBinFormatMachO()) &&
