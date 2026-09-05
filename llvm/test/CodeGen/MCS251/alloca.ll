@@ -15,7 +15,7 @@
 declare i8 @f8a()
 
 define i16 @dyn_alloca(i16 %n) {
-; CHECK-LABEL: dyn_alloca:
+; CHECK-LABEL: _dyn_alloca:
 ; CHECK: push dr16
 ; CHECK: mov dr16, dr60
 ; read SPX (0x81/0x85), add the size, write SPX back (high byte first so a
@@ -44,10 +44,10 @@ entry:
 ; A dynamic alloca mixed with a call: the callee gets an exactly restored
 ; SPX (the anchor), the caller's own frame survives the nested call.
 define i8 @dyn_alloca_call(i16 %n) {
-; CHECK-LABEL: dyn_alloca_call:
+; CHECK-LABEL: _dyn_alloca_call:
 ; CHECK: push dr16
 ; CHECK: mov dr16, dr60
-; CHECK: ecall f8a
+; CHECK: ecall _f8a
 ; CHECK: mov dr60, dr16
 ; CHECK: pop dr16
 ; CHECK: eret
@@ -69,7 +69,7 @@ declare ptr @llvm.stacksave()
 declare void @llvm.stackrestore(ptr)
 
 define void @loop_vla(i16 %n) {
-; CHECK-LABEL: loop_vla:
+; CHECK-LABEL: _loop_vla:
 ; CHECK: push dr16
 ; CHECK: mov dr16, dr60
 ; stacksave: read SPX

@@ -35,6 +35,7 @@ public:
     TLSSupported = false;
     VLASupported = false;
     HasMustTail = false;
+    UserLabelPrefix = "_";
     resetDataLayout();
   }
 

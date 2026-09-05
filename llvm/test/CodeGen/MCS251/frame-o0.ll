@@ -11,17 +11,17 @@
 declare i8 @f8a()
 
 define i8 @o0cross(i8 %c) {
-; CHECK-LABEL: o0cross:
+; CHECK-LABEL: _o0cross:
 ; CHECK: inc spx, #0x2
 ; CHECK: inc spx, #0x1
 ; CHECK: mov @dr60-0x0001, r{{[0-9]+}}
-; CHECK: ecall f8a
+; CHECK: ecall _f8a
 ; CHECK: mov r{{[0-9]+}}, @dr60-0x0001
 ; CHECK: mov @dr60-0x0002, r{{[0-9]+}}
 ; CHECK: je
-; CHECK: ecall f8a
+; CHECK: ecall _f8a
 ; CHECK: mov @dr60, r{{[0-9]+}}
-; CHECK: ecall f8a
+; CHECK: ecall _f8a
 ; CHECK: mov @dr60, r{{[0-9]+}}
 ; CHECK: mov r{{[0-9]+}}, @dr60-0x0002
 ; CHECK: mov r{{[0-9]+}}, @dr60

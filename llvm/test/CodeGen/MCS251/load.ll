@@ -25,7 +25,7 @@
 ;-----------------------------------------------------------------------------
 
 define i8 @load8_ptr(ptr %p) {
-; CHECK-LABEL: load8_ptr:
+; CHECK-LABEL: _load8_ptr:
 ; CHECK:         mov r{{[0-9]+}}, @dr{{[0-9]+}}
 ; CHECK:         mov dpl, r{{[0-9]+}}
   %v = load i8, ptr %p
@@ -33,7 +33,7 @@ define i8 @load8_ptr(ptr %p) {
 }
 
 define i8 @load8_ptr_off(ptr %p) {
-; CHECK-LABEL: load8_ptr_off:
+; CHECK-LABEL: _load8_ptr_off:
 ; CHECK:         mov r{{[0-9]+}}, @dr{{[0-9]+}}+0x0001
   %q = getelementptr i8, ptr %p, i16 1
   %v = load i8, ptr %q
@@ -42,7 +42,7 @@ define i8 @load8_ptr_off(ptr %p) {
 
 ; An i16 GEP index is sign-extended to i32: 65534 denotes -2, not +65534.
 define i8 @load8_ptr_bigdisp(ptr %p) {
-; CHECK-LABEL: load8_ptr_bigdisp:
+; CHECK-LABEL: _load8_ptr_bigdisp:
 ; CHECK:         mov r{{[0-9]+}}, @dr{{[0-9]+}}-0x0002
   %q = getelementptr i8, ptr %p, i16 65534
   %v = load i8, ptr %q
@@ -51,7 +51,7 @@ define i8 @load8_ptr_bigdisp(ptr %p) {
 
 ; Negative offset uses the signed DR indexed form.
 define i8 @load8_ptr_neg(ptr %p) {
-; CHECK-LABEL: load8_ptr_neg:
+; CHECK-LABEL: _load8_ptr_neg:
 ; CHECK:         mov r{{[0-9]+}}, @dr{{[0-9]+}}-0x0001
   %q = getelementptr i8, ptr %p, i16 -1
   %v = load i8, ptr %q
@@ -59,9 +59,9 @@ define i8 @load8_ptr_neg(ptr %p) {
 }
 
 define i8 @load8_g() {
-; CHECK-LABEL: load8_g:
-; CHECK:         .db 0x7e, {{.*}}(gv8) >> 8, (gv8)
-; CHECK-NEXT:    .db 0x7a, {{.*}}(gv8) >> 16
+; CHECK-LABEL: _load8_g:
+; CHECK:         .db 0x7e, {{.*}}(_gv8) >> 8, (_gv8)
+; CHECK-NEXT:    .db 0x7a, {{.*}}(_gv8) >> 16
 ; CHECK-NEXT:    mov r{{[0-9]+}}, @dr{{[0-9]+}}
   %v = load i8, ptr @gv8
   ret i8 %v
@@ -70,9 +70,9 @@ define i8 @load8_g() {
 ; A global plus a constant offset stays symbolic: `mov wr,#(gv8+1)`
 ; (sdas251/sdld-verified form), not a dis16 byte pair.
 define i8 @load8_g_off() {
-; CHECK-LABEL: load8_g_off:
-; CHECK:         .db 0x7e, {{.*}}(gv8+1) >> 8, (gv8+1)
-; CHECK-NEXT:    .db 0x7a, {{.*}}(gv8+1) >> 16
+; CHECK-LABEL: _load8_g_off:
+; CHECK:         .db 0x7e, {{.*}}(_gv8+1) >> 8, (_gv8+1)
+; CHECK-NEXT:    .db 0x7a, {{.*}}(_gv8+1) >> 16
 ; CHECK-NEXT:    mov r{{[0-9]+}}, @dr{{[0-9]+}}
   %q = getelementptr i8, ptr @gv8, i16 1
   %v = load i8, ptr %q
@@ -81,7 +81,7 @@ define i8 @load8_g_off() {
 
 ; Constant address <= 0xff uses the direct form: page-zero edata at 0x30.
 define i8 @load8_direct() {
-; CHECK-LABEL: load8_direct:
+; CHECK-LABEL: _load8_direct:
 ; CHECK:         mov r{{[0-9]+}}, 0x30
   %p = inttoptr i16 48 to ptr
   %v = load i8, ptr %p
@@ -92,7 +92,7 @@ define i8 @load8_direct() {
 ; the ONLY encoding that does: `mov wr,#0x99; mov r,@dr` would address
 ; region-00 edata instead (address-space trap, see MCS251ISelLowering.cpp).
 define i8 @load8_sfr() {
-; CHECK-LABEL: load8_sfr:
+; CHECK-LABEL: _load8_sfr:
 ; CHECK:         mov r{{[0-9]+}}, 0x99
   %p = inttoptr i16 153 to ptr
   %v = load i8, ptr %p
@@ -101,7 +101,7 @@ define i8 @load8_sfr() {
 
 ; Constant address above the direct range: materialise + @dr.
 define i8 @load8_abs16() {
-; CHECK-LABEL: load8_abs16:
+; CHECK-LABEL: _load8_abs16:
 ; CHECK:         mov dr{{[0-9]+}}, #0x1234
 ; CHECK-NEXT:    mov r{{[0-9]+}}, @dr{{[0-9]+}}
   %p = inttoptr i16 4660 to ptr
@@ -112,7 +112,7 @@ define i8 @load8_abs16() {
 ; Volatile: same instruction sequence (ordering/un-merging is enforced by
 ; the MachineMemOperand volatile flag, not by a different encoding).
 define i8 @load8_volatile(ptr %p) {
-; CHECK-LABEL: load8_volatile:
+; CHECK-LABEL: _load8_volatile:
 ; CHECK:         mov r{{[0-9]+}}, @dr{{[0-9]+}}
   %v = load volatile i8, ptr %p
   ret i8 %v
@@ -123,7 +123,7 @@ define i8 @load8_volatile(ptr %p) {
 ;-----------------------------------------------------------------------------
 
 define i16 @load16_ptr(ptr %p) {
-; CHECK-LABEL: load16_ptr:
+; CHECK-LABEL: _load16_ptr:
 ; Displacement 0x0000 loads the HIGH byte; it must be the register that
 ; later reaches dph. Displacement 0x0001 is the LOW byte -> dpl.
 ; CHECK:         mov [[HI:r[0-9]+]], @dr{{[0-9]+}}
@@ -135,9 +135,9 @@ define i16 @load16_ptr(ptr %p) {
 }
 
 define i16 @load16_g() {
-; CHECK-LABEL: load16_g:
-; CHECK:         .db 0x7e, {{.*}}(gv16) >> 8, (gv16)
-; CHECK-NEXT:    .db 0x7a, {{.*}}(gv16) >> 16
+; CHECK-LABEL: _load16_g:
+; CHECK:         .db 0x7e, {{.*}}(_gv16) >> 8, (_gv16)
+; CHECK-NEXT:    .db 0x7a, {{.*}}(_gv16) >> 16
 ; CHECK-NEXT:    mov [[HI:r[0-9]+]], @dr{{[0-9]+}}
 ; CHECK-NEXT:    mov [[LO:r[0-9]+]], @dr{{[0-9]+}}+0x0001
 ; CHECK-NEXT:    mov dpl, [[LO]]
@@ -148,7 +148,7 @@ define i16 @load16_g() {
 
 ; A displaced i16 load: base+1 -> hi at +0x0001, lo at +0x0002.
 define i16 @load16_ptr_off(ptr %p) {
-; CHECK-LABEL: load16_ptr_off:
+; CHECK-LABEL: _load16_ptr_off:
 ; CHECK:         mov [[HI:r[0-9]+]], @dr{{[0-9]+}}+0x0001
 ; CHECK-NEXT:    mov [[LO:r[0-9]+]], @dr{{[0-9]+}}+0x0002
 ; CHECK-NEXT:    mov dpl, [[LO]]
@@ -165,7 +165,7 @@ define i16 @load16_ptr_off(ptr %p) {
 ; The zextload expands to a byte load widened with a zero hi lane
 ; (zero + REG_SEQUENCE); on the return path dph must receive the zero.
 define i16 @load8_zext(ptr %p) {
-; CHECK-LABEL: load8_zext:
+; CHECK-LABEL: _load8_zext:
 ; CHECK-DAG:     mov [[LO:r[0-9]+]], @dr{{[0-9]+}}
 ; CHECK-DAG:     mov [[HI:r[0-9]+]], #0x00
 ; CHECK:         mov dpl, [[LO]]

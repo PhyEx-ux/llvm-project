@@ -3,16 +3,16 @@
 ; RUN: llc -mtriple=mcs251 -filetype=obj < %s -o %t
 ;
 ; Stage C and stack/ABI/relocation boundary cases.
-@_slot = external global ptr
-@_external_scalar = external global i16
+@slot = external global ptr
+@external_scalar = external global i16
 
-define i8 @_indirect(ptr %f) {
+define i8 @indirect(ptr %f) {
 ; CHECK-LABEL: _indirect:
 ; CHECK: ecall @dr{{[0-9]+}}
   %v = call i8 %f()
   ret i8 %v
 }
-define i32 @_indirect_i32(ptr %f) {
+define i32 @indirect_i32(ptr %f) {
 ; CHECK-LABEL: _indirect_i32:
 ; CHECK: mov b,
 ; CHECK: mov a,
@@ -20,69 +20,69 @@ define i32 @_indirect_i32(ptr %f) {
   %v = call i32 %f(i32 305419896)
   ret i32 %v
 }
-define i8 @_local_fn() {
+define i8 @local_fn() {
   ret i8 77
 }
-define ptr @_local_address() {
+define ptr @local_address() {
 ; CHECK-LABEL: _local_address:
 ; CHECK: (_local_fn) >> 8, (_local_fn)
 ; CHECK: (_local_fn) >> 16
-  ret ptr @_local_fn
+  ret ptr @local_fn
 }
-define ptr @_local_addend() {
+define ptr @local_addend() {
 ; CHECK-LABEL: _local_addend:
 ; CHECK: (_local_fn-65536) >> 8, (_local_fn-65536)
 ; CHECK: (_local_fn-65536) >> 16
-  %p = getelementptr i8, ptr @_local_fn, i32 -65536
+  %p = getelementptr i8, ptr @local_fn, i32 -65536
   ret ptr %p
 }
-define i8 @_local_indirect() {
+define i8 @local_indirect() {
 ; CHECK-LABEL: _local_indirect:
 ; CHECK: ecall _local_address
 ; CHECK: ecall @dr{{[0-9]+}}
-  %p = call ptr @_local_address()
+  %p = call ptr @local_address()
   %v = call i8 %p()
   ret i8 %v
 }
-declare ptr @_sdcc_pointer()
-define i32 @_sdcc_pointer_result() {
+declare ptr @sdcc_pointer()
+define i32 @sdcc_pointer_result() {
 ; CHECK-LABEL: _sdcc_pointer_result:
 ; CHECK: ecall _sdcc_pointer
 ; CHECK-NOT: mov {{r[0-9]+}}, a
 ; CHECK: eret
-  %p = call ptr @_sdcc_pointer()
+  %p = call ptr @sdcc_pointer()
   %r = ptrtoint ptr %p to i32
   ret i32 %r
 }
-declare i8 @_sdcc_reader(ptr)
-define i8 @_sdcc_pointer_arg() {
+declare i8 @sdcc_reader(ptr)
+define i8 @sdcc_pointer_arg() {
 ; CHECK-LABEL: _sdcc_pointer_arg:
 ; CHECK: ecall _sdcc_reader
-  %r = call i8 @_sdcc_reader(ptr inttoptr (i32 131072 to ptr))
+  %r = call i8 @sdcc_reader(ptr inttoptr (i32 131072 to ptr))
   ret i8 %r
 }
-define i16 @_external_word(i16 %x) {
+define i16 @external_word(i16 %x) {
 ; CHECK-LABEL: _external_word:
 ; CHECK: (_external_scalar) >> 16
-  store volatile i16 %x, ptr @_external_scalar, align 1
-  %v = load volatile i16, ptr @_external_scalar, align 1
+  store volatile i16 %x, ptr @external_scalar, align 1
+  %v = load volatile i16, ptr @external_scalar, align 1
   ret i16 %v
 }
-define i32 @_edge_load(ptr %p) {
+define i32 @edge_load(ptr %p) {
 ; CHECK-LABEL: _edge_load:
 ; CHECK: add dr{{[0-9]+}}, dr{{[0-9]+}}
   %q = getelementptr i8, ptr %p, i32 32767
   %v = load volatile i32, ptr %q, align 1
   ret i32 %v
 }
-define i8 @_edge_neg(ptr %p) {
+define i8 @edge_neg(ptr %p) {
 ; CHECK-LABEL: _edge_neg:
 ; CHECK: add dr{{[0-9]+}}, dr{{[0-9]+}}
   %q = getelementptr i8, ptr %p, i32 -32769
   %v = load volatile i8, ptr %q
   ret i8 %v
 }
-define i8 @_dyn_stack(i16 %n) {
+define i8 @dyn_stack(i16 %n) {
 ; CHECK-LABEL: _dyn_stack:
 ; CHECK: push dr16
 ; CHECK: mov 0x85,
@@ -91,10 +91,10 @@ define i8 @_dyn_stack(i16 %n) {
 ; CHECK: pop dr16
   %p = alloca i8, i16 %n, align 1
   store volatile i8 90, ptr %p
-  %v = call i8 @_stack_read(ptr %p)
+  %v = call i8 @stack_read(ptr %p)
   ret i8 %v
 }
-define i8 @_nested_dyn(i16 %n) {
+define i8 @nested_dyn(i16 %n) {
 ; CHECK-LABEL: _nested_dyn:
 ; CHECK: push dr16
 ; CHECK: ecall _dyn_stack
@@ -102,20 +102,20 @@ define i8 @_nested_dyn(i16 %n) {
 ; CHECK: pop dr16
   %p = alloca i8, i16 %n, align 1
   store volatile i8 11, ptr %p
-  %a = call i8 @_dyn_stack(i16 %n)
-  %b = call i8 @_sdcc_reader(ptr %p)
+  %a = call i8 @dyn_stack(i16 %n)
+  %b = call i8 @sdcc_reader(ptr %p)
   %c = load volatile i8, ptr %p
   %s = add i8 %a, %b
   %r = add i8 %s, %c
   ret i8 %r
 }
-define i8 @_stack_read(ptr %p) {
+define i8 @stack_read(ptr %p) {
   %v = load volatile i8, ptr %p
   ret i8 %v
 }
 declare ptr @llvm.stacksave()
 declare void @llvm.stackrestore(ptr)
-define i16 @_vla_loop(i16 %n) {
+define i16 @vla_loop(i16 %n) {
 ; CHECK-LABEL: _vla_loop:
 ; CHECK: push dr16
 ; CHECK: mov 0x85,
@@ -138,7 +138,7 @@ loop:
 exit:
   ret i16 %newsum
 }
-define i16 @_recurse(i16 %n) {
+define i16 @recurse(i16 %n) {
 ; CHECK-LABEL: _recurse:
 ; CHECK: ecall _recurse
   %p = alloca i16, align 1
@@ -149,7 +149,7 @@ base:
   ret i16 0
 rec:
   %dec = sub i16 %n, 1
-  %r = call i16 @_recurse(i16 %dec)
+  %r = call i16 @recurse(i16 %dec)
   %saved = load volatile i16, ptr %p
   %sum = add i16 %saved, %r
   ret i16 %sum

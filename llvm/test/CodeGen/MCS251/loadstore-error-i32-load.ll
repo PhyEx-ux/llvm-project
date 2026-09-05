@@ -5,9 +5,9 @@
 @g32 = external global i32
 
 define i32 @load32() {
-; CHECK-LABEL: load32:
+; CHECK-LABEL: _load32:
 ; CHECK: .db 0x7e,
-; CHECK: (g32) >> 16
+; CHECK: (_g32) >> 16
 ; CHECK: mov {{r[0-9]+}}, @dr{{[0-9]+}}
 ; CHECK: mov {{r[0-9]+}}, @dr{{[0-9]+}}+0x0001
 ; CHECK: mov {{r[0-9]+}}, @dr{{[0-9]+}}+0x0002

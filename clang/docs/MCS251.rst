@@ -54,6 +54,23 @@ in the traditional model the arithmetic uses 16-bit unsigned ``int``.
 Explicitly assigning the sum back to ``unsigned short`` would truncate in
 both models and would therefore not distinguish the intermediate semantics.
 
+Symbol names
+------------
+
+The target uses the dedicated ASxxxx DataLayout mangling mode ``m:s``. A C
+function ``foo`` has LLVM IR name ``@foo`` and physical assembler/REL name
+``_foo``. A distinct C function ``_foo`` becomes ``__foo``; a leading underscore
+in a source name never suppresses decoration. Explicit C asm labels retain
+their exact spelling through LLVM's ``\01`` no-mangle marker. Private LLVM
+symbols use the ``.L_`` prefix.
+
+Handwritten IR that previously spelled a physical symbol directly, such as
+``@_foo``, must now spell the language-level ``@foo`` to keep the physical name
+``_foo``. Alternatively, an intentionally exact physical name can use LLVM's
+``@"\01_foo"`` spelling. Existing SDCC and assembly modules keep their physical
+names unchanged. ASxxxx assembly and REL output share the same LLVM mangler;
+the object writer does not perform an additional naming transformation.
+
 Interoperability
 ----------------
 

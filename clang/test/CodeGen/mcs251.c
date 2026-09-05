@@ -6,7 +6,7 @@
 // RUN: %clang_cc1 -triple mcs251-unknown-none -ffreestanding -O2 -S -o - %s | FileCheck %s --check-prefix=ASM
 // RUN: %clang_cc1 -triple mcs251-unknown-none -target-feature +int16 -ffreestanding -O2 -S -o - %s | FileCheck %s --check-prefix=ASM
 
-// CHECK: target datalayout = "E-m:e-p:32:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8"
+// CHECK: target datalayout = "E-m:s-p:32:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8"
 // CHECK: target triple = "mcs251-unknown-none"
 
 #ifdef __MCS251_INT16__
@@ -37,12 +37,11 @@ _Static_assert(((u16)65535 + (u16)1 == 0) == MCS251_INT16,
                "traditional unsigned-16 promotion wraps; ILP32 does not");
 _Static_assert(__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__, "big endian");
 
-// The established LLVM IR symbol ABI is unmangled until the separate naming
-// migration. Explicit asm labels bridge to SDCC's physical leading underscore.
-extern volatile u16 external_word __asm__("_external_word");
-u16 read_word(void) __asm__("_read_word");
-// CHECK-LABEL: define {{.*}}i16 @_read_word(
-// CHECK: load volatile i16, ptr @_external_word, align 1
+// Ordinary C names stay undecorated in IR; the LLVM mangler adds the physical
+// underscore for both ASxxxx assembly and REL output.
+extern volatile u16 external_word;
+// CHECK-LABEL: define {{.*}}i16 @read_word(
+// CHECK: load volatile i16, ptr @external_word, align 1
 // ASM: .globl _read_word
 // ASM: _read_word:
 u16 read_word(void) { return external_word; }
@@ -54,7 +53,7 @@ u16 read_word(void) { return external_word; }
 // INT16: zext i8 {{.*}} to i16
 // INT16: add nsw i16
 // INT16: trunc i16 {{.*}} to i8
-// ASM: .globl increment
+// ASM: .globl _increment
 u8 increment(u8 value) { return value + 3; }
 
 // CHECK-LABEL: define {{.*}}i32 @read_pointer(ptr noundef

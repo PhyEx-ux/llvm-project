@@ -22,23 +22,23 @@
 ; OBJ: T 00 00 00 13 57 89 AB CD EF A1 B2 C3 01 23 45 67
 ; OBJ: T 00 00 0D 89 AB CD EF 24 68 AC E0 AA
 
-define void @_prefix_anchor() prefix <{i16, i32, i24, i64, [2 x i16]}> <{i16 4951, i32 2309737967, i24 10597059, i64 81985529216486895, [2 x i16] [i16 9320, i16 44256]}> {
+define void @prefix_anchor() prefix <{i16, i32, i24, i64, [2 x i16]}> <{i16 4951, i32 2309737967, i24 10597059, i64 81985529216486895, [2 x i16] [i16 9320, i16 44256]}> {
   ret void
 }
 
-declare void @_asm_anchor()
+declare void @asm_anchor()
 
-define i8 @_asm_byte(i8 %index) {
+define i8 @asm_byte(i8 %index) {
   %offset = zext i8 %index to i32
-  %start = getelementptr i8, ptr @_asm_anchor, i32 -5
+  %start = getelementptr i8, ptr @asm_anchor, i32 -5
   %p = getelementptr i8, ptr %start, i32 %offset
   %r = load volatile i8, ptr %p, align 1
   ret i8 %r
 }
 
-define i8 @_prefix_byte(i8 %index) {
+define i8 @prefix_byte(i8 %index) {
   %offset = zext i8 %index to i32
-  %start = getelementptr i8, ptr @_prefix_anchor, i32 -21
+  %start = getelementptr i8, ptr @prefix_anchor, i32 -21
   %p = getelementptr i8, ptr %start, i32 %offset
   %r = load volatile i8, ptr %p, align 1
   ret i8 %r

@@ -7,7 +7,7 @@
 ; with the high lane first.
 
 define i32 @c() {
-; CHECK-LABEL: c:
+; CHECK-LABEL: _c:
 ; CHECK:         mov [[D:dr[0-9]+]], #0x5678
 ; CHECK-NEXT:    movh [[D]], #0x1234
 ; CHECK:         mov dpl, r3
@@ -15,7 +15,7 @@ define i32 @c() {
 ; CHECK-NEXT:    mov b, r1
 ; CHECK-NEXT:    mov a, r0
 ; CHECK-NEXT:    eret
-; O0-LABEL: c:
+; O0-LABEL: _c:
 ; Constant return through splitI32ToBytes: the four ABI bytes are extracted
 ; from the materialised DR down to i8 lanes. Unlike the WR-lane logical-op
 ; shape (see and_const below), this byte-lane form is measured correct at
@@ -32,7 +32,7 @@ define i32 @c() {
 }
 
 define i32 @id(i32 %x) {
-; CHECK-LABEL: id:
+; CHECK-LABEL: _id:
 ; CHECK:         mov r{{[0-9]+}}, a
 ; CHECK:         mov r{{[0-9]+}}, b
 ; CHECK:         mov r{{[0-9]+}}, dph
@@ -50,27 +50,27 @@ define i32 @f(i32 %x) {
 }
 
 define i32 @call_i32() {
-; CHECK-LABEL: call_i32:
+; CHECK-LABEL: _call_i32:
 ; CHECK:         mov dr{{[0-9]+}}, #0x5678
 ; CHECK-NEXT:    movh dr{{[0-9]+}}, #0x1234
 ; CHECK:         mov dpl, r{{[0-9]+}}
 ; CHECK-NEXT:    mov dph, r{{[0-9]+}}
 ; CHECK-NEXT:    mov b, r{{[0-9]+}}
 ; CHECK-NEXT:    mov a, r{{[0-9]+}}
-; CHECK-NEXT:    ecall f
+; CHECK-NEXT:    ecall _f
 ; CHECK:         mov r3, dpl
 ; CHECK-NEXT:    mov r2, dph
 ; CHECK-NEXT:    mov r1, b
 ; CHECK-NEXT:    mov r0, a
 ; CHECK:         add dr{{[0-9]+}}, dr{{[0-9]+}}
-; O0-LABEL: call_i32:
+; O0-LABEL: _call_i32:
 ; Constant i32 argument loading (splitI32ToBytes) measured correct at -O0:
 ; four ABI byte stores before the ecall, four byte reads after it.
 ; O0:         mov dpl, [[Q1:r[0-9]+]]
 ; O0-NEXT:    mov dph, [[Q2:r[0-9]+]]
 ; O0-NEXT:    mov b, [[Q3:r[0-9]+]]
 ; O0-NEXT:    mov a, [[Q4:r[0-9]+]]
-; O0-NEXT:    ecall f
+; O0-NEXT:    ecall _f
 ; O0:         mov {{r[0-9]+}}, dpl
 ; O0:         mov {{r[0-9]+}}, dph
 ; O0:         mov {{r[0-9]+}}, b
@@ -81,21 +81,21 @@ define i32 @call_i32() {
 }
 
 define i32 @add1(i32 %x) {
-; CHECK-LABEL: add1:
+; CHECK-LABEL: _add1:
 ; CHECK:         add dr{{[0-9]+}}, dr{{[0-9]+}}
   %r = add i32 %x, 1
   ret i32 %r
 }
 
 define i32 @neg1(i32 %x) {
-; CHECK-LABEL: neg1:
+; CHECK-LABEL: _neg1:
 ; CHECK:         sub dr{{[0-9]+}}, dr{{[0-9]+}}
   %r = add i32 %x, -1
   ret i32 %r
 }
 
 define i32 @sub1(i32 %x) {
-; CHECK-LABEL: sub1:
+; CHECK-LABEL: _sub1:
 ; CHECK:         sub dr{{[0-9]+}}, dr{{[0-9]+}}
   %r = sub i32 %x, 1
   ret i32 %r
@@ -105,7 +105,7 @@ define i32 @sub1(i32 %x) {
 ; avoids FastRA coalescing two DR subregister copies into the same high lane at
 ; -O0; each logical operation must still execute once per WR lane.
 define i32 @and_self(i32 %x) {
-; CHECK-LABEL: and_self:
+; CHECK-LABEL: _and_self:
 ; CHECK-COUNT-2: anl wr{{[0-9]+}}, wr{{[0-9]+}}
   %y = freeze i32 %x
   %r = and i32 %x, %y
@@ -113,9 +113,9 @@ define i32 @and_self(i32 %x) {
 }
 
 define i32 @and_const(i32 %x) {
-; CHECK-LABEL: and_const:
+; CHECK-LABEL: _and_const:
 ; CHECK-COUNT-2: anl wr{{[0-9]+}}, wr{{[0-9]+}}
-; O0-LABEL: and_const:
+; O0-LABEL: _and_const:
 ; O0:         mov [[HI:wr[0-9]+]], #0x0000
 ; O0-NEXT:    anl {{wr[0-9]+}}, [[HI]]
 ; O0:         mov [[LO:wr[0-9]+]], #0xffff
@@ -125,9 +125,9 @@ define i32 @and_const(i32 %x) {
 }
 
 define i32 @or_const(i32 %x) {
-; CHECK-LABEL: or_const:
+; CHECK-LABEL: _or_const:
 ; CHECK-COUNT-2: orl wr{{[0-9]+}}, wr{{[0-9]+}}
-; O0-LABEL: or_const:
+; O0-LABEL: _or_const:
 ; O0:         mov [[HI:wr[0-9]+]], #0x0000
 ; O0-NEXT:    orl {{wr[0-9]+}}, [[HI]]
 ; O0:         mov [[LO:wr[0-9]+]], #0xffff
@@ -137,9 +137,9 @@ define i32 @or_const(i32 %x) {
 }
 
 define i32 @xor_const(i32 %x) {
-; CHECK-LABEL: xor_const:
+; CHECK-LABEL: _xor_const:
 ; CHECK-COUNT-2: xrl wr{{[0-9]+}}, wr{{[0-9]+}}
-; O0-LABEL: xor_const:
+; O0-LABEL: _xor_const:
 ; O0:         mov [[HI:wr[0-9]+]], #0x0000
 ; O0-NEXT:    xrl {{wr[0-9]+}}, [[HI]]
 ; O0:         mov [[LO:wr[0-9]+]], #0xffff

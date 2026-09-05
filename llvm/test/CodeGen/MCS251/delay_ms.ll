@@ -8,7 +8,7 @@
 ; 8000 appears as the wrap-around constant 0xe0c0 (65536 - 8000) counting
 ; up to zero; the iteration count is unchanged.
 
-define void @_delay_ms(i16 %ms) {
+define void @delay_ms(i16 %ms) {
 ; CHECK-LABEL: _delay_ms:
 ; outer: ms-1 == 0 -> done (canonicalised eq, skip jump jne)
 ; CHECK: add wr{{[0-9]+}}, #0xffff

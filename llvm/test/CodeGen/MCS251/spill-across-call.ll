@@ -6,11 +6,11 @@
 ; ("register spilling is not implemented"), now a normal @dr60 access.
 
 define i8 @sum2() {
-; CHECK-LABEL: sum2:
+; CHECK-LABEL: _sum2:
 ; CHECK: inc spx, #0x1
-; CHECK: ecall f8a
+; CHECK: ecall _f8a
 ; CHECK: mov @dr60, r{{[0-9]+}}
-; CHECK: ecall f8a
+; CHECK: ecall _f8a
 ; CHECK: mov r{{[0-9]+}}, @dr60
 ; CHECK: add
 ; CHECK: dec spx, #0x1
@@ -29,11 +29,11 @@ declare i16 @f16a()
 ; (mov @dr60+dis,wr / mov wr,@dr60+dis) -- the single-instruction WR
 ; displaced form, never two byte accesses.
 define i16 @sum16() {
-; CHECK-LABEL: sum16:
+; CHECK-LABEL: _sum16:
 ; CHECK: inc spx, #0x2
-; CHECK: ecall f16a
+; CHECK: ecall _f16a
 ; CHECK: mov @dr60-0x0001, wr{{[0-9]+}}
-; CHECK: ecall f16a
+; CHECK: ecall _f16a
 ; CHECK: mov wr{{[0-9]+}}, @dr60-0x0001
 ; CHECK: add
 ; CHECK: dec spx, #0x2
@@ -48,13 +48,13 @@ entry:
 ; Register pressure: three live values across interleaved calls reuse the
 ; frame slot (spill/reload between the calls, two adds at the end).
 define i16 @pressure() {
-; CHECK-LABEL: pressure:
-; CHECK: ecall f16a
+; CHECK-LABEL: _pressure:
+; CHECK: ecall _f16a
 ; CHECK: mov @dr60-0x0001, wr{{[0-9]+}}
-; CHECK: ecall f16a
+; CHECK: ecall _f16a
 ; CHECK: mov wr{{[0-9]+}}, @dr60-0x0001
 ; CHECK: add
-; CHECK: ecall f16a
+; CHECK: ecall _f16a
 ; CHECK: mov wr{{[0-9]+}}, @dr60-0x0001
 ; CHECK: add
 ; CHECK: eret

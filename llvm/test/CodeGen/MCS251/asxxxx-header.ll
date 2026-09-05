@@ -8,7 +8,7 @@
 
 source_filename = "asxxxx-header.c"
 
-define void @_sample_fn(i8 %a) {
+define void @sample_fn(i8 %a) {
 entry:
   %t = icmp eq i8 %a, 1
   br i1 %t, label %yes, label %no

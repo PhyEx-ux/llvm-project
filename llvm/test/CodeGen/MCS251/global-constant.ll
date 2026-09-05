@@ -5,13 +5,13 @@
 ; modules, private references and SDCC __code reads are independently exercised
 ; by the P-C QEMU matrix (not a dependency of lit).
 
-@_bytes = constant [8 x i8] c"\13\57\89\AB\00\22\5C\FF", align 1
-@_word = constant i16 4951, align 1
-@_long = constant i32 2309737967, align 1
-@_words = constant [2 x i16] [i16 9320, i16 44256], align 1
-@_string = constant [3 x i8] c"Hi\00", align 1
-@_repeated = constant [3 x i8] c"\A5\A5\A5", align 1
-@_zero = constant i8 0, align 1
+@bytes = constant [8 x i8] c"\13\57\89\AB\00\22\5C\FF", align 1
+@word = constant i16 4951, align 1
+@long = constant i32 2309737967, align 1
+@words = constant [2 x i16] [i16 9320, i16 44256], align 1
+@string = constant [3 x i8] c"Hi\00", align 1
+@repeated = constant [3 x i8] c"\A5\A5\A5", align 1
+@zero = constant i8 0, align 1
 
 ; ASM: .area CSEG (CODE)
 ; ASM: .globl _bytes

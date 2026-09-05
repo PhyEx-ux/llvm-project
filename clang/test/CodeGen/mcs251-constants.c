@@ -14,7 +14,7 @@ const char *literal(void) { return "MCS251"; }
 // IR-DAG: private unnamed_addr constant [7 x i8] c"MCS251\00", align 1
 // IR: getelementptr inbounds nuw i8, ptr @t,
 // ASM: .area CSEG (CODE)
-// ASM: t:
+// ASM: _t:
 // ASM-NEXT: .byte 19
 // ASM-NEXT: .byte 87
 // ASM-NEXT: .byte 137
@@ -23,10 +23,10 @@ const char *literal(void) { return "MCS251"; }
 // ASM-NEXT: .byte 34
 // ASM-NEXT: .byte 92
 // ASM-NEXT: .byte 255
-// ASM: wide:
+// ASM: _wide:
 // ASM-NEXT: .word 35243
 // ASM-NEXT: .word 52719
-// ASM: .L.str:
+// ASM: .L_.str:
 // ASM-NEXT: .byte 77
 // ASM-NEXT: .byte 67
 // ASM-NEXT: .byte 83

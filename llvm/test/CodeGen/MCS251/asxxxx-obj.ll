@@ -45,14 +45,14 @@ define void @obj_call_local() {
 ; CHECK-NEXT: H 2 areas 6 global symbols
 ; CHECK-NEXT: M asxxxx_obj
 ; CHECK-NEXT: O stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small stack-auto=0 xstack=0 intlong-reent=0 float-reent=0 reg-params=1 all-callee-saves=0 sdcccall=2 regset=r0-r9,r12-r15 compiler-build=mcs251-abi1.0-r1
-; CHECK-NEXT: S ext_fn Ref000000
-; CHECK-NEXT: S gv8 Ref000000
+; CHECK-NEXT: S _ext_fn Ref000000
+; CHECK-NEXT: S _gv8 Ref000000
 ; CHECK-NEXT: S .__.ABS. Def000000
 ; CHECK-NEXT: A _CODE size 0 flags 0 addr 0
 ; CHECK-NEXT: A CSEG size {{[0-9A-F]+}} flags 20 addr 0
-; CHECK-NEXT: S obj_load_g Def000000
-; CHECK-NEXT: S obj_call_ext Def{{[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]}}
-; CHECK-NEXT: S obj_call_local Def{{[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]}}
+; CHECK-NEXT: S _obj_load_g Def000000
+; CHECK-NEXT: S _obj_call_ext Def{{[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]}}
+; CHECK-NEXT: S _obj_call_local Def{{[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]}}
 ; CHECK-NEXT: T 00 00 00
 ; CHECK-NEXT: R 00 00 00 01
 ; T payload is capped at 13 bytes (sdas's NTXT includes the 3 XH3 address
