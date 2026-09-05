@@ -164,7 +164,11 @@ entry:
   %v = load i16, ptr %slot
   ret i16 %v
 }
-define i8 @_p13_local_inc(i8 %x) { %r = add i8 %x, 3; ret i8 %r }
+define i8 @_p13_local_inc(i8 %x) {
+entry:
+  %r = add i8 %x, 3
+  ret i8 %r
+}
 define i8 @_p13_call_chain(i8 %x) {
 entry:
   %a = call i8 @_p13_local_inc(i8 %x)
