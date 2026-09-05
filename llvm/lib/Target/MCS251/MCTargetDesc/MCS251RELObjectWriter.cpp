@@ -47,8 +47,9 @@
 //     escape.
 //
 // Scope limits are loud, not silent: more than one non-empty section,
-// symbol-difference fixups, absolute symbols and any relocation kind other
-// than the two above are all fatal errors.
+// symbol-difference fixups and absolute symbols are fatal errors. Phase 11
+// also supports byte-of24 lo/mid/hi relocations, whose 3-byte T placeholders
+// shrink to one code byte at link time (see the payload builder below).
 //
 //===----------------------------------------------------------------------===//
 
@@ -265,7 +266,7 @@ public:
     if (Fixup.getKind() < MCS251::fixup_mcs251_16 ||
         Fixup.getKind() >= MCS251::NumTargetFixupKinds)
       report_fatal_error("MCS251 REL writer: unsupported relocation kind "
-                         "(only 16-bit and 24-bit ASxxxx relocations exist)");
+                         "(expected a word/address or byte-of24 ASxxxx relocation)");
     if (Target.getSubSym())
       report_fatal_error("MCS251 REL writer: symbol-difference fixups are "
                          "not supported");

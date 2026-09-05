@@ -206,16 +206,16 @@ static void rejectPseudo(const MCInst &MI) {
   switch (MI.getOpcode()) {
 #define MCS251_PSEUDO(Name) case MCS251::Name:
     MCS251_PSEUDO(MOV32ri)
-    MCS251_PSEUDO(LD16)
-    MCS251_PSEUDO(ST16)
-    MCS251_PSEUDO(ST16T)
-    MCS251_PSEUDO(ST16TD)
+    MCS251_PSEUDO(SELECT8)
+    MCS251_PSEUDO(SELECT16)
+    MCS251_PSEUDO(SELECT32)
+    MCS251_PSEUDO(MOV8rmF)
+    MCS251_PSEUDO(MOV8mrF)
+    MCS251_PSEUDO(MOV16rmF)
+    MCS251_PSEUDO(MOV16mrF)
     MCS251_PSEUDO(ZEXT8)
     MCS251_PSEUDO(BRCC)
     MCS251_PSEUDO(BRCC8S)
-    MCS251_PSEUDO(LD16S)
-    MCS251_PSEUDO(ST16S)
-    MCS251_PSEUDO(ST16TS)
     MCS251_PSEUDO(FIADDR)
     MCS251_PSEUDO(DYNALLOCA)
     // ADD16fi keeps its frame index only until PEI, which retargets it to
@@ -395,6 +395,8 @@ void MCS251MCCodeEmitter::encodeInstruction(
   case MCS251::SJMP: B(0x080); putBranch(MI.getOperand(0), CB.size(), CB, Fixups); break;
   case MCS251::EJMP: B(0x18a); E24(0); break;
   case MCS251::ECALL: B(0x19a); E24(0); break;
+  case MCS251::ECALLr:
+    B(0x199); put8((R(MI, 0) << 4) | 8, CB); break;
   case MCS251::ERET: B(0x1aa); break;
 
   // Stack/frame forms.
@@ -404,10 +406,10 @@ void MCS251MCCodeEmitter::encodeInstruction(
   case MCS251::DECSPX1: B(0x11b); put8(0xfc, CB); break;
   case MCS251::DECSPX2: B(0x11b); put8(0xfd, CB); break;
   case MCS251::DECSPX4: B(0x11b); put8(0xfe, CB); break;
-  case MCS251::MOV56: B(0x17f); put8(0xef, CB); break;
-  case MCS251::MOV60: B(0x17f); put8(0xfe, CB); break;
-  case MCS251::PUSH56: B(0x1ca); put8(0xeb, CB); break;
-  case MCS251::POP56: B(0x1da); put8(0xeb, CB); break;
+  case MCS251::SETFP: B(0x17f); put8(0x4f, CB); break;
+  case MCS251::RESTORESP: B(0x17f); put8(0xf4, CB); break;
+  case MCS251::PUSHFP: B(0x1ca); put8(0x4b, CB); break;
+  case MCS251::POPFP: B(0x1da); put8(0x4b, CB); break;
   // Frame-relative accesses (@dr60+dis16 / @dr56+dis16).  A zero displacement
   // has a three-byte short form WITHOUT the disp16 field -- the assembly path
   // never prints "+0x0000" (MCS251InstPrinter::printStackAddr omits a zero

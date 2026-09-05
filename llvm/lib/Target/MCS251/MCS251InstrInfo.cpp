@@ -17,7 +17,7 @@ MCS251InstrInfo::MCS251InstrInfo(const MCS251Subtarget &STI)
 // Spill/reload (Phase 9). The slot address is emitted in its unresolved
 // frame-index form -- the mcs251_stack displacement operand carries the
 // (FI, offset) pair and a placeholder dr60 base, and PEI folds it into the
-// final @dr60/@dr56 displacement (see MCS251RegisterInfo::
+// final @dr60/@dr16 displacement (see MCS251RegisterInfo::
 // eliminateFrameIndex). Word-granular spill slots use the single WR form
 // (mov @dr60+dis,wr / mov wr,@dr60+dis): i16 values MUST spill as one
 // instruction pair, never as byte lanes.
@@ -52,22 +52,13 @@ void MCS251InstrInfo::storeRegToStackSlot(
     return;
   }
   if (MCS251::GPR32RegClass.hasSubClassEq(RC)) {
-    // A dr value is stored as its two WR halves with the big-endian object
-    // layout used everywhere else (mem[base] = most significant first):
-    // sub_hi16 at +0, sub_lo16 at +2.
-    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrF))
+    // One complete DR use: InlineSpiller must not reason about two separate
+    // partial-register definitions/uses. PEI expands after register allocation.
+    BuildMI(MBB, MI, DL, get(MCS251::MOV32mrF))
         .addReg(MCS251::DR60)
         .addFrameIndex(FrameIndex)
         .addImm(0)
-        .addReg(SrcReg.isPhysical() ? Register(RI.getSubReg(SrcReg, MCS251::sub_hi16)) : SrcReg,
-                RegState::NoFlags, SrcReg.isPhysical() ? 0 : MCS251::sub_hi16)
-        .setMIFlag(Flags);
-    BuildMI(MBB, MI, DL, get(MCS251::MOV16mrF))
-        .addReg(MCS251::DR60)
-        .addFrameIndex(FrameIndex)
-        .addImm(2)
-        .addReg(SrcReg.isPhysical() ? Register(RI.getSubReg(SrcReg, MCS251::sub_lo16)) : SrcReg,
-                getKillRegState(IsKill), SrcReg.isPhysical() ? 0 : MCS251::sub_lo16)
+        .addReg(SrcReg, getKillRegState(IsKill))
         .setMIFlag(Flags);
     return;
   }
@@ -98,26 +89,11 @@ void MCS251InstrInfo::loadRegFromStackSlot(
     return;
   }
   if (MCS251::GPR32RegClass.hasSubClassEq(RC)) {
-    // Mirror of the GPR32 store: define the two WR halves directly as
-    // sub-registers of DestReg. A REG_SEQUENCE is illegal here -- this runs
-    // inside/after register allocation (FastRA never assigns freshly created
-    // vregs, and the greedy spiller never builds intervals for them), so the
-    // halves must be written straight into DestReg's lanes. big-endian layout:
-    // sub_hi16 at +0, sub_lo16 at +2.
-    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmF))
-        .addReg(DestReg.isPhysical() ? Register(RI.getSubReg(DestReg, MCS251::sub_hi16)) : DestReg,
-                DestReg.isPhysical() ? RegState::Define : RegState::DefineNoRead,
-                DestReg.isPhysical() ? 0 : MCS251::sub_hi16)
+    // A single full definition gives both Greedy and FastRA one live range.
+    BuildMI(MBB, MI, DL, get(MCS251::MOV32rmF), DestReg)
         .addReg(MCS251::DR60)
         .addFrameIndex(FrameIndex)
         .addImm(0)
-        .setMIFlag(Flags);
-    BuildMI(MBB, MI, DL, get(MCS251::MOV16rmF))
-        .addReg(DestReg.isPhysical() ? Register(RI.getSubReg(DestReg, MCS251::sub_lo16)) : DestReg,
-                RegState::Define, DestReg.isPhysical() ? 0 : MCS251::sub_lo16)
-        .addReg(MCS251::DR60)
-        .addFrameIndex(FrameIndex)
-        .addImm(2)
         .setMIFlag(Flags);
     return;
   }

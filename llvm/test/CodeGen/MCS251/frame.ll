@@ -51,7 +51,7 @@ define i8 @frame_array() {
 }
 
 ; An i16 local: the frame-relative i16 store decomposes into two byte
-; stores through the frame (ST16S pseudo), displacements dis and dis+1.
+; stores through the frame, displacements dis and dis+1.
 define i16 @frame_i16() {
 ; CHECK-LABEL: frame_i16:
 ; CHECK: inc spx, #0x2

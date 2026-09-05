@@ -188,10 +188,9 @@ def MOV8rb : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, b", []>;
 // reached through @wr indirect or @wr+dis16 addresses region-00 edata. The
 // SFRs are therefore ONLY reachable via the direct forms MOV8di/MOV8id, and
 // MCS251ISelLowering::parseAddress decides direct-vs-indirect per address
-// kind (constant K <= 0xff -> direct; everything else -> @wr/+dis16). There
-// is deliberately no hardware 16-bit load/store instruction: an i16 memory
-// object is always decomposed into two byte accesses with big-endian lane
-// mapping (see LD16/ST16 below).
+// kind (constant K <= 0xff -> direct; everything else -> DR addressing).
+// The WR forms below remain legacy MC encodings; Phase 11 IR memory objects
+// use MOV8rmP/mrP and ordered big-endian bytes.
 //
 // No Patterns: the selection is a semantic decision (address space + width
 // decomposition), done by LowerLoad/LowerStore building these as machine
@@ -223,47 +222,6 @@ let mayStore = 1 in {
   def MOV8id  : MCS251Inst<(outs), (ins mcs251_dir8:$addr, GPR8:$src),
                            "mov $addr, $src", []>;
 }
-
-// Pseudo for an i16 load, built by LowerLoad and expanded by
-// EmitInstrWithCustomInserter (REG_SEQUENCE is MIR-only, the two byte loads
-// cannot be expressed as one DAG node). Endianness ruling (measurement-
-// verified): 16-bit objects in edata memory are BIG-endian -- mem[base] is
-// the high byte -- matching the WR register file where the MSB lives in the
-// lower-numbered byte slot (sub_hi8). The expansion is therefore
-//
-//   %hi:gpr8  = MOV8rmD %base, disp      ; mem[base+disp]    -> hi lane
-//   %lo:gpr8  = MOV8rmD %base, disp+1    ; mem[base+disp+1]  -> lo lane
-//   %dst:gpr16 = REG_SEQUENCE %hi:sub_hi8, %lo:sub_lo8
-//
-// using dis16 displacements instead of incrementing the base register.
-let mayLoad = 1, usesCustomInserter = 1 in
-def LD16 : MCS251Inst<(outs GPR16:$dst),
-                      (ins GPR16:$base, mcs251_dis16:$disp), "", []>;
-
-// Pseudo for an i16 store; mirror of LD16 with the lanes extracted via
-// sub-register COPYs (mem[base+disp] <- hi lane, mem[base+disp+1] <- lo
-// lane). $val must be a GPR16 vreg; constants are materialised by
-// LowerStore before the pseudo is built.
-let mayStore = 1, usesCustomInserter = 1 in
-def ST16 : MCS251Inst<(outs),
-                      (ins GPR16:$base, mcs251_dis16:$disp, GPR16:$val),
-                      "", []>;
-
-// Pseudo for a truncating store (i16 value -> i8 memory): stores the low
-// lane only.
-let mayStore = 1, usesCustomInserter = 1 in
-def ST16T : MCS251Inst<(outs),
-                       (ins GPR16:$base, mcs251_dis16:$disp, GPR16:$val),
-                       "", []>;
-
-// Direct-addressing variant of ST16T (constant address <= 0xff, including
-// the SFR space 0x80-0xff): same low-lane extraction, dir8 encoding. The
-// re-classification trap: a direct address 0x80-0xff must NOT fall back to
-// @wr for the compiler's convenience -- @wr at the same numeric address is
-// region-00 edata, a different memory location (see the address-space trap
-// at the top of this section).
-let mayStore = 1, usesCustomInserter = 1 in
-def ST16TD : MCS251Inst<(outs), (ins mcs251_dir8:$addr, GPR16:$val), "", []>;
 
 // Pseudo widening a byte to a word with a zero high lane
 // (zero/any-extending load of i8, and plain zext i8->i16):
@@ -514,10 +472,11 @@ def BRCC8S : MCS251Inst<(outs),
 // CopyFromReg, not preserved across the call.
 let isCall = 1, hasSideEffects = 1, Defs = [PSW] in
 def ECALL : MCS251Inst<(outs), (ins calltarget:$addr), "ecall $addr", []>;
+let isCall = 1, hasSideEffects = 1, Defs = [PSW], Size = 2 in
+  def ECALLr : MCS251Inst<(outs), (ins GPR32:$addr), "ecall @$addr", []>;
+def : Pat<(MCS251call GPR32:$addr), (ECALLr GPR32:$addr)>;
 
-// LowerCall wraps every callee as one of the two target symbol forms below
-// (indirect calls are rejected there), so these two Pats are the only entry
-// points for selecting MCS251ISD::CALL (same shape as MSP430's CALLi Pats).
+// Direct calls retain full addr24 symbol relocations; registers use ECALLr.
 def : Pat<(MCS251call (iPTR tglobaladdr:$dst)), (ECALL tglobaladdr:$dst)>;
 def : Pat<(MCS251call (iPTR texternalsym:$dst)), (ECALL texternalsym:$dst)>;
 
@@ -548,14 +507,14 @@ def ERET : MCS251Inst<(outs), (ins), "eret", [(MCS251eret)]>;
 //
 // Variable-sized objects (dynamic allocas) move SPX at the alloca site, so
 // the static frame can no longer be addressed relative to SPX. Those
-// functions set hasFP() and anchor the frame top in dr56 (dpx):
+// functions set hasFP() and anchor the frame top in reserved dr16:
 //
-//   prologue:  push dr56 / inc spx,#N / mov dr56,dr60
-//   epilogue:  mov dr60,dr56 / dec spx,#N / pop dr56
+//   prologue:  push dr16 / inc spx,#N / mov dr16,dr60
+//   epilogue:  mov dr60,dr16 / dec spx,#N / pop dr16
 //
-// dr56 is not preserved across calls by the SDCC ABI, so a var-sized callee
-// saves/restores it itself. A nested call to another function with
-// variable-sized objects must not destroy the caller's anchor. push/pop dr56
+// The supported SDCC port does not allocate R16-R31. LLVM reserves DR16
+// too, and functions using it as an anchor save/restore it, so nested
+// LLVM/SDCC calls preserve this private anchor convention. push/pop dr16
 // move 4 bytes (the QEMU DR-slot width), and the anchor is taken AFTER the
 // push, so the O - N displacement formula above stays valid relative to the
 // anchor as well (both the concept addresses and the anchor shift by the same
@@ -564,8 +523,8 @@ def ERET : MCS251Inst<(outs), (ins), "eret", [(MCS251eret)]>;
 // Encodings (sdas251 V05.50.4 + QEMU stc32g144k246 run-verified, see
 // /tmp/mcs251-p9 forms.asm): inc/dec dr60,#1/2/4 (the ONLY legal immediates
 // -- a frame adjustment is emitted as a sequence of these steps, the SDCC
-// prologue template), mov dr56,dr60 / mov dr60,dr56 (DR<->DR moves, the
-// same encoding family as the measured mov dr0,dr60), push/pop dr56 (same
+// prologue template), mov dr16,dr60 / mov dr60,dr16 (DR<->DR moves, the
+// same encoding family as the measured mov dr0,dr60), push/pop dr16 (same
 // DR push/pop family as the measured push dr12).
 
 // SP adjustment steps. inc/dec are ALU operations and write PSW (manual
@@ -580,16 +539,16 @@ let hasSideEffects = 1, Uses = [DR60], Defs = [DR60, PSW] in {
 }
 
 // Frame-anchor moves (only emitted when hasFP(): variable-sized objects).
-let hasSideEffects = 1, Uses = [DR60], Defs = [DR56] in
-def MOV56 : MCS251Inst<(outs), (ins), "mov dr56, dr60", []>;
-let hasSideEffects = 1, Uses = [DR56], Defs = [DR60] in
-def MOV60 : MCS251Inst<(outs), (ins), "mov dr60, dr56", []>;
+let hasSideEffects = 1, Uses = [DR60], Defs = [DR16] in
+def SETFP : MCS251Inst<(outs), (ins), "mov dr16, dr60", []>;
+let hasSideEffects = 1, Uses = [DR16], Defs = [DR60] in
+def RESTORESP : MCS251Inst<(outs), (ins), "mov dr60, dr16", []>;
 
-// Anchor save/restore. push dr56 advances SPX by 4 (a full DR slot).
-let hasSideEffects = 1, Uses = [DR56], Defs = [DR60] in
-def PUSH56 : MCS251Inst<(outs), (ins), "push dr56", []>;
-let hasSideEffects = 1, Uses = [DR60], Defs = [DR56, DR60] in
-def POP56 : MCS251Inst<(outs), (ins), "pop dr56", []>;
+// Anchor save/restore. push dr16 advances SPX by 4 (a full DR slot).
+let hasSideEffects = 1, Uses = [DR16], Defs = [DR60] in
+def PUSHFP : MCS251Inst<(outs), (ins), "push dr16", []>;
+let hasSideEffects = 1, Uses = [DR60], Defs = [DR16, DR60] in
+def POPFP : MCS251Inst<(outs), (ins), "pop dr16", []>;
 
 // Stack-slot address operand: @dr60-0x002c style. The displacement prints
 // SDCC-style: zero prints nothing (`@dr60`), positive as +0x%04x, negative
@@ -606,7 +565,7 @@ def mcs251_stack : Operand<i16> {
 }
 
 // Frame-relative loads/stores. Base is an SPBASE register (dr60 normally,
-// dr56 when the function has a frame anchor); displacement is resolved by
+// dr16 when the function has a frame anchor); displacement is resolved by
 // eliminateFrameIndex to O - StackSize (negative, see the model above).
 // There is deliberately ONE word-granular access pair: mov wr,@dr60+dis and
 // mov @dr60+dis,wr are single instructions (TSV-verified) and are the
@@ -635,27 +594,14 @@ def mcs251_frame : Operand<i32> {
 }
 let mayLoad = 1, isPseudo = 1 in {
   def MOV8rmF : MCS251Inst<(outs GPR8:$dst), (ins mcs251_frame:$addr), "", []>;
+  def MOV32rmF : MCS251Inst<(outs GPR32:$dst), (ins mcs251_frame:$addr), "", []>;
   def MOV16rmF : MCS251Inst<(outs GPR16:$dst), (ins mcs251_frame:$addr), "", []>;
 }
 let mayStore = 1, isPseudo = 1 in {
   def MOV8mrF : MCS251Inst<(outs), (ins mcs251_frame:$addr, GPR8:$src), "", []>;
+  def MOV32mrF : MCS251Inst<(outs), (ins mcs251_frame:$addr, GPR32:$src), "", []>;
   def MOV16mrF : MCS251Inst<(outs), (ins mcs251_frame:$addr, GPR16:$src), "", []>;
 }
-
-// i16 memory objects on the frame: same lane-decomposition pseudos as
-// LD16/ST16/ST16T, but frame-relative. Expanded by the custom inserter
-// (FinalizeISel) into two MOV8rmS/MOV8mrS whose displacements are FI+0 and
-// FI+1; PEI later resolves each against the frame base. Explicit operand
-// order: LD16S [dst, addr], ST16S/ST16TS [addr, val].
-let mayLoad = 1, usesCustomInserter = 1 in
-def LD16S : MCS251Inst<(outs GPR16:$dst),
-                       (ins mcs251_frame:$addr), "", []>;
-let mayStore = 1, usesCustomInserter = 1 in
-def ST16S : MCS251Inst<(outs),
-                       (ins mcs251_frame:$addr, GPR16:$val), "", []>;
-let mayStore = 1, usesCustomInserter = 1 in
-def ST16TS : MCS251Inst<(outs),
-                        (ins mcs251_frame:$addr, GPR16:$val), "", []>;
 
 // Frame-index pointer materialisation (`lea FI`). Selected by the
 // ISelDAGToDAG Select hook (AVR-style select<FrameIndex>): operand $src
@@ -676,8 +622,8 @@ def ST16TS : MCS251Inst<(outs),
 // ADJCALLSTACKs, and push only appears in a hasFP prologue. FIADDR can
 // therefore carry no chain and be freely scheduled. It is only valid without
 // a frame anchor: with variable-sized objects SPX has moved by the time the
-// sequence runs, and there is no way to read dr56 into a WR -- rejected
-// loudly there.
+// sequence runs. Reading the DR16 anchor into an escaping address is not
+// implemented yet, so that mixed case is rejected explicitly.
 let usesCustomInserter = 1, hasSideEffects = 0 in
 def FIADDR : MCS251Inst<(outs GPR16:$dst), (ins i16imm:$src), "", []>;
 

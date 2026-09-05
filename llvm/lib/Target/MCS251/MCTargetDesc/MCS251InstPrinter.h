@@ -23,7 +23,7 @@ public:
   void printImm16(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printDis16(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printDir8(const MCInst *MI, unsigned OpNo, raw_ostream &O);
-  // Frame-slot address @dr60/@dr56<+/-displacement> (mcs251_stack operand,
+  // Frame-slot address @dr60/@dr16<+/-displacement> (mcs251_stack operand,
   // two MC operands: base register + signed 16-bit displacement).
   void printStackAddr(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printSymbolImm(raw_ostream &O, const MCExpr *Expr);

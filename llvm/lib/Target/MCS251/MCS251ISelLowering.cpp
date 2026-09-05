@@ -23,24 +23,13 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
     : TargetLowering(TM, STI) {
   addRegisterClass(MVT::i8, &MCS251::GPR8RegClass);
   addRegisterClass(MVT::i16, &MCS251::GPR16RegClass);
-  // GPR32 is registered so MVT::i32 is a legal type: an illegal i32 would be
-  // taken apart by the type legalizer (an i32 load silently split into two
-  // i16 loads) before the operation legalizer could reject it. As a legal
-  // type every i32 memory access reaches LowerLoad/LowerStore's fatal error,
-  // and every other i32 operation fails loudly at selection instead of
-  // silently expanding into half-supported fragments. No instruction ever
-  // moves a whole dr register in this phase.
+  // i32 is legal for native DR arithmetic and canonical pointer values.
   addRegisterClass(MVT::i32, &MCS251::GPR32RegClass);
   computeRegisterProperties(STI.getRegisterInfo());
   setStackPointerRegisterToSaveRestore(MCS251::DR60);
   setBooleanContents(ZeroOrOneBooleanContent);
 
-  // Phase 6: comparisons and branches. BR_CC is custom-lowered into a cmp
-  // plus the BRCC long-branch pseudo (see LowerBR_CC). Declaring it Custom
-  // also enables the DAG combiner's BRCOND(setcc) -> BR_CC fold, which is
-  // the only way a `br i1 (icmp ...)` reaches this code. SETCC (materialised
-  // compare result) and BRCOND (branch on a non-icmp i1) are out of scope
-  // and rejected with a clear message in LowerOperation.
+  // Comparisons feed long conditional branches or register-valued selects.
   setOperationAction(ISD::BR_CC, MVT::i8, Custom);
   setOperationAction(ISD::BR_CC, MVT::i16, Custom);
   setOperationAction(ISD::BRCOND, MVT::Other, Custom);
@@ -59,27 +48,18 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::SELECT_CC, VT, Custom);
   }
 
-  // Phase 8: loads and stores. Custom (not MSP430-style pattern matching,
-  // which works there because MSP430 has native 16-bit load/store
-  // instructions and a single data address space): the MCS-251 has no 16-bit
-  // memory access, so an i16 object must be decomposed into two byte
-  // accesses with big-endian lane mapping, and selecting direct
-  // (dir8, 0x80-0xff reaches the SFR space) versus indirect (@wr, the same
-  // numeric address is region-00 edata) is a semantic decision per address
-  // kind. Both live in LowerLoad/LowerStore.
+  // Address classification distinguishes SFR-direct access from canonical DR
+  // pointers. Multi-byte objects retain the measured big-endian lane layout.
   setOperationAction(ISD::LOAD, MVT::i8, Custom);
   setOperationAction(ISD::LOAD, MVT::i16, Custom);
   setOperationAction(ISD::STORE, MVT::i8, Custom);
   setOperationAction(ISD::STORE, MVT::i16, Custom);
-  // i32 is a legal type in this backend (GPR32 exists) but no memory
-  // instruction reaches it: mark Custom so the rejection in LowerLoad/
-  // LowerStore is a clear fatal error instead of "Cannot select".
+  // i32 memory objects (including pointer slots) are four ordered byte ops.
   setOperationAction(ISD::LOAD, MVT::i32, Custom);
   setOperationAction(ISD::STORE, MVT::i32, Custom);
   // Extending loads and truncating stores consult their OWN action tables
   // (default Legal, they do not inherit the LOAD/STORE action above), so
-  // route them to the same custom lowering explicitly. i32 results are
-  // rejected there.
+  // route them to the same custom lowering explicitly.
   for (unsigned Ext :
        {ISD::EXTLOAD, ISD::ZEXTLOAD, ISD::SEXTLOAD}) {
     setLoadExtAction(Ext, MVT::i16, MVT::i8, Custom);
@@ -89,10 +69,7 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setTruncStoreAction(MVT::i16, MVT::i8, Custom);
   setTruncStoreAction(MVT::i32, MVT::i8, Custom);
   setTruncStoreAction(MVT::i32, MVT::i16, Custom);
-  // Byte-to-word widening (zextload i8 and plain zext i8->i16) expands to
-  // the ZEXT8 pseudo (zero hi lane + REG_SEQUENCE); anyext has the same
-  // legal expansion. Sign extension has no instruction sequence yet and is
-  // rejected in LowerOperation.
+  // Truncation extracts low lanes; extensions assemble WR/DR lanes.
   setOperationAction(ISD::TRUNCATE, MVT::i8, Custom);
   setOperationAction(ISD::TRUNCATE, MVT::i16, Custom);
   setOperationAction(ISD::ZERO_EXTEND, MVT::i16, Custom);
@@ -111,13 +88,8 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::GlobalAddress, MVT::i32, Custom);
   // Scaled GEPs use constant shifts, lowered with native DR additions.
   setOperationAction(ISD::SHL, MVT::i32, Custom);
-  // Loop VLAs use stacksave/stackrestore to recover the pre-iteration SPX.
-  // They cannot use the generic Copy{From,To}Reg expansion because DR60 is a
-  // 32-bit register while pointers are i16.
-  setOperationAction(ISD::STACKSAVE, MVT::i16, Custom);
-  setOperationAction(ISD::STACKRESTORE, MVT::i16, Custom);
-  // STACKSAVE/RESTORE are legalized through MVT::Other despite their i16
-  // pointer payload, so register that lookup form as well.
+  // Preserve the 16-bit SPX via SFR reads/writes while its saved value is an
+  // i32 pointer. The operation legalizer consults MVT::Other for both nodes.
   setOperationAction(ISD::STACKSAVE, MVT::Other, Custom);
   setOperationAction(ISD::STACKRESTORE, MVT::Other, Custom);
   // Atomics are separate opcodes (not flags on ISD::LOAD/STORE); route them
@@ -641,83 +613,6 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
         MI, BB, MI.getOperand(3).getMBB(),
         getSkipBranchOpcode8S((ISD::CondCode)MI.getOperand(2).getImm()));
   }
-  case MCS251::LD16S:
-  case MCS251::ST16S:
-  case MCS251::ST16TS: {
-    // Phase 9 frame-relative memory pseudos, mirror images of
-    // LD16/ST16/ST16T with the address carried as an unresolved
-    // (placeholder base, FrameIndex, offset) triple. Explicit operand
-    // order: LD16S [dst, base, FI, off], ST16S/ST16TS [base, FI, off, val].
-    // The displacement handed to the expanded MOV8rmS/MOV8mrS stays an
-    // (FI, off) pair -- PEI resolves each against the frame top.
-    MachineFunction *MF = BB->getParent();
-    MachineRegisterInfo &MRI = MF->getRegInfo();
-    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
-    DebugLoc DL = MI.getDebugLoc();
-
-    bool IsLoad = MI.getOpcode() == MCS251::LD16S;
-    bool IsWideStore = MI.getOpcode() == MCS251::ST16S;
-    unsigned BaseOp = IsLoad ? 1 : 0;
-    int FI = MI.getOperand(BaseOp + 1).getIndex();
-    uint64_t Disp = MI.getOperand(BaseOp + 2).getImm() & 0xffff;
-    MachineMemOperand *MMO =
-        MI.memoperands_empty() ? nullptr : *MI.memoperands_begin();
-    assert(MMO && "load/store custom inserter requires a MachineMemOperand");
-
-    auto SplitMMO = [&](uint64_t Off) {
-      return MF->getMachineMemOperand(MMO, Off, /*Size=*/1);
-    };
-    // MOV8rmS/MOV8mrS with an unresolved frame address (the placeholder
-    // base is re-attached per instruction; eliminateFrameIndex replaces it
-    // with the real frame base register).
-    auto BuildFrameMI = [&](unsigned Opc, uint64_t Off) {
-      return BuildMI(*BB, MI, DL, TII->get(Opc))
-          .addReg(MCS251::DR60)
-          .addFrameIndex(FI)
-          .addImm(Off);
-    };
-
-    if (IsLoad) {
-      Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-      Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8rmF), Hi)
-          .addReg(MCS251::DR60)
-          .addFrameIndex(FI)
-          .addImm(Disp)
-          .setMemRefs(SplitMMO(0));
-      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8rmF), Lo)
-          .addReg(MCS251::DR60)
-          .addFrameIndex(FI)
-          .addImm(Disp + 1)
-          .setMemRefs(SplitMMO(1));
-      BuildMI(*BB, MI, DL, TII->get(TargetOpcode::REG_SEQUENCE),
-              MI.getOperand(0).getReg())
-          .addReg(Hi)
-          .addImm(MCS251::sub_hi8)
-          .addReg(Lo)
-          .addImm(MCS251::sub_lo8);
-    } else {
-      // Stores extract the lanes from the GPR16 value with sub-register
-      // COPYs (def before use, keeping every temporary single-def).
-      Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-      BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), Lo)
-          .addReg(MI.getOperand(3).getReg(), RegState::NoFlags,
-                  MCS251::sub_lo8);
-      if (IsWideStore) {
-        Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-        BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), Hi)
-            .addReg(MI.getOperand(3).getReg(), RegState::NoFlags,
-                    MCS251::sub_hi8);
-        BuildFrameMI(MCS251::MOV8mrF, Disp).addReg(Hi).setMemRefs(SplitMMO(0));
-      }
-      BuildFrameMI(MCS251::MOV8mrF, IsWideStore ? Disp + 1 : Disp)
-          .addReg(Lo)
-          .setMemRefs(IsWideStore ? SplitMMO(1) : MMO);
-    }
-
-    MI.eraseFromParent();
-    return BB;
-  }
   case MCS251::FIADDR: {
     // Frame-index pointer materialisation: read SPX through the two SFR
     // direct addresses (0x81 = SP, 0x85 = SPH on this platform), assemble
@@ -794,101 +689,6 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     MI.eraseFromParent();
     return BB;
   }
-  case MCS251::LD16:
-  case MCS251::ST16:
-  case MCS251::ST16T: {
-    // Phase 8 memory pseudos. Explicit operand order: LD16 [dst, base,
-    // disp], ST16/ST16T [base, disp, val]. The pseudo's MachineMemOperand
-    // (size 2 for LD16/ST16) is split into per-byte MMOs so the expansion
-    // instructions carry exact size/offset info (the volatile flag survives
-    // the split, keeping volatile accesses un-mergeable and ordered).
-    //
-    // Endianness (measurement-verified): 16-bit objects in edata memory are
-    // big-endian -- mem[base+Disp] is the high byte, mem[base+Disp+1] the
-    // low byte -- matching the WR register file where sub_hi8 is the
-    // lower-numbered byte slot.
-    MachineFunction *MF = BB->getParent();
-    MachineRegisterInfo &MRI = MF->getRegInfo();
-    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
-    DebugLoc DL = MI.getDebugLoc();
-
-    bool IsLoad = MI.getOpcode() == MCS251::LD16;
-    bool IsWideStore = MI.getOpcode() == MCS251::ST16;
-    unsigned BaseOp = IsLoad ? 1 : 0;
-    Register Base = MI.getOperand(BaseOp).getReg();
-    uint64_t Disp = MI.getOperand(BaseOp + 1).getImm() & 0xffff;
-    // Lowering guarantees Disp <= 0xfffe, so Disp + 1 cannot wrap.
-    Register Val = IsLoad ? Register(0) : MI.getOperand(2).getReg();
-    MachineMemOperand *MMO =
-        MI.memoperands_empty() ? nullptr : *MI.memoperands_begin();
-    assert(MMO && "load/store custom inserter requires a MachineMemOperand");
-
-    auto SplitMMO = [&](uint64_t Off) {
-      return MF->getMachineMemOperand(MMO, Off, /*Size=*/1);
-    };
-
-    if (IsLoad) {
-      Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-      Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8rmD), Hi)
-          .addReg(Base)
-          .addImm(Disp)
-          .setMemRefs(SplitMMO(0));
-      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8rmD), Lo)
-          .addReg(Base)
-          .addImm(Disp + 1)
-          .setMemRefs(SplitMMO(1));
-      BuildMI(*BB, MI, DL, TII->get(TargetOpcode::REG_SEQUENCE),
-              MI.getOperand(0).getReg())
-          .addReg(Hi)
-          .addImm(MCS251::sub_hi8)
-          .addReg(Lo)
-          .addImm(MCS251::sub_lo8);
-    } else {
-      // Stores extract the lanes from the GPR16 value with sub-register
-      // COPYs (def before use, keeping every temporary single-def).
-      Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-      BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), Lo)
-          .addReg(Val, RegState::NoFlags, MCS251::sub_lo8);
-      if (IsWideStore) {
-        Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-        BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), Hi)
-            .addReg(Val, RegState::NoFlags, MCS251::sub_hi8);
-        BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8mrD))
-            .addReg(Base)
-            .addImm(Disp)
-            .addReg(Hi)
-            .setMemRefs(SplitMMO(0));
-      }
-      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8mrD))
-          .addReg(Base)
-          .addImm(IsWideStore ? Disp + 1 : Disp)
-          .addReg(Lo)
-          .setMemRefs(IsWideStore ? SplitMMO(1) : MMO);
-    }
-
-    MI.eraseFromParent();
-    return BB;
-  }
-  case MCS251::ST16TD: {
-    // Direct-address truncating store (constant address <= 0xff, including
-    // the SFR space): store the value's low lane through the dir8 form.
-    // Explicit operands [addr, val].
-    MachineFunction *MF = BB->getParent();
-    MachineRegisterInfo &MRI = MF->getRegInfo();
-    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
-    DebugLoc DL = MI.getDebugLoc();
-    Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), Lo)
-        .addReg(MI.getOperand(1).getReg(), RegState::NoFlags,
-                MCS251::sub_lo8);
-    BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8id))
-        .addImm(MI.getOperand(0).getImm() & 0xff)
-        .addReg(Lo)
-        .setMemRefs(MI.memoperands());
-    MI.eraseFromParent();
-    return BB;
-  }
   case MCS251::ZEXT8: {
     // %dst = { 0, %src }: zero hi lane + REG_SEQUENCE (single-def vregs
     // throughout, same MachineCSE-safety shape as BuildFlipped above).
@@ -924,6 +724,7 @@ MachineBasicBlock *MCS251TargetLowering::expandLongConditionalBranch(
   //     probabilities none is, so MBP keeps BB and SkipMBB adjacent;
   //   * SkipMBB has the single predecessor BB and is on the chain before
   //     MBP runs, so it is already BB's layout successor when BB is placed.
+  // MCS251PassConfig disables tail merging to protect this invariant too.
   // If IR !prof probabilities are ever preserved across this surgery, or
   // analyzeBranch is implemented (letting MBP or the branch folder reason
   // about and invert the jCCinv/ejmp pair), this guarantee breaks and the
@@ -982,44 +783,20 @@ MachineBasicBlock *MCS251TargetLowering::expandLongConditionalBranch(
 //  Load/store lowering (Phase 8)
 //===----------------------------------------------------------------------===//
 //
-// The MCS-251 has no 16-bit memory access instruction, and its byte-access
-// forms span two different address spaces:
-//
-//   * direct (dir8): 0x00-0x7f page-zero edata, 0x80-0xff SFR
-//   * @wr indirect / @wr+dis16: region-00 edata, 16-bit
-//
-// ADDRESS-SPACE TRAP (measurement-verified, do not change): the same numeric
-// address 0x80-0xff is the SFR space through direct addressing but plain
-// region-00 edata through @wr. SFRs are therefore ONLY reachable via
-// MOV8di/MOV8id, which parseAddress guarantees by mapping every constant
-// address K <= 0xff to the direct form (this also covers page-zero edata,
-// which is address-identical in both spaces). Everything else -- runtime
-// pointers, globals, displaced addresses -- goes through a 16-bit base in
-// @wr form.
-//
-// i16 objects are accessed as two bytes with BIG-ENDIAN lane mapping
-// (measurement-verified: 16-bit objects in edata memory are big-endian,
-// mem[base] = high byte, matching the WR register file where the MSB lives
-// in the lower byte slot = sub_hi8). The decomposition needs REG_SEQUENCE /
-// sub-register copies, which are MIR-only, so an i16 access is emitted as
-// the LD16/ST16/ST16T pseudo and split in EmitInstrWithCustomInserter.
-//
-// volatile: the MachineMemOperand of the original load/store (which carries
-// the volatile flag) is attached to every emitted machine node, so ordering
-// and non-merging are enforced by the scheduler through the MMO; no extra
-// handling is required here.
+// Canonical pointers use GPR32 and physical low-24-bit addresses. DR indexed
+// accesses add a signed dis16; larger offsets are folded with ADD32. Direct
+// constants <= 0xff retain the established SFR convention (0x80..0xff), which
+// differs from indirect edata at the same numeric address. This convention
+// is target-specific: taking an SFR address through a runtime pointer is not
+// a portable way to access SFRs. i16/i32 objects use ordered big-endian bytes,
+// while spills use native WR memory instructions.
 
 namespace {
 // One classified load/store address.
 struct MCS251Address {
-  // Register base: a GPR16 vreg pointer, or a value materialised here into
-  // one (constants, globals via `mov wr,#_sym`).
+  // A canonical i32 pointer; signed offsets reserve room for three more
+  // bytes of an i32 access. Larger offsets are folded into Base.
   SDValue Base;
-  // Constant displacement carried by the dis16 operand (0..0xFFFE); a plain
-  // undisplaced access has Disp == 0. Values outside the range are folded
-  // into Base by a real 16-bit add instead (parseAddress never leaves them
-  // here; 0xffff is excluded because @wr+0xffff wraparound was not
-  // measured, while `add wr,#imm16` wraparound is the plain 16-bit add).
   int64_t Disp = 0;
   // Direct addressing (i8 accesses only): constant address <= 0xff via the
   // dir8 form, covering page-zero edata (0x00-0x7f) and the SFR space
@@ -1029,13 +806,13 @@ struct MCS251Address {
   // Frame-relative addressing (Phase 9): the base is a stack object. The
   // displacement is carried as an unresolved (FrameIndex, offset) pair into
   // the mcs251_stack operand; PEI folds it against the frame top
-  // (@dr60-0x.... normally, @dr56 when the function has dynamic allocas).
+  // (@dr60-0x.... normally, @dr16 when the function has dynamic allocas).
   bool IsStack = false;
   int StackFI = 0;
 };
 } // namespace
 
-// Materialises a frame-index pointer as a plain GPR16 value (the FIADDR
+// Materialises a frame-index pointer as a zero-extended GPR32 value (the FIADDR
 // pseudo; the custom inserter builds the SFR-direct SP reads). Only used
 // when a frame pointer participates in REGISTER arithmetic (alloca[i]):
 // a direct load/store base stays frame-relative and never materialises.
@@ -1064,8 +841,7 @@ static SDValue buildMOV16ri(uint64_t Imm, const SDLoc &DL, SelectionDAG &DAG) {
       0);
 }
 
-// Fold a displacement into a register base with a real 16-bit add
-// (add wr,#imm16 wraps mod 2^16, which is the correct region-00 semantics).
+// Fold an out-of-range signed displacement using full i32 arithmetic.
 static SDValue foldDispIntoBase(SDValue Base, int64_t Disp, const SDLoc &DL,
                                 SelectionDAG &DAG) {
   if (Disp == 0)
@@ -1084,10 +860,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
   MCS251Address A;
   int64_t Off = 0;
 
-  // Peel constant offsets: (add p, K). The DAG combiner folds constant
-  // chains, so more than one level here is defensive. NOTE: offsets are
-  // read zero-extended: region-00 pointer arithmetic is mod 2^16, so the
-  // i16 constant 0xfffe is +65534 (dis16-able), not -2.
+  // Peel signed GEP offsets; the pointer index width is now 32 bits.
   while (Ptr.getOpcode() == ISD::ADD) {
     SDValue LHS = Ptr.getOperand(0), RHS = Ptr.getOperand(1);
     if (auto *C = dyn_cast<ConstantSDNode>(RHS)) {
@@ -1100,7 +873,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
       Ptr = RHS;
       continue;
     }
-    // Register + register: materialise one 16-bit add. Recursing keeps
+    // Register + register: materialise one 32-bit add. Recursing keeps
     // nested folded offsets (add (add p, 1), q) out of the operands. A
     // frame-index side leaves the frame-relative form here: it becomes a
     // plain pointer (materializeFrameIndex) so the register add covers it
@@ -1133,10 +906,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
     return A;
   }
 
-  // Symbolic bases: `mov wr,#_sym` (symbolic immediate, Phase 8
-  // measurement: sdas251 accepts it and sdld resolves the relocation; an
-  // offset stays symbolic as #(_sym+off)). The displacement stays 0 so the
-  // offset rides the immediate instead of a dis16 byte pair.
+  // Keep the full symbol+addend for byte-of-24 link-time relocations.
   if (auto *GA = dyn_cast<GlobalAddressSDNode>(Ptr)) {
     int64_t SymOff = GA->getOffset() + Off;
     A.Base = SDValue(
@@ -1160,10 +930,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
         "MCS251: constant-pool addresses are not supported (constant "
         "islands arrive with a later phase)");
   } else if (auto *C = dyn_cast<ConstantSDNode>(Ptr)) {
-    // Absolute constant address. Direct addressing for K <= 0xff (page-zero
-    // edata or SFR -- the SFR is ONLY reachable this way, see the trap
-    // above); otherwise materialise and access region-00 edata via @wr.
-    // Pointer arithmetic wraps mod 2^16 (region-00 is a 16-bit space).
+    // Preserve the direct/SFR convention only for absolute byte addresses.
     uint32_t K = C->getZExtValue() + Off;
     if (AllowDirect && K <= 0xff) {
       A.IsDirect = true;
@@ -1176,9 +943,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
     report_fatal_error(
         "MCS251: jump-table/block-address data addresses are not supported");
   } else {
-    // Plain register base (a GPR16 vreg pointer). Off within the dis16
-    // range rides the displacement (one instruction, no base clobber);
-    // outside it is folded into the base with a real add (wrap semantics).
+    // DR indexed displacements are signed16, not the old WR rule.
     A.Base = Ptr;
     if (Off >= -32768 && Off <= 32764)
       A.Disp = Off;
@@ -1642,7 +1407,7 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
 // slots (storeRegToStackSlot/loadRegFromStackSlot -> @dr60 displacement
 // accesses), so values live across a call are spilled to the frame instead
 // of being a hard error. A mixed dynamic-alloca function references its
-// static slots through the dr56 anchor, so those spills stay correct too.
+// static slots through the dr16 anchor, so those spills stay correct too.
 SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                                         SmallVectorImpl<SDValue> &InVals) const {
   SelectionDAG &DAG = CLI.DAG;
@@ -1715,7 +1480,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   // Wrap the callee so legalisation cannot hack the address apart: every
   // direct call reaches here as one of these two node kinds (checked above).
-  // The pointer type follows the DataLayout (MVT::i16 today) so a future
+  // The pointer type follows the DataLayout (MVT::i32), so a future
   // pointer-width change cannot silently truncate the symbol, and a
   // GlobalAddress with an offset keeps it (MSP430 pattern).
   if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee))

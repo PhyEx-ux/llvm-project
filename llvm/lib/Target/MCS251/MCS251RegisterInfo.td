@@ -202,17 +202,17 @@ def GPR16 : RegisterClass<"MCS251", [i16], 8, (add WR0, WR2, WR4, WR6, WR8,
 // spilling. DR8 overlaps the fixed A/B ABI locations through R10/R11; DR16+
 // have no encodable byte-register lanes. Allocating them for a PHI/spill
 // bypasses the DAG subregister constraints and would silently corrupt values.
-// DR56 (DPX) and DR60 (SPX) remain reserved.
+// DR16 (private frame anchor), DR56 (DPX) and DR60 (SPX) remain reserved.
 def GPR32 : RegisterClass<"MCS251", [i32], 8, (add DR0, DR4, DR12)>;
 
 // Non-allocatable class holding the two stack-addressing bases: dr60 (spx,
-// the default frame reference) and dr56 (dpx, the frame anchor used when the
+// the default frame reference) and dr16 (the frame anchor used when the
 // function has variable-sized objects, see MCS251FrameLowering). The stack
 // access instructions (MOV8rmS etc.) take their base from this class so
 // eliminateFrameIndex can substitute either register via ChangeToRegister.
 // Same isAllocatable=0 pattern as DP8/DP16 below.
 let isAllocatable = 0 in
-def SPBASE : RegisterClass<"MCS251", [i32], 8, (add DR60, DR56)>;
+def SPBASE : RegisterClass<"MCS251", [i32], 8, (add DR60, DR16)>;
 
 // Non-allocatable classes for the fixed SFR ABI locations (dpl/dph and their
 // 16-bit overlay dptr), same pattern as upstream X86's CCR for EFLAGS. They

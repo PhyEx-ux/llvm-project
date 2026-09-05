@@ -1,13 +1,13 @@
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs < %s | FileCheck %s
 
-; Phase 8: loads. Addressing forms (encodings verified against sdas251
+; Phase 11: canonical pointer loads. Addressing forms (encodings verified against sdas251
 ; V05.50.4):
-;   * @dr      : register-indirect, region-00 edata (a runtime pointer)
+;   * @dr      : register-indirect, full low-24-bit address
 ;   * @dr+dis16: displaced; a global folds its offset into `mov wr,#(_sym+off)`
 ;   * dir8     : direct, constant address <= 0xff (0x00-0x7f page-zero edata,
 ;                0x80-0xff SFR -- the SFRs are ONLY reachable this way; the
 ;                same numeric address via @dr is region-00 edata)
-; There is no 16-bit memory access: an i16 object is two byte loads with
+; IR i16 objects use two byte loads with
 ; BIG-ENDIAN lane mapping (mem[base] -> hi lane / sub_hi8, mem[base+1] ->
 ; lo lane / sub_lo8). The load16 tests lock that order: displacement 0x0000
 ; must land in the register that reaches dph (i16 return: dpl=lo, dph=hi).
@@ -40,8 +40,7 @@ define i8 @load8_ptr_off(ptr %p) {
   ret i8 %v
 }
 
-; Big displacement (>= 0x8000 is a positive i16 offset, not a negative one:
-; region-00 pointer arithmetic is mod 2^16).
+; An i16 GEP index is sign-extended to i32: 65534 denotes -2, not +65534.
 define i8 @load8_ptr_bigdisp(ptr %p) {
 ; CHECK-LABEL: load8_ptr_bigdisp:
 ; CHECK:         mov r{{[0-9]+}}, @dr{{[0-9]+}}-0x0002
@@ -50,7 +49,7 @@ define i8 @load8_ptr_bigdisp(ptr %p) {
   ret i8 %v
 }
 
-; Negative offset: folded into the base with a real 16-bit add (wraps).
+; Negative offset uses the signed DR indexed form.
 define i8 @load8_ptr_neg(ptr %p) {
 ; CHECK-LABEL: load8_ptr_neg:
 ; CHECK:         mov r{{[0-9]+}}, @dr{{[0-9]+}}-0x0001

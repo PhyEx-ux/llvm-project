@@ -16,9 +16,9 @@
 // Variable-sized objects (dynamic allocas) adjust SPX at the alloca site
 // (LowerDYNAMIC_STACKALLOC), which would invalidate every static
 // displacement. Such functions set hasFP(): the frame top is anchored in
-// dr56 (dpx) right after the prologue, all frame references switch to
-// @dr56-relative displacements (same O - StackSize formula -- the anchor is
-// taken after `push dr56`, so anchor and concept addresses both shift by 4),
+// reserved dr16 right after the prologue, all frame references switch to
+// @dr16-relative displacements (same O - StackSize formula -- the anchor is
+// taken after `push dr16`, so anchor and concept addresses both shift by 4),
 // and the epilogue restores SPX from the anchor before `dec spx`/`eret`.
 // eret pops [SPX-2..SPX] (QEMU mcs251_return_extended), which is why SPX
 // must be EXACTLY restored -- a dynamic alloca without restore would make
@@ -77,10 +77,12 @@ void MCS251FrameLowering::emitPrologue(MachineFunction &MF,
   bool FramePtr = hasFP(MF);
 
   if (FramePtr) {
-    // dr56 is not preserved across calls by the SDCC ABI, so a var-sized
-    // callee saves/restores it itself. A nested var-sized call must not
-    // destroy this caller's anchor. 4 bytes.
-    BuildMI(MBB, MBBI, DL, TII.get(MCS251::PUSH56))
+    // Private anchor convention: LLVM reserves DR16; the supported SDCC
+    // port never allocates R16-R31. Only LLVM var-sized functions use DR16,
+    // and they save/restore it for nested calls. Handwritten callees must
+    // preserve DR16 too. DPX/DR56 is unsuitable: DPL/DPH alias it and both
+    // argument reads and call-result writes would destroy a DPX anchor.
+    BuildMI(MBB, MBBI, DL, TII.get(MCS251::PUSHFP))
         .setMIFlag(MachineInstr::FrameSetup);
   }
 
@@ -90,8 +92,8 @@ void MCS251FrameLowering::emitPrologue(MachineFunction &MF,
 
   if (FramePtr) {
     // Anchor the frame top AFTER the push and the allocation. From here on
-    // eliminateFrameIndex references the frame through dr56.
-    BuildMI(MBB, MBBI, DL, TII.get(MCS251::MOV56))
+    // eliminateFrameIndex references the frame through dr16.
+    BuildMI(MBB, MBBI, DL, TII.get(MCS251::SETFP))
         .setMIFlag(MachineInstr::FrameSetup);
   }
 }
@@ -113,7 +115,7 @@ void MCS251FrameLowering::emitEpilogue(MachineFunction &MF,
     // Restore SPX from the anchor in one step (this also discards any
     // dynamic-alloca offset), landing on the frame top as it was after the
     // prologue.
-    BuildMI(MBB, MBBI, DL, TII.get(MCS251::MOV60))
+    BuildMI(MBB, MBBI, DL, TII.get(MCS251::RESTORESP))
         .setMIFlag(MachineInstr::FrameDestroy);
   }
 
@@ -124,7 +126,7 @@ void MCS251FrameLowering::emitEpilogue(MachineFunction &MF,
   if (FramePtr) {
     // Restore the caller's anchor; SPX ends at the function-entry value,
     // so eret pops the return address saved by ecall.
-    BuildMI(MBB, MBBI, DL, TII.get(MCS251::POP56))
+    BuildMI(MBB, MBBI, DL, TII.get(MCS251::POPFP))
         .setMIFlag(MachineInstr::FrameDestroy);
   }
 }
@@ -133,10 +135,10 @@ StackOffset MCS251FrameLowering::getFrameIndexReference(
     const MachineFunction &MF, int FI, Register &FrameReg) const {
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   // The frame reference base: SPX (post-prologue frame top) normally, the
-  // dr56 anchor when dynamic allocas move SPX. This mirrors
+  // dr16 anchor when dynamic allocas move SPX. This mirrors
   // getFrameRegister(), kept in sync for the generic passes that consult
   // that one.
-  FrameReg = MFI.hasVarSizedObjects() ? Register(MCS251::DR56)
+  FrameReg = MFI.hasVarSizedObjects() ? Register(MCS251::DR16)
                                       : Register(MCS251::DR60);
   // Stack-grows-up mirror of the default (down-growing) formula: the base
   // points at the frame TOP while the objects start one byte above the

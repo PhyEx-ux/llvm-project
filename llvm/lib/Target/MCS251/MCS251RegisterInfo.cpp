@@ -7,6 +7,7 @@
 #include "llvm/ADT/BitVector.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
@@ -49,6 +50,8 @@ BitVector MCS251RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   // alias machinery keeps wr56-wr62 and r56-r63 unallocatable as well.
   Reserved.set(MCS251::DR60);
   Reserved.set(MCS251::DR56);
+  // Dynamic-frame anchor. Unlike DPX it does not alias DPL/DPH arguments.
+  Reserved.set(MCS251::DR16);
   // DPL/DPH are the ABI return-value locations and DPTR is their 16-bit
   // overlay; none of them belong to an allocatable register class. Reserve
   // them anyway so that no allocator can ever hand them out.
@@ -80,9 +83,7 @@ MCS251RegisterInfo::getPointerRegClass(unsigned Kind) const {
 // immediate (upstream FI convention -- the offset operand is folded away
 // here). Two instruction shapes reach this code:
 //
-//   MOV8rmS/MOV8mrS/MOV16rmS/MOV16mrS  [.., base, FI, off, ..]
-//       (also matches nothing else: LD16S/ST16S/ST16TS are expanded by
-//        FinalizeISel long before PEI runs)
+//   MOV8rmF/MOV8mrF/MOV16rmF/MOV16mrF  [.., base, FI, off, ..]
 //   ADD16fi                            [dst, lhs, FI, off]
 //
 // The final displacement is
@@ -115,6 +116,33 @@ bool MCS251RegisterInfo::eliminateFrameIndex(
   switch (MI.getOpcode()) {
   default:
     report_fatal_error("MCS251: unknown instruction with a frame index");
+  case MCS251::MOV32rmF:
+  case MCS251::MOV32mrF: {
+    // Keep a full DR definition/use throughout allocation. Only now, with
+    // physical registers and final offsets, expose the native WR lanes.
+    if (!isInt<16>(Dis + 2))
+      report_fatal_error("MCS251: i32 spill exceeds signed16 frame displacement");
+    bool Load = MI.getOpcode() == MCS251::MOV32rmF;
+    const MachineOperand &Value = MI.getOperand(Load ? 0 : 3);
+    Register DR = Value.getReg();
+    assert(DR.isPhysical() && "frame elimination must follow allocation");
+    const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
+    for (unsigned I = 0; I < 2; ++I) {
+      Register WR = getSubReg(DR, I == 0 ? MCS251::sub_hi16 : MCS251::sub_lo16);
+      MachineInstrBuilder MIB = BuildMI(*MI.getParent(), MI, MI.getDebugLoc(),
+          TII->get(Load ? MCS251::MOV16rmS : MCS251::MOV16mrS));
+      if (Load)
+        MIB.addReg(WR, RegState::Define | getDeadRegState(Value.isDead()));
+      MIB.addReg(FrameReg).addImm(Dis + 2 * I);
+      if (!Load)
+        MIB.addReg(WR, getKillRegState(Value.isKill()));
+      for (MachineMemOperand *MMO : MI.memoperands())
+        MIB.addMemOperand(MF.getMachineMemOperand(MMO, 2 * I, /*Size=*/2));
+      MIB.setMIFlags(MI.getFlags());
+    }
+    MI.eraseFromParent();
+    return true;
+  }
   case MCS251::MOV8rmF:
   case MCS251::MOV8mrF:
   case MCS251::MOV16rmF:
@@ -140,9 +168,8 @@ bool MCS251RegisterInfo::eliminateFrameIndex(
     // form. add wr,#imm16 wraps mod 2^16, which is the correct region-00
     // behaviour for the negative displacement (Phase 8 ruling). This path
     // reads SPX at runtime, so it is only valid while SPX is the frame
-    // reference -- a var-sized function would need to materialise the dr56
-    // anchor. Not yet implemented: wr56 (dptr) is dr56's low 16 bits, and
-    // Phase 10 can use `mov wrN, wr56`.
+    // reference -- a var-sized function would need to materialise the dr16
+    // anchor (not yet implemented).
     if (MF.getFrameInfo().hasVarSizedObjects())
       report_fatal_error("MCS251: taking the address of a frame object in a "
                          "function with dynamic allocas is not supported "
@@ -160,6 +187,6 @@ MCS251RegisterInfo::getFrameRegister(const MachineFunction &MF) const {
   // Mirrors MCS251FrameLowering::getFrameIndexReference: SPX is the frame
   // reference unless dynamic allocas moved it, in which case the dr56
   // anchor holds the stable frame top.
-  return MF.getFrameInfo().hasVarSizedObjects() ? MCS251::DR56
+  return MF.getFrameInfo().hasVarSizedObjects() ? MCS251::DR16
                                                 : MCS251::DR60;
 }

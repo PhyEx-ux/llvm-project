@@ -98,12 +98,22 @@ def isa(args):
                   'mov r6, @dr4', 'cmp r6, #0x5a', f'je mem{checks}',
                   'ejmp fail', f'mem{checks}:']
         checks += 1
+    # Candidate frame anchor: DR16 has no allocatable byte lanes, but native
+    # DR moves, CMP and indexed addressing must all work independently.
+    lines += emit_text('DR16\n')
+    lines += ['mov dr16, dr60', 'mov dr0, dr16', 'cmp dr0, dr60',
+              'je anchor_copy', 'ejmp fail', 'anchor_copy:',
+              'mov r7, #0x69', 'mov @dr16-2, r7', 'mov r6, @dr60-2',
+              'cmp r6, #0x69', 'je anchor_mem', 'ejmp fail', 'anchor_mem:',
+              'push dr16', 'mov dr16, #0x1234', 'pop dr16',
+              'cmp dr16, dr60', 'je anchor_restore', 'ejmp fail', 'anchor_restore:']
+    checks += 3
     lines += emit_text('PASS\n') + ['halt: sjmp halt', 'fail:']
     lines += emit_text('FAIL\n') + ['sjmp halt']
     source = args.work_dir / 'isa.asm'
     source.write_text('\n'.join(lines) + '\n')
     qemu(args, link(args, 'isa', [assemble(args, source)]))
-    print(f'ISA assertions passed: {checks} (120 CMP32 branches, 4 DR addresses)')
+    print(f'ISA assertions passed: {checks} (120 CMP32 branches, 4 DR addresses, 3 DR16 anchor checks)')
 
 
 def compile_c(args, source):
@@ -232,6 +242,114 @@ __xdata __at (0x010300) volatile unsigned char slotbytes[4];
         assert memory(images[0]) == memory(images[1]), 'asm/obj linked byte mismatch'
 
 
+def regressions(args):
+    test_dir = pathlib.Path(__file__).resolve().parent.parent
+    firmware = test_dir.parents[3] / 'validation/mcs251-firmware'
+    source = args.work_dir / 'regression-harness.c'
+    source.write_text('''
+extern unsigned char indirect(unsigned char (*)(void));
+typedef unsigned long (*long_fn)(unsigned long value);
+extern unsigned long indirect_i32(long_fn fn);
+extern unsigned char local_indirect(void);
+extern unsigned char local_fn(void);
+extern unsigned char (*local_address(void))(void);
+extern unsigned char (*local_addend(void))(void);
+extern unsigned long sdcc_pointer_result(void);
+extern unsigned char sdcc_pointer_arg(void);
+extern unsigned int external_word(unsigned int);
+extern unsigned long edge_load(unsigned char *);
+extern unsigned char edge_neg(unsigned char *);
+extern unsigned char dyn_stack(unsigned int);
+extern unsigned char nested_dyn(unsigned int);
+extern unsigned int vla_loop(unsigned int);
+extern unsigned int recurse(unsigned int);
+__sfr __at (0xe0) ACC;
+__xdata __at (0x020000) volatile unsigned char upper;
+__xdata __at (0x01ffff) volatile unsigned char lower;
+__xdata __at (0x010200) volatile unsigned char word[4];
+__xdata __at (0x010400) volatile unsigned int external_scalar;
+unsigned char target_byte(void) { return 93; }
+unsigned long target_long(unsigned long x) { return x + 1; }
+unsigned char *sdcc_pointer(void) { ACC = 0xab; return (unsigned char *)0x20000UL; }
+unsigned char sdcc_reader(__xdata unsigned char *p) { return *p; }
+#define MCS251_CHECKPOINTS() do { \\
+  harness_check_u8(93, indirect(target_byte)); \\
+  harness_check_u32(0x12345679UL, indirect_i32(target_long)); \\
+  harness_check_u8(77, local_indirect()); \\
+  harness_check_u32((unsigned long)local_fn, (unsigned long)local_address()); \\
+  harness_check_u32((unsigned long)local_fn - 0x10000UL, (unsigned long)local_addend()); \\
+  harness_check_u32(0x20000UL, sdcc_pointer_result()); \\
+  upper = 0x5a; lower = 0xa5; \\
+  harness_check_u8(0x5a, sdcc_pointer_arg()); \\
+  harness_check_u16(0x1357, external_word(0x1357)); \\
+  harness_check_u16(0x1357, external_scalar); \\
+  word[0]=0x89; word[1]=0xab; word[2]=0xcd; word[3]=0xef; \\
+  harness_check_u32(0x89abcdefUL, edge_load((unsigned char *)0x8201UL)); \\
+  harness_check_u8(0xa5, edge_neg((unsigned char *)0x28000UL)); \\
+  harness_check_u8(90, dyn_stack(9)); \\
+  harness_check_u8(90, dyn_stack(259)); \\
+  harness_check_u16(12, vla_loop(37)); \\
+  harness_check_u16(12, vla_loop(257)); \\
+  harness_check_u16(0, recurse(0)); \\
+  harness_check_u16(55, recurse(10)); \\
+  harness_check_u16(210, recurse(20)); \\
+  harness_check_u8(112, nested_dyn(31)); \\
+} while (0)
+''' + '#include "' + str(firmware / 'harness-template.c') + '"\n')
+    # Emit a checkpoint letter before each assertion for failure localization.
+    text = source.read_text()
+    import re
+    counter = iter(range(65, 91))
+    text = re.sub(r'  harness_check_', lambda _: f"  UART_PUTC('{chr(next(counter))}'); harness_check_", text)
+    source.write_text(text)
+    harness = compile_c(args, source)
+    for opt in [0, 2]:
+        for kind in ['asm', 'obj']:
+            name = f'regression-O{opt}-{kind}'
+            output = args.work_dir / (name + ('.asm' if kind == 'asm' else '.rel'))
+            run([args.llc, '-mtriple=mcs251', '-verify-machineinstrs', f'-O{opt}',
+                 f'-filetype={kind}', test_dir / 'pointer-regressions.ll', '-o', output])
+            obj = assemble(args, output) if kind == 'asm' else output
+            qemu(args, link(args, name, [args.work_dir / 'crt0.rel', harness, obj,
+                                        args.work_dir / 'pointer-provider.rel']))
+
+
+def legacy(args):
+    test_dir = pathlib.Path(__file__).resolve().parent.parent
+    root = test_dir.parents[3]
+    firmware = root / 'validation/mcs251-firmware'
+    module = args.work_dir / 'i32-legacy.ll'
+    module.write_text((test_dir / 'i32.ll').read_text().replace('@', '@_'))
+    decls = ['extern unsigned long c(void);', 'extern unsigned long call_i32(void);']
+    names = ['id', 'add1', 'neg1', 'sub1', 'and_self', 'and_const', 'or_const', 'xor_const']
+    decls += [f'extern unsigned long {n}(unsigned long);' for n in names]
+    checks = ['harness_check_u32(0x12345678UL, c());',
+              'harness_check_u32(0x12345679UL, call_i32());']
+    for x in [0, 0xffff, 0x10000, 0x89abcdef, 0xffffffff]:
+        values = [x, (x+1)&0xffffffff, (x-1)&0xffffffff, (x-1)&0xffffffff,
+                  x, x&0xffff, x|0xffff, x^0xffff]
+        checks += [f'harness_check_u32(0x{v:08x}UL, {n}(0x{x:08x}UL));'
+                   for n, v in zip(names, values)]
+    source = args.work_dir / 'i32-legacy-harness.c'
+    source.write_text('\n'.join(decls) + '\n#define MCS251_CHECKPOINTS() do { ' +
+                      ' '.join(checks) + ' } while (0)\n#include "' +
+                      str(firmware / 'harness-template.c') + '"\n')
+    harness = compile_c(args, source)
+    smoke_c = args.work_dir / 'smoke-harness.c'
+    smoke_c.write_text((root / 'validation/mcs251-smoke/harness.c').read_text())
+    smoke_obj = compile_c(args, smoke_c)
+    for name, ir, obj in [('legacy', module, harness),
+                          ('smoke', root / 'validation/mcs251-smoke/probe.ll', smoke_obj)]:
+        for opt in [0, 2]:
+            for kind in ['asm', 'obj']:
+                stem = f'{name}-O{opt}-{kind}'
+                output = args.work_dir / (stem + ('.asm' if kind == 'asm' else '.rel'))
+                run([args.llc, '-mtriple=mcs251', '-verify-machineinstrs', f'-O{opt}',
+                     f'-filetype={kind}', ir, '-o', output])
+                code = assemble(args, output) if kind == 'asm' else output
+                qemu(args, link(args, stem, [args.work_dir / 'crt0.rel', obj, code]))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--work-dir', type=pathlib.Path, required=True)
@@ -243,6 +361,8 @@ def main():
     isa(args)
     comparisons(args)
     pointers(args)
+    regressions(args)
+    legacy(args)
 
 
 if __name__ == '__main__':

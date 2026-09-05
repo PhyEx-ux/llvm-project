@@ -94,7 +94,7 @@ void MCS251InstPrinter::printDir8(const MCInst *MI, unsigned OpNo,
 }
 
 // Frame-slot address (mcs251_stack operand): OpNo is the base register
-// (dr60 or dr56), OpNo+1 the signed 16-bit displacement. Prints SDCC-style:
+// (dr60 or dr16), OpNo+1 the signed 16-bit displacement. Prints SDCC-style:
 // a zero displacement prints nothing (`@dr60`), otherwise +0x%04x / -0x%04x.
 // The SIGN IS LOAD-BEARING: sdas251 parses an @DRk displacement as a
 // positive 24-bit value, so a negative displacement must never be emitted

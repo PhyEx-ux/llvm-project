@@ -1,12 +1,14 @@
-; RUN: not --crash llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
-
-; The ecall encoding takes a symbolic target address (resolved by the
-; linker); calling through a register (function pointer) would need an
-; indirect-call encoding that this phase does not model. Rejected explicitly.
-; (report_fatal_error aborts, hence --crash; lit pipelines are pipefail.)
-
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs < %s | FileCheck %s
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 < %s | FileCheck %s
+; RUN: llc -mtriple=mcs251 -filetype=obj < %s | FileCheck %s --check-prefix=OBJ
+;
+; Former rejection: canonical i32 function pointers select ECALLr.
 define void @caller(ptr %f) {
-; CHECK: LLVM ERROR: MCS251: indirect calls (function pointers) are not supported
+; CHECK-LABEL: caller:
+; CHECK: ecall @dr{{[0-9]+}}
+; CHECK: eret
+; OBJ: T 00 00 00 {{.*}} 99
+; OBJ: T 00 00 0D 08 AA
   call void %f()
   ret void
 }

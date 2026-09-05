@@ -19,7 +19,7 @@
 ;-----------------------------------------------------------------------------
 
 ; Constant value (the ABI has a single argument slot, so the value is an
-; immediate and the pointer rides dptr).
+; immediate and the pointer rides B:DPH:DPL).
 define void @store8_ptr(ptr %p) {
 ; CHECK-LABEL: store8_ptr:
 ; CHECK:         mov r{{[0-9]+}}, #0xff
@@ -164,8 +164,7 @@ define void @store16_trunc(i16 %v) {
   ret void
 }
 
-; Truncating store to a constant direct address keeps the dir8 form (ST16TD
-; pseudo): falling back to @dr would retarget 0x80-0xff from the SFR space
+; Truncating store to a constant direct address keeps the dir8 form: falling back to @dr would retarget 0x80-0xff from the SFR space
 ; to region-00 edata.
 define void @store16_trunc_direct(i16 %v) {
 ; CHECK-LABEL: store16_trunc_direct:

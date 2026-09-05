@@ -25,11 +25,8 @@ public:
     return MVT::i8;
   }
 
-  // The DAG combiner's consecutive-store merge would fuse i8 stores into
-  // i32 stores (e.g. an alloca'd byte array initialised element by
-  // element). There is no i32 memory instruction and i32 stores are a
-  // deliberate loud rejection, so the merge is turned off entirely --
-  // the merged-to type would only be legal at i8 anyway.
+  // Keep explicit byte ordering and avoid merging across the target-specific
+  // SFR-direct versus indirect-address distinction.
   bool canMergeStoresTo(unsigned AS, EVT MemVT,
                         const MachineFunction &MF) const override {
     return false;

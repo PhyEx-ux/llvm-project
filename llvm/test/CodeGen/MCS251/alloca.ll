@@ -8,7 +8,7 @@
 ;
 ; The returned pointer is the object base = old SPX+1 (the stack grows up
 ; and SPX points at the top-most used byte). Because dynamic allocas move
-; SPX, such functions anchor the frame top in dr56 (push/mov/pop in
+; SPX, such functions anchor the frame top in dr16 (push/mov/pop in
 ; prologue/epilogue) so SPX is exactly restored before eret pops
 ; [SPX-2..SPX].
 
@@ -16,8 +16,8 @@ declare i8 @f8a()
 
 define i16 @dyn_alloca(i16 %n) {
 ; CHECK-LABEL: dyn_alloca:
-; CHECK: push dr56
-; CHECK: mov dr56, dr60
+; CHECK: push dr16
+; CHECK: mov dr16, dr60
 ; read SPX (0x81/0x85), add the size, write SPX back (high byte first so a
 ; mid-update interrupt only ever lands above the new object)
 ; CHECK: mov r{{[0-9]+}}, 0x81
@@ -28,8 +28,8 @@ define i16 @dyn_alloca(i16 %n) {
 ; object base = old SPX + 1
 ; CHECK: add wr{{[0-9]+}}, #0x0001
 ; CHECK: mov @dr{{[0-9]+}}, r{{[0-9]+}}
-; CHECK: mov dr60, dr56
-; CHECK: pop dr56
+; CHECK: mov dr60, dr16
+; CHECK: pop dr16
 ; CHECK: eret
 entry:
   %b = alloca i8, i16 %n
@@ -45,11 +45,11 @@ entry:
 ; SPX (the anchor), the caller's own frame survives the nested call.
 define i8 @dyn_alloca_call(i16 %n) {
 ; CHECK-LABEL: dyn_alloca_call:
-; CHECK: push dr56
-; CHECK: mov dr56, dr60
+; CHECK: push dr16
+; CHECK: mov dr16, dr60
 ; CHECK: ecall f8a
-; CHECK: mov dr60, dr56
-; CHECK: pop dr56
+; CHECK: mov dr60, dr16
+; CHECK: pop dr16
 ; CHECK: eret
 entry:
   %b = alloca i8, i16 %n
@@ -64,14 +64,14 @@ entry:
 ; Loop VLAs use llvm.stacksave/stackrestore to recover the pre-iteration SPX.
 ; stacksave returns the current SPX (SFR read 0x81/0x85), stackrestore writes
 ; it back (hi-first). The function has var-sized objects, so the frame is
-; anchored in dr56.
+; anchored in dr16.
 declare ptr @llvm.stacksave()
 declare void @llvm.stackrestore(ptr)
 
 define void @loop_vla(i16 %n) {
 ; CHECK-LABEL: loop_vla:
-; CHECK: push dr56
-; CHECK: mov dr56, dr60
+; CHECK: push dr16
+; CHECK: mov dr16, dr60
 ; stacksave: read SPX
 ; CHECK: mov r{{[0-9]+}}, 0x81
 ; CHECK: mov r{{[0-9]+}}, 0x85

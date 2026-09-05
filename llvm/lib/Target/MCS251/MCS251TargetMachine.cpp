@@ -73,7 +73,13 @@ namespace {
 class MCS251PassConfig final : public TargetPassConfig {
 public:
   MCS251PassConfig(MCS251TargetMachine &TM, PassManagerBase &PM)
-      : TargetPassConfig(TM, PM) {}
+      : TargetPassConfig(TM, PM) {
+    // Long conditional branches depend on the adjacent short-skip block.
+    // See MCS251TargetLowering::expandLongConditionalBranch. Re-enable only
+    // after implementing analyzeBranch/insertBranch/removeBranch AND real
+    // branch relaxation. Until then the generic folder cannot rewrite CFGs.
+    setEnableTailMerge(false);
+  }
 
   bool addInstSelector() override {
     addPass(createMCS251ISelDag(getTM<MCS251TargetMachine>(), getOptLevel()));
