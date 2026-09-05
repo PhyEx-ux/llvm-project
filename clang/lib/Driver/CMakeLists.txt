@@ -77,6 +77,7 @@ add_clang_library(clangDriver
   ToolChains/LFILinux.cpp
   ToolChains/Linux.cpp
   ToolChains/Managarm.cpp
+  ToolChains/MCS251.cpp
   ToolChains/MipsLinux.cpp
   ToolChains/MinGW.cpp
   ToolChains/MSP430.cpp
