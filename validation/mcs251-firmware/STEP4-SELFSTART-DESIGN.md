@@ -1,9 +1,12 @@
 # Step 4 自建启动设计：去 SDCC 的最小启动链
 
-状态：设计定稿候选 v1（2026-09-05，Moka）。工具：冻结 llc/qemu（md5
-09c438e6…/6b9edfd0…）。实验资产：WSL `/home/liu/mcs251-step4/`（startup.asm、
-startup2.asm、main.ll、globals.ll、s4.lk、s4vec.lk、s4self.hex/.out、
-s4vec.hex/.out、e2/e3/e5 脚本）。
+状态：设计定稿候选 v1（2026-09-05，Moka）；Step 4a 已交付并实测
+（`crt-selfstart.asm`/`link-selfstart.lk` 见本目录，验收证据
+`selfstart-smoke/`；§5 第 1/3/4 项已回填实测结论）。工具：冻结
+llc/qemu（md5 09c438e6…/6b9edfd0…）。实验资产：WSL
+`/home/liu/mcs251-step4/`（startup.asm、startup2.asm、main.ll、
+globals.ll、s4.lk、s4vec.lk、s4self.hex/.out、s4vec.hex/.out、
+e2/e3/e5 脚本；Step 4a 回填实验 e1/e3/e4 材料亦归档于此）。
 
 标注约定：**[实测]** = 有 QEMU transcript 或产物字节/map 证据；**[推断]** =
 设计推断，进 §5 最小实测清单。
@@ -73,8 +76,10 @@ BOOT = `mov spx,#0x2fff` → `ecall _main` → 返回后 `<post-main>` → 自�
   取值的自由度未探究，非关键]。
 - `__start__stack`/SSEG 等价物：**不需要**（§1-5 零引用）[实测]。兼容
   条款：未来混链 SDCC 模块若引用之，补 1 字节 SSEG 定义即可 [推断，§5-2]。
-- 三 ERET 桩：纯 LLVM/asm 链无 SDCC 启动序列引用，可省 [推断，§5-1]；
-  混链期保留 crt0.asm 不动。
+- [已实测回填，§5-1] 三 ERET 桩：**混链 SDCC 模块时刚需**（缺桩链接
+  rc=2 不出镜像；引用来自 SDCC 无条件 .globl，非真实调用点）；纯
+  LLVM/asm 链不需要（crt-selfstart.asm 无桩实测跑通）。crt0.asm 原样
+  保留不动。
 - `<post-main>`：当前测试契约里 main 不返回（harness PASS/FAIL 后自旋），
   post-main 仅作返回证据/保险丝。clang 落地后由前端契约定 main 返回语义
   （exit code 打印？裸机惯例：打印退出码进 transcript）。
@@ -90,8 +95,8 @@ BOOT = `mov spx,#0x2fff` → `ecall _main` → 返回后 `<post-main>` → 自�
      `-b GSFINAL` 且 GSFINAL 保留尾跳（端序专项 §7：不可假定连续）；
   b. 自有期：自有 INIT 区 + BOOT 在 `ecall _main` 前
      `ecall __init_data`（flash→xdata COPY），格式随后端数据区形态定。
-- QEMU loader 对 .hex 中 xdata 地址记录的行为（直接预置 RAM、免 COPY 的
-  可能）：[推断，§5-4]。
+- QEMU loader 对 .hex 中 xdata 地址记录的行为 [已实测回填，§5-4]：
+  **拒载整镜像**——"加载器预置"不可行，数据初始化只能运行时 COPY。
 
 ### 2.4 mcs251_ld.py 布线（-b 选项组）
 
@@ -101,9 +106,10 @@ BOOT = `mov spx,#0x2fff` → `ecall _main` → 返回后 `<post-main>` → 自�
   XSEG/PSEG`——无数据区的镜像不要写 XSEG/PSEG 的 -b；Areas51 只预建
   `_CODE/REG_BANK_0-3/BSEG/BSEG_BYTES/BIT_BANK/DSEG/OSEG/ISEG/SSEG`
   （读码+链接通过佐证）。
-- [推断，§5-3] 未 -b 的 CODE 区从 rloc=0 起排（lnkarea2 读码），而 QEMU
-  取指 <0x800000 被禁（外设调查）→ **所有代码区必须显式 -b**，建议写成
-  runner 前置检查。
+- [已实测回填，§5-3，修正原推断] 未 -b 的 CODE 区**并非落零页**：
+  8051 式分配器把它尾接在已定位代码之后（实测静默跑通，属危险形态）；
+  全部不 -b 才落零页并被 loader 拒载。规则维持不变：**所有代码区必须
+  显式 -b**，runner 前置检查文案按"覆盖全部代码区"写。
 - .lk 纪律沿用：无空行、`;` 注释、`-e` 收尾、输出直出 .hex
   （mcs251_ld.py 行为，T4 实测）。
 
@@ -128,20 +134,49 @@ BOOT = `mov spx,#0x2fff` → `ecall _main` → 返回后 `<post-main>` → 自�
 
 [实测]：现状契约全部 7 项（§1）；向量留槽布局+自有启动全链 `MS`；默认
 向量兜网 `MS!`/裸 `!`；llc 全局数据报错；`-b` 未定义区报错；指令编码表；
-ecall/eret 24 位帧平衡（T4）。
-[推断]：ERET 桩可省性、SSEG 兼容条款、未 -b 代码区落零页行为、loader 对
-xdata 记录行为、自有 INIT 区格式。
+ecall/eret 24 位帧平衡（T4）；混链缺桩 rc=2 拒出镜像（§5-1）；漏 -b
+两级失败形态（§5-3）；loader 拒载 flash 窗外记录（§5-4）。
+[推断]：SSEG 兼容条款（§5-2）、自有 INIT 区格式、exec-ram 别名可加载性
+（§5-6）。
 
 ## 5. 最小实测清单（按价值排序，均小成本）
 
-1. 混链缺桩：自有启动 + 一个 SDCC 编译 harness 模块、不提供三 ERET 桩 →
-   观察链接是否失败/运行是否异常。决定桩去留。
+**回填（2026-09-05，Step 4a，冻结工具链）：第 1/3/4 项已实测，结论如下；
+第 2/5 项仍开放。**
+
+1. **[已实测]** 混链缺桩：crt0 去掉三 ERET 桩（保留 GSINIT0 入口）与
+   SDCC 编译的 harness.rel 混链 → mcs251_ld.py 报三条
+   `ASlink-Warning-Undefined Global __mcs51_gen* referenced by module
+   harness`，**rc=2 且不产出镜像**（fail-closed）。结论：**混链 SDCC
+   模块时三桩是刚需，crt0.asm 原样保留**；纯 LLVM/asm 链无此引用，自建
+   启动不需要它们（crt-selfstart.asm 无桩跑通 smoke1/2 为证）。
+   机理顺带查明：引用并非来自真实调用点，而是 SDCC 代码生成在每个含启动
+   序列的模块里**无条件 `.globl` 三钩子的定义/引用声明**（harness.lst
+   103-105 行，无任何 call 指令）；ASxxxx 把未定义的 .globl 记为 Ref，
+   链接器要求可解析。本镜像中三桩永远不会被执行到——它们是链接完整性
+   设施，不是运行时依赖。
+3. **[已实测，结论修正原推断]** 漏 `-b` 的失败形态分两级：
+   a. **只漏一个代码区**（如漏 `-b CSEG` 但 HOME/VECS/BOOT 有基址）：
+      mcs251_ld.py 的 8051 式分配器把未定位代码区**尾接在已定位代码之后**
+      （实测 `_main` 落 0xFF0112，紧随 BOOT），链接 rc=0，镜像**静默
+      "正常"跑通**（transcript `MS`）。这是危险形态：能跑 ≠ 布局正确。
+      → runner 前置检查仍必要，文案应写"校验 .lk 覆盖镜像全部代码区"
+      而非"校验 CSEG 基址"。
+   b. **全部不 -b**：所有区从 0x000000 起排，复位向量 0xFF0000 无内容，
+      QEMU loader **直接拒载**（`Unable to load Intel HEX firmware
+      image`，响亮失败）。
+4. **[已实测]** QEMU loader **拒绝** flash 窗口（0xFC2800–0xFFFFFF）以外
+   的记录：给合法镜像追加一条 xdata 记录（0x5A@0x010000）后整镜像拒载
+   （同 E3b 的报错）。同时实测 xdata 复位态读回 0x00（@dpx 读取通路
+   验证）。结论：**"加载器预置初始化数据"不可行；未来数据初始化只能
+   运行时 COPY**（自有 INIT 区路线 b），或评估 exec-ram 别名窗口
+   （0x030000 数据别名，未实测，列入开放项）。
+
+仍开放：
 2. `__start__stack` 引用场景普查：SDCC `--stack-auto`/reentrant 函数是否
    生成对它的引用（编译一个带 reentrant 的 C 看 .rel）。
-3. 漏 `-b CSEG` 的失败形态固化：确认取指禁区的 QEMU 表现（无输出/spin），
-   写成 runner 检查文案。
-4. QEMU loader 对 .hex 内 xdata 地址记录：写特征值记录后在固件里读回。
-   决定初始化数据能否"加载器预置"。
 5. 兜网与 UART1 电平 IRQ：stray TI 落 `isr_unhandled` 后 TI 未清，中断
    是否重复触发（不影响兜网正确性，影响 transcript 形态——写进测试注意
    清单）。
+6. （新增，来自 4 号回填）exec-ram 数据别名窗口 0x030000 是否被 loader
+   接受；若接受，小块初始化数据可经加载器预置。

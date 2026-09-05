@@ -1,0 +1,2 @@
+# Regenerable smoke build outputs (build.sh recreates them from WSL).
+build/
