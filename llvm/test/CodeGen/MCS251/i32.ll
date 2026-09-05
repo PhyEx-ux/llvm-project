@@ -8,21 +8,18 @@
 
 define i32 @c() {
 ; CHECK-LABEL: _c:
-; CHECK:         mov [[D:dr[0-9]+]], #0x5678
-; CHECK-NEXT:    movh [[D]], #0x1234
-; CHECK:         mov dpl, r3
-; CHECK-NEXT:    mov dph, r2
-; CHECK-NEXT:    mov b, r1
-; CHECK-NEXT:    mov a, r0
+; CHECK:         mov wr0, #0x5678
+; CHECK-NEXT:    mov wr2, #0x1234
+; CHECK:         mov dpl, r1
+; CHECK-NEXT:    mov dph, r0
+; CHECK-NEXT:    mov b, r3
+; CHECK-NEXT:    mov a, r2
 ; CHECK-NEXT:    eret
 ; O0-LABEL: _c:
-; Constant return through splitI32ToBytes: the four ABI bytes are extracted
-; from the materialised DR down to i8 lanes. Unlike the WR-lane logical-op
-; shape (see and_const below), this byte-lane form is measured correct at
-; -O0 -- the assertion pins the four distinct loads in ABI order so a FastRA
-; lane-merge regression cannot pass silently.
-; O0:         mov [[D0:dr[0-9]+]], #0x5678
-; O0-NEXT:    movh [[D0]], #0x1234
+; Constant return through splitI32ToBytes uses independent WR constants,
+; avoiding two subregister COPYs from one DR vreg under FastRA.
+; O0:         mov {{wr[0-9]+}}, #0x5678
+; O0:         mov {{wr[0-9]+}}, #0x1234
 ; O0:         mov dpl, [[P1:r[0-9]+]]
 ; O0-NEXT:    mov dph, [[P2:r[0-9]+]]
 ; O0-NEXT:    mov b, [[P3:r[0-9]+]]
@@ -51,8 +48,8 @@ define i32 @f(i32 %x) {
 
 define i32 @call_i32() {
 ; CHECK-LABEL: _call_i32:
-; CHECK:         mov dr{{[0-9]+}}, #0x5678
-; CHECK-NEXT:    movh dr{{[0-9]+}}, #0x1234
+; CHECK:         mov wr{{[0-9]+}}, #0x5678
+; CHECK-NEXT:    mov wr{{[0-9]+}}, #0x1234
 ; CHECK:         mov dpl, r{{[0-9]+}}
 ; CHECK-NEXT:    mov dph, r{{[0-9]+}}
 ; CHECK-NEXT:    mov b, r{{[0-9]+}}

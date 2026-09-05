@@ -11,7 +11,10 @@
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Mangler.h"
+#include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Target/TargetMachine.h"
 
 using namespace llvm;
 
@@ -401,10 +404,17 @@ static const MCPhysReg I32ABIRegs[] = {MCS251::DPL, MCS251::DPH, MCS251::B,
 
 static void splitI32ToBytes(SDValue Value, const SDLoc &DL, SelectionDAG &DAG,
                             SmallVectorImpl<SDValue> &Parts) {
-  if (isa<ConstantSDNode>(Value))
-    Value = materializeImm(Value, DL, DAG);
-  SDValue Lo = extractLane(Value, MCS251::sub_lo16, DL, DAG);
-  SDValue Hi = extractLane(Value, MCS251::sub_hi16, DL, DAG);
+  SDValue Lo, Hi;
+  if (auto *C = dyn_cast<ConstantSDNode>(Value)) {
+    // Do not extract both WR lanes from one materialized DR constant: FastRA
+    // can coalesce the two subregister COPYs into the same lane at -O0.
+    uint32_t Imm = C->getZExtValue();
+    Lo = materializeImm(DAG.getConstant(Imm & 0xffff, DL, MVT::i16), DL, DAG);
+    Hi = materializeImm(DAG.getConstant(Imm >> 16, DL, MVT::i16), DL, DAG);
+  } else {
+    Lo = extractLane(Value, MCS251::sub_lo16, DL, DAG);
+    Hi = extractLane(Value, MCS251::sub_hi16, DL, DAG);
+  }
   // ABI order is low byte first: DPL, DPH, B, A.
   Parts.push_back(DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8,
                                              Lo));
@@ -1439,6 +1449,40 @@ SDValue MCS251TargetLowering::LowerDynamicStackAlloc(SDValue Op,
   return DAG.getMergeValues({Ptr, Alloc.getValue(1)}, DL);
 }
 
+// Static argument slots use the *mangled function symbol* plus _PARM_n.
+// The leading \1 prevents the external-symbol path from mangling it twice.
+static SDValue parameterSlot(StringRef Callee, unsigned Index,
+                             SelectionDAG &DAG) {
+  std::string Name = (Twine("\1") + Callee + "_PARM_" + Twine(Index + 1)).str();
+  return DAG.getExternalSymbol(
+      DAG.getMachineFunction().createExternalSymbolName(Name), MVT::i32);
+}
+
+// Check the IR type as well as the legalized piece. A one-field aggregate (or
+// an empty aggregate preceding a scalar) need not carry the ISD split flag.
+static void checkParameterType(Type *Ty, unsigned Index) {
+  if (Ty->isPointerTy()) {
+    if (Index)
+      report_fatal_error("MCS251: static pointer parameters are not supported "
+                         "(SDCC uses three-byte slots)");
+    return; // Preserve the existing first-argument B:DPH:DPL pointer ABI.
+  }
+  if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) && !Ty->isIntegerTy(32))
+    report_fatal_error("MCS251: arguments must be unsplit i8/i16/i32 scalars");
+}
+
+template <typename ArgT>
+static void checkParameter(const ArgT &Arg, unsigned Index) {
+  if ((Arg.VT != MVT::i8 && Arg.VT != MVT::i16 && Arg.VT != MVT::i32) ||
+      Arg.ArgVT != Arg.VT || Arg.PartOffset || Arg.Flags.isSplit() ||
+      Arg.Flags.isByVal() || Arg.Flags.isByRef() || Arg.Flags.isSRet() ||
+      Arg.Flags.isInAlloca() || Arg.Flags.isNest())
+    report_fatal_error("MCS251: arguments must be unsplit i8/i16/i32 scalars");
+  if (Index && Arg.Flags.isPointer())
+    report_fatal_error("MCS251: static pointer parameters are not supported "
+                       "(SDCC uses three-byte slots)");
+}
+
 SDValue MCS251TargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,
@@ -1454,28 +1498,18 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
     report_fatal_error("minimal MCS251 backend does not support variadic "
                        "functions");
 
+  MachineFunction &MF = DAG.getMachineFunction();
+  for (const Argument &Arg : MF.getFunction().args())
+    checkParameterType(Arg.getType(), Arg.getArgNo());
+
   if (Ins.empty())
     return Chain;
 
-  MachineFunction &MF = DAG.getMachineFunction();
-
-  // CC_MCS251 deliberately offers only the single first-argument slot; the
-  // SDCC ABI for a second argument (or any wider type) uses static OSEG
-  // overlay slots (_FUNCNAME_PARM_n), which this minimal backend does not
-  // implement. Check count and types up front: an unhandled argument would
-  // otherwise die inside CCState::AnalyzeFormalArguments with the generic
-  // "unable to allocate function argument" message instead of pointing at
-  // the real (OSEG) limitation.
-  if (Ins.size() > 1 ||
-      (Ins[0].VT != MVT::i8 && Ins[0].VT != MVT::i16 &&
-       Ins[0].VT != MVT::i32))
-    report_fatal_error("minimal MCS251 backend only supports zero or one "
-                       "i8/i16/i32 argument; SDCC multi-arg ABI uses static "
-                       "OSEG overlay slots (not yet supported)");
-
-  SmallVector<CCValAssign, 16> ArgLocs;
-  CCState CCInfo(CallConv, IsVarArg, MF, ArgLocs, *DAG.getContext());
-  CCInfo.AnalyzeFormalArguments(Ins, CC_MCS251);
+  for (unsigned I = 0; I < Ins.size(); ++I) {
+    checkParameter(Ins[I], I);
+    if (Ins[I].OrigArgIndex != I)
+      report_fatal_error("MCS251: aggregate parameters are not supported");
+  }
 
   // The argument arrives in a reserved SFR (DPL/DPH/DPTR, and A/B for i32).
   // addLiveIn hands its value to the DAG as a virtual register of the matching
@@ -1501,22 +1535,25 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
       Chain = Part.getValue(1);
     }
     InVals.push_back(combineI32FromBytes(Parts, DL, DAG));
-    return Chain;
+  } else {
+    bool Byte = Ins[0].VT == MVT::i8;
+    Register VReg = MF.addLiveIn(Byte ? MCS251::DPL : MCS251::DPTR,
+        Byte ? &MCS251::GPR8RegClass : &MCS251::GPR16RegClass);
+    SDValue ArgValue = DAG.getCopyFromReg(Chain, DL, VReg, Ins[0].VT);
+    InVals.push_back(ArgValue);
+    Chain = ArgValue.getValue(1);
   }
 
-  for (unsigned I = 0, E = ArgLocs.size(); I != E; ++I) {
-    CCValAssign &VA = ArgLocs[I];
-    if (!VA.isRegLoc())
-      report_fatal_error(
-          "minimal MCS251 backend only supports zero or one i8/i16/i32 "
-          "argument; SDCC multi-arg ABI uses static OSEG overlay slots (not "
-          "yet supported)");
-    const TargetRegisterClass *RC = VA.getLocVT() == MVT::i8
-                                        ? &MCS251::GPR8RegClass
-                                        : &MCS251::GPR16RegClass;
-    Register VReg = MF.addLiveIn(VA.getLocReg(), RC);
-    SDValue ArgValue = DAG.getCopyFromReg(Chain, DL, VReg, VA.getLocVT());
-    InVals.push_back(ArgValue);
+  // Chain entry reads before any call can overwrite an overlay slot. Unknown
+  // pointer info deliberately avoids claiming that distinct slot symbols do
+  // not alias: leaf functions share the same OSEG storage across modules.
+  for (unsigned I = 1; I < Ins.size(); ++I) {
+    SDValue Ptr = parameterSlot(
+        DAG.getTarget().getSymbol(&MF.getFunction())->getName(), I, DAG);
+    SDValue Value = DAG.getLoad(Ins[I].VT, DL, Chain, Ptr,
+                               MachinePointerInfo(), Align(1));
+    InVals.push_back(Value);
+    Chain = Value.getValue(1);
   }
 
   return Chain;
@@ -1528,18 +1565,17 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
 //
 // Direct calls compile to `ecall _sym` (9A + addr24, 4 bytes; the linker
 // fills the 24-bit address, so the symbol is never truncated). Argument
-// loading reuses the Phase 4 ABI slots (i8 -> dpl, i16 -> dptr) via the same
-// CC_MCS251 analysis as LowerFormalArguments, mirrored onto the caller side
-// with CopyToReg. Results come back through the same fixed locations
+// loading mirrors LowerFormalArguments: the first scalar uses the ABI
+// registers and subsequent scalars use the named callee's static slots.
+// Results come back through the same fixed locations
 // (LowerCallResult's CopyFromReg); a returned value feeding straight into
 // the caller's own return needs no intermediate copy at all -- the
 // phys->virt->phys chain through dpl/dptr coalesces away (dpl/dptr are
 // reserved), the SDCC-equivalent `ecall; eret` tail.
 //
 // CALLSEQ decision: no CALLSEQ_START/END nodes are emitted. The SDCC MCS-251
-// ABI passes no arguments on the stack (stack-auto=0; the single register
-// slot is all this backend supports), so the sequence bounds would always be
-// 0,0. Skipping them entirely (deviation from the MSP430/AVR template, which
+// ABI passes no arguments on the stack (stack-auto=0; registers plus static
+// OSEG/DSEG slots), so the sequence bounds would always be 0,0. Skipping them entirely (deviation from the MSP430/AVR template, which
 // wraps the call in CALLSEQ nodes and then implements the ADJCALLSTACKDOWN/UP
 // pseudos) avoids two never-anything-but-zero pseudo instructions and the
 // corresponding eliminateCallFramePseudoInstr hook; nothing in the DAG
@@ -1584,19 +1620,36 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   if (isa<ConstantSDNode>(Callee))
     Callee = materializeImm(Callee, DL, DAG);
 
-  // Same single-slot restriction as LowerFormalArguments, checked up front
-  // so the error names the real limitation (OSEG overlay) instead of a
-  // generic CC allocation failure.
-  if (Outs.size() > 1 ||
-      (!Outs.empty() && Outs[0].VT != MVT::i8 && Outs[0].VT != MVT::i16 &&
-       Outs[0].VT != MVT::i32))
-    report_fatal_error("MCS251 multi-argument calls need SDCC OSEG overlay "
-                       "slots (not yet supported)");
+  if (CLI.CB)
+    for (unsigned I = 0; I < CLI.CB->arg_size(); ++I)
+      checkParameterType(CLI.CB->getArgOperand(I)->getType(), I);
 
-  SmallVector<CCValAssign, 16> ArgLocs;
-  CCState CCInfo(CallConv, IsVarArg, DAG.getMachineFunction(), ArgLocs,
-                 *DAG.getContext());
-  CCInfo.AnalyzeCallOperands(Outs, CC_MCS251);
+  for (unsigned I = 0; I < Outs.size(); ++I) {
+    checkParameter(Outs[I], I);
+    if (CLI.CB && Outs[I].OrigArgIndex != I)
+      report_fatal_error("MCS251: aggregate parameters are not supported");
+  }
+
+  std::string SlotCallee;
+  if (Outs.size() > 1) {
+    if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee)) {
+      if (G->getOffset() || !isa<Function>(G->getGlobal()))
+        report_fatal_error("MCS251: static parameters require a named function");
+      SlotCallee = DAG.getTarget().getSymbol(G->getGlobal())->getName().str();
+    } else if (auto *S = dyn_cast<ExternalSymbolSDNode>(Callee)) {
+      SmallString<128> Name;
+      Mangler::getNameWithPrefix(Name, S->getSymbol(), DAG.getDataLayout());
+      SlotCallee = Name.str().str();
+    } else {
+      report_fatal_error("MCS251: multi-argument indirect calls are not supported "
+                         "(static parameter slots require a named callee)");
+    }
+    // Finish every slot store before setting up the first argument registers.
+    // Memory objects use the same measured big-endian layout as SDCC.
+    for (unsigned I = 1; I < Outs.size(); ++I)
+      Chain = DAG.getStore(Chain, DL, OutVals[I],
+          parameterSlot(SlotCallee, I, DAG), MachinePointerInfo(), Align(1));
+  }
 
   // Copy the arguments into their ABI registers, chained and glued so nothing
   // can be scheduled between the copies and the call.
@@ -1609,14 +1662,9 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
       Parts[3] = buildMOV8ri(0, DL, DAG);
     for (unsigned I = 0; I < 4; ++I)
       RegsToPass.emplace_back(I32ABIRegs[I], Parts[I]);
-  } else {
-    for (unsigned I = 0, E = ArgLocs.size(); I != E; ++I) {
-      CCValAssign &VA = ArgLocs[I];
-      if (!VA.isRegLoc() || VA.getLocInfo() != CCValAssign::Full)
-        report_fatal_error("MCS251 multi-argument calls need SDCC OSEG overlay "
-                           "slots (not yet supported)");
-      RegsToPass.emplace_back(VA.getLocReg(), OutVals[I]);
-    }
+  } else if (!Outs.empty()) {
+    RegsToPass.emplace_back(Outs[0].VT == MVT::i8 ? MCS251::DPL : MCS251::DPTR,
+                            OutVals[0]);
   }
   for (const auto &[Reg, Val] : RegsToPass) {
     Chain = DAG.getCopyToReg(Chain, DL, Reg, Val, InGlue);

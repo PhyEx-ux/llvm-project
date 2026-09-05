@@ -45,7 +45,9 @@
 #include "MCS251TargetMachine.h"
 #include "MCTargetDesc/MCS251ABISignature.h"
 #include "TargetInfo/MCS251TargetInfo.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
@@ -54,6 +56,7 @@
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/Compiler.h"
@@ -96,6 +99,9 @@ static std::string getMCS251ModuleName(const Module &M) {
 
 namespace {
 class MCS251AsmPrinter final : public AsmPrinter {
+  StringSet<> LocalParameterSlots;
+  StringSet<> DeclaredExternalSymbols;
+
 public:
   static char ID;
 
@@ -108,11 +114,61 @@ public:
 
   bool runOnMachineFunction(MachineFunction &MF) override {
     SetupMachineFunction(MF);
+    emitParameterSlots(MF);
     emitFunctionBody();
     return false;
   }
 
+  void emitParameterSlots(const MachineFunction &MF) {
+    const Function &F = MF.getFunction();
+    if (F.arg_size() < 2)
+      return;
+    if (!F.hasLocalLinkage() && !F.hasExternalLinkage())
+      report_fatal_error("MCS251: static parameter slots require local or "
+                         "external function linkage");
+    // SDCC overlays leaf functions only. Non-leaf slots must survive nested
+    // calls, including calls into independently compiled SDCC modules.
+    bool Leaf = true;
+    for (const MachineBasicBlock &BB : MF)
+      for (const MachineInstr &MI : BB)
+        if (MI.isCall() || MI.isInlineAsm())
+          Leaf = false;
+    std::string Area = Leaf ? "OSEG" : "DSEG";
+    MCSection *Sec = OutContext.getELFSection(
+        ".mcs251." + Area + "." + Twine(MF.getFunctionNumber()),
+        ELF::SHT_NOBITS, ELF::SHF_ALLOC | ELF::SHF_WRITE);
+    OutStreamer->switchSection(Sec);
+    OutStreamer->emitRawText("\t.area " + Area +
+                             (Leaf ? " (OVR,DATA)" : " (DATA)"));
+    unsigned I = 0;
+    for (const Argument &Arg : F.args()) {
+      if (I++ == 0)
+        continue;
+      Type *Ty = Arg.getType();
+      if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) && !Ty->isIntegerTy(32))
+        report_fatal_error("MCS251: static parameters require i8/i16/i32");
+      MCSymbol *Slot = OutContext.getOrCreateSymbol(
+          getSymbol(&F)->getName() + "_PARM_" + Twine(I));
+      if (!F.hasLocalLinkage())
+        OutStreamer->emitSymbolAttribute(Slot, MCSA_Global);
+      OutStreamer->emitLabel(Slot);
+      OutStreamer->emitZeros(Ty->getIntegerBitWidth() / 8);
+    }
+    OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
+    OutStreamer->emitRawText("\t.area CSEG (CODE)");
+  }
+
   void emitInstruction(const MachineInstr *MI) override {
+    // Merely taking a function's address must not create undefined references
+    // to its parameter slots. Declare only slots actually referenced by code.
+    for (const MachineOperand &MO : MI->operands()) {
+      if (!MO.isSymbol())
+        continue;
+      MCSymbol *Sym = GetExternalSymbolSymbol(MO.getSymbolName());
+      if (!LocalParameterSlots.contains(Sym->getName()) &&
+          DeclaredExternalSymbols.insert(Sym->getName()).second)
+        OutStreamer->emitSymbolAttribute(Sym, MCSA_Global);
+    }
     MCS251_MC::verifyInstructionPredicates(MI->getOpcode(),
                                            getSubtargetInfo().getFeatureBits());
 
@@ -140,6 +196,22 @@ public:
     // other MainFileName consumer is DWARF line-table setup, which this
     // target never enables).
     OutStreamer->getContext().setMainFileName(ModuleName);
+    if (llvm::any_of(M, [](const Function &F) {
+          return !F.isDeclaration() && F.arg_size() > 1;
+        })) {
+      // The object writer emits the matching reservation as an A record.
+      OutStreamer->emitRawText("\t.area REG_BANK_0 (OVR,DATA)\n\t.ds 8\n"
+                               "\t.area CSEG (CODE)");
+    }
+    LocalParameterSlots.clear();
+    DeclaredExternalSymbols.clear();
+    for (const Function &F : M) {
+      if (!F.hasLocalLinkage())
+        continue;
+      for (unsigned I = 1; I < F.arg_size(); ++I)
+        LocalParameterSlots.insert(
+            (getSymbol(&F)->getName() + "_PARM_" + Twine(I + 1)).str());
+    }
   }
 
   // The initial data path is deliberately read-only and shares the one CSEG

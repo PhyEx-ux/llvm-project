@@ -36,7 +36,7 @@
 //     mode 0x082 / 0x080 likewise (R_WORD|R_C24, |R_SYM).
 //   * A fixup whose target symbol is defined in this module is area-relative:
 //     the T payload carries the symbol's area offset plus the addend and the
-//     R record points at the CSEG area.  Only references to UNDEFINED globals
+//     R record points at the target CSEG/OSEG/DSEG area. Only UNDEFINED globals
 //     use the symbol's S-record index (mode | 0x02).  This matches sdas251
 //     exactly (measured: `ecall _f` to a defined global emits mode 0x80 with
 //     ref 0001, not a symbol reference).
@@ -46,7 +46,7 @@
 //     write_rmode); the two modes used here (0x00/0x02, 0x80/0x82) never
 //     escape.
 //
-// Scope limits are loud, not silent: more than one non-empty section,
+// Scope limits are loud, not silent: more than one non-empty code section,
 // symbol-difference fixups and absolute symbols are fatal errors. Phase 11
 // also supports byte-of24 lo/mid/hi relocations, whose 3-byte T placeholders
 // shrink to one code byte at link time (see the payload builder below).
@@ -123,6 +123,11 @@ struct Relocation {
 struct SectionData {
   const MCSection *Section = nullptr;
   uint64_t Base = 0;
+  uint64_t Size = 0;
+  unsigned AreaIndex = 1;
+  std::string AreaName = "CSEG";
+  unsigned Flags = 0x20;
+  bool NoLoad = false;
   std::vector<uint8_t> Bytes;
 };
 
@@ -199,7 +204,8 @@ class MCS251RELObjectWriter final : public MCObjectWriter {
   void emitRLine(const SectionData &Sec, uint64_t ChunkStart,
                  uint64_t ChunkSize, unsigned AreaIndex,
                  const std::map<const MCSymbol *, unsigned> &SymbolRefs,
-                 const std::map<uint64_t, unsigned> &TIndices) {
+                 const std::map<uint64_t, unsigned> &TIndices,
+                 const std::vector<SectionData> &Sections) {
     OS << "R";
     byte(OS, 0);
     byte(OS, 0);
@@ -239,10 +245,11 @@ class MCS251RELObjectWriter final : public MCObjectWriter {
           report_fatal_error("MCS251 REL writer: missing symbol reference");
         Ref = It->second;
       } else {
-        if (Target && Target->isInSection() &&
-            &Target->getSection() != Sec.Section)
-          report_fatal_error("MCS251 REL writer: cross-section relocation");
-        Ref = AreaIndex;
+        const SectionData *TargetSec = Target && Target->isInSection()
+            ? findSection(Sections, &Target->getSection()) : nullptr;
+        if (!TargetSec)
+          report_fatal_error("MCS251 REL writer: missing relocation section");
+        Ref = TargetSec->AreaIndex;
       }
       emitRMode(Mode);
       // ASxxxx's R index is into the parsed T array, including XH3's three
@@ -284,8 +291,20 @@ public:
     std::vector<SectionData> Sections;
     uint64_t TotalSize = 0;
     for (const MCSection &Section : *Asm) {
-      if (Section.isBssSection())
+      bool Overlay = Section.getName().starts_with(".mcs251.OSEG.");
+      bool Static = Section.getName().starts_with(".mcs251.DSEG.");
+      if (Overlay || Static) {
+        SectionData Data;
+        Data.Section = &Section;
+        Data.Size = Asm->getSectionAddressSize(Section);
+        Data.AreaName = Overlay ? "OSEG" : "DSEG";
+        Data.Flags = Overlay ? 4 : 0;
+        Data.NoLoad = true;
+        Sections.push_back(std::move(Data));
         continue;
+      }
+      if (Section.isBssSection())
+        report_fatal_error("MCS251 REL writer: unsupported BSS section");
       SmallString<256> Storage;
       raw_svector_ostream DataOS(Storage);
       Asm->writeSectionData(DataOS, &Section);
@@ -295,16 +314,27 @@ public:
       Data.Section = &Section;
       Data.Base = TotalSize;
       Data.Bytes.assign(Storage.begin(), Storage.end());
-      TotalSize += Data.Bytes.size();
+      Data.Size = Data.Bytes.size();
+      TotalSize += Data.Size;
       Sections.push_back(std::move(Data));
     }
 
     // This implementation deliberately supports the one code section emitted
     // by MCS251AsmPrinter. Rejecting other allocated sections prevents silently
     // producing an object whose addresses disagree with its linker area.
-    if (Sections.size() > 1)
-      report_fatal_error("MCS251 REL writer: multiple non-empty sections are "
+    if (llvm::count_if(Sections, [](const SectionData &S) {
+          return !S.NoLoad;
+        }) > 1)
+      report_fatal_error("MCS251 REL writer: multiple code sections are "
                         "not supported yet");
+    // CSEG stays index 1 for compatibility with existing objects. Each
+    // parameter frame has an independent A record: OSEG frames overlay,
+    // DSEG frames concatenate, even when they belong to one LLVM module.
+    unsigned NextArea = 2;
+    for (SectionData &Sec : Sections)
+      if (Sec.NoLoad)
+        Sec.AreaIndex = NextArea++;
+    bool HasSlots = NextArea != 2;
 
     std::vector<const MCSymbol *> Globals;
     for (const MCSymbol &S : Asm->symbols())
@@ -320,8 +350,12 @@ public:
     for (const MCSymbol *S : Globals) {
       if (S->isUndefined())
         Undefined.push_back(S);
-      else
+      else {
+        // Validate even a single definition; a sort comparator need not run.
+        if (!S->isInSection() || !findSection(Sections, &S->getSection()))
+          report_fatal_error("MCS251 REL writer: unsupported symbol section");
         Defined.push_back(S);
+      }
     }
     std::sort(Undefined.begin(), Undefined.end(),
               [](const MCSymbol *A, const MCSymbol *B) {
@@ -329,6 +363,12 @@ public:
               });
     std::sort(Defined.begin(), Defined.end(),
               [&](const MCSymbol *A, const MCSymbol *B) {
+                const SectionData *SA = A->isInSection()
+                    ? findSection(Sections, &A->getSection()) : nullptr;
+                const SectionData *SB = B->isInSection()
+                    ? findSection(Sections, &B->getSection()) : nullptr;
+                if (SA->AreaIndex != SB->AreaIndex)
+                  return SA->AreaIndex < SB->AreaIndex;
                 uint64_t OA = symbolOffset(*Asm, *A);
                 uint64_t OB = symbolOffset(*Asm, *B);
                 if (OA != OB)
@@ -349,7 +389,7 @@ public:
 
     OS << "XH3\n";
     OS << "H ";
-    hexMin(OS, 2); // _CODE and CSEG
+    hexMin(OS, NextArea + (HasSlots ? 1 : 0)); // plus REG_BANK_0 reservation
     OS << " areas ";
     hexMin(OS, NextRef);
     OS << " global symbols\n";
@@ -381,15 +421,31 @@ public:
     hexMin(OS, 0);
     OS << '\n';
 
-    for (const MCSymbol *S : Defined) {
-      OS << "S " << S->getName() << " Def";
-      uint64_t Off = symbolOffset(*Asm, *S);
-      const SectionData *Sec = S->isInSection()
-                                   ? findSection(Sections, &S->getSection())
-                                   : nullptr;
-      hex(OS, (Sec ? Sec->Base : 0) + Off, 6);
-      OS << '\n';
+    auto EmitDefinitions = [&](unsigned Index) {
+      for (const MCSymbol *S : Defined) {
+        const SectionData *Sec = S->isInSection()
+            ? findSection(Sections, &S->getSection()) : nullptr;
+        if (!Sec || Sec->AreaIndex != Index)
+          continue;
+        OS << "S " << S->getName() << " Def";
+        hex(OS, Sec->Base + symbolOffset(*Asm, *S), 6);
+        OS << '\n';
+      }
+    };
+    EmitDefinitions(1);
+    for (const SectionData &Sec : Sections) {
+      if (!Sec.NoLoad)
+        continue;
+      OS << "A " << Sec.AreaName << " size ";
+      hexMin(OS, Sec.Size);
+      OS << " flags ";
+      hexMin(OS, Sec.Flags);
+      OS << " addr 0\n";
+      EmitDefinitions(Sec.AreaIndex);
     }
+    // Keep static slots off the classic register-bank aliases, as SDCC does.
+    if (HasSlots)
+      OS << "A REG_BANK_0 size 8 flags 4 addr 0\n";
 
     // sdas emits an initial empty T/R pair when it opens an area.
     OS << "T";
@@ -402,6 +458,8 @@ public:
     OS << '\n';
 
     for (const SectionData &Sec : Sections) {
+      if (Sec.NoLoad)
+        continue; // reservations must not become bytes in the ROM image
       std::map<uint64_t, const Relocation *> At;
       for (const Relocation &Rel : Relocations)
         if (Rel.Fragment && Rel.Fragment->getParent() == Sec.Section)
@@ -443,7 +501,8 @@ public:
         for (uint8_t B : Payload)
           byte(OS, B);
         OS << '\n';
-        emitRLine(Sec, Pos, End - Pos, 1, SymbolRefs, TIndices);
+        emitRLine(Sec, Pos, End - Pos, Sec.AreaIndex, SymbolRefs, TIndices,
+                  Sections);
         Pos = End;
       }
     }

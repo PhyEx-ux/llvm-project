@@ -1,0 +1,35 @@
+; RUN: split-file %s %t
+; RUN: not --crash llc -mtriple=mcs251 %t/pointer-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
+; RUN: not --crash llc -mtriple=mcs251 %t/pointer-call.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
+; RUN: not --crash llc -mtriple=mcs251 %t/aggregate-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 %t/aggregate-call.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 %t/empty.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 %t/i64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 %t/float.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 %t/indirect.ll -o - 2>&1 | FileCheck %s --check-prefix=INDIRECT
+; RUN: not --crash llc -mtriple=mcs251 %t/weak.ll -o - 2>&1 | FileCheck %s --check-prefix=LINKAGE
+; PTR: LLVM ERROR: MCS251: static pointer parameters are not supported (SDCC uses three-byte slots)
+; TYPE: LLVM ERROR: MCS251: arguments must be unsplit i8/i16/i32 scalars
+; INDIRECT: LLVM ERROR: MCS251: multi-argument indirect calls are not supported
+; LINKAGE: LLVM ERROR: MCS251: static parameter slots require local or external function linkage
+
+;--- pointer-formal.ll
+ define i8 @f(i8 %a, ptr %b) { ret i8 %a }
+;--- pointer-call.ll
+ declare void @g(i8, ptr)
+ define void @f() { call void @g(i8 1, ptr null) ret void }
+;--- aggregate-formal.ll
+ define void @f({i16} %a) { ret void }
+;--- aggregate-call.ll
+ declare void @g({i16})
+ define void @f() { call void @g({i16} {i16 1}) ret void }
+;--- empty.ll
+ define void @f({} %a) { ret void }
+;--- i64.ll
+ define void @f(i64 %a) { ret void }
+;--- float.ll
+ define void @f(float %a) { ret void }
+;--- indirect.ll
+ define void @f(ptr %p) { call void %p(i8 1, i16 2) ret void }
+;--- weak.ll
+ define weak i16 @f(i16 %a, i16 %b) { ret i16 %b }
