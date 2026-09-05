@@ -5,7 +5,7 @@
 ; These constants are removed before codegen: this tests LLVM core byte
 ; interpretation without depending on unsupported target global emission.
 ; opt must obtain the big-endian DataLayout from the target triple.
-; CHECK: target datalayout = "E-m:e-p:32:8-i8:8-i16:8-i32:8-n8:16:32-S8"
+; CHECK: target datalayout = "E-m:e-p:32:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8"
 @bytes = private constant [4 x i8] [i8 18, i8 52, i8 86, i8 120]
 @scalar = private constant i32 2309737967
 @record = private constant <{i8, i16, i32}> <{i8 165, i16 4951, i32 2309737967}>

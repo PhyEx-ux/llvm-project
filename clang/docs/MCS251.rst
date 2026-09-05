@@ -1,0 +1,65 @@
+MCS251 freestanding C target
+===========================
+
+The experimental MCS251 target uses a big-endian, byte-aligned data layout.
+The default C data model is ILP32: ``int``, ``long``, and pointers are 32 bits;
+``short`` is 16 bits and ``long long`` is 64 bits. The ABI alignment of these
+integer types, pointers, ``float``, ``double``, and ``long double`` is one byte.
+Declaring a type's layout does not imply that all of its runtime operations
+are implemented by the experimental backend.
+
+Compile explicitly for the freestanding target::
+
+  clang --target=mcs251-unknown-none -S module.c -o module.asm
+  clang --target=mcs251-unknown-none -c module.c -o module.rel
+
+The outputs use ASxxxx assembly and REL objects, not ELF object files.
+Firmware linking requires an explicit board layout and startup code; the
+Clang driver does not implicitly select a host linker or libc.
+
+Traditional 16-bit int model
+---------------------------
+
+Use the existing driver-to-cc1 forwarding mechanism to select 16-bit ``int``::
+
+  clang --target=mcs251-unknown-none \
+    -Xclang -target-feature -Xclang +int16 -c module.c -o module.rel
+
+The equivalent frontend invocation is::
+
+  clang -cc1 -triple mcs251-unknown-none -target-feature +int16 \
+    -ffreestanding -emit-obj module.c -o module.rel
+
+``-target-feature -int16`` selects the default model again. If both settings
+are supplied, the last setting wins. There is no ``-mint16`` driver alias;
+``-mattr`` is an LLVM tool option, not the Clang driver interface for this mode.
+
+Only ``int`` changes width. ``long`` and pointers remain 32 bits, ``short``
+remains 16 bits, and alignment and byte order do not change. The target defines
+``__MCS251_INT16__`` only in the traditional model. ``__SIZEOF_INT__`` also
+reports the selected size. Unknown target features such as ``+long16`` or
+``+ptr16`` are rejected. The data model is a translation-unit setting, not a
+per-function ``target`` attribute or an LLVM instruction-set feature; it is
+consumed by TargetInfo rather than written into LLVM ``target-features``.
+
+Integer promotions follow the selected C model. For example::
+
+  unsigned char wraps(unsigned short x) {
+    return x + (unsigned short)1 == 0;
+  }
+
+For ``x == 65535``, this returns one with ``+int16`` and zero with the default
+model. In the default model the operands promote to a 32-bit signed ``int``;
+in the traditional model the arithmetic uses 16-bit unsigned ``int``.
+Explicitly assigning the sum back to ``unsigned short`` would truncate in
+both models and would therefore not distinguish the intermediate semantics.
+
+Interoperability
+----------------
+
+Do not exchange ``int``-typed arguments or objects between translation units
+compiled with different models. Object-file symbol names alone do not encode
+or validate this distinction. Use matching fixed-width declarations on both
+sides of an interoperability boundary; in particular, SDCC's ``unsigned int``
+is not the default MCS251 Clang ``unsigned int``. Pointers to shared objects
+must agree on the object's actual type and size, not merely its symbol name.

@@ -18,22 +18,19 @@ class LLVM_LIBRARY_VISIBILITY MCS251TargetInfo final : public TargetInfo {
 public:
   MCS251TargetInfo(const llvm::Triple &Triple, const TargetOptions &)
       : TargetInfo(Triple) {
-    // Provisional C data model: keep int compatible with the SDCC/C251 world.
-    // Changing this requires an ABI decision, not just a backend legalization.
-    IntWidth = ShortWidth = 16;
-    LongWidth = PointerWidth = 32;
+    // The default C model is ILP32. +int16 selects the traditional C model;
+    // it is a translation-unit language option, not an ISA feature.
+    ShortWidth = 16;
+    IntWidth = LongWidth = PointerWidth = 32;
     LongLongWidth = 64;
-    ShortAlign = IntAlign = LongAlign = PointerAlign = 8;
-    // Wider integers and floating types retain the LLVM DataLayout defaults.
-    // Their runtime operations are outside the initial i8/i16/i32 C subset.
-    LongLongAlign = FloatAlign = 32;
-    DoubleAlign = LongDoubleAlign = 64;
-    SuitableAlign = DefaultAlignForAttributeAligned = 64;
+    ShortAlign = IntAlign = LongAlign = LongLongAlign = PointerAlign = 8;
+    FloatAlign = DoubleAlign = LongDoubleAlign = 8;
+    SuitableAlign = DefaultAlignForAttributeAligned = 8;
     SizeType = UnsignedLong;
     PtrDiffType = IntPtrType = SignedLong;
-    Int16Type = SignedInt;
+    Int16Type = SignedShort;
     Char32Type = UnsignedLong;
-    WCharType = WIntType = SignedInt;
+    WCharType = WIntType = SignedShort;
     SigAtomicType = SignedChar;
     TLSSupported = false;
     VLASupported = false;
@@ -46,7 +43,16 @@ public:
   llvm::SmallVector<Builtin::InfosShard> getTargetBuiltins() const override {
     return {};
   }
-  bool hasFeature(StringRef Feature) const override { return Feature == "mcs251"; }
+  bool initFeatureMap(llvm::StringMap<bool> &Features, DiagnosticsEngine &Diags,
+                      StringRef CPU,
+                      const std::vector<std::string> &FeatureVec) const override;
+  bool handleTargetFeatures(std::vector<std::string> &Features,
+                            DiagnosticsEngine &Diags) override;
+  bool hasFeature(StringRef Feature) const override {
+    return Feature == "mcs251" || (Feature == "int16" && IntWidth == 16);
+  }
+  // Function target attributes cannot change a translation unit's C model.
+  bool isValidFeatureName(StringRef Feature) const override { return false; }
   bool allowsLargerPreferedTypeAlignment() const override { return false; }
   ArrayRef<const char *> getGCCRegNames() const override { return {}; }
   ArrayRef<GCCRegAlias> getGCCRegAliases() const override { return {}; }

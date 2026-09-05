@@ -3960,7 +3960,7 @@ TEST(DataLayoutTest, MCS251) {
   EXPECT_FALSE(TT.isLittleEndian());
   EXPECT_EQ(Triple::mcs251, TT.getBigEndianArchVariant().getArch());
   EXPECT_EQ(Triple::UnknownArch, TT.getLittleEndianArchVariant().getArch());
-  EXPECT_EQ("E-m:e-p:32:8-i8:8-i16:8-i32:8-n8:16:32-S8",
+  EXPECT_EQ("E-m:e-p:32:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8",
             TT.computeDataLayout());
 }
 

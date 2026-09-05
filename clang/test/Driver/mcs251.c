@@ -30,10 +30,20 @@
 // MACROS-DAG: #define __MCS251__ 1
 // MACROS-DAG: #define __mcs251__ 1
 // MACROS-DAG: #define __STDC_HOSTED__ 0
-// MACROS-DAG: #define __SIZEOF_INT__ 2
+// MACROS-DAG: #define __SIZEOF_INT__ 4
 // MACROS-DAG: #define __SIZEOF_LONG__ 4
 // MACROS-DAG: #define __SIZEOF_POINTER__ 4
 // MACROS-DAG: #define __BYTE_ORDER__ __ORDER_BIG_ENDIAN__
+
+// The driver uses its existing cc1 passthrough, not llc's -mattr syntax.
+// RUN: %clang --target=mcs251-unknown-none -Xclang -target-feature -Xclang +int16 -dM -E %s | FileCheck %s --check-prefix=INT16
+// RUN: %clang --target=mcs251-unknown-none -Xclang -target-feature -Xclang +int16 -fsyntax-only %s
+// RUN: not %clang --target=mcs251-unknown-none -Xclang -target-feature -Xclang +long16 -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD-MODEL
+// RUN: %clang --target=mcs251-unknown-none -Xclang -target-feature -Xclang +int16 -Xclang -target-feature -Xclang -int16 -dM -E %s | FileCheck %s --check-prefix=MACROS
+// RUN: not %clang --target=mcs251-unknown-none -Xclang -target-feature -Xclang +ptr16 -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD-MODEL
+// INT16-DAG: #define __MCS251_INT16__ 1
+// INT16-DAG: #define __SIZEOF_INT__ 2
+// BAD-MODEL: error: invalid feature combination: MCS251 supports only +int16/-int16; long and pointer widths are fixed at 32 bits
 
 #include <stddef.h>
 #include <stdint.h>
