@@ -49,7 +49,9 @@
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Module.h"
+#include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCStreamer.h"
@@ -140,34 +142,68 @@ public:
     OutStreamer->getContext().setMainFileName(ModuleName);
   }
 
-  // Defined global data is rejected until data-area emission exists
-  // (Step 2+ of the Phase 12 plan).  Everything the base implementation
-  // would do is wrong here in a *silent* way, which is the one thing the
-  // MCS251 backend must never do: MCS251MCAsmInfo::printSwitchToSection is
-  // a no-op, so the switchSection calls in AsmPrinter::emitGlobalVariable
-  // would not print ".data"/".rodata"/".section" but leave the output in
-  // the CODE area CSEG opened by emitStartOfAsmFile.  The DataLayout's
-  // 1-byte i8/i16 alignments make emitAlignment return early, and
-  // .globl/.word/.byte/.ds are all legal sdas251 spelling -- so the data
-  // would assemble, link and run, just sitting in code space while loads
-  // and stores address it as region-00 data.  A loud fatal error beats a
-  // quietly mislinked image.
-  //
-  // External declarations are unaffected: the base path emits nothing for
-  // them (default visibility + no initializer returns before any data).
-  // Known small exemption: extern_weak globals reach the WeakRefDirective
-  // bookkeeping in AsmPrinter::doInitialization and are silently skipped
-  // there (the base getWeakRefDirective is empty on this target), so they
-  // never get here in the first place.
+  // The initial data path is deliberately read-only and shares the one CSEG
+  // section with functions. Region-qualified MOVADDR32 accesses can read ROM;
+  // using an ELF .rodata section would instead violate the REL writer's
+  // single-section contract. Mutable data needs a separate area and startup
+  // initialization, neither of which is implied by accepting constants here.
   void emitGlobalVariable(const GlobalVariable *GV) override {
     if (GV->isDeclaration()) {
       AsmPrinter::emitGlobalVariable(GV);
       return;
     }
-    report_fatal_error(
-        "MCS251: defined global data is not supported yet (it would be "
-        "emitted into the CODE area CSEG; data-area support is Step 2 of "
-        "the Phase 12 plan)");
+
+    auto Reject = []() {
+      report_fatal_error(
+          "MCS251: defined global data requires a byte-aligned read-only "
+          "CSEG i8/i16/i32 scalar or nonempty initialized integer array; "
+          "mutable data, zeroinitializers, custom sections, TLS, weak/COMDAT, "
+          "aggregates and initializer relocations are not supported");
+    };
+    const DataLayout &DL = GV->getDataLayout();
+    if (!GV->isConstant() || GV->isThreadLocal() || GV->getAddressSpace() != 0 ||
+        GV->hasSection() || GV->hasComdat() ||
+        (!GV->hasExternalLinkage() && !GV->hasLocalLinkage()) ||
+        GV->getVisibility() != GlobalValue::DefaultVisibility ||
+        GV->getDLLStorageClass() != GlobalValue::DefaultStorageClass ||
+        GV->getAlign().valueOrOne() != Align(1) ||
+        DL.getABITypeAlign(GV->getValueType()) != Align(1))
+      Reject();
+
+    const Constant *Init = GV->getInitializer();
+    auto IsSupportedInt = [](Type *Ty) {
+      return Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32);
+    };
+    if (auto *AT = dyn_cast<ArrayType>(Init->getType())) {
+      if (!AT->getNumElements() || !IsSupportedInt(AT->getElementType()) ||
+          (!isa<ConstantDataArray>(Init) && !isa<ConstantArray>(Init)))
+        Reject();
+      // Validate the whole initializer before emitting any label or data.
+      for (uint64_t I = 0; I != AT->getNumElements(); ++I)
+        if (!isa_and_nonnull<ConstantInt>(Init->getAggregateElement(I)))
+          Reject();
+    } else if (!isa<ConstantInt>(Init) || !IsSupportedInt(Init->getType())) {
+      Reject();
+    }
+
+    OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
+    MCSymbol *Sym = getSymbol(GV);
+    emitLinkage(GV, Sym);
+    OutStreamer->emitLabel(Sym);
+    if (auto *AT = dyn_cast<ArrayType>(Init->getType())) {
+      // Emit elements, not .ascii/.asciz/.fill: those generic optimizations
+      // use GAS spellings/escaping which are not the sdas251 string dialect.
+      // emitIntValue preserves the MCAsmInfo big-endian .word fallback for
+      // i32 and emits actual zero bytes for embedded NULs (not reservations).
+      unsigned Bytes = DL.getTypeStoreSize(AT->getElementType());
+      for (uint64_t I = 0; I != AT->getNumElements(); ++I)
+        OutStreamer->emitIntValue(
+            cast<ConstantInt>(Init->getAggregateElement(I))->getZExtValue(),
+            Bytes);
+    } else {
+      OutStreamer->emitIntValue(cast<ConstantInt>(Init)->getZExtValue(),
+                               DL.getTypeStoreSize(Init->getType()));
+    }
   }
 };
 } // namespace
