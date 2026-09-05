@@ -112,13 +112,17 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   // Phase 14: full constant-count shift support.  i8/i16 unroll the native
   // 1-bit sll/srl/sra; i32 SHL keeps the ADD32rr doubling while i32 SRL/SRA
   // go through the SRL32ri/SRA32ri custom-inserter pseudos (no native dword
-  // shift exists).  Variable counts stay a loud error (LowerShift).
+  // shift exists). Variable counts use guarded unit-shift loops.
   setOperationAction(ISD::SHL, MVT::i32, Custom);
   setOperationAction(ISD::SHL, MVT::i8, Custom);
   setOperationAction(ISD::SHL, MVT::i16, Custom);
   for (MVT VT : {MVT::i8, MVT::i16, MVT::i32}) {
     setOperationAction(ISD::SRL, VT, Custom);
     setOperationAction(ISD::SRA, VT, Custom);
+    setOperationAction(ISD::ROTL, VT, Expand);
+    setOperationAction(ISD::ROTR, VT, Expand);
+    setOperationAction(ISD::FSHL, VT, Expand);
+    setOperationAction(ISD::FSHR, VT, Expand);
   }
   // Preserve the 16-bit SPX via SFR reads/writes while its saved value is an
   // i32 pointer. The operation legalizer consults MVT::Other for both nodes.
@@ -143,8 +147,8 @@ const char *MCS251TargetLowering::getTargetNodeName(unsigned Opcode) const {
   }
 }
 
-// Phase 14 shift lowering (constant counts only; variable counts stay a loud
-// error, matching the pre-existing i32 SHL contract).
+// Constant shifts retain the Phase 14 unrolled lowering. Variable shifts
+// become pre-RA guarded loops with ordinary PHIs and a GPR8Low counter.
 //
 // i8/i16 unroll the native 1-bit sll/srl/sra: one MachineNode per shifted
 // bit.  Machine nodes are opaque to the DAG combiner, so no combinatorial
@@ -166,8 +170,17 @@ SDValue MCS251TargetLowering::LowerShift(SDValue Op, SelectionDAG &DAG) const {
   const bool Left = Op.getOpcode() == ISD::SHL;
   const bool Arith = Op.getOpcode() == ISD::SRA;
   auto *C = dyn_cast<ConstantSDNode>(Op.getOperand(1));
-  if (!C)
-    report_fatal_error("MCS251: variable-count shifts are not supported");
+  if (!C) {
+    // Defined shift counts fit in five bits. Truncating to a byte does not
+    // constrain the unspecified result for out-of-range (poison) counts.
+    SDValue Count = DAG.getZExtOrTrunc(Op.getOperand(1), DL, MVT::i8);
+    unsigned Opc = Width == 8 ? MCS251::VSHIFT8
+                   : Width == 16 ? MCS251::VSHIFT16 : MCS251::VSHIFT32;
+    return SDValue(DAG.getMachineNode(
+        Opc, DL, VT, {Op.getOperand(0), Count,
+                      DAG.getTargetConstant(Left ? 0 : Arith ? 2 : 1,
+                                            DL, MVT::i8)}), 0);
+  }
   uint64_t Cnt = C->getZExtValue();
   if (Cnt == 0)
     return Op.getOperand(0);
@@ -627,6 +640,10 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   switch (MI.getOpcode()) {
   default:
     llvm_unreachable("unknown custom inserter opcode");
+  case MCS251::VSHIFT8:
+  case MCS251::VSHIFT16:
+  case MCS251::VSHIFT32:
+    return emitVariableShift(MI, BB);
   case MCS251::MUL8:
   case MCS251::MUL16:
   case MCS251::UMUL16WIDE: {
@@ -936,6 +953,83 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     return BB;
   }
   }
+}
+
+MachineBasicBlock *MCS251TargetLowering::emitVariableShift(
+    MachineInstr &MI, MachineBasicBlock *BB) const {
+  MachineFunction &MF = *BB->getParent();
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+  DebugLoc DL = MI.getDebugLoc();
+  Register Dst = MI.getOperand(0).getReg();
+  Register Src = MI.getOperand(1).getReg();
+  Register Count = MRI.createVirtualRegister(&MCS251::GPR8LowRegClass);
+  BuildMI(*BB, MI, DL, TII.get(TargetOpcode::COPY), Count)
+      .addReg(MI.getOperand(2).getReg());
+  unsigned Kind = MI.getOperand(3).getImm();
+  const TargetRegisterClass *RC = MRI.getRegClass(Dst);
+
+  // Layout: BB -> Zero -> Loop -> Back -> Done. Conditional targets are
+  // adjacent skip blocks, never a potentially distant loop body/exit. Keep
+  // the same uniform-successor invariant as expandLongConditionalBranch.
+  auto NewBlock = [&]() {
+    auto *MBB = MF.CreateMachineBasicBlock();
+    MF.insert(std::next(BB->getIterator()), MBB);
+    return MBB;
+  };
+  MachineBasicBlock *Done = NewBlock();
+  MachineBasicBlock *Back = NewBlock();
+  MachineBasicBlock *Loop = NewBlock();
+  MachineBasicBlock *Zero = NewBlock();
+  Done->splice(Done->end(), BB, std::next(MI.getIterator()), BB->end());
+  Done->transferSuccessorsAndUpdatePHIs(BB);
+
+  BuildMI(BB, DL, TII.get(MCS251::CMP8ri)).addReg(Count).addImm(0);
+  BuildMI(BB, DL, TII.get(MCS251::JE)).addMBB(Zero);
+  BuildMI(BB, DL, TII.get(MCS251::EJMP)).addMBB(Loop);
+  BB->addSuccessor(Zero);
+  BB->addSuccessor(Loop);
+  BuildMI(Zero, DL, TII.get(MCS251::EJMP)).addMBB(Done);
+  Zero->addSuccessor(Done);
+
+  Register Value = MRI.createVirtualRegister(RC);
+  Register Shifted = MRI.createVirtualRegister(RC);
+  Register Remaining = MRI.createVirtualRegister(&MCS251::GPR8LowRegClass);
+  Register NextCount = MRI.createVirtualRegister(&MCS251::GPR8LowRegClass);
+  BuildMI(Loop, DL, TII.get(TargetOpcode::PHI), Value)
+      .addReg(Src).addMBB(BB).addReg(Shifted).addMBB(Back);
+  BuildMI(Loop, DL, TII.get(TargetOpcode::PHI), Remaining)
+      .addReg(Count).addMBB(BB).addReg(NextCount).addMBB(Back);
+  unsigned Opc;
+  if (MI.getOpcode() == MCS251::VSHIFT32)
+    Opc = Kind == 0 ? MCS251::ADD32rr
+          : Kind == 1 ? MCS251::SRL32one : MCS251::SRA32one;
+  else if (MI.getOpcode() == MCS251::VSHIFT16)
+    Opc = Kind == 0 ? MCS251::SLL16
+          : Kind == 1 ? MCS251::SRL16 : MCS251::SRA16;
+  else
+    Opc = Kind == 0 ? MCS251::SLL8
+          : Kind == 1 ? MCS251::SRL8 : MCS251::SRA8;
+  auto Shift = BuildMI(Loop, DL, TII.get(Opc), Shifted).addReg(Value);
+  if (Opc == MCS251::ADD32rr)
+    Shift.addReg(Value);
+  // Keep the decrement separate from the terminator. A DJNZ defining a
+  // cross-block vreg makes FastRA insert its spill AFTER the branch, which
+  // the taken edge would skip. SUB/JNE lets every spill precede the branch.
+  // Remaining and Shifted have overlapping live ranges, so their register
+  // units must be disjoint (including WR/DR lanes).
+  BuildMI(Loop, DL, TII.get(MCS251::SUB8ri), NextCount)
+      .addReg(Remaining).addImm(1);
+  BuildMI(Loop, DL, TII.get(MCS251::JNE)).addMBB(Back);
+  BuildMI(Loop, DL, TII.get(MCS251::EJMP)).addMBB(Done);
+  Loop->addSuccessor(Back);
+  Loop->addSuccessor(Done);
+  BuildMI(Back, DL, TII.get(MCS251::EJMP)).addMBB(Loop);
+  Back->addSuccessor(Loop);
+  BuildMI(*Done, Done->begin(), DL, TII.get(TargetOpcode::PHI), Dst)
+      .addReg(Src).addMBB(Zero).addReg(Shifted).addMBB(Loop);
+  MI.eraseFromParent();
+  return Done;
 }
 
 MachineBasicBlock *MCS251TargetLowering::expandLongConditionalBranch(

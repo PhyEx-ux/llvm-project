@@ -225,6 +225,11 @@ static void rejectPseudo(const MCInst &MI) {
     MCS251_PSEUDO(DYNALLOCA)
     MCS251_PSEUDO(SRL32ri)
     MCS251_PSEUDO(SRA32ri)
+    MCS251_PSEUDO(VSHIFT8)
+    MCS251_PSEUDO(VSHIFT16)
+    MCS251_PSEUDO(VSHIFT32)
+    MCS251_PSEUDO(SRL32one)
+    MCS251_PSEUDO(SRA32one)
     // ADD16fi keeps its frame index only until PEI, which retargets it to
     // ADD16ri (see MCS251RegisterInfo::eliminateFrameIndex).
     MCS251_PSEUDO(ADD16fi)
@@ -296,6 +301,10 @@ void MCS251MCCodeEmitter::encodeInstruction(
     B(0x17e); put8((R(MI, 0) << 4) | 1, CB); put8(SFR_DPL, CB); break;
   case MCS251::MOV8rdph:
     B(0x17e); put8((R(MI, 0) << 4) | 1, CB); put8(SFR_DPH, CB); break;
+  case MCS251::MOVAI:
+    B(0x74); putImm8(MI.getOperand(0), CB); break;
+  case MCS251::OR8a:
+    B(0x14c); put8((R(MI, 0) << 4) | 0x0b, CB); break;
   case MCS251::MOV8a:
     if (R(MI, 0) < 8)
       B(0x0e8 + R(MI, 0));

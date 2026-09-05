@@ -15,6 +15,30 @@ MCS251InstrInfo::MCS251InstrInfo(const MCS251Subtarget &STI)
     : MCS251GenInstrInfo(STI, RI, MCS251::ADJCALLSTACKDOWN,
                         MCS251::ADJCALLSTACKUP), RI() {}
 
+bool MCS251InstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
+  if (MI.getOpcode() != MCS251::SRL32one &&
+      MI.getOpcode() != MCS251::SRA32one)
+    return false;
+  MachineBasicBlock &MBB = *MI.getParent();
+  DebugLoc DL = MI.getDebugLoc();
+  Register Dst = MI.getOperand(0).getReg();
+  assert(Dst == MI.getOperand(1).getReg() && "expected tied DR shift");
+  Register Hi = RI.getSubReg(Dst, MCS251::sub_hi16);
+  Register Lo = RI.getSubReg(Dst, MCS251::sub_lo16);
+  Register LoHi = RI.getSubReg(Lo, MCS251::sub_hi8);
+  unsigned HiOpc = MI.getOpcode() == MCS251::SRA32one ? MCS251::SRA16
+                                                    : MCS251::SRL16;
+  // QEMU-measured five-instruction shift: save old bit16 in A.7, then
+  // merge it into the low word. DR0 is WR0:WR2 (most significant first).
+  BuildMI(MBB, MI, DL, get(HiOpc), Hi).addReg(Hi);
+  BuildMI(MBB, MI, DL, get(MCS251::MOVAI)).addImm(0);
+  BuildMI(MBB, MI, DL, get(MCS251::RRCA));
+  BuildMI(MBB, MI, DL, get(MCS251::SRL16), Lo).addReg(Lo);
+  BuildMI(MBB, MI, DL, get(MCS251::OR8a), LoHi).addReg(LoHi);
+  MI.eraseFromParent();
+  return true;
+}
+
 // Spill/reload (Phase 9). The slot address is emitted in its unresolved
 // frame-index form -- the mcs251_stack displacement operand carries the
 // (FI, offset) pair and a placeholder dr60 base, and PEI folds it into the

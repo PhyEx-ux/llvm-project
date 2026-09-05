@@ -111,6 +111,27 @@ let usesCustomInserter = 1 in {
                            "", []>;
 }
 
+// Variable shifts expand to a guarded unit-shift loop before RA. Kind is
+// 0=left, 1=logical right, 2=arithmetic right; only the low count byte is
+// needed for defined IR inputs (count < width <= 32).
+let usesCustomInserter = 1, isPseudo = 1 in {
+  def VSHIFT8 : MCS251Inst<(outs GPR8:$dst),
+      (ins GPR8:$src, GPR8:$count, i8imm:$kind), "", []>;
+  def VSHIFT16 : MCS251Inst<(outs GPR16:$dst),
+      (ins GPR16:$src, GPR8:$count, i8imm:$kind), "", []>;
+  def VSHIFT32 : MCS251Inst<(outs GPR32:$dst),
+      (ins GPR32:$src, GPR8:$count, i8imm:$kind), "", []>;
+}
+
+// Atomic one-bit DR right shift. Expand after RA into the measured five
+// instructions so spills cannot break the carry/A dependencies. The full
+// tied DR operand exposes every lane to RA; A and flags are scratch, and
+// the final flags are NOT the N/Z of the 32-bit result.
+let isPseudo = 1, Constraints = "$src = $dst", Defs = [A, PSW], Size = 9 in {
+  def SRL32one : MCS251Inst<(outs GPR32:$dst), (ins GPR32:$src), "", []>;
+  def SRA32one : MCS251Inst<(outs GPR32:$dst), (ins GPR32:$src), "", []>;
+}
+
 // Atomic symbolic address materialisation. Both words are emitted together;
 // byte-of-24 relocations perform full symbol+addend arithmetic before slicing.
 let Size = 8, isReMaterializable = 1 in
@@ -172,8 +193,13 @@ def MOV8rdph : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, dph", []>;
 
 // ACC/B fixed SFR byte moves (A=0xe0, B=0xf0). These are deliberately
 // separate from R11/R10, whose byte-slot aliases are not allocatable.
-let Defs = [A] in
+let Defs = [A] in {
 def MOV8a : MCS251Inst<(outs), (ins GPR8:$src), "mov a, $src", []>;
+def MOVAI : MCS251Inst<(outs), (ins mcs251_imm8:$imm), "mov a, $imm", []>;
+}
+let Uses = [A], Defs = [PSW], Constraints = "$src = $dst" in
+  def OR8a : MCS251Inst<(outs GPR8:$dst), (ins GPR8:$src),
+                        "orl $dst, a", []>;
 let Defs = [B] in
 def MOV8b : MCS251Inst<(outs), (ins GPR8:$src), "mov b, $src", []>;
 let Uses = [A] in

@@ -77,6 +77,9 @@ public:
                       const SDLoc &DL, SelectionDAG &DAG) const override;
 
 private:
+  MachineBasicBlock *emitVariableShift(MachineInstr &MI,
+                                       MachineBasicBlock *BB) const;
+
   // Expands a BRCC/BRCC8S pseudo into the three-part long conditional
   // branch `jCCinv SkipMBB; ejmp TrueMBB; SkipMBB:` (jcc only reaches rel8;
   // the skip target is the 4-byte ejmp directly below, always in range).

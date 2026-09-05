@@ -193,6 +193,11 @@ def PSW : Register<"psw"> {
 def GPR8 : RegisterClass<"MCS251", [i8], 8, (add R0, R1, R2, R3, R4, R5, R6,
                                              R7, R8, R9, R12, R13, R14, R15)>;
 
+// Keep shift-loop counters in the classic low-register bank. A real subclass
+// and live-range interference prevent aliasing the shifted WR/DR value.
+def GPR8Low : RegisterClass<"MCS251", [i8], 8,
+                            (add R0, R1, R2, R3, R4, R5, R6, R7)>;
+
 // wr10 is excluded because it covers r10/r11 (B/ACC); wr16+ are not
 // allocatable in this phase.
 def GPR16 : RegisterClass<"MCS251", [i16], 8, (add WR0, WR2, WR4, WR6, WR8,

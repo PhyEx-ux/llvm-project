@@ -21,6 +21,8 @@ public:
   explicit MCS251InstrInfo(const MCS251Subtarget &STI);
   const MCS251RegisterInfo &getRegisterInfo() const { return RI; }
 
+  bool expandPostRAPseudo(MachineInstr &MI) const override;
+
   void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
                    const DebugLoc &DL, Register DestReg, Register SrcReg,
                    bool KillSrc, bool RenamableDest = false,
