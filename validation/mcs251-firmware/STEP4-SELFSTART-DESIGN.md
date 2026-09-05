@@ -8,6 +8,13 @@ llc/qemu（md5 09c438e6…/6b9edfd0…）。实验资产：WSL
 globals.ll、s4.lk、s4vec.lk、s4self.hex/.out、s4vec.hex/.out、
 e2/e3/e5 脚本；Step 4a 回填实验 e1/e3/e4 材料亦归档于此）。
 
+**v2 增补（2026-09-05，Shizuku，冻结 llc 43739468… + clang
+0260312e… + qemu 6b9edfd0…）**：Step 4 自启动以 clang 前端 +
+`llc -filetype=obj` 全链实测跑通（§6）。产物归档
+`/home/liu/mcs251-step4/v2/`，构建脚本
+`build-selfstart.sh`（本目录）。修订点：§2.3 数据支持结论过时
+（只读常量数据已支持）；§2.5 新增 crt→.rel 路线裁定与后端能力边界。
+
 标注约定：**[实测]** = 有 QEMU transcript 或产物字节/map 证据；**[推断]** =
 设计推断，进 §5 最小实测清单。
 
@@ -87,10 +94,14 @@ BOOT = `mov spx,#0x2fff` → `ecall _main` → 返回后 `<post-main>` → 自�
 
 ### 2.3 GSINIT 数据初始化：当前为空集，设计预留
 
-- **[实测]** llc 对任何已定义全局数据响亮报错：`LLVM ERROR: MCS251:
-  defined global data is not supported yet (…data-area support is Step 2
-  of the Phase 12 plan)`。即纯 LLVM 链当前**没有可初始化对象**，GSINIT
-  无事可做；后端数据区落地前，初始化设计不定稿。
+- **[v2 实测修订]** 冻结 llc 43739468… 已支持**只读常量全局数据**：
+  byte-aligned 只读 CSEG i8/i16/i32 标量或非空整型数组可定义并
+  落 CSEG（实测 `@g_ro = constant i32 305419896` 大端 `12 34 56 78`
+  落 CSEG，clang `const unsigned long` 直接可用）。**可变全局、
+  零初始化、聚合体、TLS/weak 仍响亮报错**。故纯 LLVM 链的可变全局
+  采用「C 侧 `extern volatile` + asm 侧 XSEG `.ds` 定义 +
+  `-b XSEG=0x010000`」模式（v2 img2 实测，写-读-写回全通）。
+  运行时 COPY 初始化结论（loader 拒载预置）不变，仍只此一条路。
 - 预留两条路（待数据区落地后定稿，[推断]）：
   a. 混链期：SDCC 模块初值走其 GSINIT——.lk 必须显式 `-b GSINIT` +
      `-b GSFINAL` 且 GSFINAL 保留尾跳（端序专项 §7：不可假定连续）；
@@ -199,3 +210,45 @@ ecall/eret 24 位帧平衡（T4）；混链缺桩 rc=2 拒出镜像（§5-1）�
    0x00（@dpx 通路顺带验证）。结论：loader 只接受 flash 窗口
    （0xFC2800–0xFFFFFF），任何"加载器预置 RAM"路线均不可行，数据初始化
    只有运行时 COPY 一条路。
+
+## 6. Step 4 自启动 v2 实测记录（clang 前端全链，冻结工具）
+
+工具：clang `/home/liu/mcs251-alice4/v1/bin-frozen/0260312e/clang`、
+llc `…/43739468/llc`、qemu `6b9edfd0…`、sdas251 `/home/liu/build-sdcc/bin`。
+资产：`/home/liu/mcs251-step4/v2/`，构建脚本
+`validation/mcs251-firmware/build-selfstart.sh`。
+
+### 6.1 crt→.rel 路线裁定 [实测]
+
+- 路线 b（MC 层汇编 ASxxxx 语法 crt）：**不可行**。clang cc1as 报
+  `unknown target triple 'mcs251-unknown-none'`（clang 不携带 mcs251
+  的 MC 汇编器）；环境无 llvm-mc；llc 的 `-filetype=asm` 输出本身就是
+  ASxxxx 语法，LLVM 自家汇编器不消费。
+- 但 **LLVM C 模块已零 SDCC**：`llc -filetype=obj` 直出 ASxxxx .rel
+  （含 .optsdcc O 行与常量数据），不经 sdas251 [实测 t0/probe2/img1-3]。
+- 裁定：**路线 a（sdas251 汇编 crt-selfstart.asm）为当前唯一路径**，
+  sdas251 是自启动链残留的最后一个 SDCC 工具依赖，且仅服务于手写 asm
+  资产（crt/数据模块），C 模块编译链已无 SDCC。
+
+### 6.2 后端能力边界（v2 实测撞到并绕开）
+
+- 函数最多 **1 个** i8/i16/i32 参数（多参数需 OSEG overlay，未支持）：
+  `LLVM ERROR: minimal MCS251 backend only supports zero or one …`。
+- **i32 mul 不可选**（ISel Cannot select）；i32 加/异或/移位、调用、
+  extern 符号访问均正常。
+- clang 侧 `main` 经 llc 得符号 `_main`（前缀自动加）；C 源写成
+  `_main` 反而会得到 `__main` 导致链接 Undefined [实测]。
+
+### 6.3 三镜像验收（transcript 原文见 v2/*.qemu.out）
+
+| 镜像 | 链 | hex md5 | QEMU transcript | 判定 |
+|---|---|---|---|---|
+| img1 | crt-selfstart + clang 最小 C（打印 S4BOOT 后返回） | e9ba6ce3d64c7382d0700582658e3194 | `S4BOOTS` | PASS：自启动+ECALL/ERET 返回链闭合，'S' 为 boot 的 main-返回标记 |
+| img2 | 同上 + data2.asm XSEG 可变全局 + 只读常量全局 + 单参调用 + i32 移位/加/异或 | 1d821ef23324dc95b1c1f16a682dc573 | `D5F6A6939S` | PASS：与 host gcc 真值 `D5F6A6939`（truth2）逐字节一致 |
+| img3old | 旧链（crt0.asm + SDCC 编译同语义 C + link-template.lk 布线） | 1ab16e6f80c4605a4f957530e9721a1d | `D5F6A6939` | 对照成立：C 模块输出与新链一致（新链多的 'S' 是 boot 返回标记，旧链 main 内自旋故无） |
+
+- img2 的 g_state 经写(0x89ABCDEF)→读(作实参)→写回(结果)三步，
+  证明 SPX 栈、CSEG 取指、XSEG 数据窗口三项运行时前置对真实
+  clang 编译代码成立。
+- 注：mcs251_ld.py 不产 map 文件（其文档明言 -M 被接受但忽略），
+  归档以链接器 stdout（area 数/字节数）、crt .lst/.sym、hex md5 代替。
