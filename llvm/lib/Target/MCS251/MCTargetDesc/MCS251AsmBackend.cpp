@@ -117,6 +117,11 @@ public:
       Data[2] |= uint8_t(V >> 8);
       Data[3] |= uint8_t(V);
       return;
+    case MCS251::fixup_mcs251_lo8:
+    case MCS251::fixup_mcs251_mid8:
+    case MCS251::fixup_mcs251_hi8:
+      Data[0] = uint8_t(V >> (8 * (Fixup.getKind() - MCS251::fixup_mcs251_lo8)));
+      return;
     case MCS251::fixup_mcs251_16:
       if (!isIntN(16, static_cast<int64_t>(V)) && !isUIntN(16, V))
         getContext().reportError(Fixup.getLoc(),
@@ -144,6 +149,9 @@ public:
                                        FirstTargetFixupKind] = {
         {"fixup_mcs251_16", 0, 16, 0},
         {"fixup_mcs251_24", 0, 24, 0},
+        {"fixup_mcs251_lo8", 0, 8, 0},
+        {"fixup_mcs251_mid8", 0, 8, 0},
+        {"fixup_mcs251_hi8", 0, 8, 0},
     };
     if (Kind < FirstTargetFixupKind)
       return MCAsmBackend::getFixupKindInfo(Kind);

@@ -7,6 +7,7 @@
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
@@ -119,6 +120,22 @@ void MCS251InstPrinter::printInst(const MCInst *MI, uint64_t Address,
                                   StringRef Annot,
                                   const MCSubtargetInfo &STI,
                                   raw_ostream &O) {
-  printInstruction(MI, Address, O);
+  if (MI->getOpcode() == MCS251::MOVADDR32) {
+    // ASxxxx has byte-of-24 relocations, but no high-word relocation for
+    // MOVH's outrw operand. Spell the real MOV/MOVH bytes explicitly so the
+    // assembler selects each byte AFTER the linker's full symbol+addend sum.
+    unsigned Reg = MRI.getEncodingValue(MI->getOperand(0).getReg()) / 4;
+    const MCExpr *Expr = MI->getOperand(1).getExpr();
+    O << format("\t.db 0x7e, 0x%02x, (", (Reg << 4) | 8);
+    MAI.printExpr(O, *Expr);
+    O << ") >> 8, (";
+    MAI.printExpr(O, *Expr);
+    O << ")\n";
+    O << format("\t.db 0x7a, 0x%02x, 0x00, (", (Reg << 4) | 12);
+    MAI.printExpr(O, *Expr);
+    O << ") >> 16";
+  } else {
+    printInstruction(MI, Address, O);
+  }
   printAnnotation(O, Annot);
 }

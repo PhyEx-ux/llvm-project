@@ -58,11 +58,14 @@ define void @obj_call_local() {
 ; T payload is capped at 13 bytes (sdas's NTXT includes the 3 XH3 address
 ; bytes; sdld's relocation arrays share that limit), so obj_load_g's ecall
 ; field moves to the next line:
-; CHECK-NEXT: T 00 00 00 7E 04 00 00 7E 09 00 7A 01 82 AA 9A
-; 16-bit reloc at payload offset 2 (t-index 5) referencing gv8 (S index 1):
-; CHECK-NEXT: R 00 00 00 01 02 05 00 01
-; ecall ext_fn (24-bit symbol field at payload offset 0 -> t-index 3, mode
-; 0x82, ref 0000), then obj_call_local's ecall to the DEFINED obj_call_ext --
-; area-relative (mode 0x80, ref 0001 = CSEG), offset 0x0B already in payload:
-; CHECK-NEXT: T 00 00 0C 00 00 00 AA 9A 00 00 0B AA
+; CHECK-NEXT: T 00 00 00 7E 08 00 00 00 00 00 00 7A 0C 00
+; MOV low word: mid/lo byte-of24 occupy 3 T bytes each, but one code byte.
+; The second fixup's t-index must therefore be 8, not 6.
+; CHECK-NEXT: R 00 00 00 01 F1 83 05 00 01 F1 03 08 00 01
+; MOVH high word: constant zero then relocated region byte. Code offset 7,
+; not T-payload offset 11: expanded placeholder bytes do not advance PC.
+; CHECK-NEXT: T 00 00 07 00 00 00 7E 0B 00 7A 01 82 AA 9A
+; CHECK-NEXT: R 00 00 00 01 F3 83 03 00 01
+; Direct calls remain full addr24; defined function target remains area-relative.
+; CHECK-NEXT: T 00 00 10 00 00 00 AA 9A 00 00 0F AA
 ; CHECK-NEXT: R 00 00 00 01 82 03 00 00 80 08 00 01

@@ -1,4 +1,4 @@
-; RUN: llc -mtriple=mcs251 < %s | FileCheck %s
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs < %s | FileCheck %s
 
 ; Phase 9: dynamic allocas. `add dr60,wr` is an illegal width mix (both ADD
 ; operands must be DR), so SPX is read and written through its SFR direct
@@ -27,7 +27,7 @@ define i16 @dyn_alloca(i16 %n) {
 ; CHECK: mov 0x81, r{{[0-9]+}}
 ; object base = old SPX + 1
 ; CHECK: add wr{{[0-9]+}}, #0x0001
-; CHECK: mov @wr{{[0-9]+}}, r{{[0-9]+}}
+; CHECK: mov @dr{{[0-9]+}}, r{{[0-9]+}}
 ; CHECK: mov dr60, dr56
 ; CHECK: pop dr56
 ; CHECK: eret

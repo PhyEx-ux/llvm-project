@@ -107,6 +107,10 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   // through DYNAMIC_STACKALLOC into the DYNALLOCA pseudo.
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i8, Custom);
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i16, Custom);
+  setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i32, Custom);
+  setOperationAction(ISD::GlobalAddress, MVT::i32, Custom);
+  // Scaled GEPs use constant shifts, lowered with native DR additions.
+  setOperationAction(ISD::SHL, MVT::i32, Custom);
   // Loop VLAs use stacksave/stackrestore to recover the pre-iteration SPX.
   // They cannot use the generic Copy{From,To}Reg expansion because DR60 is a
   // 32-bit register while pointers are i16.
@@ -170,9 +174,24 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
   case ISD::ANY_EXTEND:
     return LowerExtend(Op, DAG);
   case ISD::SIGN_EXTEND:
-    report_fatal_error(
-        "MCS251: sign extension is not supported (no 8-to-16 bit sign "
-        "extension sequence yet)");
+    return LowerExtend(Op, DAG);
+  case ISD::GlobalAddress: {
+    SDLoc DL(Op);
+    auto *GA = cast<GlobalAddressSDNode>(Op);
+    return SDValue(DAG.getMachineNode(MCS251::MOVADDR32, DL, MVT::i32,
+        DAG.getTargetGlobalAddress(GA->getGlobal(), DL, MVT::i32,
+                                   GA->getOffset())), 0);
+  }
+  case ISD::SHL: {
+    SDLoc DL(Op);
+    auto *C = dyn_cast<ConstantSDNode>(Op.getOperand(1));
+    if (!C)
+      report_fatal_error("MCS251: variable i32 shifts are not supported");
+    SDValue V = Op.getOperand(0);
+    for (unsigned I = 0; I < C->getZExtValue(); ++I)
+      V = SDValue(DAG.getMachineNode(MCS251::ADD32rr, DL, MVT::i32, {V, V}), 0);
+    return V;
+  }
   case ISD::BRCOND: {
     SDLoc DL(Op);
     SDValue Cond = Op.getOperand(1);
@@ -1028,12 +1047,13 @@ static SDValue materializeFrameIndex(int FrameIdx, int64_t Off,
                        "(needs an anchor read, not yet implemented)");
   SDValue TFI = DAG.getTargetFrameIndex(FrameIdx, MVT::i16);
   SDValue P(DAG.getMachineNode(MCS251::FIADDR, DL, MVT::i16, TFI), 0);
+  SDValue Zero = materializeImm(DAG.getConstant(0, DL, MVT::i16), DL, DAG);
+  P = makeDR(Zero, P, DL, DAG);
   if (Off == 0)
     return P;
-  return SDValue(DAG.getMachineNode(
-                     MCS251::ADD16ri, DL, MVT::i16,
-                     {P, DAG.getTargetConstant(Off & 0xffff, DL, MVT::i16)}),
-                 0);
+  SDValue Disp = materializeImm(DAG.getConstant(Off, DL, MVT::i32), DL, DAG);
+  return SDValue(DAG.getMachineNode(MCS251::ADD32rr, DL, MVT::i32,
+                                    {P, Disp}), 0);
 }
 
 // Materialise a 16-bit constant into a GPR16 vreg.
@@ -1050,11 +1070,9 @@ static SDValue foldDispIntoBase(SDValue Base, int64_t Disp, const SDLoc &DL,
                                 SelectionDAG &DAG) {
   if (Disp == 0)
     return Base;
-  return SDValue(DAG.getMachineNode(
-                     MCS251::ADD16ri, DL, MVT::i16,
-                     {Base, DAG.getTargetConstant(Disp & 0xffff, DL,
-                                                  MVT::i16)}),
-                 0);
+  SDValue D = materializeImm(DAG.getConstant(Disp, DL, MVT::i32), DL, DAG);
+  return SDValue(DAG.getMachineNode(MCS251::ADD32rr, DL, MVT::i32,
+                                    {Base, D}), 0);
 }
 
 // Classify a load/store pointer. AllowDirect permits the dir8 form (i8
@@ -1073,12 +1091,12 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
   while (Ptr.getOpcode() == ISD::ADD) {
     SDValue LHS = Ptr.getOperand(0), RHS = Ptr.getOperand(1);
     if (auto *C = dyn_cast<ConstantSDNode>(RHS)) {
-      Off += (int64_t)C->getZExtValue();
+      Off += C->getSExtValue();
       Ptr = LHS;
       continue;
     }
     if (auto *C = dyn_cast<ConstantSDNode>(LHS)) {
-      Off += (int64_t)C->getZExtValue();
+      Off += C->getSExtValue();
       Ptr = RHS;
       continue;
     }
@@ -1096,7 +1114,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
     SDValue RBase =
         R.IsStack ? materializeFrameIndex(R.StackFI, R.Disp, DL, DAG)
                   : foldDispIntoBase(R.Base, R.Disp, DL, DAG);
-    Ptr = SDValue(DAG.getMachineNode(MCS251::ADD16rr, DL, MVT::i16,
+    Ptr = SDValue(DAG.getMachineNode(MCS251::ADD32rr, DL, MVT::i32,
                                      {LBase, RBase}),
                   0);
     break;
@@ -1121,21 +1139,18 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
   // offset rides the immediate instead of a dis16 byte pair.
   if (auto *GA = dyn_cast<GlobalAddressSDNode>(Ptr)) {
     int64_t SymOff = GA->getOffset() + Off;
-    if (SymOff < 0 || SymOff > 0xffff)
-      report_fatal_error("MCS251: global address offset out of 16-bit "
-                         "range");
     A.Base = SDValue(
-        DAG.getMachineNode(MCS251::MOV16ri, DL, MVT::i16,
+        DAG.getMachineNode(MCS251::MOVADDR32, DL, MVT::i32,
                            DAG.getTargetGlobalAddress(GA->getGlobal(), DL,
-                                                       MVT::i16, SymOff)),
+                                                       MVT::i32, SymOff)),
         0);
     return A;
   }
   if (auto *ES = dyn_cast<ExternalSymbolSDNode>(Ptr)) {
     A.Base = SDValue(DAG.getMachineNode(
-                         MCS251::MOV16ri, DL, MVT::i16,
+                         MCS251::MOVADDR32, DL, MVT::i32,
                          DAG.getTargetExternalSymbol(ES->getSymbol(),
-                                                     MVT::i16)),
+                                                     MVT::i32)),
                      0);
     // External symbols carry no offset field; fold Off below.
   } else if (isa<ConstantPoolSDNode>(Ptr)) {
@@ -1149,13 +1164,13 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
     // edata or SFR -- the SFR is ONLY reachable this way, see the trap
     // above); otherwise materialise and access region-00 edata via @wr.
     // Pointer arithmetic wraps mod 2^16 (region-00 is a 16-bit space).
-    uint64_t K = (C->getZExtValue() + (uint64_t)(int64_t)Off) & 0xffff;
+    uint32_t K = C->getZExtValue() + Off;
     if (AllowDirect && K <= 0xff) {
       A.IsDirect = true;
       A.DirectAddr = K;
       return A;
     }
-    A.Base = buildMOV16ri(K, DL, DAG);
+    A.Base = materializeImm(DAG.getConstant(K, DL, MVT::i32), DL, DAG);
     return A;
   } else if (isa<JumpTableSDNode>(Ptr) || isa<BlockAddressSDNode>(Ptr)) {
     report_fatal_error(
@@ -1165,7 +1180,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
     // range rides the displacement (one instruction, no base clobber);
     // outside it is folded into the base with a real add (wrap semantics).
     A.Base = Ptr;
-    if (Off >= 0 && Off <= 0xfffe)
+    if (Off >= -32768 && Off <= 32764)
       A.Disp = Off;
     else
       A.Base = foldDispIntoBase(Ptr, Off, DL, DAG);
@@ -1174,7 +1189,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
 
   // External-symbol base with a folded offset: same displacement treatment
   // as the register-base case (the symbol itself accepts no offset).
-  if (Off >= 0 && Off <= 0xfffe)
+  if (Off >= -32768 && Off <= 32764)
     A.Disp = Off;
   else
     A.Base = foldDispIntoBase(A.Base, Off, DL, DAG);
@@ -1201,11 +1216,9 @@ static SDValue buildByteLoad(const MCS251Address &A, const SDLoc &DL,
     N = DAG.getMachineNode(MCS251::MOV8di, DL, ResTys,
                            {DAG.getTargetConstant(A.DirectAddr, DL, MVT::i8),
                             Chain});
-  else if (A.Disp == 0)
-    N = DAG.getMachineNode(MCS251::MOV8rm, DL, ResTys, {A.Base, Chain});
   else
     N = DAG.getMachineNode(
-        MCS251::MOV8rmD, DL, ResTys,
+        MCS251::MOV8rmP, DL, ResTys,
         {A.Base, DAG.getTargetConstant(A.Disp, DL, MVT::i16), Chain});
   DAG.setNodeMemRefs(cast<MachineSDNode>(N), {MMO});
   return SDValue(N, 0);
@@ -1219,13 +1232,8 @@ SDValue MCS251TargetLowering::LowerLoad(SDValue Op, SelectionDAG &DAG) const {
 
   if (LD->isAtomic())
     report_fatal_error("MCS251: atomic memory operations are not supported");
-  if (MemVT != MVT::i8 && MemVT != MVT::i16)
-    report_fatal_error("MCS251: only i8/i16 memory objects are supported "
-                       "(load)");
-  // Extending load results must be widenable: i32 (a GPR32 value) has no
-  // instructions, reject before an i8 node could be returned to an i32 user.
-  if (ValVT != MVT::i8 && ValVT != MVT::i16)
-    report_fatal_error("MCS251: only i8/i16 values are supported (load)");
+  if (MemVT != MVT::i8 && MemVT != MVT::i16 && MemVT != MVT::i32)
+    report_fatal_error("MCS251: only i8/i16/i32 memory objects are supported (load)");
   if (LD->getExtensionType() == ISD::SEXTLOAD)
     report_fatal_error("MCS251: sign-extending loads are not supported (no "
                        "8-to-16 bit sign extension yet)");
@@ -1233,39 +1241,28 @@ SDValue MCS251TargetLowering::LowerLoad(SDValue Op, SelectionDAG &DAG) const {
   MCS251Address A = parseAddress(LD->getBasePtr(), DL, DAG,
                                  /*AllowDirect=*/MemVT == MVT::i8);
 
-  if (MemVT == MVT::i16) {
-    // Two byte loads + REG_SEQUENCE via the LD16 pseudo (big-endian: the
-    // pseudo's disp 0 lane is the hi lane). The pseudo carries the full MMO
-    // (size 2); the split MMOs are attached by the custom inserter.
-    SDNode *N;
-    if (A.IsStack) {
-      N = DAG.getMachineNode(
-          MCS251::LD16S, DL, DAG.getVTList(MVT::i16, MVT::Other),
-          {DAG.getRegister(MCS251::DR60, MVT::i16),
-           DAG.getTargetFrameIndex(A.StackFI, MVT::i16),
-           DAG.getTargetConstant(A.Disp, DL, MVT::i16), LD->getChain()});
-    } else {
-      N = DAG.getMachineNode(
-          MCS251::LD16, DL, DAG.getVTList(MVT::i16, MVT::Other),
-          {A.Base, DAG.getTargetConstant(A.Disp, DL, MVT::i16),
-           LD->getChain()});
-    }
-    DAG.setNodeMemRefs(cast<MachineSDNode>(N), {LD->getMemOperand()});
-    return SDValue(N, 0);
+  // Preserve the established big-endian object layout, including the new
+  // four-byte pointer slots. Each byte retains exact MMO offset and ordering.
+  SmallVector<SDValue, 4> Bytes;
+  SDValue Chain = LD->getChain();
+  unsigned Size = MemVT.getSizeInBits() / 8;
+  for (unsigned I = 0; I < Size; ++I) {
+    MCS251Address ByteAddr = A;
+    ByteAddr.Disp += I;
+    auto *MMO = DAG.getMachineFunction().getMachineMemOperand(
+        LD->getMemOperand(), I, /*Size=*/1);
+    SDValue Byte = buildByteLoad(ByteAddr, DL, DAG, Chain, MMO);
+    Bytes.push_back(Byte);
+    Chain = Byte.getValue(1);
   }
-
-  // i8 memory object: value is i8 (plain) or i16 (zero/any-extending load).
-  SDValue Res =
-      buildByteLoad(A, DL, DAG, LD->getChain(), LD->getMemOperand());
-  if (LD->getValueType(0) == MVT::i16) {
-    // Widen with a zero hi lane (anyext: high bits undefined, zeroing is a
-    // legal choice). Chain passthrough keeps the load ordered.
-    SDNode *Z = DAG.getMachineNode(MCS251::ZEXT8, DL,
-                                   DAG.getVTList(MVT::i16, MVT::Other),
-                                   {Res, Res.getValue(1)});
-    return SDValue(Z, 0);
-  }
-  return Res;
+  SDValue Res = Bytes[0];
+  if (Size >= 2)
+    Res = makeWord(Bytes[0], Bytes[1], DL, DAG);
+  if (Size == 4)
+    Res = makeDR(Res, makeWord(Bytes[2], Bytes[3], DL, DAG), DL, DAG);
+  if (ValVT != MemVT)
+    Res = DAG.getNode(ISD::ZERO_EXTEND, DL, ValVT, Res);
+  return DAG.getMergeValues({Res, Chain}, DL);
 }
 
 // Materialise an i8 constant value into a GPR8 vreg for the store forms.
@@ -1294,12 +1291,9 @@ static SDValue buildByteStore(const MCS251Address &A, SDValue Val,
     N = DAG.getMachineNode(
         MCS251::MOV8id, DL, MVT::Other,
         {DAG.getTargetConstant(A.DirectAddr, DL, MVT::i8), Val, Chain});
-  else if (A.Disp == 0)
-    N = DAG.getMachineNode(MCS251::MOV8mr, DL, MVT::Other,
-                           {A.Base, Val, Chain});
   else
     N = DAG.getMachineNode(
-        MCS251::MOV8mrD, DL, MVT::Other,
+        MCS251::MOV8mrP, DL, MVT::Other,
         {A.Base, DAG.getTargetConstant(A.Disp, DL, MVT::i16), Val, Chain});
   DAG.setNodeMemRefs(cast<MachineSDNode>(N), {MMO});
   return SDValue(N, 0);
@@ -1313,83 +1307,65 @@ SDValue MCS251TargetLowering::LowerStore(SDValue Op, SelectionDAG &DAG) const {
 
   if (ST->isAtomic())
     report_fatal_error("MCS251: atomic memory operations are not supported");
-  if (MemVT != MVT::i8 && MemVT != MVT::i16)
-    report_fatal_error("MCS251: only i8/i16 memory objects are supported "
-                       "(store)");
+  if (MemVT != MVT::i8 && MemVT != MVT::i16 && MemVT != MVT::i32)
+    report_fatal_error("MCS251: only i8/i16/i32 memory objects are supported (store)");
 
   MCS251Address A = parseAddress(ST->getBasePtr(), DL, DAG,
                                  /*AllowDirect=*/MemVT == MVT::i8);
 
-  if (MemVT == MVT::i16) {
-    // i16 memory object: two byte stores via the ST16 pseudo (value lane
-    // extraction is MIR-only). $val must be a GPR16 vreg; constants are
-    // materialised here.
-    if (isa<ConstantSDNode>(Val))
-      Val = buildMOV16ri(cast<ConstantSDNode>(Val)->getZExtValue(), DL, DAG);
-    SDNode *N;
-    if (A.IsStack) {
-      N = DAG.getMachineNode(
-          MCS251::ST16S, DL, MVT::Other,
-          {DAG.getRegister(MCS251::DR60, MVT::i16),
-           DAG.getTargetFrameIndex(A.StackFI, MVT::i16),
-           DAG.getTargetConstant(A.Disp, DL, MVT::i16), Val,
-           ST->getChain()});
+  unsigned Size = MemVT.getSizeInBits() / 8;
+  SmallVector<SDValue, 4> Bytes;
+  if (auto *C = dyn_cast<ConstantSDNode>(Val)) {
+    for (unsigned I = 0; I < Size; ++I)
+      Bytes.push_back(buildMOV8ri(C->getZExtValue() >> ((Size - I - 1) * 8), DL, DAG));
+  } else {
+    if (ST->isTruncatingStore())
+      Val = DAG.getNode(ISD::TRUNCATE, DL, MemVT, Val);
+    if (Size == 4) {
+      splitI32ToBytes(Val, DL, DAG, Bytes);
+      std::reverse(Bytes.begin(), Bytes.end());
+    } else if (Size == 2) {
+      Bytes.push_back(DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8, Val));
+      Bytes.push_back(DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, Val));
     } else {
-      N = DAG.getMachineNode(
-          MCS251::ST16, DL, MVT::Other,
-          {A.Base, DAG.getTargetConstant(A.Disp, DL, MVT::i16), Val,
-           ST->getChain()});
+      Bytes.push_back(Val);
     }
-    DAG.setNodeMemRefs(cast<MachineSDNode>(N), {ST->getMemOperand()});
-    return SDValue(N, 0);
   }
-
-  // i8 memory object: value is i8 (plain) or i16 (truncating store, low
-  // lane). A constant truncation is shortened to a plain byte store.
-  if (ST->isTruncatingStore()) {
-    if (auto *C = dyn_cast<ConstantSDNode>(Val))
-      return buildByteStore(A, buildMOV8ri(C->getZExtValue(), DL, DAG), DL,
-                            DAG, ST->getChain(), ST->getMemOperand());
-    // Non-constant i16 value: the low-lane extraction is MIR-only. A
-    // direct-classified address keeps the dir8 form via ST16TD -- falling
-    // back to @wr would silently retarget 0x80-0xff from the SFR space to
-    // region-00 edata (the address-space trap). A frame-relative address
-    // likewise stays frame-relative (ST16TS).
-    SmallVector<SDValue, 4> Ops;
-    unsigned Opc;
-    if (A.IsDirect) {
-      Opc = MCS251::ST16TD;
-      Ops.push_back(DAG.getTargetConstant(A.DirectAddr, DL, MVT::i8));
-    } else if (A.IsStack) {
-      Opc = MCS251::ST16TS;
-      Ops.push_back(DAG.getRegister(MCS251::DR60, MVT::i16));
-      Ops.push_back(DAG.getTargetFrameIndex(A.StackFI, MVT::i16));
-      Ops.push_back(DAG.getTargetConstant(A.Disp, DL, MVT::i16));
-    } else {
-      Opc = MCS251::ST16T;
-      Ops.push_back(A.Base);
-      Ops.push_back(DAG.getTargetConstant(A.Disp, DL, MVT::i16));
-    }
-    Ops.push_back(Val);
-    Ops.push_back(ST->getChain());
-    SDNode *N = DAG.getMachineNode(Opc, DL, MVT::Other, Ops);
-    DAG.setNodeMemRefs(cast<MachineSDNode>(N), {ST->getMemOperand()});
-    return SDValue(N, 0);
+  SDValue Chain = ST->getChain();
+  for (unsigned I = 0; I < Size; ++I) {
+    MCS251Address ByteAddr = A;
+    ByteAddr.Disp += I;
+    auto *MMO = DAG.getMachineFunction().getMachineMemOperand(
+        ST->getMemOperand(), I, /*Size=*/1);
+    Chain = buildByteStore(ByteAddr, Bytes[I], DL, DAG, Chain, MMO);
   }
-
-  if (isa<ConstantSDNode>(Val))
-    Val = buildMOV8ri(cast<ConstantSDNode>(Val)->getZExtValue(), DL, DAG);
-  return buildByteStore(A, Val, DL, DAG, ST->getChain(), ST->getMemOperand());
+  return Chain;
 }
 
 SDValue MCS251TargetLowering::LowerExtend(SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Op);
-  if (Op.getValueType() != MVT::i16)
-    report_fatal_error("MCS251: i32 values are not supported");
   SDValue Src = Op.getOperand(0);
-  assert(Src.getValueType() == MVT::i8 && "only i8->i16 extension is routed "
-                                          "here");
-  return SDValue(DAG.getMachineNode(MCS251::ZEXT8, DL, MVT::i16, Src), 0);
+  EVT SrcVT = Src.getValueType();
+  bool Signed = Op.getOpcode() == ISD::SIGN_EXTEND;
+  if (Signed) {
+    // Compare before widening: signed byte comparisons use the measured
+    // offset-binary fallback, signed words use CMP16 N/OV.
+    SDValue Sign = DAG.getSetCC(DL, MVT::i8, Src,
+                                DAG.getConstant(0, DL, SrcVT), ISD::SETLT);
+    SDValue Hi = DAG.getSelect(DL, MVT::i16, Sign,
+                              DAG.getConstant(0xffff, DL, MVT::i16),
+                              DAG.getConstant(0, DL, MVT::i16));
+    if (SrcVT == MVT::i8) {
+      SDValue Byte = DAG.getNode(ISD::TRUNCATE, DL, MVT::i8, Hi);
+      Src = makeWord(Byte, Src, DL, DAG);
+    }
+    return Op.getValueType() == MVT::i32 ? makeDR(Hi, Src, DL, DAG) : Src;
+  }
+  if (SrcVT == MVT::i8)
+    Src = SDValue(DAG.getMachineNode(MCS251::ZEXT8, DL, MVT::i16, Src), 0);
+  if (Op.getValueType() == MVT::i16)
+    return Src;
+  return makeDR(buildMOV16ri(0, DL, DAG), Src, DL, DAG);
 }
 
 SDValue MCS251TargetLowering::LowerArithmetic32(SDValue Op,
@@ -1496,6 +1472,7 @@ SDValue MCS251TargetLowering::LowerSTACKSAVE(SDValue Op,
   SDValue SPX(DAG.getMachineNode(TargetOpcode::REG_SEQUENCE, DL, MVT::i16,
                                  Ops),
               0);
+  SPX = makeDR(buildMOV16ri(0, DL, DAG), SPX, DL, DAG);
   return DAG.getMergeValues({SPX, Hi.getValue(1)}, DL);
 }
 
@@ -1503,7 +1480,7 @@ SDValue MCS251TargetLowering::LowerSTACKRESTORE(SDValue Op,
                                                 SelectionDAG &DAG) const {
   SDLoc DL(Op);
   SDValue Chain = Op.getOperand(0);
-  SDValue SavedSPX = Op.getOperand(1);
+  SDValue SavedSPX = extractLane(Op.getOperand(1), MCS251::sub_lo16, DL, DAG);
   SDValue Hi = DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8,
                                            SavedSPX);
   SDValue Lo = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8,
@@ -1527,9 +1504,10 @@ SDValue MCS251TargetLowering::LowerDynamicStackAlloc(SDValue Op,
   SDValue Size = Op.getOperand(1);
   SDLoc DL(Op);
 
-  // The result is a pointer; only the i16 pointer type exists.
-  if (Op.getValueType() != MVT::i16)
-    report_fatal_error("MCS251: only 16-bit pointers are supported");
+  // SPX arithmetic remains 16-bit. Objects must fit the physical stack;
+  // allocation amounts above 65535 are outside this target's stack model.
+  if (Size.getValueType() == MVT::i32)
+    Size = DAG.getNode(ISD::TRUNCATE, DL, MVT::i16, Size);
   if (Size.getValueType() == MVT::i8) {
     // Widen a byte-sized allocation amount to the 16-bit add.
     Size = SDValue(DAG.getMachineNode(MCS251::ZEXT8, DL, MVT::i16, Size), 0);
@@ -1548,10 +1526,10 @@ SDValue MCS251TargetLowering::LowerDynamicStackAlloc(SDValue Op,
   if (isa<ConstantSDNode>(Size))
     Size = buildMOV16ri(cast<ConstantSDNode>(Size)->getZExtValue(), DL, DAG);
 
-  return SDValue(DAG.getMachineNode(
-                     MCS251::DYNALLOCA, DL,
-                     DAG.getVTList(MVT::i16, MVT::Other), {Size, Chain}),
-                 0);
+  SDValue Alloc(DAG.getMachineNode(MCS251::DYNALLOCA, DL,
+      DAG.getVTList(MVT::i16, MVT::Other), {Size, Chain}), 0);
+  SDValue Ptr = makeDR(buildMOV16ri(0, DL, DAG), Alloc, DL, DAG);
+  return DAG.getMergeValues({Ptr, Alloc.getValue(1)}, DL);
 }
 
 SDValue MCS251TargetLowering::LowerFormalArguments(
@@ -1604,6 +1582,12 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
   if (Ins[0].VT == MVT::i32) {
     SmallVector<SDValue, 4> Parts;
     for (MCPhysReg Reg : I32ABIRegs) {
+      // SDCC pointers occupy B:DPH:DPL; A is unspecified, not an address
+      // byte. Canonicalise it before comparisons, not just at dereference.
+      if (Ins[0].Flags.isPointer() && Reg == MCS251::A) {
+        Parts.push_back(buildMOV8ri(0, DL, DAG));
+        continue;
+      }
       Register VReg = MF.addLiveIn(Reg, &MCS251::GPR8RegClass);
       SDValue Part = DAG.getCopyFromReg(Chain, DL, VReg, MVT::i8);
       Parts.push_back(Part);
@@ -1685,12 +1669,10 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   if (IsTailCall)
     report_fatal_error("MCS251: tail calls are not supported");
 
-  // Only direct calls: the ecall encoding takes a symbolic target address.
-  // A register callee (function pointer) would need an indirect-call
-  // encoding that this phase does not model.
-  if (!isa<GlobalAddressSDNode>(Callee) && !isa<ExternalSymbolSDNode>(Callee))
-    report_fatal_error("MCS251: indirect calls (function pointers) are not "
-                       "supported");
+  // Canonical function pointers use the same GPR32 values as data pointers.
+  // ECALLr consumes the complete region-qualified address (not a WR offset).
+  if (isa<ConstantSDNode>(Callee))
+    Callee = materializeImm(Callee, DL, DAG);
 
   // Same single-slot restriction as LowerFormalArguments, checked up front
   // so the error names the real limitation (OSEG overlay) instead of a
@@ -1713,6 +1695,8 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   if (!Outs.empty() && Outs[0].VT == MVT::i32) {
     SmallVector<SDValue, 4> Parts;
     splitI32ToBytes(OutVals[0], DL, DAG, Parts);
+    if (Outs[0].Flags.isPointer())
+      Parts[3] = buildMOV8ri(0, DL, DAG);
     for (unsigned I = 0; I < 4; ++I)
       RegsToPass.emplace_back(I32ABIRegs[I], Parts[I]);
   } else {
@@ -1783,6 +1767,10 @@ SDValue MCS251TargetLowering::LowerCallResult(
   if (!Ins.empty() && Ins[0].VT == MVT::i32) {
     SmallVector<SDValue, 4> Parts;
     for (MCPhysReg Reg : I32ABIRegs) {
+      if (Ins[0].Flags.isPointer() && Reg == MCS251::A) {
+        Parts.push_back(buildMOV8ri(0, DL, DAG));
+        continue;
+      }
       SDValue Val = DAG.getCopyFromReg(Chain, DL, Reg, MVT::i8, InGlue);
       Parts.push_back(Val.getValue(0));
       Chain = Val.getValue(1);
@@ -1853,6 +1841,8 @@ SDValue MCS251TargetLowering::LowerReturn(
     assert(Outs.size() == 1 && "MCS251 supports only one return value");
     SmallVector<SDValue, 4> Parts;
     splitI32ToBytes(OutVals[0], DL, DAG, Parts);
+    if (Outs[0].Flags.isPointer())
+      Parts[3] = buildMOV8ri(0, DL, DAG);
     for (unsigned I = 0; I < 4; ++I) {
       Chain = DAG.getCopyToReg(Chain, DL, I32ABIRegs[I], Parts[I], Glue);
       Glue = Chain.getValue(1);

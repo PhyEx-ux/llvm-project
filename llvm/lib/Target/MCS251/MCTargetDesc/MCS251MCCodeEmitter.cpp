@@ -256,6 +256,20 @@ void MCS251MCCodeEmitter::encodeInstruction(
   // the upper word with zeroes (mov), 0xC leaves it to a following movh.
   // (gold: mov_dr_imm16_zero "7e 38 12 34" for dr12; linked sample
   // "7E 08 56 78" for dr0 -- NOT nibble 0.)
+  case MCS251::MOVADDR32: {
+    const MCExpr *Expr = MI.getOperand(1).getExpr();
+    auto Byte = [&](MCFixupKind Kind) {
+      Fixups.push_back(MCFixup::create(CB.size(), Expr, Kind));
+      put8(0, CB);
+    };
+    B(0x17e); put8((R(MI, 0) << 4) | 0x08, CB);
+    Byte(MCS251::fixup_mcs251_mid8);
+    Byte(MCS251::fixup_mcs251_lo8);
+    B(0x17a); put8((R(MI, 0) << 4) | 0x0c, CB);
+    put8(0, CB);
+    Byte(MCS251::fixup_mcs251_hi8);
+    break;
+  }
   case MCS251::MOVDRri:
     B(0x17e); put8((R(MI, 0) << 4) | 0x08, CB); E16(1); break;
   case MCS251::MOVHDRi:
@@ -401,6 +415,7 @@ void MCS251MCCodeEmitter::encodeInstruction(
   // (gold: mov_rm_at_dr "7e 4b 30", mov_wr_at_dr "0b 4a 20",
   // mov_idx_dr_rm/... for the displaced forms).  The object file must contain
   // exactly what the assembly text would have produced.
+  case MCS251::MOV8rmP:
   case MCS251::MOV8rmS:
     if (MI.getOperand(2).isImm() && MI.getOperand(2).getImm() == 0) {
       B(0x17e); put8((R(MI, 1) << 4) | 0x0b, CB); put8(R(MI, 0) << 4, CB);
@@ -417,6 +432,7 @@ void MCS251MCCodeEmitter::encodeInstruction(
       putDisp16(MI.getOperand(2), CB);
     }
     break;
+  case MCS251::MOV8mrP:
   case MCS251::MOV8mrS:
     if (MI.getOperand(1).isImm() && MI.getOperand(1).getImm() == 0) {
       B(0x17a); put8((R(MI, 0) << 4) | 0x0b, CB); put8(R(MI, 2) << 4, CB);

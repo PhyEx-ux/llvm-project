@@ -35,6 +35,10 @@ enum Fixups {
   fixup_mcs251_16 = FirstTargetFixupKind,
   // ASxxxx R mode 0x82: a complete 24-bit big-endian symbol/area value.
   fixup_mcs251_24,
+  // One selected byte of a full symbol+addend (ASxxxx R_BYTE|R_BYT3).
+  fixup_mcs251_lo8,
+  fixup_mcs251_mid8,
+  fixup_mcs251_hi8,
   NumTargetFixupKinds,
 };
 

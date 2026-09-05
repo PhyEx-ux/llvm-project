@@ -69,7 +69,7 @@ BitVector MCS251RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
 
 const TargetRegisterClass *
 MCS251RegisterInfo::getPointerRegClass(unsigned Kind) const {
-  return &MCS251::GPR16RegClass;
+  return &MCS251::GPR32RegClass;
 }
 
 // Frame-index elimination (Phase 9).

@@ -99,6 +99,24 @@ let usesCustomInserter = 1 in
   def MOV32ri : MCS251Inst<(outs GPR32:$dst), (ins mcs251_imm32:$imm), "",
                            [(set GPR32:$dst, imm:$imm)]>;
 
+// Atomic symbolic address materialisation. Both words are emitted together;
+// byte-of-24 relocations perform full symbol+addend arithmetic before slicing.
+let Size = 8, isReMaterializable = 1 in
+  def MOVADDR32 : MCS251Inst<(outs GPR32:$dst), (ins calltarget:$addr), "", []>;
+
+// General pointers use DR and the signed dis16 indexed form. Reuse the
+// printer (not the restricted SPBASE class) of resolved stack addresses.
+def mcs251_addr : Operand<i32> {
+  let MIOperandInfo = (ops GPR32, i16imm);
+  let PrintMethod = "printStackAddr";
+}
+let mayLoad = 1 in
+  def MOV8rmP : MCS251Inst<(outs GPR8:$dst), (ins mcs251_addr:$addr),
+                         "mov $dst, $addr", []>;
+let mayStore = 1 in
+  def MOV8mrP : MCS251Inst<(outs), (ins mcs251_addr:$addr, GPR8:$src),
+                         "mov $addr, $src", []>;
+
 // DR-lane instructions operate on the complete 32-bit register.
 let Constraints = "$lhs = $dst", Defs = [PSW] in {
   def ADD32rr : MCS251Inst<(outs GPR32:$dst), (ins GPR32:$lhs, GPR32:$rhs),
@@ -661,7 +679,11 @@ def ST16TS : MCS251Inst<(outs),
 // sequence runs, and there is no way to read dr56 into a WR -- rejected
 // loudly there.
 let usesCustomInserter = 1, hasSideEffects = 0 in
-def FIADDR : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$src), "", []>;
+def FIADDR : MCS251Inst<(outs GPR16:$dst), (ins i16imm:$src), "", []>;
+
+def mcs251_fioffset : Operand<i16> {
+  let MIOperandInfo = (ops i16imm, i16imm);
+}
 
 // add wr, <frame displacement>: operand 1 is the unresolved frame index
 // (FI, offset) pair; eliminateFrameIndex replaces it with the folded
@@ -670,7 +692,7 @@ def FIADDR : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$src), "", []>;
 // displacement (Phase 8 ruling).
 let Constraints = "$lhs = $dst", Defs = [PSW] in
 def ADD16fi : MCS251Inst<(outs GPR16:$dst),
-                         (ins GPR16:$lhs, mcs251_stack:$addr),
+                         (ins GPR16:$lhs, mcs251_fioffset:$addr),
                          "add $dst, $addr", []>;
 
 // Dynamic alloca (DYNAMIC_STACKALLOC). The whole size-adjust-readback

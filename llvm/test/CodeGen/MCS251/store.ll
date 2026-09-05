@@ -1,8 +1,8 @@
-; RUN: llc -mtriple=mcs251 < %s | FileCheck %s
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs < %s | FileCheck %s
 
 ; Phase 8: stores, mirror of load.ll (addressing forms verified against
 ; sdas251 V05.50.4). An i16 object is two byte stores with BIG-ENDIAN lane
-; mapping: the value's hi lane (sub_hi8) goes to mem[base+0x0000], the lo
+; mapping: the value's hi lane (sub_hi8) goes to mem[base], the lo
 ; lane to mem[base+0x0001]. The store16 tests lock that mapping by pairing
 ; dph/dpl (the i16 argument's hi/lo bytes) with the displacements.
 
@@ -23,14 +23,14 @@
 define void @store8_ptr(ptr %p) {
 ; CHECK-LABEL: store8_ptr:
 ; CHECK:         mov r{{[0-9]+}}, #0xff
-; CHECK:         mov @wr{{[0-9]+}}, r{{[0-9]+}}
+; CHECK:         mov @dr{{[0-9]+}}, r{{[0-9]+}}
   store i8 255, ptr %p
   ret void
 }
 
 define void @store8_ptr_off(ptr %p) {
 ; CHECK-LABEL: store8_ptr_off:
-; CHECK:         mov @wr{{[0-9]+}}+0x0001, r{{[0-9]+}}
+; CHECK:         mov @dr{{[0-9]+}}+0x0001, r{{[0-9]+}}
   %q = getelementptr i8, ptr %p, i16 1
   store i8 255, ptr %q
   ret void
@@ -40,16 +40,18 @@ define void @store8_ptr_off(ptr %p) {
 ; is `mov wr,#gv8` then the indirect write.
 define void @store8_g() {
 ; CHECK-LABEL: store8_g:
-; CHECK:         mov wr{{[0-9]+}}, #gv8
-; CHECK:         mov @wr{{[0-9]+}}, r{{[0-9]+}}
+; CHECK:         .db 0x7e, {{.*}}(gv8) >> 8, (gv8)
+; CHECK-NEXT:    .db 0x7a, {{.*}}(gv8) >> 16
+; CHECK:         mov @dr{{[0-9]+}}, r{{[0-9]+}}
   store i8 255, ptr @gv8
   ret void
 }
 
 define void @store8_g_off() {
 ; CHECK-LABEL: store8_g_off:
-; CHECK:         mov wr{{[0-9]+}}, #(gv8+1)
-; CHECK:         mov @wr{{[0-9]+}}, r{{[0-9]+}}
+; CHECK:         .db 0x7e, {{.*}}(gv8+1) >> 8, (gv8+1)
+; CHECK-NEXT:    .db 0x7a, {{.*}}(gv8+1) >> 16
+; CHECK:         mov @dr{{[0-9]+}}, r{{[0-9]+}}
   %q = getelementptr i8, ptr @gv8, i16 1
   store i8 255, ptr %q
   ret void
@@ -65,7 +67,7 @@ define void @store8_direct() {
 }
 
 ; Direct store at 0x99 reaches the SFR space -- the ONLY encoding that does
-; (same numeric address via @wr is region-00 edata; address-space trap, see
+; (same numeric address via @dr is region-00 edata; address-space trap, see
 ; MCS251ISelLowering.cpp).
 define void @store8_sfr() {
 ; CHECK-LABEL: store8_sfr:
@@ -77,8 +79,9 @@ define void @store8_sfr() {
 
 define void @store8_gv(i8 %v) {
 ; CHECK-LABEL: store8_gv:
-; CHECK:         mov wr{{[0-9]+}}, #gv8
-; CHECK:         mov @wr{{[0-9]+}}, r{{[0-9]+}}
+; CHECK:         .db 0x7e, {{.*}}(gv8) >> 8, (gv8)
+; CHECK-NEXT:    .db 0x7a, {{.*}}(gv8) >> 16
+; CHECK:         mov @dr{{[0-9]+}}, r{{[0-9]+}}
   store i8 %v, ptr @gv8
   ret void
 }
@@ -86,7 +89,7 @@ define void @store8_gv(i8 %v) {
 ; Volatile store: same encoding as the plain store.
 define void @store8_volatile(ptr %p) {
 ; CHECK-LABEL: store8_volatile:
-; CHECK:         mov @wr{{[0-9]+}}, r{{[0-9]+}}
+; CHECK:         mov @dr{{[0-9]+}}, r{{[0-9]+}}
   store volatile i8 1, ptr %p
   ret void
 }
@@ -101,20 +104,22 @@ define void @store16_g(i16 %v) {
 ; CHECK-LABEL: store16_g:
 ; CHECK:         mov [[LO:r[0-9]+]], dpl
 ; CHECK:         mov [[HI:r[0-9]+]], dph
-; CHECK:         mov wr{{[0-9]+}}, #gv16
-; CHECK:         mov @wr{{[0-9]+}}+0x0000, [[HI]]
-; CHECK-NEXT:    mov @wr{{[0-9]+}}+0x0001, [[LO]]
+; CHECK:         .db 0x7e, {{.*}}(gv16) >> 8, (gv16)
+; CHECK-NEXT:    .db 0x7a, {{.*}}(gv16) >> 16
+; CHECK:         mov @dr{{[0-9]+}}, [[HI]]
+; CHECK-NEXT:    mov @dr{{[0-9]+}}+0x0001, [[LO]]
   store i16 %v, ptr @gv16
   ret void
 }
 
 ; Constant i16 value materialised whole, then stored by its lanes: wr =
-; 0x1234 stores 0x12 at +0x0000 and 0x34 at +0x0001 (r2 = wr2 hi, r3 = lo).
+; 0x1234 stores 0x12 at  and 0x34 at +0x0001 (r2 = wr2 hi, r3 = lo).
 define void @store16_ptr(ptr %p) {
 ; CHECK-LABEL: store16_ptr:
-; CHECK:         mov wr[[#W:]], #0x1234
-; CHECK-NEXT:    mov @wr{{[0-9]+}}+0x0000, r[[#W]]
-; CHECK-NEXT:    mov @wr{{[0-9]+}}+0x0001, r[[#W+1]]
+; CHECK:         mov [[HI:r[0-9]+]], #0x12
+; CHECK:         mov @dr{{[0-9]+}}, [[HI]]
+; CHECK:         mov [[LO:r[0-9]+]], #0x34
+; CHECK:         mov @dr{{[0-9]+}}+0x0001, [[LO]]
   store i16 4660, ptr %p
   ret void
 }
@@ -123,9 +128,10 @@ define void @store16_g_off(i16 %v) {
 ; CHECK-LABEL: store16_g_off:
 ; CHECK:         mov [[LO:r[0-9]+]], dpl
 ; CHECK:         mov [[HI:r[0-9]+]], dph
-; CHECK:         mov wr{{[0-9]+}}, #(gv16+2)
-; CHECK:         mov @wr{{[0-9]+}}+0x0000, [[HI]]
-; CHECK-NEXT:    mov @wr{{[0-9]+}}+0x0001, [[LO]]
+; CHECK:         .db 0x7e, {{.*}}(gv16+2) >> 8, (gv16+2)
+; CHECK-NEXT:    .db 0x7a, {{.*}}(gv16+2) >> 16
+; CHECK:         mov @dr{{[0-9]+}}, [[HI]]
+; CHECK-NEXT:    mov @dr{{[0-9]+}}+0x0001, [[LO]]
   %q = getelementptr i8, ptr @gv16, i16 2
   store i16 %v, ptr %q
   ret void
@@ -134,8 +140,8 @@ define void @store16_g_off(i16 %v) {
 ; Volatile i16 store: same two-instruction shape.
 define void @store16_volatile(i16 %v) {
 ; CHECK-LABEL: store16_volatile:
-; CHECK:         mov @wr{{[0-9]+}}+0x0000, r{{[0-9]+}}
-; CHECK-NEXT:    mov @wr{{[0-9]+}}+0x0001, r{{[0-9]+}}
+; CHECK:         mov @dr{{[0-9]+}}, r{{[0-9]+}}
+; CHECK-NEXT:    mov @dr{{[0-9]+}}+0x0001, r{{[0-9]+}}
   store volatile i16 %v, ptr @gv16
   ret void
 }
@@ -150,15 +156,16 @@ define void @store16_volatile(i16 %v) {
 define void @store16_trunc(i16 %v) {
 ; CHECK-LABEL: store16_trunc:
 ; CHECK:         mov [[LO:r[0-9]+]], dpl
-; CHECK:         mov wr{{[0-9]+}}, #gv8
-; CHECK:         mov @wr{{[0-9]+}}+0x0000, [[LO]]
+; CHECK:         .db 0x7e, {{.*}}(gv8) >> 8, (gv8)
+; CHECK-NEXT:    .db 0x7a, {{.*}}(gv8) >> 16
+; CHECK:         mov @dr{{[0-9]+}}, [[LO]]
   %t = trunc i16 %v to i8
   store i8 %t, ptr @gv8
   ret void
 }
 
 ; Truncating store to a constant direct address keeps the dir8 form (ST16TD
-; pseudo): falling back to @wr would retarget 0x80-0xff from the SFR space
+; pseudo): falling back to @dr would retarget 0x80-0xff from the SFR space
 ; to region-00 edata.
 define void @store16_trunc_direct(i16 %v) {
 ; CHECK-LABEL: store16_trunc_direct:
@@ -183,8 +190,9 @@ define void @store16_trunc_sfr(i16 %v) {
 define void @store16_trunc_const() {
 ; CHECK-LABEL: store16_trunc_const:
 ; CHECK:         mov r{{[0-9]+}}, #0x34
-; CHECK:         mov wr{{[0-9]+}}, #gv8
-; CHECK:         mov @wr{{[0-9]+}}, r{{[0-9]+}}
+; CHECK:         .db 0x7e, {{.*}}(gv8) >> 8, (gv8)
+; CHECK-NEXT:    .db 0x7a, {{.*}}(gv8) >> 16
+; CHECK:         mov @dr{{[0-9]+}}, r{{[0-9]+}}
   %t = trunc i16 4660 to i8
   store i8 %t, ptr @gv8
   ret void

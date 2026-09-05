@@ -197,7 +197,8 @@ class MCS251RELObjectWriter final : public MCObjectWriter {
 
   void emitRLine(const SectionData &Sec, uint64_t ChunkStart,
                  uint64_t ChunkSize, unsigned AreaIndex,
-                 const std::map<const MCSymbol *, unsigned> &SymbolRefs) {
+                 const std::map<const MCSymbol *, unsigned> &SymbolRefs,
+                 const std::map<uint64_t, unsigned> &TIndices) {
     OS << "R";
     byte(OS, 0);
     byte(OS, 0);
@@ -216,6 +217,12 @@ class MCS251RELObjectWriter final : public MCObjectWriter {
         Mode = 0x00;
       else if (Rel.Fixup.getKind() == MCS251::fixup_mcs251_24)
         Mode = 0x80;
+      else if (Rel.Fixup.getKind() == MCS251::fixup_mcs251_lo8)
+        Mode = 0x101;
+      else if (Rel.Fixup.getKind() == MCS251::fixup_mcs251_mid8)
+        Mode = 0x181;
+      else if (Rel.Fixup.getKind() == MCS251::fixup_mcs251_hi8)
+        Mode = 0x381;
       else
         report_fatal_error("MCS251 REL writer: unsupported relocation kind");
 
@@ -239,7 +246,7 @@ class MCS251RELObjectWriter final : public MCObjectWriter {
       emitRMode(Mode);
       // ASxxxx's R index is into the parsed T array, including XH3's three
       // address bytes. The first payload byte is therefore index 3.
-      byte(OS, unsigned(Offset - ChunkStart + 3));
+      byte(OS, TIndices.at(Offset));
       word(OS, Ref);
     }
     OS << '\n';
@@ -255,8 +262,8 @@ public:
 
   void recordRelocation(const MCFragment &F, const MCFixup &Fixup,
                         MCValue Target, uint64_t &FixedValue) override {
-    if (Fixup.getKind() != MCS251::fixup_mcs251_16 &&
-        Fixup.getKind() != MCS251::fixup_mcs251_24)
+    if (Fixup.getKind() < MCS251::fixup_mcs251_16 ||
+        Fixup.getKind() >= MCS251::NumTargetFixupKinds)
       report_fatal_error("MCS251 REL writer: unsupported relocation kind "
                          "(only 16-bit and 24-bit ASxxxx relocations exist)");
     if (Target.getSubSym())
@@ -394,29 +401,49 @@ public:
     OS << '\n';
 
     for (const SectionData &Sec : Sections) {
+      std::map<uint64_t, const Relocation *> At;
+      for (const Relocation &Rel : Relocations)
+        if (Rel.Fragment && Rel.Fragment->getParent() == Sec.Section)
+          At[Asm->getFragmentOffset(*Rel.Fragment) + Rel.Fixup.getOffset()] = &Rel;
       uint64_t Pos = 0;
       while (Pos < Sec.Bytes.size()) {
-        uint64_t Chunk = std::min<uint64_t>(MaxTPayload, Sec.Bytes.size() - Pos);
-        // Keep a relocation field within one T line, as asout.c's outchk does.
-        for (const Relocation &Rel : Relocations) {
-          if (!Rel.Fragment || Rel.Fragment->getParent() != Sec.Section)
-            continue;
-          uint64_t RPos = Asm->getFragmentOffset(*Rel.Fragment) +
-                          Rel.Fixup.getOffset();
-          unsigned Width = relocationWidth(Rel.Fixup.getKind());
-          if (RPos > Pos && RPos < Pos + Chunk && RPos + Width > Pos + Chunk)
-            Chunk = RPos - Pos;
+        // Byte-of-24 relocations occupy THREE bytes in T but ONE byte in
+        // machine code. Keep all addresses/symbol offsets in machine bytes,
+        // and build a separate T-index map after expanding the placeholders.
+        SmallVector<uint8_t, 16> Payload;
+        std::map<uint64_t, unsigned> TIndices;
+        uint64_t End = Pos;
+        while (End < Sec.Bytes.size()) {
+          auto It = At.find(End);
+          const Relocation *Rel = It == At.end() ? nullptr : It->second;
+          unsigned Width = Rel ? relocationWidth(Rel->Fixup.getKind()) : 1;
+          bool Byte24 = Rel && Rel->Fixup.getKind() >= MCS251::fixup_mcs251_lo8;
+          unsigned TWidth = Byte24 ? 3 : Width;
+          if (Payload.size() + TWidth > MaxTPayload)
+            break;
+          if (Rel)
+            TIndices[End] = Payload.size() + 3;
+          if (Byte24) {
+            // Rel.Value is the unshifted area-relative symbol+addend from MC.
+            // The linker adds its final base before choosing lo/mid/hi.
+            Payload.push_back(Rel->Value >> 16);
+            Payload.push_back(Rel->Value >> 8);
+            Payload.push_back(Rel->Value);
+          } else {
+            for (unsigned I = 0; I < Width; ++I)
+              Payload.push_back(Sec.Bytes[End + I]);
+          }
+          End += Width;
         }
-        if (Chunk == 0)
+        if (End == Pos)
           report_fatal_error("MCS251 REL writer: relocation chunk overflow");
-
         OS << "T";
         addr24(OS, Pos + Sec.Base);
-        for (uint64_t I = 0; I < Chunk; ++I)
-          byte(OS, Sec.Bytes[Pos + I]);
+        for (uint8_t B : Payload)
+          byte(OS, B);
         OS << '\n';
-        emitRLine(Sec, Pos, Chunk, 1, SymbolRefs);
-        Pos += Chunk;
+        emitRLine(Sec, Pos, End - Pos, 1, SymbolRefs, TIndices);
+        Pos = End;
       }
     }
     return OS.tell();

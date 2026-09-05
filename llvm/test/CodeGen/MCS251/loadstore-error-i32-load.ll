@@ -1,14 +1,21 @@
-; RUN: not --crash llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs < %s | FileCheck %s
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 < %s | FileCheck %s
+;
+; Former rejection: four byte loads now implement i32 and pointer objects.
+@g32 = external global i32
 
-; Phase 8: i32 memory objects are rejected. i32 is a legal type in this
-; backend (GPR32, so the type legalizer cannot silently split the access)
-; but no instruction loads 32 bits.
-; (report_fatal_error aborts, hence --crash; lit pipelines are pipefail.)
-
-@g32 = global i32 1
-
-define void @load32() {
-; CHECK: LLVM ERROR: MCS251: only i8/i16 memory objects are supported (load)
-  %v = load volatile i32, ptr @g32
-  ret void
+define i32 @load32() {
+; CHECK-LABEL: load32:
+; CHECK: .db 0x7e,
+; CHECK: (g32) >> 16
+; CHECK: mov {{r[0-9]+}}, @dr{{[0-9]+}}
+; CHECK: mov {{r[0-9]+}}, @dr{{[0-9]+}}+0x0001
+; CHECK: mov {{r[0-9]+}}, @dr{{[0-9]+}}+0x0002
+; CHECK: mov {{r[0-9]+}}, @dr{{[0-9]+}}+0x0003
+; CHECK: mov dpl,
+; CHECK: mov dph,
+; CHECK: mov b,
+; CHECK: mov a,
+  %v = load volatile i32, ptr @g32, align 1
+  ret i32 %v
 }

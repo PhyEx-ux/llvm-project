@@ -35,6 +35,9 @@ public:
     return false;
   }
 
+  bool isOffsetFoldingLegal(const GlobalAddressSDNode *) const override {
+    return true;
+  }
   SDValue LowerOperation(SDValue Op, SelectionDAG &DAG) const override;
   SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const;
