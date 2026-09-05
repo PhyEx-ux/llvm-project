@@ -73,14 +73,13 @@ ORACLE_A_TIMEOUT = 60
 # IR compatibility shims (PM ruling 2026-09-05 "retirable shims"):
 #   1. symbol adaptation  @name -> @_name   (mangle_ll_symbols)
 #   2. constant-shift lowering              (lower_constant_shifts)
-# Both are ON by default while the backend lacks shift ISel and the apt-clang
-# path lacks SDCC symbol prefixes.  RETIREMENT CONDITIONS:
-#   1: fork-clang natively emits '_'-prefixed C symbols (front-end ruling).
-#   2: MCS251 backend gains real lshr/shl/ashr selection (sprint item).
-# Run with --no-ir-shims to check that a toolchain no longer needs them;
-# when a case compiles and passes without shims, the shim is ripe for
-# removal.
-IR_SHIMS = True
+# FLIPPED OFF by default 2026-09-06: both retirement conditions hold for the
+# current llc (post-867232bec shift ISel, post-9d74d7ede m:s '_' prefixing)
+# and shims are actively harmful there (double '__name' prefix -> link
+# failure).  Re-acceptance: 19/22 three-way PASS shimless, 3 SKIP known
+# i32-mul/div limitation (ACCEPTANCE.md).  --ir-shims remains for old-llc
+# baseline comparisons only.
+IR_SHIMS = False
 
 
 def sh(cmd, stdin=None, stdout_path=None, cwd=None):
