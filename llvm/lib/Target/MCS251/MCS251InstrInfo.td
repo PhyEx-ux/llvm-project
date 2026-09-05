@@ -366,6 +366,29 @@ let Constraints = "$lhs = $dst", Defs = [PSW] in {
 }
 
 //===----------------------------------------------------------------------===//
+//  Multiply/divide
+//===----------------------------------------------------------------------===//
+
+// QEMU frozen 6b9edfd0 probe: MUL WR12,WR8 reads the two unsigned words,
+// writes the full DR12 product and flags, and preserves WR8, A/B and DPTR.
+// Pin the destination away from DR8 (whose R10/R11 lanes alias B/A).
+let Uses = [WR12, WR8], Defs = [DR12, PSW], Size = 2 in
+  def MULW : MCS251Inst<(outs), (ins), "mul wr12, wr8", []>;
+let Uses = [A, B], Defs = [A, B, PSW] in
+  def MULAB : MCS251Inst<(outs), (ins), "mul ab", []>;
+
+// Expand before RA: all fixed-register copies and clobbers are visible to
+// both FastRA and Greedy. No hidden scratch registers or static helper slots.
+let usesCustomInserter = 1, isPseudo = 1 in {
+  def MUL8 : MCS251Inst<(outs GPR8:$dst), (ins GPR8:$lhs, GPR8:$rhs), "",
+                       [(set GPR8:$dst, (mul GPR8:$lhs, GPR8:$rhs))]>;
+  def MUL16 : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$lhs, GPR16:$rhs), "",
+                        [(set GPR16:$dst, (mul GPR16:$lhs, GPR16:$rhs))]>;
+  def UMUL16WIDE : MCS251Inst<(outs GPR32:$dst),
+                              (ins GPR16:$lhs, GPR16:$rhs), "", []>;
+}
+
+//===----------------------------------------------------------------------===//
 //  Native 1-bit shifts (Phase 14)
 //===----------------------------------------------------------------------===//
 //
@@ -505,6 +528,22 @@ def BRCC8S : MCS251Inst<(outs),
 //===----------------------------------------------------------------------===//
 //  Call instruction
 //===----------------------------------------------------------------------===//
+
+// Although this ABI has no stack arguments, call sequences protect static
+// parameter slots from interleaving with another call's setup. The scheduler
+// recognizes these opcodes through TargetInstrInfo's call-frame descriptors.
+def MCS251callseq_start : SDNode<"ISD::CALLSEQ_START",
+    SDCallSeqStart<[SDTCisVT<0, i32>, SDTCisVT<1, i32>]>,
+    [SDNPHasChain, SDNPOutGlue]>;
+def MCS251callseq_end : SDNode<"ISD::CALLSEQ_END",
+    SDCallSeqEnd<[SDTCisVT<0, i32>, SDTCisVT<1, i32>]>,
+    [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue]>;
+let isPseudo = 1, hasSideEffects = 1 in {
+  def ADJCALLSTACKDOWN : MCS251Inst<(outs), (ins i32imm:$amt, i32imm:$callee),
+      "", [(MCS251callseq_start timm:$amt, timm:$callee)]>;
+  def ADJCALLSTACKUP : MCS251Inst<(outs), (ins i32imm:$amt, i32imm:$callee),
+      "", [(MCS251callseq_end timm:$amt, timm:$callee)]>;
+}
 //
 // Direct call = ecall (opcode 9A + addr24, 4 bytes). The 24-bit target
 // address is filled in by the sdas251/linker from the symbol, so ecall is

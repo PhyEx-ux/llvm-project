@@ -15,8 +15,10 @@
 - Oracle-A 真值 serial：`BaFFFEbFFFFc0000d028Ae0640f0001PASS\n`
 - 期望比对：原 d/f 期望值非 Oracle-A 来源，已按宿主真值替换（0x0320→0x028A, 0x000A→0x0001）；其余 checkpoint 与宿主真值一致。
 
-## DUT 状态：SKIP-known-limitation
+## DUT 状态：SKIP-known-limitation（ro-align 阻塞，mul/div 已解决；2026-09-06）
 
-- kernel 原样保留为 `i32 mul` 后端验收样本；不为当前最小后端改写乘法。
-- llc 在 `mul i32 ..., 10` 的 SelectionDAG 处报告 `LLVM ERROR: Cannot select: ... i32 = mul ...`。这是已知 MCS251 后端能力限制，故 DUT 记 `SKIP-known-limitation`，不是算法回归失败。
-- Oracle-A 真值 serial 保持为 `BaFFFEbFFFFc0000d028Ae0640f0001PASS\n`。
+- kernel 原样保留，不使用 IR shims。`post-ec171ddee+muldiv`（llc MD5 `ff1d986ce8be131cbf961cea6f965fab`）已完成 `i32 mul` 与 `udiv` 选指，原乘除法阻塞已解决。
+- 官方 runner `--case temperature-lookup` 暴露后续独立限制：host clang 为只读 `temp_table`（`[161 x i16]`）生成 `align 16`，AsmPrinter 当前只接受 `align 1`，在全局发射阶段明确拒绝；未生成可执行 DUT，不能记三方转正。
+- Oracle-A、Oracle-B 本次真实 serial 均为 `BaFFFEbFFFFc0000d028Ae0640f0001PASS\n`；DUT 无 serial。
+- PM 裁定：ro-align 独立后续处理，不抹除 alignment，不伪造转正。`.bndry 16` 单独只能对齐模块内偏移；跨模块 CSEG slice 的基址也必须由链接器保证（独立 QEMU 探针测得表最终地址 `0xFC2815`，低四位为 5）。
+- 证据：`/home/liu/mcs251-muldiv-alice/acceptance/temperature-lookup/`；对齐调查与布局量化见同沙盒 `alignment-probe.*`、`alignment-layout.json`。

@@ -17,6 +17,7 @@ declare i8 @g8p(i8)
 define i8 @call_arg8(i8 %a) {
 ; CHECK-LABEL: name: call_arg8
 ; CHECK:       ECALL @g8p, csr_mcs251,{{.*}}implicit-def dead $psw,{{.*}}implicit $dpl,{{.*}}implicit-def $dpl
+; CHECK-NEXT:  ADJCALLSTACKUP 0, 0
 ; CHECK-NEXT:  ERET implicit $dpl
   %t = add i8 %a, 1
   %r = call i8 @g8p(i8 %t)

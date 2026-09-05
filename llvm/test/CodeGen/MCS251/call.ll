@@ -85,13 +85,14 @@ define i16 @call_arg16(i16 %a) {
 }
 
 define i16 @fwd16(i16 %a) {
-; Full forwarding: the incoming argument is live in as dptr, the outgoing
-; argument is loaded into dptr, the result comes back through dptr and is
-; returned through dptr -- the whole register chain coalesces, exactly like
-; the id16 pass-through of Phase 4. No machine instruction survives besides
-; the call itself.
+; CALLSEQ separates the entry read from the argument setup, so DPTR may
+; travel through a word vreg. The returned value still forwards directly.
 ; CHECK-LABEL: _fwd16:
 ; CHECK-NEXT:  ; %bb.0:
+; CHECK-NEXT:    mov r[[LO:[0-9]+]], dpl
+; CHECK-NEXT:    mov r[[HI:[0-9]+]], dph
+; CHECK-NEXT:    mov dpl, r[[LO]]
+; CHECK-NEXT:    mov dph, r[[HI]]
 ; CHECK-NEXT:    ecall _g16p
 ; CHECK-NEXT:    eret
   %r = call i16 @g16p(i16 %a)

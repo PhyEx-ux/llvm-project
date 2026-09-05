@@ -2947,6 +2947,19 @@ def __mips16_unorddf2 : RuntimeLibcallImpl<UO_F64>;
 def __mips16_unordsf2 : RuntimeLibcallImpl<UO_F32>;
 
 //===----------------------------------------------------------------------===//
+// MCS251 Runtime Libcalls
+//===----------------------------------------------------------------------===//
+
+// The target's '_' prefix turns these C-level names into the SDCC-compatible
+// __divuint/__divulong symbols. No other integer runtime helpers are shipped.
+def mcs251_divuint : RuntimeLibcallImpl<UDIV_I16, "_divuint">;
+def mcs251_divulong : RuntimeLibcallImpl<UDIV_I32, "_divulong">;
+def IsMCS251 : LibcallPredicate<[{TT.getArch() == Triple::mcs251}]>;
+def isMCS251 : RuntimeLibcallAvailability<(all_of IsMCS251)>;
+def MCS251SystemLibrary : SystemRuntimeLibrary<isMCS251,
+    (add mcs251_divuint, mcs251_divulong)>;
+
+//===----------------------------------------------------------------------===//
 // MSP430 Runtime Libcalls
 //===----------------------------------------------------------------------===//
 

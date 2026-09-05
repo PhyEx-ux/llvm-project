@@ -206,6 +206,11 @@ static void rejectPseudo(const MCInst &MI) {
   switch (MI.getOpcode()) {
 #define MCS251_PSEUDO(Name) case MCS251::Name:
     MCS251_PSEUDO(MOV32ri)
+    MCS251_PSEUDO(MUL8)
+    MCS251_PSEUDO(MUL16)
+    MCS251_PSEUDO(UMUL16WIDE)
+    MCS251_PSEUDO(ADJCALLSTACKDOWN)
+    MCS251_PSEUDO(ADJCALLSTACKUP)
     MCS251_PSEUDO(SELECT8)
     MCS251_PSEUDO(SELECT16)
     MCS251_PSEUDO(SELECT32)
@@ -326,6 +331,10 @@ void MCS251MCCodeEmitter::encodeInstruction(
     putDisp16(MI.getOperand(1), CB); break;
   case MCS251::MOV8id:
     B(0x17a); put8((R(MI, 1) << 4) | 1, CB); put8(Imm(MI, 0), CB); break;
+
+  // sdas251 source-mode gold and frozen-QEMU probe: A4 / AD 64.
+  case MCS251::MULAB: B(0xa4); break;
+  case MCS251::MULW: B(0x1ad); put8(0x64, CB); break;
 
   // Native arithmetic and logical operations.
   case MCS251::ADD32rr:

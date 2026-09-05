@@ -21,6 +21,9 @@ public:
                     MachineBasicBlock &MBB) const override;
   void emitEpilogue(MachineFunction &MF,
                     MachineBasicBlock &MBB) const override;
+  MachineBasicBlock::iterator eliminateCallFramePseudoInstr(
+      MachineFunction &MF, MachineBasicBlock &MBB,
+      MachineBasicBlock::iterator MI) const override;
 
   // Stack-grows-up mirror of the default formula. The default
   // getFrameIndexReference computes ObjectOffset + StackSize - ... which is

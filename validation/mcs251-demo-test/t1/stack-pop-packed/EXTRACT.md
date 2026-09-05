@@ -15,8 +15,9 @@
 - Oracle-A 真值 serial：`Ba01b01cA3dA5e01f00g00h00PASS\n`
 - 期望比对：各 checkpoint 均与宿主真值一致；替换值：无。
 
-## DUT 状态：SKIP-known-limitation
+## DUT 状态：三方转正（2026-09-06）
 
-- PM 批准口径：kernel 原样保留为 `i32 mul` 后端验收样本，不为当前最小后端改写乘法，也不由 runner 的 shift shim 隐式降级。
-- 指定 llc（md5 `f6c2f4034f9e32ee61ecfb690b238c93`）在 `%24 = mul nsw i32 %19, %23` 的 SelectionDAG 处终止，首行诊断为 `LLVM ERROR: Cannot select: ... i32 = mul ...`；这是已知 MCS251 后端能力限制，故 DUT 记 `SKIP-known-limitation`，不是算法回归失败。
-- 2026-09-05 host 复跑通过，serial 仍为 `Ba01b01cA3dA5e01f00g00h00PASS\n`，未发生变化。
+- kernel 原样保留；`i32 mul` 已由原生 16×16 部分积 lowering 支持，不使用 IR shims，不改写测试算法。
+- 官方 runner `--case stack-pop-packed`：Oracle-A、Oracle-B、DUT serial 逐字一致，均为 `Ba01b01cA3dA5e01f00g00h00PASS\n`。
+- llc 冻结：`post-ec171ddee+muldiv`，MD5 `ff1d986ce8be131cbf961cea6f965fab`；QEMU MD5 `6b9edfd0be5618a466c846df0f488faa`。严格链接的 ABI 签名由 `.lk` 内 `-A` 行驱动。
+- 证据：`/home/liu/mcs251-muldiv-alice/acceptance/stack-pop-packed/`（三份 `.serial`、`results.json`、原始 IR/REL/HEX 与链接日志）。

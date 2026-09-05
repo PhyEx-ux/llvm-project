@@ -12,7 +12,8 @@ using namespace llvm;
 #include "MCS251GenInstrInfo.inc"
 
 MCS251InstrInfo::MCS251InstrInfo(const MCS251Subtarget &STI)
-    : MCS251GenInstrInfo(STI, RI), RI() {}
+    : MCS251GenInstrInfo(STI, RI, MCS251::ADJCALLSTACKDOWN,
+                        MCS251::ADJCALLSTACKUP), RI() {}
 
 // Spill/reload (Phase 9). The slot address is emitted in its unresolved
 // frame-index form -- the mcs251_stack displacement operand carries the

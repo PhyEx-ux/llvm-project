@@ -42,6 +42,15 @@ MCS251FrameLowering::MCS251FrameLowering()
     // start object offsets at +1, not 0.
     : TargetFrameLowering(StackGrowsUp, Align(1), 1, Align(1)) {}
 
+MachineBasicBlock::iterator MCS251FrameLowering::eliminateCallFramePseudoInstr(
+    MachineFunction &MF, MachineBasicBlock &MBB,
+    MachineBasicBlock::iterator MI) const {
+  // CALLSEQ protects static-parameter setup; it never adjusts the stack.
+  assert(MI->getOperand(0).getImm() == 0 &&
+         MI->getOperand(1).getImm() == 0 && "unexpected stack arguments");
+  return MBB.erase(MI);
+}
+
 bool MCS251FrameLowering::hasFPImpl(const MachineFunction &MF) const {
   return MF.getFrameInfo().hasVarSizedObjects();
 }

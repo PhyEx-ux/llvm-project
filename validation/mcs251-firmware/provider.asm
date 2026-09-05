@@ -218,3 +218,58 @@ __divuint:
         mov     dpl, r7
         mov     dph, r6
         eret
+
+; LLVM udiv libcall support, clean-room implementation, semantics QEMU-verified.
+; Small-model ABI: dividend A:B:DPH:DPL, divisor in the big-endian four-byte
+; __divulong_PARM_2 slot, quotient A:B:DPH:DPL. All ABI caller-saved registers
+; and flags may be destroyed; SPX is unchanged. No additional static scratch.
+;
+; Restoring unsigned division, exactly 32 iterations. DR0 holds the unread
+; dividend bits followed by quotient bits; DR4 is the partial remainder;
+; DR12 is the divisor, R8 the counter, R9 the incoming dividend bit.
+; Invariant after k steps: consumed_prefix = quotient_prefix * divisor + rem,
+; 0 <= rem < divisor. Preserve the 33rd remainder bit via CY before adding
+; the incoming bit: if it is set, subtraction is mandatory even when the
+; wrapped 32-bit remainder compares below the divisor. Division by zero has
+; no language-level result guarantee; the fixed iteration bound still holds.
+        .globl __divulong
+        .globl __divulong_PARM_2
+        .area DSEG (DATA)
+__divulong_PARM_2:
+        .ds 4
+        .area CSEG (CODE)
+__divulong:
+        mov     r0,a
+        mov     r1,b
+        mov     r2,dph
+        mov     r3,dpl
+        mov     r12,(__divulong_PARM_2 + 0)
+        mov     r13,(__divulong_PARM_2 + 1)
+        mov     r14,(__divulong_PARM_2 + 2)
+        mov     r15,(__divulong_PARM_2 + 3)
+        mov     dr4,#0
+        mov     r8,#32
+__divulong_loop:
+        add     dr0,dr0
+        mov     a,#0
+        rlc     a
+        mov     r9,a
+        add     dr4,dr4
+        jc      __divulong_overflow
+        add     r7,r9
+        cmp     dr4,dr12
+        jc      __divulong_next
+        sjmp    __divulong_subtract
+__divulong_overflow:
+        add     r7,r9
+__divulong_subtract:
+        sub     dr4,dr12
+        add     r3,#1
+__divulong_next:
+        sub     r8,#1
+        jne     __divulong_loop
+        mov     a,r0
+        mov     b,r1
+        mov     dph,r2
+        mov     dpl,r3
+        eret

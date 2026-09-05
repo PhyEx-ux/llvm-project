@@ -52,6 +52,24 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::SELECT_CC, VT, Custom);
   }
 
+  setOperationAction(ISD::MUL, MVT::i32, Custom);
+  setOperationAction(ISD::UDIV, MVT::i8, Promote);
+  setOperationPromotedToType(ISD::UDIV, MVT::i8, MVT::i16);
+  setOperationAction(ISD::UDIV, MVT::i16, LibCall);
+  setOperationAction(ISD::UDIV, MVT::i32, LibCall);
+  setLibcallImpl(RTLIB::UDIV_I16, RTLIB::impl_mcs251_divuint);
+  setLibcallImpl(RTLIB::UDIV_I32, RTLIB::impl_mcs251_divulong);
+  for (MVT VT : {MVT::i8, MVT::i16, MVT::i32}) {
+    for (unsigned Op : {ISD::SDIV, ISD::SREM, ISD::UREM})
+      setOperationAction(Op, VT, Custom);
+    setOperationAction(ISD::UDIVREM, VT, Expand);
+    setOperationAction(ISD::SDIVREM, VT, Expand);
+    setOperationAction(ISD::MULHU, VT, Expand);
+    setOperationAction(ISD::MULHS, VT, Expand);
+    setOperationAction(ISD::UMUL_LOHI, VT, Expand);
+    setOperationAction(ISD::SMUL_LOHI, VT, Expand);
+  }
+
   // Address classification distinguishes SFR-direct access from canonical DR
   // pointers. Multi-byte objects retain the measured big-endian lane layout.
   setOperationAction(ISD::LOAD, MVT::i8, Custom);
@@ -185,6 +203,12 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
   switch (Op.getOpcode()) {
   default:
     llvm_unreachable("custom operation has no registered lowering");
+  case ISD::MUL:
+    return LowerMul32(Op, DAG);
+  case ISD::SDIV:
+  case ISD::SREM:
+  case ISD::UREM:
+    report_fatal_error("MCS251: signed division and remainder are not supported");
   case ISD::BR_CC:
     return LowerBR_CC(Op, DAG);
   case ISD::ADD:
@@ -395,6 +419,37 @@ static SDValue makeDR(SDValue Hi, SDValue Lo, const SDLoc &DL,
                  0);
 }
 
+// Low 32 bits of (AH:AL)*(BH:BL): AL*BL + ((AH*BL + AL*BH) << 16).
+// Signed and unsigned MUL have identical low-bit semantics. Keep constants
+// in separate WR values, as in LowerLogical32, for FastRA lane correctness.
+SDValue MCS251TargetLowering::LowerMul32(SDValue Op,
+                                        SelectionDAG &DAG) const {
+  assert(Op.getValueType() == MVT::i32 && "only i32 MUL needs custom lowering");
+  SDLoc DL(Op);
+  auto Split = [&](SDValue V, unsigned Sub) {
+    if (auto *C = dyn_cast<ConstantSDNode>(V)) {
+      uint32_t Value = C->getZExtValue();
+      if (Sub == MCS251::sub_hi16)
+        Value >>= 16;
+      return materializeImm(DAG.getConstant(Value & 0xffff, DL, MVT::i16),
+                            DL, DAG);
+    }
+    return extractLane(V, Sub, DL, DAG);
+  };
+  SDValue AL = Split(Op.getOperand(0), MCS251::sub_lo16);
+  SDValue AH = Split(Op.getOperand(0), MCS251::sub_hi16);
+  SDValue BL = Split(Op.getOperand(1), MCS251::sub_lo16);
+  SDValue BH = Split(Op.getOperand(1), MCS251::sub_hi16);
+  SDValue Product(DAG.getMachineNode(MCS251::UMUL16WIDE, DL, MVT::i32,
+                                     {AL, BL}), 0);
+  SDValue Cross0 = DAG.getNode(ISD::MUL, DL, MVT::i16, AH, BL);
+  SDValue Cross1 = DAG.getNode(ISD::MUL, DL, MVT::i16, AL, BH);
+  SDValue Hi = DAG.getNode(ISD::ADD, DL, MVT::i16,
+                          extractLane(Product, MCS251::sub_hi16, DL, DAG),
+                          DAG.getNode(ISD::ADD, DL, MVT::i16, Cross0, Cross1));
+  return makeDR(Hi, extractLane(Product, MCS251::sub_lo16, DL, DAG), DL, DAG);
+}
+
 // i32 ABI byte-register order is least-significant byte first: DPL, DPH, B,
 // A. CC_MCS251/RetCC_MCS251 use DPL only as a single-value gatekeeper; all four
 // lanes are explicitly transferred by splitI32ToBytes/combineI32FromBytes and
@@ -572,6 +627,27 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   switch (MI.getOpcode()) {
   default:
     llvm_unreachable("unknown custom inserter opcode");
+  case MCS251::MUL8:
+  case MCS251::MUL16:
+  case MCS251::UMUL16WIDE: {
+    const TargetInstrInfo *TII = BB->getParent()->getSubtarget().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+    bool Byte = MI.getOpcode() == MCS251::MUL8;
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY),
+            Byte ? MCS251::A : MCS251::WR12)
+        .addReg(MI.getOperand(1).getReg());
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY),
+            Byte ? MCS251::B : MCS251::WR8)
+        .addReg(MI.getOperand(2).getReg());
+    BuildMI(*BB, MI, DL, TII->get(Byte ? MCS251::MULAB : MCS251::MULW));
+    Register Result = Byte ? MCS251::A
+                      : MI.getOpcode() == MCS251::MUL16 ? MCS251::WR14
+                                                       : MCS251::DR12;
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY),
+            MI.getOperand(0).getReg()).addReg(Result);
+    MI.eraseFromParent();
+    return BB;
+  }
   case MCS251::SELECT8:
   case MCS251::SELECT16:
   case MCS251::SELECT32: {
@@ -1573,13 +1649,10 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
 // phys->virt->phys chain through dpl/dptr coalesces away (dpl/dptr are
 // reserved), the SDCC-equivalent `ecall; eret` tail.
 //
-// CALLSEQ decision: no CALLSEQ_START/END nodes are emitted. The SDCC MCS-251
-// ABI passes no arguments on the stack (stack-auto=0; registers plus static
-// OSEG/DSEG slots), so the sequence bounds would always be 0,0. Skipping them entirely (deviation from the MSP430/AVR template, which
-// wraps the call in CALLSEQ nodes and then implements the ADJCALLSTACKDOWN/UP
-// pseudos) avoids two never-anything-but-zero pseudo instructions and the
-// corresponding eliminateCallFramePseudoInstr hook; nothing in the DAG
-// builder requires a LowerCall to produce a call sequence.
+// CALLSEQ_START/END carry zero stack sizes but are still essential: independent
+// libcalls can start on the entry chain, and their static argument stores must
+// not interleave. The standard call-sequence scheduler dependency keeps each
+// setup/call together; PEI erases the zero-sized call-frame pseudos.
 //
 // Register pressure across calls: since Phase 9 the spiller has real frame
 // slots (storeRegToStackSlot/loadRegFromStackSlot -> @dr60 displacement
@@ -1629,6 +1702,8 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     if (CLI.CB && Outs[I].OrigArgIndex != I)
       report_fatal_error("MCS251: aggregate parameters are not supported");
   }
+
+  Chain = DAG.getCALLSEQ_START(Chain, 0, 0, DL);
 
   std::string SlotCallee;
   if (Outs.size() > 1) {
@@ -1705,6 +1780,8 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                       DAG.getVTList(MVT::Other, MVT::Glue), Ops);
   InGlue = Chain.getValue(1);
 
+  Chain = DAG.getCALLSEQ_END(Chain, 0, 0, InGlue, DL);
+  InGlue = Chain.getValue(1);
   return LowerCallResult(Chain, InGlue, CallConv, IsVarArg, CLI.Ins, DL, DAG,
                          InVals);
 }
