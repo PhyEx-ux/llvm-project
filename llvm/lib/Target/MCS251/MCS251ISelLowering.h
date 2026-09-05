@@ -41,6 +41,7 @@ public:
   SDValue LowerLoad(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerStore(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerExtend(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerShift(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerArithmetic32(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerLogical32(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerDynamicStackAlloc(SDValue Op, SelectionDAG &DAG) const;

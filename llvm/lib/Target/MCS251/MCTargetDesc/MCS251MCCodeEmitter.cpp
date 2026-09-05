@@ -218,6 +218,8 @@ static void rejectPseudo(const MCInst &MI) {
     MCS251_PSEUDO(BRCC8S)
     MCS251_PSEUDO(FIADDR)
     MCS251_PSEUDO(DYNALLOCA)
+    MCS251_PSEUDO(SRL32ri)
+    MCS251_PSEUDO(SRA32ri)
     // ADD16fi keeps its frame index only until PEI, which retargets it to
     // ADD16ri (see MCS251RegisterInfo::eliminateFrameIndex).
     MCS251_PSEUDO(ADD16fi)
@@ -366,6 +368,30 @@ void MCS251MCCodeEmitter::encodeInstruction(
   MCS251_IMM16(OR16ri, 0x14e)
   MCS251_IMM16(XOR16ri, 0x16e)
 #undef MCS251_IMM16
+
+  // Native 1-bit shifts (Phase 14).  Opcode then specifier byte
+  // (code<<4)|mode, byte mode 0, word mode 4.  sdas251 V05.50.4 gold
+  // (source mode, opcode bare): sll r3 -> 3E 30, srl r7 -> 1E 70,
+  // sra r1 -> 0E 10, sll wr2 -> 3E 14, srl wr6 -> 1E 34, sra wr30 -> 0E F4.
+#define MCS251_SHIFT8(Name, O) \
+  case MCS251::Name: B(O); put8(R(MI, 0) << 4, CB); break;
+#define MCS251_SHIFT16(Name, O) \
+  case MCS251::Name: B(O); put8((R(MI, 0) << 4) | 4, CB); break;
+  MCS251_SHIFT8(SLL8, 0x13e)
+  MCS251_SHIFT8(SRL8, 0x11e)
+  MCS251_SHIFT8(SRA8, 0x10e)
+  MCS251_SHIFT16(SLL16, 0x13e)
+  MCS251_SHIFT16(SRL16, 0x11e)
+  MCS251_SHIFT16(SRA16, 0x10e)
+#undef MCS251_SHIFT8
+#undef MCS251_SHIFT16
+
+  // Classic A-rotates and CY clear for the 32-bit shift expansion.
+  // Single-byte, low nibble < 6, so no A5 source-mode escape (gold:
+  // rrc a = 13, rlc a = 33, clr c = C3).
+  case MCS251::RRCA: B(0x13); break;
+  case MCS251::RLCA: B(0x33); break;
+  case MCS251::CLRC: B(0xc3); break;
 
   // Compare has no output/tied operand.
   case MCS251::CMP8rr:

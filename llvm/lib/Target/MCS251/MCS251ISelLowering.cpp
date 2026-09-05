@@ -87,7 +87,17 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i32, Custom);
   setOperationAction(ISD::GlobalAddress, MVT::i32, Custom);
   // Scaled GEPs use constant shifts, lowered with native DR additions.
+  // Phase 14: full constant-count shift support.  i8/i16 unroll the native
+  // 1-bit sll/srl/sra; i32 SHL keeps the ADD32rr doubling while i32 SRL/SRA
+  // go through the SRL32ri/SRA32ri custom-inserter pseudos (no native dword
+  // shift exists).  Variable counts stay a loud error (LowerShift).
   setOperationAction(ISD::SHL, MVT::i32, Custom);
+  setOperationAction(ISD::SHL, MVT::i8, Custom);
+  setOperationAction(ISD::SHL, MVT::i16, Custom);
+  for (MVT VT : {MVT::i8, MVT::i16, MVT::i32}) {
+    setOperationAction(ISD::SRL, VT, Custom);
+    setOperationAction(ISD::SRA, VT, Custom);
+  }
   // Preserve the 16-bit SPX via SFR reads/writes while its saved value is an
   // i32 pointer. The operation legalizer consults MVT::Other for both nodes.
   setOperationAction(ISD::STACKSAVE, MVT::Other, Custom);
@@ -109,6 +119,61 @@ const char *MCS251TargetLowering::getTargetNodeName(unsigned Opcode) const {
   default:
     return nullptr;
   }
+}
+
+// Phase 14 shift lowering (constant counts only; variable counts stay a loud
+// error, matching the pre-existing i32 SHL contract).
+//
+// i8/i16 unroll the native 1-bit sll/srl/sra: one MachineNode per shifted
+// bit.  Machine nodes are opaque to the DAG combiner, so no combinatorial
+// re-derivation (or/select chains -> shift) can resurrect an unselectable
+// form: the shift nodes here ARE the legal form.
+//
+// i32: SHL keeps the ADD32rr doubling (no native dword shift exists at all);
+// SRL/SRA go through the custom-inserter pseudos (CY-chained RRC A byte
+// lanes, see EmitInstrWithCustomInserter).
+//
+// LLVM IR shifts by count >= width produce poison. SelectionDAG normally
+// folds them to UNDEF before this hook; LowerReturn chooses zero for an
+// undefined scalar result. The bounds handling below is only defensive,
+// not a saturation/sign-fill contract for out-of-range IR shifts.
+SDValue MCS251TargetLowering::LowerShift(SDValue Op, SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT VT = Op.getValueType();
+  const unsigned Width = VT.getSizeInBits();
+  const bool Left = Op.getOpcode() == ISD::SHL;
+  const bool Arith = Op.getOpcode() == ISD::SRA;
+  auto *C = dyn_cast<ConstantSDNode>(Op.getOperand(1));
+  if (!C)
+    report_fatal_error("MCS251: variable-count shifts are not supported");
+  uint64_t Cnt = C->getZExtValue();
+  if (Cnt == 0)
+    return Op.getOperand(0);
+  if (Cnt >= Width) {
+    if (!Arith)
+      return DAG.getConstant(0, DL, VT);
+    Cnt = Width - 1;  // ashr: full sign fill
+  }
+  SDValue V = Op.getOperand(0);
+  if (VT == MVT::i32) {
+    if (Left) {
+      for (unsigned I = 0; I < Cnt; ++I)
+        V = SDValue(DAG.getMachineNode(MCS251::ADD32rr, DL, MVT::i32, {V, V}),
+                    0);
+      return V;
+    }
+    unsigned Opc = Arith ? MCS251::SRA32ri : MCS251::SRL32ri;
+    return SDValue(
+        DAG.getMachineNode(Opc, DL, MVT::i32,
+                           {V, DAG.getTargetConstant(Cnt, DL, MVT::i32)}),
+        0);
+  }
+  unsigned Opc = Left  ? (Width == 8 ? MCS251::SLL8 : MCS251::SLL16)
+                 : Arith ? (Width == 8 ? MCS251::SRA8 : MCS251::SRA16)
+                         : (Width == 8 ? MCS251::SRL8 : MCS251::SRL16);
+  for (unsigned I = 0; I < Cnt; ++I)
+    V = SDValue(DAG.getMachineNode(Opc, DL, VT, {V}), 0);
+  return V;
 }
 
 SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
@@ -154,16 +219,10 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
         DAG.getTargetGlobalAddress(GA->getGlobal(), DL, MVT::i32,
                                    GA->getOffset())), 0);
   }
-  case ISD::SHL: {
-    SDLoc DL(Op);
-    auto *C = dyn_cast<ConstantSDNode>(Op.getOperand(1));
-    if (!C)
-      report_fatal_error("MCS251: variable i32 shifts are not supported");
-    SDValue V = Op.getOperand(0);
-    for (unsigned I = 0; I < C->getZExtValue(); ++I)
-      V = SDValue(DAG.getMachineNode(MCS251::ADD32rr, DL, MVT::i32, {V, V}), 0);
-    return V;
-  }
+  case ISD::SHL:
+  case ISD::SRL:
+  case ISD::SRA:
+    return LowerShift(Op, DAG);
   case ISD::BRCOND: {
     SDLoc DL(Op);
     SDValue Cond = Op.getOperand(1);
@@ -551,6 +610,88 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
       BuildMI(*BB, MI, DL, TII->get(MCS251::MOVHDRi), Dst)
           .addReg(Low)
           .addImm(Value >> 16);
+    MI.eraseFromParent();
+    return BB;
+  }
+  case MCS251::SRL32ri:
+  case MCS251::SRA32ri: {
+    // 32-bit right shift by a constant, as a CY-chained byte rotate.  There
+    // is no native dword shift, so each bit step moves the lanes through the
+    // carry flag, MSB first:
+    //
+    //   SRL:  clr c                         ; CY = 0
+    //   SRA:  mov a, msb / rlc a            ; CY = sign bit
+    //   then for each lane, MSB to LSB:
+    //         mov a, lane / rrc a / mov lane, a
+    //
+    // (mov a,rX / rrc a / mov rX,a is the measurement-verified classic
+    // encoding family; rrc rotates the 9-bit {CY,A} right, so each lane's
+    // old bit 0 enters the next lane's bit 7 via CY -- exactly a 1-bit
+    // logical right shift of the 32-bit lane tuple.  For SRA the preloaded
+    // sign bit makes the same chain arithmetic.)
+    //
+    // Register-file byte order is big-endian (lower position = more
+    // significant): MSB..LSB = sub_hi16.sub_hi8, sub_hi16.sub_lo8,
+    // sub_lo16.sub_hi8, sub_lo16.sub_lo8.  Every lane value lives in a fresh
+    // single-def vreg per step (MachineCSE's getUniqueVRegDef assumption;
+    // see the BRCC8S comment).
+    MachineFunction *MF = BB->getParent();
+    MachineRegisterInfo &MRI = MF->getRegInfo();
+    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+    Register Dst = MI.getOperand(0).getReg();
+    Register Src = MI.getOperand(1).getReg();
+    unsigned Cnt = (unsigned)MI.getOperand(2).getImm();
+    const bool Arith = MI.getOpcode() == MCS251::SRA32ri;
+    if (Cnt > 31)
+      Cnt = 31;  // LowerShift already clamps; belt and braces
+    if (Cnt == 0) {
+      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV32rr), Dst).addReg(Src);
+      MI.eraseFromParent();
+      return BB;
+    }
+    Register WrHi = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    Register WrLo = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), WrHi)
+        .addReg(Src, RegState(), MCS251::sub_hi16);
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), WrLo)
+        .addReg(Src, RegState(), MCS251::sub_lo16);
+    Register Lanes[4];
+    auto ExtractLane = [&](Register Wr, unsigned Sub, Register &Out) {
+      Out = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+      BuildMI(*BB, MI, DL, TII->get(TargetOpcode::COPY), Out)
+          .addReg(Wr, RegState(), Sub);
+    };
+    ExtractLane(WrHi, MCS251::sub_hi8, Lanes[0]);  // MSB
+    ExtractLane(WrHi, MCS251::sub_lo8, Lanes[1]);
+    ExtractLane(WrLo, MCS251::sub_hi8, Lanes[2]);
+    ExtractLane(WrLo, MCS251::sub_lo8, Lanes[3]);  // LSB
+    for (unsigned I = 0; I < Cnt; ++I) {
+      if (Arith) {
+        BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8a)).addReg(Lanes[0]);
+        BuildMI(*BB, MI, DL, TII->get(MCS251::RLCA));
+      } else {
+        BuildMI(*BB, MI, DL, TII->get(MCS251::CLRC));
+      }
+      for (int J = 0; J < 4; ++J) {
+        Register Next = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+        BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8a)).addReg(Lanes[J]);
+        BuildMI(*BB, MI, DL, TII->get(MCS251::RRCA));
+        BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8ra), Next);
+        Lanes[J] = Next;
+      }
+    }
+    Register NewHi = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    Register NewLo = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::REG_SEQUENCE), NewHi)
+        .addReg(Lanes[0]).addImm(MCS251::sub_hi8)
+        .addReg(Lanes[1]).addImm(MCS251::sub_lo8);
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::REG_SEQUENCE), NewLo)
+        .addReg(Lanes[2]).addImm(MCS251::sub_hi8)
+        .addReg(Lanes[3]).addImm(MCS251::sub_lo8);
+    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::REG_SEQUENCE), Dst)
+        .addReg(NewHi).addImm(MCS251::sub_hi16)
+        .addReg(NewLo).addImm(MCS251::sub_lo16);
     MI.eraseFromParent();
     return BB;
   }
@@ -1600,12 +1741,21 @@ SDValue MCS251TargetLowering::LowerReturn(
                  *DAG.getContext());
   CCInfo.AnalyzeReturn(Outs, RetCC_MCS251);
 
+  // Out-of-range constant shifts become UNDEF during DAG construction,
+  // before LowerShift can see them. Choose zero for an undefined scalar
+  // return instead of leaving stale ABI registers (or a bare ERET at -O2).
+  // This is a permitted refinement of undef, not defined shift semantics.
+  auto ReturnValue = [&](unsigned I) {
+    SDValue V = OutVals[I];
+    return V.isUndef() ? DAG.getConstant(0, DL, V.getValueType()) : V;
+  };
+
   SDValue Glue;
   SmallVector<SDValue, 8> RetOps(1, Chain);
   if (!Outs.empty() && Outs[0].VT == MVT::i32) {
     assert(Outs.size() == 1 && "MCS251 supports only one return value");
     SmallVector<SDValue, 4> Parts;
-    splitI32ToBytes(OutVals[0], DL, DAG, Parts);
+    splitI32ToBytes(ReturnValue(0), DL, DAG, Parts);
     if (Outs[0].Flags.isPointer())
       Parts[3] = buildMOV8ri(0, DL, DAG);
     for (unsigned I = 0; I < 4; ++I) {
@@ -1617,7 +1767,7 @@ SDValue MCS251TargetLowering::LowerReturn(
     for (unsigned I = 0, E = RVLocs.size(); I != E; ++I) {
       CCValAssign &VA = RVLocs[I];
       assert(VA.isRegLoc() && "MCS251 return values must go to registers");
-      Chain = DAG.getCopyToReg(Chain, DL, VA.getLocReg(), OutVals[I], Glue);
+      Chain = DAG.getCopyToReg(Chain, DL, VA.getLocReg(), ReturnValue(I), Glue);
       Glue = Chain.getValue(1);
       RetOps.push_back(DAG.getRegister(VA.getLocReg(), VA.getLocVT()));
     }

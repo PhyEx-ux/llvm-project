@@ -99,6 +99,18 @@ let usesCustomInserter = 1 in
   def MOV32ri : MCS251Inst<(outs GPR32:$dst), (ins mcs251_imm32:$imm), "",
                            [(set GPR32:$dst, imm:$imm)]>;
 
+// 32-bit right shifts.  There is no native dword shift (QEMU
+// mcs251_native_shift_execute rejects the dword mode, matching the manual),
+// so these pseudos expand in EmitInstrWithCustomInserter to a CY-chained
+// RRC-A byte-lane sequence, unrolled $cnt times.  Reaching the MC emitter
+// unexpanded is a compiler bug (rejectPseudo).
+let usesCustomInserter = 1 in {
+  def SRL32ri : MCS251Inst<(outs GPR32:$dst), (ins GPR32:$src, i32imm:$cnt),
+                           "", []>;
+  def SRA32ri : MCS251Inst<(outs GPR32:$dst), (ins GPR32:$src, i32imm:$cnt),
+                           "", []>;
+}
+
 // Atomic symbolic address materialisation. Both words are emitted together;
 // byte-of-24 relocations perform full symbol+addend arithmetic before slicing.
 let Size = 8, isReMaterializable = 1 in
@@ -168,6 +180,17 @@ let Uses = [A] in
 def MOV8ra : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, a", []>;
 let Uses = [B] in
 def MOV8rb : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, b", []>;
+
+// CY/A byte rotates for the 32-bit right-shift expansion (Phase 14 shifts).
+// The classic A-rotate encodings are single byte and need no A5 source-mode
+// escape (low nibble < 6; sdas251 V05.50.4 gold: rrc a = 13, rlc a = 33,
+// clr c = C3).  rrc/rlc read and write CY; clr c writes CY.
+let Defs = [PSW] in
+def CLRC : MCS251Inst<(outs), (ins), "clr c", []>;
+let Defs = [PSW, A], Uses = [PSW, A] in {
+def RLCA : MCS251Inst<(outs), (ins), "rlc a", []>;
+def RRCA : MCS251Inst<(outs), (ins), "rrc a", []>;
+}
 
 //===----------------------------------------------------------------------===//
 //  Memory instructions (load/store, Phase 8)
@@ -340,6 +363,32 @@ let Constraints = "$lhs = $dst", Defs = [PSW] in {
                            (ins GPR16:$lhs, mcs251_imm16:$imm),
                            "xrl $dst, $imm",
                            [(set GPR16:$dst, (xor GPR16:$lhs, imm:$imm))]>;
+}
+
+//===----------------------------------------------------------------------===//
+//  Native 1-bit shifts (Phase 14)
+//===----------------------------------------------------------------------===//
+//
+// sll/srl/sra exist for byte (Rn) and word (WRn) registers only; there is no
+// dword form (QEMU mcs251_native_shift_execute rejects the dword mode,
+// matching the Intel manual).  Each shifts by exactly one bit: CY takes the
+// shifted-out bit, N/Z track the result (QEMU helper.c measurement).
+// Encodings (sdas251 V05.50.4 gold, source mode, opcode bare):
+//
+//   sll r3   -> 3E 30      sll wr2 -> 3E 14     (specifier = code<<4|mode,
+//   srl r7   -> 1E 70      srl wr6 -> 1E 34      byte mode 0, word mode 4)
+//   sra r1   -> 0E 10      sra wr30 -> 0E F4
+//
+// No Patterns: these are only ever emitted by LowerShift via MachineNode
+// unrolling (one node per shifted bit), the same shape as the i32 SHL
+// ADD32rr unroll.  Variable shift counts remain a loud error there.
+let Constraints = "$src = $dst", Defs = [PSW] in {
+  def SLL8  : MCS251Inst<(outs GPR8:$dst),  (ins GPR8:$src),  "sll $dst", []>;
+  def SRL8  : MCS251Inst<(outs GPR8:$dst),  (ins GPR8:$src),  "srl $dst", []>;
+  def SRA8  : MCS251Inst<(outs GPR8:$dst),  (ins GPR8:$src),  "sra $dst", []>;
+  def SLL16 : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$src), "sll $dst", []>;
+  def SRL16 : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$src), "srl $dst", []>;
+  def SRA16 : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$src), "sra $dst", []>;
 }
 
 //===----------------------------------------------------------------------===//
