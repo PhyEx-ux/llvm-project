@@ -124,6 +124,8 @@ ABS_AREA = ".  .ABS."  # lkdata.c _abs_; sdas writes it as ".__.ABS."
                        # internal spelling; symbol matching uses the
                        # raw .rel text, so both spellings stay distinct.
 
+_HEX2 = re.compile(r"^[0-9A-Fa-f]{2}$")  # one ASxxxx value byte token
+
 
 class LinkError(Exception):
     """Fatal, sdld-style diagnostic (always prefixed ?ASlink-Error-)."""
@@ -536,7 +538,20 @@ class Linker(object):
         return s
 
     def read_rel(self, path):
-        lines = self._read_lines(path)
+        # Fail-closed reads: unlike sdld (which silently skips anything it
+        # does not know and accepts a missing final newline / dangling T),
+        # every structural defect is a loud, non-zero-exit error.  A legal
+        # file is always a whole number of newline-terminated records.
+        try:
+            with open(path, "r") as f:
+                data = f.read()
+        except OSError as e:
+            raise LinkError("?ASlink-Error-<cannot open> : \"%s\" (%s)"
+                            % (path, e.strerror))
+        if data and not data.endswith("\n"):
+            raise LinkError("?ASlink-Error-truncated record at EOF: last "
+                            "line of \"%s\" is not newline-terminated" % path)
+        lines = data.splitlines()
         if not lines or not lines[0].startswith(("XH3", "XL3", "XH2", "XL2",
                                                  "XH4", "XL4", "DH", "QH")):
             raise LinkError("?ASlink-Error-not an ASxxxx .rel file: \"%s\""
@@ -547,16 +562,23 @@ class Linker(object):
                             % (lines[0].strip(), path))
         head = None
         ax = None
+        dangling_t = 0  # line number of a T record still awaiting its R
         dump = RelDump(path) if self.dump else None
         for no, line in enumerate(lines[1:], start=2):
             toks = line.split()
             if not toks:
                 continue
             kind = toks[0]
+            if dangling_t and kind != "R":
+                # sdas always closes a T with its R line (even an empty
+                # "R 00 00 aa aa"); anything else means the file was cut.
+                raise LinkError("?ASlink-Error-truncated record 'T' "
+                                "(%s:%d): no following 'R' record"
+                                % (path, dangling_t))
             if kind == "H":
                 head = Head(path)
                 self.heads.append(head)
-                self.parse_header(head, toks)
+                self.parse_header(head, toks, path, no)
                 ax = self.abs_areax(head)
             elif kind == "M":
                 if head is None:
@@ -592,13 +614,33 @@ class Linker(object):
                     dump.areas.append((toks[1], int(toks[3], 16),
                                        int(toks[5], 16)))
             elif kind in ("T", "R", "P"):
+                # Byte-level truncation guard: ASxxxx encodes every T/R
+                # value byte as exactly two hex digits; a one-digit token
+                # means the line was cut mid-field (sdld would quietly
+                # parse the narrower value).
+                for t in toks[1:]:
+                    if len(t) != 2 or not _HEX2.match(t):
+                        raise LinkError("?ASlink-Error-truncated record '%s' "
+                                        "(%s:%d): \"%s\" is not a two-hex-"
+                                        "digit byte" % (kind, path, no, t))
                 if dump:
                     dump.record(head, kind, toks, no)
                 # Full processing happens in pass 2; pass 1 only builds
                 # the model, but T/R syntax is validated eagerly so bad
                 # inputs fail before layout.
-                if kind == "R":
-                    self._scan_r_line(head, toks, path, no)
+                if kind == "T":
+                    dangling_t = no
+                else:
+                    dangling_t = 0
+                    if kind == "R":
+                        self._scan_r_line(head, toks, path, no)
+            else:
+                raise LinkError("?ASlink-Error-unsupported record '%s' "
+                                "(%s:%d)" % (kind, path, no))
+        if dangling_t:
+            raise LinkError("?ASlink-Error-truncated record 'T' "
+                            "(%s:%d): no following 'R' record"
+                            % (path, dangling_t))
         if dump:
             dump.report()
 
@@ -613,8 +655,9 @@ class Linker(object):
         ax.addr = 0
         return ax
 
-    def parse_header(self, head, toks):
+    def parse_header(self, head, toks, path, no):
         i = 1
+        seen = set()
         while i < len(toks):
             try:
                 val = int(toks[i], 16)
@@ -624,9 +667,17 @@ class Linker(object):
             if i + 1 < len(toks):
                 if toks[i + 1] == "areas":
                     head.narea = val
+                    seen.add("areas")
                 elif toks[i + 1] == "global":
                     head.nsym = val
+                    seen.add("global")
             i += 2
+        # "H n areas n global symbols" is the fixed sdas251/llc shape; a
+        # missing half means the record was truncated.
+        if seen != {"areas", "global"}:
+            raise LinkError("?ASlink-Error-truncated record 'H' (%s:%d): "
+                            "missing area/global symbol counts"
+                            % (path, no))
 
     def _head_add_area(self, head, ax):
         if len(head.areas) >= max(head.narea, 1) and head.narea:
@@ -661,11 +712,13 @@ class Linker(object):
             raise LinkError("?ASlink-Error-No header defined (%s:%d)"
                             % (path, no))
         # lksym.c newsym reads the kind letter then skips exactly two
-        # characters ("ef" of Ref/Def) before evaluating the value.
-        m = re.match(r"^S\s+(\S+)\s+([RD])..([0-9A-Fa-f]*)$", " ".join(toks))
+        # characters ("ef" of Ref/Def) before evaluating the value.  The
+        # value itself must be present (sdas emits six digits); an empty
+        # field means the record was truncated.
+        m = re.match(r"^S\s+(\S+)\s+([RD])..([0-9A-Fa-f]+)$", " ".join(toks))
         if not m:
-            raise LinkError("?ASlink-Error-Invalid S record (%s:%d): %s"
-                            % (path, no, " ".join(toks)))
+            raise LinkError("?ASlink-Error-Invalid or truncated S record "
+                            "(%s:%d): %s" % (path, no, " ".join(toks)))
         name, kind, val = m.group(1), m.group(2), int(m.group(3), 16)
         s = self.lkpsym(name, create=True)
         if kind == "R":
@@ -1200,11 +1253,12 @@ class Linker(object):
             if kind in ("M", "O", "S", "A"):
                 continue
             if kind == "T":
-                try:
-                    vals = [int(t, 16) for t in toks[1:]]
-                except ValueError:
-                    raise LinkError("?ASlink-Error-T input error (%s:%d)"
-                                    % (path, no))
+                for t in toks[1:]:
+                    if len(t) != 2 or not _HEX2.match(t):
+                        raise LinkError("?ASlink-Error-truncated record 'T' "
+                                        "(%s:%d): \"%s\" is not a two-hex-"
+                                        "digit byte" % (path, no, t))
+                vals = [int(t, 16) for t in toks[1:]]
                 if len(vals) < A_BYTES or len(vals) > NTXT:
                     raise LinkError("?ASlink-Error-T input error (%s:%d)"
                                     % (path, no))
