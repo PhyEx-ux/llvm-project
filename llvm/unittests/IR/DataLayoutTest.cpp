@@ -53,7 +53,7 @@ TEST(DataLayoutTest, ParseEndianness) {
 }
 
 TEST(DataLayoutTest, ParseMangling) {
-  for (StringRef Str : {"m:a", "m:e", "m:l", "m:m", "m:o", "m:w", "m:x"})
+  for (StringRef Str : {"m:a", "m:e", "m:l", "m:m", "m:o", "m:s", "m:w", "m:x"})
     EXPECT_THAT_EXPECTED(DataLayout::parse(Str), Succeeded());
 
   for (StringRef Str : {"m", "ms:m", "m:"})

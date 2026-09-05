@@ -673,6 +673,9 @@ Error DataLayout::parseSpecification(
     case 'a':
       ManglingMode = MM_XCOFF;
       break;
+    case 's':
+      ManglingMode = MM_ASXXXX;
+      break;
     }
     break;
   default:

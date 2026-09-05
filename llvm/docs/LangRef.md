@@ -3635,6 +3635,9 @@ as follows:
     * `w`: Windows COFF mangling: Similar to `x`, except that normal C
       symbols do not receive a `_` prefix.
     * `a`: XCOFF mangling: Private symbols get a `L..` prefix.
+    * `s`: ASxxxx mangling: Symbols get a `_` prefix, including names that
+      already begin with `_`. Private symbols additionally get a `.L` prefix.
+      There is no calling-convention suffix or special linker-private prefix.
 
 `n<size1>:<size2>:<size3>...`
 :   This specifies a set of native integer widths for the target CPU in

@@ -62,6 +62,27 @@ TEST(ManglerTest, MachO) {
             "L_foo");
 }
 
+TEST(ManglerTest, ASXXXX) {
+  LLVMContext Ctx;
+  DataLayout DL("m:s");
+  Module Mod("test", Ctx);
+  Mod.setDataLayout(DL);
+  Mangler Mang;
+  EXPECT_EQ(mangleStr("foo", Mang, DL), "_foo");
+  EXPECT_EQ(mangleStr("_foo", Mang, DL), "__foo");
+  EXPECT_EQ(mangleStr("\01foo", Mang, DL), "foo");
+  EXPECT_EQ(mangleStr("\01_foo", Mang, DL), "_foo");
+  EXPECT_EQ(mangleFunc("foo", GlobalValue::ExternalLinkage, CallingConv::C,
+                       Mod, Mang),
+            "_foo");
+  EXPECT_EQ(mangleFunc("foo", GlobalValue::PrivateLinkage, CallingConv::C,
+                       Mod, Mang),
+            ".L_foo");
+  EXPECT_FALSE(DL.hasMicrosoftFastStdCallMangling());
+  EXPECT_FALSE(DL.doNotMangleLeadingQuestionMark());
+  EXPECT_FALSE(DL.hasLinkerPrivateGlobalPrefix());
+}
+
 TEST(ManglerTest, WindowsX86) {
   LLVMContext Ctx;
   DataLayout DL("m:x-p:32:32"); // 32-bit windows
