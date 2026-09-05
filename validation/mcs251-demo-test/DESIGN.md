@@ -59,7 +59,7 @@ SDCC 的角色（oracle 专用，符合 de-SDCC 战略）：harness C 的编译�
 | --- | --- | --- | --- | --- |
 | 多参数调用（≥2 实参） | 40.6%（1117 函数/4400 调用点） | 57.8% | OSEG 未实现，响亮报错 | **最高**：demo 过半文件被此挡住 |
 | bit 类型 | 11.2% | 34.2% | 无 i1/bit lowering | 第二（配合 SFR 改写） |
-| __interrupt | 6.9% | 36.4% | 无；可用 asm 向量 stub + 普通 LLVM 函数绕过（待 QEMU 实测） | 第三（T4 先行验证绕过形态） |
+| __interrupt | 6.9% | 36.4% | 无语言扩展；asm 向量 stub + 普通 LLVM 函数绕过**已实测成立**（ecall+reti 形态，见 t4-probes/ISR-STUB-VERDICT.md） | 第三（T4 已验证绕过形态，落地件 t4/timer0-irq-llvm） |
 | SFR 引用 | 26.7% | 65.8% | 固定地址 volatile 指针可达（T2 验证） | 改写层解决，非后端缺口 |
 | 浮点 | 3.5% | 9.8% | 无 | 低（TFPU QEMU 行为未实测，不预设） |
 | 结构体按值 / varargs 定义 | 0% / 0.1% | — | 无 | 忽略 |
@@ -71,8 +71,15 @@ T1/T2 扩容清单（Momo 数据可按特性反查）。
 
 - 基线：Moka 10 个裸 asm probe 原样入库（transcript 已留档），保护
   "测试体系对 QEMU 行为的假设"不被 QEMU 升级无声破坏。
-- 升级：LLVM 侧 ISR 形态假设——`vector_stub: lcall _isr_body; reti`（ERET
-  弹 lcall 帧、reti 弹硬件帧）——**必须先 QEMU 实测**再固化为测试。
+- 升级：LLVM 侧 ISR 形态——原假设 `vector_stub: lcall _isr_body; reti` 已被
+  QEMU **证伪**（LCALL 压 2 字节帧、ERET 弹 3 字节帧，返回地址混入硬件中断
+  帧后 PC 跑飞；对照实验隔离证明帧长不匹配是唯一原因）。可用最小形态
+  `ecall _isr_body; reti`（ECALL 3 字节帧与 ERET 匹配）；交付形态为
+  "向量槽 ejmp → asm stub 保现场（PSW/ACC/B/R0-R7）→ ecall LLVM 函数 →
+  恢复 → reti"。证据与四组实验：`t4-probes/ISR-STUB-VERDICT.md`。
+  附带实测事实：后端函数一律 ERET 收尾且踩 r0/PSW（stub 必须保现场）；
+  TR0 保持运行时 TF0 会在主程序反应窗口内重触发 1–7 次（定时器断言须
+  ISR 自清 TR0 或按多入口设计）。
 - 已知约束（来自实测）：HOME 复位 stub ≤3 字节（INT0 向量 0xFF0003）；
   ES 使能期间打印需先关 ES（ISR 自清 TI）；无 icount，定时器断言用轮询+
   超时或同指令流比值。

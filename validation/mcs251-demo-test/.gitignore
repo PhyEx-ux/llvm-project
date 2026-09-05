@@ -1,0 +1,3 @@
+# Regenerable per-case build outputs (kept out of the repo; build.sh/build-all.sh
+# recreate them into build/ when run from WSL).
+build/

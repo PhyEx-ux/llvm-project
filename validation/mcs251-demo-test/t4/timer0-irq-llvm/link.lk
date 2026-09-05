@@ -1,0 +1,28 @@
+; mcs251_ld.py command file for t4/timer0-irq-llvm.
+; SDLD-style command grammar: one directive per line, ';' comments, '-e' ends.
+; Keep this file free of EMPTY lines (sdld-family parsers treat them as EOF).
+-muwx
+; -i: Intel HEX output; the following token is the output file base.
+; mcs251_ld.py writes <stem>.hex directly (the QEMU loader wants .hex).
+-i build/timer0-irq-llvm
+-M
+; -I: internal RAM size reserved low range, as in link-template.lk.
+-I 0x0100
+; Area bases.  HOME holds the 7-byte reset stub; VEC is the TF0 vector slot
+; at 0xff000b (must stay clear of HOME); PROBE holds main + the hardened
+; stub; CSEG is the LLVM module (_isr_body), placed in the same 64K bank.
+-b HOME = 0xff0000
+-b VEC = 0xff000b
+-b PROBE = 0xff0100
+-b CSEG = 0xff0200
+-b XSEG = 0x10000
+-b PSEG = 0x10000
+-b ISEG = 0x0000
+-b BSEG = 0x0000
+; Full MCS-251 ABI signature, checked under --mcs251-abi; must match the
+; .optsdcc records in vector-stub.asm and in llc's object output verbatim.
+-A stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small stack-auto=0 xstack=0 intlong-reent=0 float-reent=0 reg-params=1 all-callee-saves=0 sdcccall=2 regset=r0-r9,r12-r15 compiler-build=mcs251-abi1.0-r1
+; Inputs (relative to this directory; build.sh runs the linker here).
+build/vector-stub.rel
+build/isr-body.rel
+-e
