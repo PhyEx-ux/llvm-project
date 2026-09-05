@@ -27,8 +27,8 @@ run_case() {
   "$LLC" -mtriple=mcs251-unknown-none -filetype=obj \
     -o "$BUILD/$name-main.rel" "$HERE/$ll" || { echo "FAIL llc $name"; rc=1; return; }
   sed -e "s|@OUTPUT_STEM@|$BUILD/$name|" \
-      -e "s|@CRT_REL@|$BUILD/crt-selfstart.rel|" \
-      -e "s|@MODULE_REL@|$BUILD/$name-main.rel|" \
+      -e "s|^@CRT_REL@\$|$BUILD/crt-selfstart.rel|" \
+      -e "s|^@MODULE_REL@\$|$BUILD/$name-main.rel|" \
       "$FW/link-selfstart.lk" > "$BUILD/$name.lk"
   python3 "$MCS251_LD" --mcs251-abi -f "$BUILD/$name.lk" \
       > "$BUILD/$name.link.log" 2>&1 \
