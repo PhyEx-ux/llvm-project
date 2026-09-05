@@ -1,11 +1,13 @@
 ; mcs251_ld.py command-file template for self-hosted startup images.
 ; Companion to crt-selfstart.asm; replaces link-template.lk for images that
-; carry no SDCC-generated startup glue.  Replace @OUTPUT_STEM@, @CRT_REL@
-; and @MODULE_REL@ with real paths before invoking:
+; carry no SDCC-generated startup glue.  Substitute the three placeholder
+; LINES at the bottom (output stem, crt .rel, module .rel) with real paths
+; before invoking - keep substitutions off the comment lines:
 ;   python3 validation/mcs251-ld/mcs251_ld.py --mcs251-abi -f image.lk
 ; Grammar notes: one directive per line, ';' comments, no EMPTY lines (the
 ; sdld-family parser treats them as EOF), '-e' terminates.  mcs251_ld.py
-; writes @OUTPUT_STEM@.hex directly (the QEMU loader keys on that suffix).
+; writes the output stem's .hex directly (the QEMU loader keys on that
+; suffix).
 -muwx
 -i @OUTPUT_STEM@
 -I 0x0100
@@ -24,4 +26,5 @@
 -A stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small stack-auto=0 xstack=0 intlong-reent=0 float-reent=0 reg-params=1 all-callee-saves=0 sdcccall=2 regset=r0-r9,r12-r15 compiler-build=mcs251-abi1.0-r1
 @CRT_REL@
 @MODULE_REL@
+; Multi-module images: insert additional module .rel paths here, before -e.
 -e

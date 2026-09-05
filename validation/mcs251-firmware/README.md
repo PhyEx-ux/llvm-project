@@ -15,6 +15,8 @@ SDCC 构建树复制，也不依赖 `/tmp` 中会消失的 crt0/harness/provider
 | `crt-selfstart.asm`（Step 4a） | 自有启动三合一：HOME 3 字节复位跳板（`ljmp boot`，不盖任何中断向量槽）+ VECS 8 槽默认兜网（`ejmp isr_unhandled`→打印 `!`，覆盖 0xFF0003+n*8 全部向量）+ BOOT（`mov spx,#0x2fff`→`ecall _main`→返回后打印 `S` 自旋） | 不含 SDCC 启动胶；不做 GSINIT 数据初始化（后端尚无已定义全局数据）；不服务需自定义中断向量的镜像（那些镜像自带向量模块，如 t4/timer0-irq-llvm） |
 | `link-selfstart.lk`（Step 4a） | crt-selfstart 镜像的 mcs251_ld.py 命令模板：`-b HOME/VECS/BOOT/CSEG` 四基址 + ABI 签名；写入两条实测规则（代码区必须显式 -b；不要给未定义区加 -b） | 同样必须先替换 `@OUTPUT_STEM@/@CRT_REL@/@MODULE_REL@` |
 | `selfstart-smoke/`（Step 4a 验收证据） | 两个用例链接未修改的库资产：smoke1 期望 `MS`（复位/栈/ECALL-ERET 往返），smoke2 期望 `MS!`（另验证默认向量兜网兜住无处理器 TF0） | 不是 PASS/FAIL harness；判定 = transcript 精确匹配 |
+| `harness-llvm.ll` + `harness-llvm-cells.asm`（Step 4b） | 判定协议的自建化：`harness_check_u8/u16/u32` 的 LLVM 实现，输出与 C 版逐字节一致（`FAIL expected=0x.. got=0x..`、成功静默、`_harness_pass` 打印 `PASS` 后停住）。多参缺口绕过约定：expected 先 volatile 存进 cells 的固定 idata 单元（0x60-0x66，RSEG 绝对等值），check 只带 got 单参 | 不含 HOME/向量/栈初始化（那是 crt-selfstart 的职责）；不向后端要多参调用；IR 形态避开已探明缺口（i8/i16 移位、i32 lshr/ashr 均不可选） |
+| `selfstart-check/`（Step 4b 验收证据） | 全 LLVM 镜像四相：pass 期望 `BrwdPASS`；fail8/16/32 期望 `BFAIL expected=0xA5 got=0x00` / `0x1357/0x0000` / `0x12345678/0x00000000` 后停机 | 同 smoke：transcript 精确匹配，非通用 runner |
 
 分界原则是：crt0 只启动，harness 只驱动/判定，用户模块只实现被测函数，provider
 只提供明确的外部依赖。这样更换用户模块不会隐式更换启动代码或判定逻辑。
