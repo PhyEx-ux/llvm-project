@@ -1,11 +1,7 @@
 /* Extracted T1 kernel: demo-16 NTC table lookup and interpolation. */
 typedef unsigned char u8;
 typedef unsigned short u16;
-#if defined(__SDCC_mcs251)
 typedef unsigned long u32;
-#else
-typedef unsigned long u32;
-#endif
 #define D_SCALE 10u
 
 /* Exact demo-16 temp_table values, indexes 0..160 (-40..120 C). */

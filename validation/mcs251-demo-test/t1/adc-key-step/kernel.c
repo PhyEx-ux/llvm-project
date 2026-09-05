@@ -1,20 +1,16 @@
 /* Extracted T1 kernel: demo-15 ADC-key classification/debounce FSM. */
 typedef unsigned char u8;
 typedef unsigned short u16;
-#if defined(__SDCC_mcs251)
 typedef unsigned long u32;
-#else
-typedef unsigned long u32;
-#endif
 
 #define ADC_OFFSET 64u
-static u8 adc_key_state;
-static u8 adc_key_state1;
-static u8 adc_key_state2;
-static u8 adc_key_state3;
-static u8 adc_key_hold_count;
-static u8 adc_key_code;
-static u8 adc_key_event;
+extern u8 adc_key_state;
+extern u8 adc_key_state1;
+extern u8 adc_key_state2;
+extern u8 adc_key_state3;
+extern u8 adc_key_hold_count;
+extern u8 adc_key_code;
+extern u8 adc_key_event;
 
 void adc_key_reset(void)
 {

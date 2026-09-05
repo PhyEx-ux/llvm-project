@@ -1,11 +1,7 @@
 /* Extracted T1 kernel: demo-14 RTC body from the main-loop path. */
 typedef unsigned char u8;
 typedef unsigned short u16;
-#if defined(__SDCC_mcs251)
 typedef unsigned long u32;
-#else
-typedef unsigned long u32;
-#endif
 
 typedef struct {
     u8 hour;

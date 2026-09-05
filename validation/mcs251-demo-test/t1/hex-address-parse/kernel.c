@@ -1,10 +1,10 @@
 /* Extracted T1 kernel: demo-18 hexadecimal address parser. */
 typedef unsigned char u8;
 typedef unsigned short u16;
-#if defined(__SDCC_mcs251)
+#ifdef SDCC_FW
 typedef unsigned long u32;
 #else
-typedef unsigned long u32;
+typedef unsigned int u32;
 #endif
 
 static u8 hex_nibble(u8 c)
@@ -14,15 +14,18 @@ static u8 hex_nibble(u8 c)
     return 0xffu;
 }
 
-/* Native global UsbOutBuffer is supplied as one pointer argument. */
-u32 parse_hex_address(const u8 *input)
+/* The extracted demo read UsbOutBuffer. Keep it in a driver-owned array so
+ * all three compilers use direct indexed accesses (no unqualified gptr). */
+extern u8 hex_input[16];
+
+u32 parse_hex_address(void)
 {
     u32 address = 0;
     u8 i;
     u8 digit;
-    if (input[2] != (u8)'0' || input[3] != (u8)'X') return 0xffffffffUL;
+    if (hex_input[2] != (u8)'0' || hex_input[3] != (u8)'X') return 0xffffffffUL;
     for (i = 4; i < 10; i++) {
-        digit = hex_nibble(input[i]);
+        digit = hex_nibble(hex_input[i]);
         if (digit >= 0x10u) return 0xffffffffUL;
         address = (address << 4) + digit;
     }

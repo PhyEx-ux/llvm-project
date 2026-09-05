@@ -1,17 +1,13 @@
 /* Extracted T1 kernel: demo-14 row/column keyboard debounce FSM. */
 typedef unsigned char u8;
 typedef unsigned short u16;
-#if defined(__SDCC_mcs251)
 typedef unsigned long u32;
-#else
-typedef unsigned long u32;
-#endif
 
-static u8 key_state;
-static u8 previous_sample;
-static u8 hold_count;
-static u8 key_code;
-static u8 event_ready;
+extern u8 key_state;
+extern u8 previous_sample;
+extern u8 hold_count;
+extern u8 key_code;
+extern u8 event_ready;
 
 void keyboard_scan_reset(void)
 {

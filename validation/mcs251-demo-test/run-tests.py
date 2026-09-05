@@ -39,6 +39,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -67,6 +68,7 @@ GCC = "gcc"
 # symbols, switch CLANG to it and retire the symbol shim (see --no-ir-shims).
 CLANG = "/usr/bin/clang"
 QEMU_TIMEOUT = 30
+ORACLE_A_TIMEOUT = 60
 
 # IR compatibility shims (PM ruling 2026-09-05 "retirable shims"):
 #   1. symbol adaptation  @name -> @_name   (mangle_ll_symbols)
@@ -332,16 +334,18 @@ def lower_constant_shifts(src_ll, dst_ll):
 # ---------------------------------------------------------------------------
 
 _WIDTH_TYPEDEF_RE = re.compile(r"typedef\s+(?:unsigned\s+)?int\s")
+_U32_TYPEDEF_RE = re.compile(r"^\s*typedef\s+unsigned\s+int\s+u32\s*;")
 _WIDTH_EXTERN_RE = re.compile(r"^\s*extern\s+(?:unsigned\s+)?int\s")
 
 
 def check_shared_widths(kernel_src):
     """Cross-compiler shared-width guard (baseline reset follow-up,
-    2026-09-05): SDCC mcs251 int=16 while host clang int=32, so an
-    `(unsigned) int` typedef or extern makes the two sides disagree on the
-    width of the same symbol (clang then stores 4 bytes into SDCC's 2-byte
-    global, stomping neighbours -- observed on pilot-nec/led8 before the
-    fix).  Scalars must be unsigned char/short/long."""
+    2026-09-05): `(unsigned) int` remains forbidden for u16 and shared
+    globals because SDCC mcs251 int=16 while host clang int=32.  The sole
+    exception is the canonical `typedef unsigned int u32`: clang LP64 would
+    otherwise turn `unsigned long` function values into unsupported i64,
+    while the MCS251 ABI carries those values in its 32-bit long-width ABI
+    slots.  Other shared scalars must use unsigned char/short/long."""
     bad = []
     try:
         lines = open(kernel_src).read().splitlines()
@@ -350,9 +354,11 @@ def check_shared_widths(kernel_src):
     for i, ln in enumerate(lines, 1):
         if ln.strip().startswith(("//", "*", "/*")):
             continue
-        if _WIDTH_TYPEDEF_RE.search(ln):
+        if (_WIDTH_TYPEDEF_RE.search(ln)
+                and not _U32_TYPEDEF_RE.match(ln)):
             bad.append("%s:%d: typedef uses (unsigned) int -- use unsigned "
-                       "short/long (cross-compiler width differs)" % (kernel_src, i))
+                       "short/long, except canonical u32 (cross-compiler "
+                       "width differs)" % (kernel_src, i))
         if _WIDTH_EXTERN_RE.match(ln):
             bad.append("%s:%d: extern declares (unsigned) int -- use explicit "
                        "width types" % (kernel_src, i))
@@ -390,8 +396,23 @@ def run_case(casedir, name, fwcache):
             out["oracle_a"] = {"status": "gcc-failed"}
             out["error"] = "oracle-A gcc build failed"
             return out
-        rc, _ = sh([os.path.join(b, "oracle-a.bin")],
-                   stdout_path=os.path.join(b, "oracle-a.serial"))
+        oracle_a_serial = os.path.join(b, "oracle-a.serial")
+        with open(oracle_a_serial, "wb") as serial_out:
+            p = subprocess.Popen([os.path.join(b, "oracle-a.bin")],
+                                 stdout=serial_out, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+            try:
+                rc = p.wait(timeout=ORACLE_A_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                p.wait()
+                out["oracle_a"] = {
+                    "status": "run-failed timeout=%ds" % ORACLE_A_TIMEOUT}
+                out["error"] = "oracle-A run timed out"
+                return out
         out["oracle_a"] = {"status": "ok" if rc == 0 else "run-failed rc=%d" % rc}
         if rc != 0:
             out["error"] = "oracle-A run failed"

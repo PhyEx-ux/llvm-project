@@ -1,11 +1,7 @@
 /* Extracted T1 kernel: demo-37 alg_compare_level with native two chars packed. */
 typedef unsigned char u8;
 typedef unsigned short u16;
-#if defined(__SDCC_mcs251)
 typedef unsigned long u32;
-#else
-typedef unsigned long u32;
-#endif
 #define LEVEL_BIGGER 0u
 #define LEVEL_SMALLER 1u
 #define LEVEL_SAME 2u
@@ -18,14 +14,12 @@ typedef struct {
 
 static u8 precedence(u8 op)
 {
-    switch (op) {
-    case '+': case '-': return 1;
-    case '*': case '/': return 2;
-    case '^': case 'i': case '!': case 'd': return 3;
-    case 'f': return 4;
-    case '(': case ')': return 5;
-    default: return 0;
-    }
+    if (op == '+' || op == '-') return 1;
+    if (op == '*' || op == '/') return 2;
+    if (op == '^' || op == 'i' || op == '!' || op == 'd') return 3;
+    if (op == 'f') return 4;
+    if (op == '(' || op == ')') return 5;
+    return 0;
 }
 
 /* Native alg_compare_level(char operator1, char operator2) is packed into one

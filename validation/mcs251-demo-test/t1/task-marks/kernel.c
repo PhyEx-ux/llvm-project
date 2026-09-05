@@ -1,11 +1,7 @@
 /* Extracted T1 kernel: demo-32 periodic task mark callback. */
 typedef unsigned char u8;
 typedef unsigned short u16;
-#if defined(__SDCC_mcs251)
 typedef unsigned long u32;
-#else
-typedef unsigned long u32;
-#endif
 
 typedef struct {
     u16 time_count;
@@ -13,25 +9,33 @@ typedef struct {
     u8 run;
 } task_mark;
 
-typedef struct {
-    task_mark *tasks;
-    u8 count;
-} task_marks_args;
+#define TASK_MARKS_CAPACITY 8u
 
-/* Native callback has a task array plus count; T1 packs both into one pointer. */
-u8 task_marks_step(task_marks_args *args)
+#ifdef SDCC_FW
+#define MCS251_DATA __data
+#else
+#define MCS251_DATA
+#endif
+extern MCS251_DATA task_mark mark_tasks[8];
+extern u8 mark_task_count;
+
+/* Native callback has a task array plus count. The extracted table/count are
+ * driver-owned globals and are traversed in ascending order. */
+u8 task_marks_step(void)
 {
     u8 i;
     u8 marked = 0;
-    for (i = 0; i < args->count; i++) {
-        if (args->tasks[i].time_count) {
-            args->tasks[i].time_count--;
-            if (args->tasks[i].time_count == 0) {
-                args->tasks[i].time_count = args->tasks[i].retry_time;
-                args->tasks[i].run = 1;
+    MCS251_DATA task_mark *task = mark_tasks;
+    for (i = 0; i < mark_task_count; i++, task++) {
+        if (task->time_count) {
+            task->time_count--;
+            if (task->time_count == 0) {
+                task->time_count = task->retry_time;
+                task->run = 1;
                 marked++;
             }
         }
     }
     return marked;
 }
+

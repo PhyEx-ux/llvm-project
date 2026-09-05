@@ -1,0 +1,5 @@
+typedef unsigned char u8;u8 dispatch_task_storage[40];u8 dispatch_task_hook_ids[8];u8 dispatch_task_count,ca,cb;void dispatch_hook_a(void){ca++;}void dispatch_hook_b(void){cb+=2;}extern unsigned char task_dispatch_step(void);
+#define RUN(n) dispatch_task_storage[((n)<<2)+(n)]
+#define MCS251_CHECKPOINTS() do{u8 v;dispatch_task_count=4;RUN(0)=1;dispatch_task_hook_ids[0]=1;RUN(1)=1;dispatch_task_hook_ids[1]=0;RUN(2)=0;dispatch_task_hook_ids[2]=2;RUN(3)=1;dispatch_task_hook_ids[3]=2;v=task_dispatch_step();UART_PUTC('a');harness_hex8(v);harness_check_u8(2,v);UART_PUTC('b');harness_hex8(ca);harness_check_u8(1,ca);UART_PUTC('c');harness_hex8(cb);harness_check_u8(2,cb);UART_PUTC('d');harness_hex8(RUN(0));harness_check_u8(0,RUN(0));UART_PUTC('e');harness_hex8(RUN(1));harness_check_u8(0,RUN(1));v=task_dispatch_step();UART_PUTC('f');harness_hex8(v);harness_check_u8(0,v);RUN(2)=1;v=task_dispatch_step();UART_PUTC('g');harness_hex8(v);harness_check_u8(1,v);UART_PUTC('h');harness_hex8(cb);harness_check_u8(4,cb);}while(0)
+
+#include "/mnt/c/Prj/LLVM/MCS251/validation/mcs251-firmware/harness-template.c"

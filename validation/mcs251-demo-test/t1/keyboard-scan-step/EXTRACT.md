@@ -7,3 +7,5 @@
 - ISR/外设边界：该函数由主循环每 50 ms 调用，不带中断属性；只提取算法状态机，不猜 GPIO 电平行为。
 - 可观察输出：`keyboard_scan_code()` 返回键码，`keyboard_scan_event()` 返回新事件标志。
 - 编译自检：GCC `-c -Wall -Wextra -std=c89` 通过（无 warning）；SDCC `-mmcs251 --model-small -c` 通过。SDCC driver 输出两条环境 warning：`__has_builtin` 与 `__STDC_HOSTED__` redefined；无 kernel error/warning。
+- 批量合规补记：删除对 SDCC 宏无差别的冗余条件编译，保留唯一显式宽度 u32 typedef，语义不变。
+- 期望值语义修正：host gcc 真值为 `Ba00b00c00d00e12f01g12h01i12j01k12l01PASS`；换键 `0x12 -> 0x23` 的两次稳定采样没有释放沿，状态机仅在 `old_state == 0`（按下）或 `old_state == key_state`（保持/重复）路径置 `first_or_repeat`，换键不进入任一路径，故 checkpoint `k/l` 仍为 `0x12/1`，不是 `0x23/1`。同时删除 wrapper 中 `typedef unsigned int unsigned short;` 鬼行，消除 warning 166 家族并保持 `u8` 由 harness/内核统一定义。

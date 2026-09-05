@@ -1,0 +1,351 @@
+{
+ "timestamp": 1788633624.942422,
+ "iso": "2026-09-06T02:40:24+0800",
+ "kind": "case-snapshot-final (reacceptance, Sakuna)",
+ "runner": "/mnt/c/Prj/LLVM/MCS251/validation/mcs251-demo-test/run-tests.py",
+ "runner_mechanism": {
+  "oracle_a_timeout_code": true,
+  "oracle_a_timeout_behavior_selftest": "TIMEOUT-MECHANISM-OK (60.1s, no orphan; see timeout-selftest.log)",
+  "case_flag": "OK (exercised by base-shim 7x1 and main-shim-recheck 2x1 runs)",
+  "ir_shims_default": "True",
+  "ir_shims_flip_status": "pending (PM action after reacceptance PASS)"
+ },
+ "tools": {
+  "llc_main": "/home/liu/build-mcs251/bin/llc",
+  "llc_main_md5": "f6c2f4034f9e32ee61ecfb690b238c93",
+  "llc_baseline": "/home/liu/mcs251-clang/bin-frozen/67a17057/llc",
+  "llc_baseline_md5": "67a170573cba625fe24441d0b6825d10",
+  "qemu": "/home/liu/mcs251-clang/bin-frozen/6b9edfd0/qemu-system-mcs251",
+  "qemu_md5": "6b9edfd0be5618a466c846df0f488faa"
+ },
+ "layers": {
+  "t1": {
+   "visible": [
+    "adc-key-step",
+    "decimal-length-parse",
+    "hex-address-parse",
+    "keyboard-scan-step",
+    "operator-precedence",
+    "pilot-const-handle",
+    "pilot-delay-smoke",
+    "pilot-judge-type",
+    "pilot-led8-nibble",
+    "pilot-nec-decode",
+    "pilot-string-length",
+    "pilot-sum-sfn",
+    "pulse-width-step",
+    "reverse16",
+    "reverse32",
+    "rtc-step",
+    "stack-packed",
+    "stack-pop-packed",
+    "task-dispatch",
+    "task-marks",
+    "temperature-lookup",
+    "wildcard-recursive"
+   ],
+   "n_visible": 22,
+   "verdict_noshim_newllc": {
+    "pass": [
+     "adc-key-step",
+     "decimal-length-parse",
+     "hex-address-parse",
+     "keyboard-scan-step",
+     "operator-precedence",
+     "pilot-const-handle",
+     "pilot-delay-smoke",
+     "pilot-judge-type",
+     "pilot-led8-nibble",
+     "pilot-nec-decode",
+     "pilot-string-length",
+     "pilot-sum-sfn",
+     "pulse-width-step",
+     "reverse16",
+     "reverse32",
+     "rtc-step",
+     "task-dispatch",
+     "task-marks",
+     "wildcard-recursive"
+    ],
+    "n_pass": 19,
+    "skip_known_limitation": [
+     "stack-packed",
+     "stack-pop-packed",
+     "temperature-lookup"
+    ],
+    "n_skip": 3,
+    "triangle_equal_all_pass": true,
+    "per_case": [
+     {
+      "case": "adc-key-step",
+      "pass": true,
+      "sec": 60.8,
+      "md5_a": "763d265f92fa",
+      "md5_b": "763d265f92fa",
+      "md5_dut": "763d265f92fa",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "decimal-length-parse",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "7ad5066dd778",
+      "md5_b": "7ad5066dd778",
+      "md5_dut": "7ad5066dd778",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "hex-address-parse",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "fbeaf6184275",
+      "md5_b": "fbeaf6184275",
+      "md5_dut": "fbeaf6184275",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "keyboard-scan-step",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "9dcd4d2c4ac5",
+      "md5_b": "9dcd4d2c4ac5",
+      "md5_dut": "9dcd4d2c4ac5",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "operator-precedence",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "b9cc3a2422ce",
+      "md5_b": "b9cc3a2422ce",
+      "md5_dut": "b9cc3a2422ce",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "pilot-const-handle",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "ec2e11fa12b5",
+      "md5_b": "ec2e11fa12b5",
+      "md5_dut": "ec2e11fa12b5",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "pilot-delay-smoke",
+      "pass": true,
+      "sec": 60.2,
+      "md5_a": "-",
+      "md5_b": "e9faa75a0dfe",
+      "md5_dut": "e9faa75a0dfe",
+      "tri": "-",
+      "dut_status": "ok"
+     },
+     {
+      "case": "pilot-judge-type",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "8a037ca42b4f",
+      "md5_b": "8a037ca42b4f",
+      "md5_dut": "8a037ca42b4f",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "pilot-led8-nibble",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "0a09c0483230",
+      "md5_b": "0a09c0483230",
+      "md5_dut": "0a09c0483230",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "pilot-nec-decode",
+      "pass": true,
+      "sec": 60.6,
+      "md5_a": "2b7e4d92f527",
+      "md5_b": "2b7e4d92f527",
+      "md5_dut": "2b7e4d92f527",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "pilot-string-length",
+      "pass": true,
+      "sec": 60.5,
+      "md5_a": "7fb8aae24310",
+      "md5_b": "7fb8aae24310",
+      "md5_dut": "7fb8aae24310",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "pilot-sum-sfn",
+      "pass": true,
+      "sec": 60.5,
+      "md5_a": "73d9c7b2973e",
+      "md5_b": "73d9c7b2973e",
+      "md5_dut": "73d9c7b2973e",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "pulse-width-step",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "44ced401f3c4",
+      "md5_b": "44ced401f3c4",
+      "md5_dut": "44ced401f3c4",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "reverse16",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "7d78e022924e",
+      "md5_b": "7d78e022924e",
+      "md5_dut": "7d78e022924e",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "reverse32",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "465429d6d933",
+      "md5_b": "465429d6d933",
+      "md5_dut": "465429d6d933",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "rtc-step",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "e60874e9a984",
+      "md5_b": "e60874e9a984",
+      "md5_dut": "e60874e9a984",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "stack-packed",
+      "pass": false,
+      "sec": 30.4,
+      "md5_a": "802ffecbaeda",
+      "md5_b": "802ffecbaeda",
+      "md5_dut": "-",
+      "tri": "-",
+      "dut_status": "llc failed"
+     },
+     {
+      "case": "stack-pop-packed",
+      "pass": false,
+      "sec": 30.4,
+      "md5_a": "6412adce7cd9",
+      "md5_b": "6412adce7cd9",
+      "md5_dut": "-",
+      "tri": "-",
+      "dut_status": "llc failed"
+     },
+     {
+      "case": "task-dispatch",
+      "pass": true,
+      "sec": 60.4,
+      "md5_a": "55df3a031c95",
+      "md5_b": "55df3a031c95",
+      "md5_dut": "55df3a031c95",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "task-marks",
+      "pass": true,
+      "sec": 60.5,
+      "md5_a": "a7a3f272a312",
+      "md5_b": "a7a3f272a312",
+      "md5_dut": "a7a3f272a312",
+      "tri": true,
+      "dut_status": "ok"
+     },
+     {
+      "case": "temperature-lookup",
+      "pass": false,
+      "sec": 30.5,
+      "md5_a": "bf561fd81ae0",
+      "md5_b": "bf561fd81ae0",
+      "md5_dut": "-",
+      "tri": "-",
+      "dut_status": "llc failed"
+     },
+     {
+      "case": "wildcard-recursive",
+      "pass": true,
+      "sec": 60.8,
+      "md5_a": "ba4b61ee84c1",
+      "md5_b": "ba4b61ee84c1",
+      "md5_dut": "ba4b61ee84c1",
+      "tri": true,
+      "dut_status": "ok"
+     }
+    ]
+   }
+  },
+  "t2": {
+   "visible": [],
+   "n_visible": 0,
+   "on_disk": [
+    "absent-sentinel",
+    "display-table",
+    "gpio-readback",
+    "sfr-uart-tx",
+    "uart-echo-poll"
+   ]
+  },
+  "t4": {
+   "visible": [],
+   "n_visible": 0,
+   "on_disk": [
+    "ISR-STUB-VERDICT.md",
+    "README.md",
+    "a_timer.asm",
+    "a_timer.expect",
+    "b_gpio.asm",
+    "b_gpio.expect",
+    "build",
+    "build-all.sh",
+    "c_uart234.asm",
+    "c_uart234.expect",
+    "d1_tint.asm",
+    "d1_tint.expect",
+    "d2_uint.asm",
+    "d2_uint.expect",
+    "d3_extint.asm",
+    "d3_extint.expect",
+    "d4_t1int1.asm",
+    "d4_t1int1.expect",
+    "e_absent.asm",
+    "e_absent.expect",
+    "f_t234_presc.asm",
+    "f_t234_presc.expect",
+    "g_uartrx.asm",
+    "g_uartrx.expect",
+    "isr-stub-exp"
+   ]
+  }
+ },
+ "other_matrices": {
+  "baseline_oldllc_7pilot": "7/7 PASS (base-shim)",
+  "default_shims_newllc_2case": "0/2 PASS, dut=mcs251_ld failed (double-underscore mangling) -> shims harmful, flip motivated",
+  "smoke_newllc": "double PASS (SDCC reference + LLVM replacement; smoke-reacc.log)",
+  "truth_recheck": "5/5 cases all_match (temperature-lookup, reverse32, hex-address-parse, task-dispatch, adc-key-step; truth-recheck.json)"
+ }
+}

@@ -22,15 +22,19 @@
 1. 自包含：文件头自带显式宽度 typedef，不 include 任何系统头：
    ```c
    typedef unsigned char  u8;
-   typedef unsigned short u16;   /* NOT unsigned int: SDCC int=16 but host
-                                    clang int=32 (user ruling "int=32");
-                                    `unsigned int` makes clang declare the
-                                    extern as i32 and store 4 bytes into
-                                    SDCC's 2-byte global (observed: stomps
-                                    neighbouring variables) */
+   typedef unsigned short u16;
+   #ifdef SDCC_FW
    typedef unsigned long  u32;
+   #else
+   typedef unsigned int   u32;
+   #endif
    ```
-   宽度是硬规则：demo 原文的 `unsigned int` 一律折算为 `unsigned short`。
+   u32 无跨端一致的安全岛类型，必须条件编译：SDCC 路径
+   `typedef unsigned long u32`（SDCC long=32），host 路径
+   `typedef unsigned int u32`（host int=32，裸 unsigned long 产 i64 撞后端）。
+   禁止 host 可达路径裸 unsigned long、禁止 SDCC 可达路径裸 unsigned int。
+   u8=unsigned char、u16=unsigned short 为安全岛类型可直接用。demo 原文的
+   16 位 `unsigned int` 一律折算为 `unsigned short`。
 2. 零全局定义：可变全局状态一律 `extern` 声明，定义放 wrapper.c（固件侧）
    与 host-main.c（host 侧）。原因：MCS251 后端拒绝 defined global data
    （"Phase 12 Step 2 pending"，llc 报错原文）。三方零初始化语义一致。
