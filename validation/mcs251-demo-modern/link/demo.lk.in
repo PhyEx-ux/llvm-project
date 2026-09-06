@@ -1,0 +1,19 @@
+; mcs251_ld.py 链接命令文件模板 — 现代 C demo 固件。
+; Makefile 会把 @OUTPUT_STEM@/@CRT_REL@/@MAIN_REL@/@FEATURES_REL@ 替换为真实路径。
+; 语法约束：一行一条指令、';' 为注释、不允许空行（sdld 家族解析器视空行为 EOF）。
+-muwx
+-i @OUTPUT_STEM@
+-I 0x0100
+; 布局：HOME 复位向量 -> VECS 默认向量表 -> BOOT 启动代码 -> CSEG 主代码。
+; ECALL/EJMP 是 24 位寻址，CSEG 放哪个 64K bank 都可达（此处沿用 selfstart 布局）。
+-b HOME = 0xff0000
+-b VECS = 0xff0003
+-b XINIT = 0xfe0000
+-b BOOT = 0xff0100
+-b CSEG = 0xff0200
+; DSEG 由链接器自动布局（不绑定基址），XINIT 记录表指向各 DSEG slice。
+-A stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small stack-auto=0 xstack=0 intlong-reent=0 float-reent=0 reg-params=1 all-callee-saves=0 sdcccall=2 regset=r0-r9,r12-r15 compiler-build=mcs251-abi1.0-r1
+@CRT_REL@
+@MAIN_REL@
+@FEATURES_REL@
+-e
