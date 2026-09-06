@@ -39,6 +39,8 @@ const uint32_t *MCS251RegisterInfo::getCallPreservedMask(
   default:
     report_fatal_error("Unsupported calling convention");
   case CallingConv::C:
+  case CallingConv::Fast:
+    // Fast deliberately shares the C physical ABI, including its clobbers.
     return CSR_MCS251_RegMask;
   }
 }

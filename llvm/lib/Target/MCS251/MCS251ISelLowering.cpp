@@ -70,6 +70,11 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::SMUL_LOHI, VT, Expand);
   }
 
+  // InstCombine recognizes byte permutations as BSWAP. There is no native
+  // instruction; use generic shifts/masks, all of which are already lowered.
+  setOperationAction(ISD::BSWAP, MVT::i16, Expand);
+  setOperationAction(ISD::BSWAP, MVT::i32, Expand);
+
   // Address classification distinguishes SFR-direct access from canonical DR
   // pointers. Multi-byte objects retain the measured big-endian lane layout.
   setOperationAction(ISD::LOAD, MVT::i8, Custom);
@@ -1661,6 +1666,10 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
   default:
     report_fatal_error("Unsupported calling convention");
   case CallingConv::C:
+  case CallingConv::Fast:
+    // IPO can select fastcc for local functions. MCS251 deliberately uses
+    // the C physical ABI for Fast too: ABI registers plus named scalar
+    // parameter slots. Call sites and definitions must still agree on CC.
     break;
   }
 
@@ -1769,6 +1778,10 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   default:
     report_fatal_error("Unsupported calling convention");
   case CallingConv::C:
+  case CallingConv::Fast:
+    // IPO can select fastcc for local functions. MCS251 deliberately uses
+    // the C physical ABI for Fast too: ABI registers plus named scalar
+    // parameter slots. Call sites and definitions must still agree on CC.
     break;
   }
 
