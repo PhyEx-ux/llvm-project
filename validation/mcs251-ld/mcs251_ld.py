@@ -905,6 +905,11 @@ class Linker(object):
         codemap = self._Bitmap(0x1000000)   # codemap8051: 4 MiB bits
         xdatamap = self._Bitmap(0x1000000)  # xdatamap
         rloc = [0, 0, 0, 0]
+        # Absolute slices lose their origin during relocation layout. Preserve
+        # their physical bounds for the opt-in G12K128 stack contract.
+        absolute_data_ends = [ax.addr + ax.size for ap in self.areas
+                              if ap.flag & A3_ABS and ap.loc_index() == 0
+                              for ax in ap.areaxs if ax.size]
 
         # 1. sort all absolute areas to the front, reversed (lkarea.c:801-818)
         i = 0
@@ -984,6 +989,37 @@ class Linker(object):
             s = self.symtab.get("l_DSEG")
             if s is not None and dseg is not None:
                 s.addr = dseg.size
+        self._define_mcs251_stack_base(absolute_data_ends)
+
+    def _define_mcs251_stack_base(self, absolute_data_ends):
+        """Self-start opt-in: place an upward stack in G12K128's 4K EDATA.
+
+        s_DSEG/l_DSEG are SDLD usage summaries, not a physical high-water
+        mark. Use every byte-addressed internal slice (including OSEG/ISEG
+        and register/bit-bank reservations), not an area size sum.
+        """
+        symbol = self.symtab.get("__mcs251_stack_base")
+        if symbol is None or not symbol.ref_modules:
+            return  # Existing SDCC/QEMU-only chains retain their old layout.
+        if symbol.defined:
+            raise LinkError("?ASlink-Error-__mcs251_stack_base is reserved for "
+                            "the linker")
+        ends = list(absolute_data_ends)
+        ends.extend(ax.addr + ax.size for ap in self.areas
+                    if ap.loc_index() == 0 and not ap.flag & A3_ABS
+                    for ax in ap.areaxs if ax.size)
+        data_end = max([0x100] + ends)
+        first_byte = ((data_end + 15) & ~15) + 16
+        if first_byte > 0x0C00:
+            raise LinkError("?ASlink-Error-MCS251 stack capacity: data end "
+                            "0x%04X leaves fewer than 1024 bytes in 4K EDATA"
+                            % data_end)
+        symbol.defined = True
+        symbol.addr = first_byte - 1
+        symbol.areax = None
+        sys.stderr.write("MCS251 stack: data end=0x%04X SPX=0x%04X "
+                         "capacity=%d bytes (EDATA end=0x0FFF)\n"
+                         % (data_end, symbol.addr, 0x1000 - first_byte))
 
     def lnksect2(self, ap, loc, idatamap, codemap, xdatamap,
                  dram_start, iram_start):

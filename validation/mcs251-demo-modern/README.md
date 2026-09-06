@@ -82,17 +82,21 @@ STC32）各自运行，逐字比对输出——语义一致才算通过，必须
 
 `uart.h` 提供三个互斥路径：`HOST_BUILD` 走宿主 stdio；默认路径走冻结 QEMU
 的 UART test-port（写 SBUF 即输出，不模拟波特率、不置 TI）；`STC32_REAL_HW`
-走 SCON 模式 1、TI 起步与发送轮询。**真机轮询路径不能拿到当前 QEMU 中运行**。
+走 STC32G12K128 的 SCON 模式1、Timer2波特率和写SBUF后TI轮询。
+**真机轮询路径不能拿到当前 QEMU 中运行**。
 
-**真机分支目前只是未经真机实测、尚未完成板级参数的模板，不可直接据此烧录。**
-已放入 `SCON=0x40`、`TI=1` 与 TI 轮询；TX GPIO/引脚映射、时钟和 AUXR/BRT
-或 T1 波特率发生器仍是明确 TODO。STC32G12K128 的 flash 映射、时钟、串口参数
-和烧录流程需经板级核对；当前链接模板的 QEMU 地址不能冒充 G12K128 已验证布局。
+真机参数已按官方手册填实：ISP用户HIRC必须设24MHz，UART1=P3.0/P3.1，
+SCON=0x50、Timer2 1T重载0xFFCC，对应115200/8N1（实际+0.16%误差）。
+AUXR逐位保留其它配置，清T2_C/T，最后启动T2R。共享crt先写WTST=0，再从
+链接器符号设置4KB EDATA内的动态向上栈，保证静态布局剩余至少1KB。
+**仍待用户首次真机验收**；EEPROM必须设0，避免FE:0000与XINIT冲突。
+完整接线/下载步骤和QEMU差异矩阵见
+`/mnt/c/Prj/LLVM/MCS251/validation/mcs251-demos/REALHW-GUIDE.md`。
 
 仅验证真机分支编译/链接时，使用独立构建目录（不执行 `make check`）：
 
 ```bash
-make BUILD=/home/liu/mcs251-demo-alice/real-hw \
+make BUILD=/home/liu/mcs251-realhw-alice/modern-real-hw \
   CFLAGS='--target=mcs251-unknown-none -std=c11 -O2 -Wall -Wextra -DSTC32_REAL_HW'
 ```
 

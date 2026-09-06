@@ -8,7 +8,7 @@
 ;   HOME 0xff0000  ljmp boot                 3 bytes; INT0 slot stays free
 ;   VECS 0xff0003  8 x { ejmp isr_unhandled; .ds 4 }   64 bytes; covers
 ;                  INT0/TF0/INT1/TF1/UART1/ADC/LVD/PCA at 0xFF0003+n*8
-;   BOOT 0xff0100  mov spx,#0x2fff; initialize DSEG from the sparse XINIT
+;   BOOT 0xff0100  set SPX from linker; initialize DSEG from the sparse XINIT
 ;                  table; ecall _main; marker 'S'; spin
 ;   XINIT 0xfe0000 linked ROM records emitted by LLVM for mutable globals:
 ;                  { target16, object-size16, payload-size16, payload[] }*
@@ -31,12 +31,14 @@
         .optsdcc stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small stack-auto=0 xstack=0 intlong-reent=0 float-reent=0 reg-params=1 all-callee-saves=0 sdcccall=2 regset=r0-r9,r12-r15 compiler-build=mcs251-abi1.0-r1
 
 SBUF    = 0x99
+WTST    = 0xe9
 
         .globl  __mcs251_selfstart_boot
         .globl  __mcs251_globals_init
         .globl  __mcs251_isr_unhandled
         .globl  s_XINIT
         .globl  l_XINIT
+        .globl  __mcs251_stack_base
 
         .area HOME (CODE)
 __mcs251_reset:
@@ -62,7 +64,16 @@ __mcs251_reset:
 
         .area BOOT (CODE)
 __mcs251_selfstart_boot::
-        mov     spx,#0x2fff             ; same stack top as crt0.asm
+        ; G12K128 manual p553: WTST resets to 7; below 35MHz use 0.
+        ; This startup's real-hardware profile requires ISP HIRC=24MHz.
+        mov     WTST,#0
+        ; G12K128 manual sections 10.3.1 / 11.3.5: stack uses 00-region
+        ; EDATA, physically only 4K (0x0000..0x0fff), and grows upwards.
+        ; The strict linker finds all internal-data slice ends, rounds above
+        ; them with a 16-byte guard, and reserves at least 1K before 0x1000.
+        ; SPX is the byte BEFORE the first usable stack byte. Unlike the
+        ; QEMU-only crt0.asm, this startup must not use the old 0x2fff value.
+        mov     spx,#__mcs251_stack_base
         ecall   __mcs251_globals_init   ; DSEG clear + ROM image copy
         ecall   _main                   ; 24-bit call, matches LLVM ERET
         mov     SBUF,#'S'               ; main returned (protocol marker)

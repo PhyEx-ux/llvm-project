@@ -19,27 +19,38 @@
 #endif
 
 #ifdef STC32_REAL_HW
-/* ---------- 真机模板：未经真机实测，烧录前必须完成下方 TODO ----------
- * 与单文件 01-selftest.c 使用相同 SCON/TI 约定。此模板尚未提供完整的
- * 板级初始化，不能把编译/链接通过当作波特率或引脚已验证。
+/* ---------- STC32G12K128：ISP HIRC=24MHz，UART1 115200/8N1 ----------
+ * 官方手册页 441/675/774/777；尚待用户真机实测，不假定 ISP 用户时钟默认值。
+ * T2 重载=65536-round(24000000/(4*115200))=0xFFCC；实际115384.6，+0.16%。
+ * 仅访问标准 SFR，无需打开扩展 SFR。保留其它外设的路由、GPIO和AUXR位。
  */
+#define AUXR (*(volatile uint8_t *)0x8E)
 #define SCON (*(volatile uint8_t *)0x98)
 #define SBUF (*(volatile uint8_t *)0x99)
-#define TI_GET() ((SCON >> 1) & 1u)
-#define TI_SET(v) do { SCON = (uint8_t)((SCON & ~0x02u) | ((v) ? 0x02u : 0u)); } while (0)
+#define P_SW1 (*(volatile uint8_t *)0xA2)
+#define P3M1 (*(volatile uint8_t *)0xB1)
+#define P3M0 (*(volatile uint8_t *)0xB2)
+#define T2H (*(volatile uint8_t *)0xD6)
+#define T2L (*(volatile uint8_t *)0xD7)
 static void uart_init(void)
 {
-    /* TODO(真机): 配置 TX GPIO 模式与实际映射引脚（如 P3.1）。 */
-    SCON = 0x40u;  /* 模式 1：8 位可变波特率，REN=0。 */
-    /* TODO(真机): 核对主频，设置 AUXR/BRT 或 T1 波特率发生器；
-     * 访问扩展 SFR 前按 STC32G 手册设置 P_SW2。不可省略后直接烧录。 */
-    TI_SET(1);
+    P_SW1 &= (uint8_t)~0xC0u; /* UART1路由00：RxD=P3.0，TxD=P3.1。 */
+    P3M1 &= (uint8_t)~0x03u;
+    P3M0 &= (uint8_t)~0x03u;  /* P3.0/1准双向弱上拉；不改P3.2。 */
+    AUXR &= (uint8_t)~0x10u; /* T2R=0：停止后写计数/重载寄存器。 */
+    AUXR &= (uint8_t)~0x08u; /* T2_C/T=0：内部时钟定时器，非外部计数器。 */
+    SCON = 0x50u;           /* 模式1，REN=1，TI/RI清零。 */
+    T2L = 0xCCu;
+    T2H = 0xFFu;
+    AUXR |= 0x01u;          /* S1BRT=1：UART1使用Timer2。 */
+    AUXR |= 0x04u;          /* T2x12=1：1T。 */
+    AUXR |= 0x10u;          /* T2R=1：最后启动；合计置位0x15，不置bit3。 */
 }
 static void uart_putc(char c)
 {
-    while (!TI_GET()) { }
-    TI_SET(0);
     SBUF = (uint8_t)c;
+    while (!(SCON & 0x02u)) { } /* 硬件在停止位开始时置TI；QEMU不模拟。 */
+    SCON &= (uint8_t)~0x02u;
 }
 static void uart_puts(const char *s) { while (*s) uart_putc(*s++); }
 

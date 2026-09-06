@@ -98,37 +98,47 @@
  *   SCON 模式、不模拟波特率、不置 TI，因此无需任何初始化或轮询。
  *   （整个测试体系 harness 的 serial oracle 都建立在这个语义上。）
  *
- *  真机路径（-DSTC32_REAL_HW）：烧到 STC32G144K246 真芯片上必须先做
- *   串口初始化，且发送需要 TI 轮询：
- *     1) TX 引脚 GPIO 模式配置（STC32 的 IO 模式寄存器：准双向/推挽）
- *     2) SCON = 0x40   —— 模式 1（8 位可变波特率），暂不开收
- *     3) 波特率发生器  —— 独立波特率 BRT 或 T1，分频值按主频计算
- *     4) TI = 1         —— 模式 1 发送的前置就绪标志
- *   时钟：上电默认内部 IRC 已在跑（不初始化也能工作）；需要标称主频
- *   再配时钟寄存器；访问扩展 SFR 区（EAXFR）要先开 P_SW2。
- *   注意：下方真机参数是按手册推算的典型形态，未经真机实测——烧录前
- *   按你的主频/引脚映射核对填写（TODO 标记处）。
+ *  真机路径（-DSTC32_REAL_HW）：STC32G12K128，必须在 AiCube-ISP 中将
+ *   用户HIRC设24MHz；本程序不假定用户程序的时钟默认值。
+ *   UART1路由00（RxD=P3.0/TxD=P3.1），SCON=0x50，Timer2为1T内部定时器，
+ *   重载0xFFCC，115200/8N1（实际115384.6，误差+0.16%）。写SBUF后查TI并清零。
+ *   参数依据官方手册页441/675/774/777；编译/QEMU验证不能替代首次真机验收。
+ *   栈由crt引用的链接器符号自动置于数据区之上，使用真实4K EDATA范围。
+ *   EEPROM必须设0字节：本镜像从FE:0000放XINIT，任何非零EEPROM都可能冲突。
+ *   接线、烧录与判定步骤见随附 REALHW-GUIDE.md。
  */
+#if defined(HOST_BUILD) && defined(STC32_REAL_HW)
+#error "HOST_BUILD 与 STC32_REAL_HW 必须二选一"
+#endif
 #ifdef STC32_REAL_HW
+#define AUXR (*(volatile uint8_t *)0x8E)
 #define SCON (*(volatile uint8_t *)0x98)
 #define SBUF (*(volatile uint8_t *)0x99)
-/* 位访问：本后端无 SFR 位域，用读-改-写 */
-#define TI_GET()  ((SCON >> 1) & 1u)
-#define TI_SET(v) do { SCON = (uint8_t)((SCON & ~0x02u) | ((v) ? 0x02u : 0u)); } while (0)
+#define P_SW1 (*(volatile uint8_t *)0xA2)
+#define P3M1 (*(volatile uint8_t *)0xB1)
+#define P3M0 (*(volatile uint8_t *)0xB2)
+#define T2H (*(volatile uint8_t *)0xD6)
+#define T2L (*(volatile uint8_t *)0xD7)
 
 static void uart_init(void)
 {
-    /* TODO(真机): TX 引脚 GPIO 模式配置（P3.0/P3.1 或重映射引脚） */
-    SCON = 0x40u;            /* 模式 1：8 位可变波特率，REN=0 */
-    /* TODO(真机): 波特率发生器 AUXR/BRT 分频值按主频与目标波特率计算
-     * （见 STC32G 数据手册"串口波特率"章节） */
-    TI_SET(1);               /* 发送就绪起步 */
+    P_SW1 &= (uint8_t)~0xC0u; /* 路由00：RxD=P3.0，TxD=P3.1。 */
+    P3M1 &= (uint8_t)~0x03u;
+    P3M0 &= (uint8_t)~0x03u;  /* P3.0/1准双向；保留其它GPIO。 */
+    AUXR &= (uint8_t)~0x10u; /* T2R=0，停止后写入重载。 */
+    AUXR &= (uint8_t)~0x08u; /* T2_C/T=0：定时器，不是外部计数器。 */
+    SCON = 0x50u;           /* 模式1、REN=1、TI/RI=0。 */
+    T2L = 0xCCu;            /* ISP HIRC=24MHz @115200：0xFFCC。 */
+    T2H = 0xFFu;
+    AUXR |= 0x01u;          /* S1BRT=1，UART1选择Timer2。 */
+    AUXR |= 0x04u;          /* T2x12=1，1T。 */
+    AUXR |= 0x10u;          /* T2R=1，最后启动；合计0x15，不置bit3。 */
 }
 static void putc_(char c)
 {
-    while (!TI_GET()) { }    /* 等上一字节移出 */
-    TI_SET(0);
     SBUF = (uint8_t)c;
+    while (!(SCON & 0x02u)) { } /* 停止位开始时硬件置TI；QEMU不模拟。 */
+    SCON &= (uint8_t)~0x02u;
 }
 static void puts_(const char *s) { while (*s) putc_(*s++); }
 
