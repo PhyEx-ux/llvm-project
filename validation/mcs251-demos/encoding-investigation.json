@@ -1,0 +1,92 @@
+{
+  "title": "Source编码排查与真机可观察性修复",
+  "baseline": "f97665e4b",
+  "status": "未发现需要全工具链重编码的证据；QEMU和MC编码器未修改；最终demo收官真机复烧待确认",
+  "evidence_root": "/home/liu/mcs251-encoding-alice/",
+  "experiment_root": "/home/liu/mcs251-realhw-alice/blink-asm/",
+  "classification": {
+    "confirmed": [
+      "Intel A-59/A-60原页位图：Source ECALL为9A+addr24、EJMP为8A+addr24，均4字节；Binary才增加A5前缀共5字节。7E04是MOV WR0,#imm16形态，不能按裸字节频次推断为EJMP。",
+      "官方init.hex从FF0000跳至FF1230，154条直接可达指令/44形态无未知opcode或边界冲突；blink实际1732条/34形态同样可按Intel Source图解码。静态可达分析不等于动态完整路径覆盖。",
+      "M1全TSV269行：48三源同形态、219仅Intel位图一致而官方可达语料未见、1个ERET手册长度栏冲突、1个孤立A5非完整指令。确认错误Source编码0；不得将未观察形态标成三源验证。",
+      "旧QEMU无需重制解码器即可执行官方初始化到main，随后停在FF0FD3..FF0FDE的USB握手轮询，而非复位跑飞。",
+      "M1.5官方子集asm blink、M1.6 ECALL/ERET单变量近似实验、M1.7编译器volatile栈帧函数均由用户经PM报告真机通过。仅证明各实验实际覆盖的路径，不是全部ISA证明。",
+      "M1.8 V0由用户报告TI成功的LED慢闪；V1由用户报告UART-PROBE 115200整行重复、无乱码且LED慢闪，115200/24MHz与fresh-TI初始化方案通过。",
+      "02-blink原版把UART输出放在LED翻转之前，并使用可被O2删除的无volatile空延时循环；新版本默认纯LED、翻转前置、volatile计数，时间未经校准。"
+    ],
+    "high_confidence_hypotheses": [
+      "一次性开机输出可能在烧录后打开串口终端之前已经完成，能解释空白窗口；V0仅发送一次U，V1改为周期完整行增加了可观察性。尚无开机同步捕获A/B证明这是所有旧镜像空白的唯一根因。",
+      "旧blink空延时被O2删除使LED快速翻转，肉眼无法据此判定停止执行；volatile修复是无论最终串口根因如何都必须完成的源码修复。"
+    ],
+    "not_measured": [
+      "P_SW1复位实际值未读回。V0实际执行P_SW1&=~0xC0，两demo及旧MOVC也清过路由位；不能写成V0完全没初始化路由。",
+      "V1相对V0同时改变整字节P_SW1=0、重复完整文本、每字节fresh TI与P4.4观测，不是仅P_SW1一个变量；不能据此断言复位值非0或旧输出必在其它引脚。",
+      "MOVC的固定FF或当前PC bank硅片仲裁尚未报告。",
+      "最终带周期状态重发的selftest/modern/MOVC发布包尚待用户复烧完整验收。"
+    ]
+  },
+  "experiments": [
+    {
+      "id": "M1.5",
+      "file": "blink-asm-near.hex",
+      "sha256": "fe6e601a925a6503e27fafbd472af85a9b1041eecd3740dcb66b87872f08653d",
+      "bytes": 68,
+      "observation_source": "用户经PM转述，非本代理直接仪器采集",
+      "observation": "LED闪烁，24MHz确认",
+      "scope": "26条、13形态；官方启动子集、LCALL/RET、纯GPIO，无LLVM/UART/XINIT"
+    },
+    {
+      "id": "M1.6",
+      "file": "blink-asm-ecall.hex",
+      "sha256": "55301289c9149da16e0601f1531b80a5517428e2351f25bbaaba2ebb69b7dca6",
+      "bytes": 69,
+      "observation_source": "用户经PM转述",
+      "observation": "LED正常闪烁",
+      "scope": "仅LCALL12改ECALL9A、RET22改ERETAA，附1字节增长所必需的call目标/SJMP位移修正；启动和delay本体字节保持"
+    },
+    {
+      "id": "M1.7",
+      "file": "blink-asm-mixed.hex",
+      "sha256": "ca2f54f7d32586336128cf38c18f04bba1e4bbc1fb40ed5e4efbb125f7177599",
+      "bytes": 153,
+      "observation_source": "用户经PM转述",
+      "observation": "万用表看到P4.5快速翻转/中间电压抖动",
+      "scope": "48条、25形态；同asm启动+llc的volatile局部双层计数、spx帧、@dr60访存、jcc；sdld/mcs251_ld镜像一致"
+    },
+    {
+      "id": "M1.8-V0",
+      "file": "uart-ti-v0.hex",
+      "sha256": "90bb0ccfc92b5b212e5d326442aabc8f7149ffec792db7533154eca386022126",
+      "bytes": 334,
+      "observation_source": "用户经PM转述",
+      "observation": "成功模式LED慢闪，即TI已到；PC未看到单次U",
+      "scope": "P_SW1&=~C0、Timer2 FFCC、SCON50、有界TI"
+    },
+    {
+      "id": "M1.8-V1",
+      "file": "uart-ti-v1.hex",
+      "sha256": "b7ab361e14b2412d7e01959a4899e7bf1e11a81f69381c7e26376cde4943277f",
+      "bytes": 452,
+      "observation_source": "用户经PM转述",
+      "observation": "UART-PROBE 115200整行重复且无乱码、LED慢闪",
+      "scope": "P_SW1=00、循环整行、每字节先清TI、P4.4前后观测；多变量对比不能单独归因为P_SW1"
+    }
+  ],
+  "manual_conflicts": [
+    "JE：A-8表写88，但A-5/A-68位图和官方FF1250的68 1A一致，采用68。",
+    "ERET：A-8/A-61位图单字节AA，A-22/A-61字节数字段写Source=2；单字节AA已在M1.6/M1.7用户硅片实验路径通过。",
+    "ECALL @DRk：A-60操作伪码写PC+4而Source形态长度2，属手册内部冲突，不是7E前缀依据。"
+  ],
+  "closure_changes": [
+    "四份真机UART初始化显式P_SW1=00，注释称V1已验证配置，不声称测过复位值；整字节写也重置其它复用路由，仅适用独占demo。",
+    "STC32_REAL_HW自检一次后低速重发最终状态，不重跑有副作用测试；MOVC真机重复仲裁行；QEMU/HOST精确单次输出协议不改。",
+    "02-blink默认BLINK_ENABLE_UART=0、volatile延时且LED翻转前置；显式开启UART才发tick，真实周期不作10秒承诺。",
+    "QEMU树与LLVM MC编码层均未修改；既有QEMU脏树补丁只读归档，不用错误假设开展M2重制。"
+  ],
+  "crosswalk_files": [
+    "/home/liu/mcs251-encoding-alice/M1-full-crosswalk.tsv",
+    "/home/liu/mcs251-encoding-alice/M1-blink-priority.tsv",
+    "/home/liu/mcs251-encoding-alice/M1-summary.json",
+    "/home/liu/mcs251-encoding-alice/inputs.json"
+  ]
+}
