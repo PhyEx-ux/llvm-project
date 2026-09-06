@@ -17,7 +17,7 @@ def run(command):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, default=Path("/home/liu/mcs251-realhw-alice/selftest-real-hw"))
+    parser.add_argument("--out", type=Path, default=Path("/home/liu/mcs251-realhw-alice/layout-v2/selftest-real-hw"))
     parser.add_argument("--qemu", action="store_true", help="只构建test-port版，不能烧到真机")
     parser.add_argument("--clang", default="/home/liu/build-clang/bin/clang")
     parser.add_argument("--llc", default="/home/liu/build-mcs251/bin/llc")
@@ -40,7 +40,7 @@ def main():
     lnk = mld.Linker(strict_abi=True)
     lnk.parse_command_file(str(script)); lnk.read_all_rels(); lnk.setarea(); lnk.lnkarea2(); lnk.symdef()
     assert not lnk.lkerr
-    layout = {"profile": "QEMU TEST PORT -- NOT FOR HARDWARE" if args.qemu else "G12K128 HIRC=24MHz UART1=115200/8N1 EEPROM=0",
+    layout = {"profile": "QEMU TEST PORT -- NOT FOR HARDWARE" if args.qemu else "G12K128 HIRC=24MHz UART1=115200/8N1 layout-v2 XINIT=FF8000 EEPROM<=0x700 (0 recommended)",
               "spx": lnk.symval(lnk.symtab["__mcs251_stack_base"]), "areas": []}
     for area in lnk.areas:
         for ax in area.areaxs:
@@ -48,7 +48,7 @@ def main():
                 continue
             lo, hi = ax.addr, ax.addr + ax.size
             if area.loc_index() == 1:
-                assert 0xfe0000 <= lo < hi <= 0x1000000, (area.name, lo, hi)
+                assert 0xff0000 <= lo < hi <= 0x1000000, (area.name, lo, hi)
             elif area.loc_index() == 2:
                 assert 0x10000 <= lo < hi <= 0x12000, (area.name, lo, hi)
             elif area.loc_index() == 0:

@@ -50,7 +50,7 @@
  *    -I 0x0100
  *    -b HOME = 0xff0000
  *    -b VECS = 0xff0003
- *    -b XINIT = 0xfe0000
+ *    -b XINIT = 0xff8000
  *    -b BOOT = 0xff0100
  *    -b CSEG = 0xff0200
  *    -A stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small stack-auto=0 xstack=0 intlong-reent=0 float-reent=0 reg-params=1 all-callee-saves=0 sdcccall=2 regset=r0-r9,r12-r15 compiler-build=mcs251-abi1.0-r1
@@ -104,7 +104,8 @@
  *   重载0xFFCC，115200/8N1（实际115384.6，误差+0.16%）。写SBUF后查TI并清零。
  *   参数依据官方手册页441/675/774/777；编译/QEMU验证不能替代首次真机验收。
  *   栈由crt引用的链接器符号自动置于数据区之上，使用真实4K EDATA范围。
- *   EEPROM必须设0字节：本镜像从FE:0000放XINIT，任何非零EEPROM都可能冲突。
+ *   layout-v2：XINIT移到FF:8000程序段，两demo不再读取FE EEPROM窗口。
+ *   本真机包统一验收EEPROM<=0x700字节（含1K），推荐0；MOVC探针仍有此上限。
  *   接线、烧录与判定步骤见随附 REALHW-GUIDE.md。
  */
 #if defined(HOST_BUILD) && defined(STC32_REAL_HW)

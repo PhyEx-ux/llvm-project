@@ -17,7 +17,9 @@
 ; readability choice, not a reachability requirement.
 -b HOME = 0xff0000
 -b VECS = 0xff0003
--b XINIT = 0xfe0000
+; Keep the ROM initializer in program Flash, outside FE EEPROM partitions.
+; CSEG's current images fit well below FF:8000; validate layout on expansion.
+-b XINIT = 0xff8000
 -b BOOT = 0xff0100
 -b CSEG = 0xff0200
 ; All code areas MUST be based explicitly: unbased CODE areas allocate from

@@ -15,7 +15,7 @@ SIG = ("stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small "
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, default=Path("/home/liu/mcs251-realhw-alice/movc"))
+    parser.add_argument("--out", type=Path, default=Path("/home/liu/mcs251-realhw-alice/layout-v2/movc"))
     parser.add_argument("--sdas", default="/home/liu/build-sdcc/bin/sdas251")
     parser.add_argument("--qemu", default="/home/liu/mcs251-clang/bin-frozen/6b9edfd0/qemu-system-mcs251")
     parser.add_argument("--run-qemu", action="store_true")
@@ -34,14 +34,14 @@ def main():
         lk = base.with_suffix(".lk")
         lk.write_text("\n".join(["-muwx", "-i " + str(base), "-I 0x100",
             "-b HOME=0xff0000", "-b VECS=0xff0003", "-b BOOT=0xff0100",
-            "-b CSEG=0xfe0200", "-b SENT_FE=0xfe8000", "-b SENT_FF=0xff8000",
+            "-b CSEG=0xfe0800", "-b SENT_FE=0xfe8000", "-b SENT_FF=0xff8000",
             "-A " + SIG, str(base.with_suffix(".rel")), "-e", ""]))
         subprocess.run(["python3", str(linker), "--mcs251-abi", "-f", str(lk)], check=True)
         lnk = mld.Linker(strict_abi=True)
         lnk.parse_command_file(str(lk)); lnk.read_all_rels(); lnk.setarea(); lnk.lnkarea2()
         symbols = {name: lnk.symval(lnk.symtab[name]) for name in
                    ["movc_site", "sentinel_fe", "sentinel_ff", "__mcs251_stack_base"]}
-        assert symbols["movc_site"] >> 16 == 0xfe
+        assert 0xfe0800 <= symbols["movc_site"] < 0xff0000
         assert symbols["sentinel_fe"] == 0xfe8000 and symbols["sentinel_ff"] == 0xff8000
         base.with_suffix(".layout.json").write_text(json.dumps(symbols, indent=2) + "\n")
         if args.run_qemu and not real:
@@ -57,7 +57,7 @@ def main():
             print(out.decode(), end="")
             if out != b"MOVC=3C FE=3C FF=A7\n":
                 raise RuntimeError("冻结QEMU的MOVC行为与基线不符，需重新调查")
-    print("真机请烧 movc-real-hw.hex；尚未执行真机仲裁。")
+    print("真机请烧 movc-real-hw.hex；EEPROM分区需<=0x700字节（推荐0）；尚未执行真机仲裁。")
 
 
 if __name__ == "__main__":

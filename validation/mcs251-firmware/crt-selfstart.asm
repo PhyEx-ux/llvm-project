@@ -10,7 +10,8 @@
 ;                  INT0/TF0/INT1/TF1/UART1/ADC/LVD/PCA at 0xFF0003+n*8
 ;   BOOT 0xff0100  set SPX from linker; initialize DSEG from the sparse XINIT
 ;                  table; ecall _main; marker 'S'; spin
-;   XINIT 0xfe0000 linked ROM records emitted by LLVM for mutable globals:
+;   XINIT 0xff8000 linked ROM records emitted by LLVM for mutable globals:
+;                  keep this in program Flash, not the FE EEPROM window.
 ;                  { target16, object-size16, payload-size16, payload[] }*
 ;
 ; Serial markers this module may emit (both indicate protocol-relevant

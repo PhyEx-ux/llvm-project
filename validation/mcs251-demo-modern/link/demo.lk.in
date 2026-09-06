@@ -8,7 +8,8 @@
 ; ECALL/EJMP 是 24 位寻址，CSEG 放哪个 64K bank 都可达（此处沿用 selfstart 布局）。
 -b HOME = 0xff0000
 -b VECS = 0xff0003
--b XINIT = 0xfe0000
+; XINIT 放 FF 程序段，避开 ISP 在 FE:0000 起划出的 EEPROM。
+-b XINIT = 0xff8000
 -b BOOT = 0xff0100
 -b CSEG = 0xff0200
 ; DSEG 由链接器自动布局（不绑定基址），XINIT 记录表指向各 DSEG slice。

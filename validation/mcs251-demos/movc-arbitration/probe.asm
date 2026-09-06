@@ -1,5 +1,7 @@
 ; G12K128 MOVC arbitration. Built by build.py with REAL_HW=0 or 1.
-; Execute MOVC in FE:0200, same DPTR offset points at distinct FE/FF sentinels.
+; Execute MOVC in FE:0800, same DPTR offset points at distinct FE/FF sentinels.
+; ISP EEPROM partition must be <=0x700 bytes (zero recommended). The old
+; FE:0200 body overlapped a 1K EEPROM partition and could not execute.
 ; No compiler, MOVC-dependent strings, XINIT, interrupts or RAM execution.
 ; Manual p1589 example annotates DPTR0=#1000H as FF1000H (strong evidence).
 ; p1655's EA=(A)+(DPTR) wording does not explicitly define the bank. This

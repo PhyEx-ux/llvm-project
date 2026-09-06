@@ -1,7 +1,9 @@
 # STC32G12K128 首次真机验收指南
 
 适用对象：STC32G12K128（手册核对版本为 STC32G12K128-24A，2026-08-19）。
-本包已经过编译、严格链接与冻结 QEMU 回归，**尚未获得用户真机串口结果**。
+layout-v2 已规避首次真机烧录暴露的 EEPROM 窗口冲突。旧版三个固件首字符前
+无输出，现场确认板子/串口/ISP流程正常、EEPROM设为1K；新版仍须重烧并保存
+真实串口结果，不能仅凭布局修复或QEMU通过宣布真机验收成功。
 本指南区分“手册依据”“QEMU 实测”和“待真机裁定”，不把仿真通过当作实机通过。
 
 ## 1. 固定验收条件
@@ -9,9 +11,11 @@
 - 官方下载工具：Windows **AiCube-ISP**，选择实际芯片型号及正确 COM 口。
 - 在 ISP 中明确将**用户 HIRC 设为 24MHz**。上电先运行 ISP 的 24MHz HIRC，
   不代表用户程序必然继承 24MHz；用户程序使用 ISP 保存的时钟配置。
-- **EEPROM 分区设为 0 字节**。本包的 XINIT 从 `FE:0000` 开始，而 G12K128
-  的 EEPROM 也从 `FE:0000` 起分配；不仅 64KB 会冲突，任何非零分区都可能
-  覆盖本包起始数据。不要只笼统选择“小一点”。更改分区后完整断电再上电。
+- **本包统一支持 EEPROM 分区 ≤0x700 字节（1792字节，含现场1K），推荐0**。
+  layout-v2 两份demo的 XINIT 已从 `FE:0000` 移至 `FF:8000` 程序区，全部ROM
+  内容均在FF段，因此不再依赖EEPROM设0。MOVC探针必须在非FF段执行，现移至
+  `FE:0800`，所以它仍要求上述分区上限；不支持将更大分区随意套用到整个包。
+  更改分区后完整断电再上电。旧版FE:0000 XINIT及FE:0200探针不能继续烧录。
 - UART1：115200、8 数据位、无校验、1 停止位（8N1），无流控。
 - UART1 默认路由：RxD=P3.0、TxD=P3.1；P3.0/P3.1 配为准双向弱上拉，保留
   其它 GPIO 配置。代码不操作 P3.2。
@@ -51,38 +55,50 @@ PC USB-TTL GND  ------ 板上 GND
 
 ```bash
 python3 /mnt/c/Prj/LLVM/MCS251/validation/mcs251-demos/build-realhw.py \
-  --out /home/liu/mcs251-realhw-alice/selftest-real-hw
+  --out /home/liu/mcs251-realhw-alice/layout-v2/selftest-real-hw
 ```
 
 默认启用 `STC32_REAL_HW`，生成：
 
-- `/home/liu/mcs251-realhw-alice/selftest-real-hw/selftest.hex`：**要烧录的文件**。
+- `/home/liu/mcs251-realhw-alice/layout-v2/selftest-real-hw/selftest.hex`：**要烧录的文件**。
 - 同目录 `layout.json`：区域实际地址与初始 SPX。
 - `.ll`、`.rel`、`.lk`：复验中间产物；它们不是烧录文件。
 
-脚本检查非空 CODE slice 在 `FE:0000–FF:FFFF`，内部数据在栈起点之下，
+layout-v2单文件构建脚本检查非空 CODE slice 全在 `FF:0000–FF:FFFF`，内部数据在栈起点之下，
 XDATA（如存在）在 `01:0000–01:1FFF`。标准 Intel HEX 含扩展线性地址记录，
 在 AiCube-ISP 中使用 HEX-80/Intel HEX，不转成丢失高地址的裸 binary。
 
-Windows 可通过 `\\wsl.localhost\Debian\home\liu\mcs251-realhw-alice\selftest-real-hw\selftest.hex`
+Windows 可通过 `\\wsl.localhost\Debian\home\liu\mcs251-realhw-alice\layout-v2\selftest-real-hw\selftest.hex`
 访问该文件，或复制到本地磁盘。WSL 发行版名不是 Debian 时相应替换。
 
 ### 14 项工程版
 
 ```bash
 make -C /mnt/c/Prj/LLVM/MCS251/validation/mcs251-demo-modern \
-  BUILD=/home/liu/mcs251-realhw-alice/modern-real-hw \
+  BUILD=/home/liu/mcs251-realhw-alice/layout-v2/modern-real-hw \
   CFLAGS='--target=mcs251-unknown-none -std=c11 -O2 -Wall -Wextra -DSTC32_REAL_HW'
 ```
 
-烧录 `/home/liu/mcs251-realhw-alice/modern-real-hw/demo.hex`。
+烧录 `/home/liu/mcs251-realhw-alice/layout-v2/modern-real-hw/demo.hex`。
 **不要烧默认 `make check` 生成的 QEMU test-port 固件**；不要用 QEMU 跑真机
 TI 轮询分支。编译参数改变时用不同 BUILD 目录，避免复用旧产物。
+
+### 本次 layout-v2 发布位
+
+重构建并审计后发布到 Windows 侧，烧录前核对本次提供的 SHA256：
+
+- `/mnt/c/Prj/LLVM/realhw-hex/selftest.hex`（Windows：`C:\Prj\LLVM\realhw-hex\selftest.hex`）
+- `/mnt/c/Prj/LLVM/realhw-hex/modern-demo.hex`
+- `/mnt/c/Prj/LLVM/realhw-hex/movc-arbitration.hex`
+
+旧发布件保留在 `/home/liu/mcs251-realhw-alice/layout-v2/previous-published/`。
+`selftest-eeprom1k.hex`（FE:0400）是现场临时诊断版，不是这里的FF:8000根治版。
 
 ## 4. AiCube-ISP 操作顺序
 
 1. 关闭占用 COM 口的串口终端；选择芯片型号、COM 口，核对供电和接线。
-2. 打开上节指定的 **真机版 `.hex`**；设置用户 HIRC=24MHz、EEPROM=0。
+2. 打开上节指定的 **layout-v2真机版 `.hex`**；设置用户HIRC=24MHz、
+   EEPROM≤0x700字节（推荐0，现场1K即0x400也可）。不要误选旧HEX或临时FE:0400版。
 3. 芯片断电；确认没有 USB-TTL 反向供电。
 4. PC 点击“下载/编程”，进入等待芯片状态。
 5. 再给芯片上电，等待芯片识别、擦写、校验全部成功；保存下载日志和设置截图。
@@ -129,7 +145,11 @@ SELFTEST-PASS
 | Flash | `FE:0000–FF:FFFF`，128KB |
 | HOME / 向量 | `FF:0000` / `FF:0003 + n*8` |
 | BOOT / CSEG | `FF:0100` / `FF:0200` |
-| XINIT | `FE:0000`，故 EEPROM 必须为0 |
+| XINIT（layout-v2） | `FF:8000`程序区，不再占用FE EEPROM窗口 |
+
+当前CSEG只有约8–10KB，低于FF:8000，XINIT与它不重叠。HEX为稀疏记录，不因
+中间空隙填满Flash；后续程序增长必须重新审计各slice，不能假定CSEG永远不会
+接近XINIT。FF段总容量为64KB，不能据128KB芯片容量忽略这一布局限制。
 
 此前 QEMU 专用栈 `SPX=0x2fff` 已被本包自启动 crt 修复。新 crt 引用
 `__mcs251_stack_base`：链接器按所有内部字节数据 slice 的真实最大 end 计算，
@@ -174,13 +194,14 @@ BOOT 先写 WTST(0xE9)=0：手册p553规定 G12上电值为7，工作频率低�
 
 ```bash
 python3 /mnt/c/Prj/LLVM/MCS251/validation/mcs251-demos/movc-arbitration/build.py \
-  --out /home/liu/mcs251-realhw-alice/movc --run-qemu
+  --out /home/liu/mcs251-realhw-alice/layout-v2/movc --run-qemu
 ```
 
-真机烧录 `/home/liu/mcs251-realhw-alice/movc/movc-real-hw.hex`；不要烧
-`movc-qemu.hex`。同样 ISP24MHz、EEPROM=0、115200/8N1。
+真机烧录 `/home/liu/mcs251-realhw-alice/layout-v2/movc/movc-real-hw.hex`；不要烧
+`movc-qemu.hex`。同样ISP24MHz、EEPROM≤0x700字节（推荐0）、115200/8N1。
 
-探针在 `FE:0200`附近执行 MOVC，DPTR=0x8000、A=0；两个哨兵分别为
+layout-v2探针在 `FE:0800`附近执行 MOVC（实际指令地址见布局文件），避开
+FE:0000起的常规1K窗口；DPTR=0x8000、A=0，两个哨兵仍分别为
 `FE:8000=0x3C`、`FF:8000=0xA7`。同时使用完整24位DR寻址读取两处作为控制。
 布局文件 `.layout.json` 可核对 MOVC 指令地址，固件不使用MOVC读取提示字符串。
 
@@ -207,7 +228,9 @@ p1655规范仅写EA=(A)+(DPTR)，没有明确bank文字。必须保留实际真�
   检查HIRC=24MHz、P3.0/1路由、Timer2是否被其它代码占用。
 - 乱码：优先检查ISP用户时钟、终端115200/8N1、电平和接线，不先改真值。
 - 反复重启或递归项之前停止：检查电源、旧crt栈值、EEPROM分区和栈峰值。
-- 出现 `globals:FAIL`：优先检查FE:0000的XINIT是否被EEPROM配置占用。
+- 首字符前卡死或出现 `globals:FAIL`：确认烧的是layout-v2（XINIT=FF:8000），
+  而不是FE:0000旧版；核对下载校验和HEX SHA256。MOVC还需检查EEPROM上限。
+  EEPROM=0是独立诊断手段，但新版两demo不应依赖该设置才能通过。
 - 出现 `S` / `!`：分别表示主函数返回 / 无处理器中断，不属于正常通过输出。
 - 动态栈链接门禁失败：减少内部静态数据或调整有依据的存储方案；不要删除门禁
   或把EDATA上限改成QEMU的16KB来让真机包“编过”。

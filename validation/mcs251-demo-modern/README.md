@@ -89,14 +89,16 @@ STC32）各自运行，逐字比对输出——语义一致才算通过，必须
 SCON=0x50、Timer2 1T重载0xFFCC，对应115200/8N1（实际+0.16%误差）。
 AUXR逐位保留其它配置，清T2_C/T，最后启动T2R。共享crt先写WTST=0，再从
 链接器符号设置4KB EDATA内的动态向上栈，保证静态布局剩余至少1KB。
-**仍待用户首次真机验收**；EEPROM必须设0，避免FE:0000与XINIT冲突。
+**layout-v2待用户真机复验**；XINIT已移至FF:8000程序段，不再与FE:0000起的
+EEPROM窗口冲突。本包统一支持EEPROM≤0x700字节（含1K），推荐0；该上限来自
+独立MOVC探针的FE执行段，两份demo自身全部ROM内容位于FF段。
 完整接线/下载步骤和QEMU差异矩阵见
 `/mnt/c/Prj/LLVM/MCS251/validation/mcs251-demos/REALHW-GUIDE.md`。
 
 仅验证真机分支编译/链接时，使用独立构建目录（不执行 `make check`）：
 
 ```bash
-make BUILD=/home/liu/mcs251-realhw-alice/modern-real-hw \
+make BUILD=/home/liu/mcs251-realhw-alice/layout-v2/modern-real-hw \
   CFLAGS='--target=mcs251-unknown-none -std=c11 -O2 -Wall -Wextra -DSTC32_REAL_HW'
 ```
 
