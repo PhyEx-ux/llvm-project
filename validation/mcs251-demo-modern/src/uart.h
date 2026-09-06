@@ -13,6 +13,7 @@
 #define MCS251_DEMO_UART_H
 
 #include <stdint.h>
+#include "board_config.h"
 
 #if defined(HOST_BUILD) && defined(STC32_REAL_HW)
 #error "HOST_BUILD 与 STC32_REAL_HW 必须二选一"
@@ -29,12 +30,15 @@ static void uart_status_pause(void)
         while (--inner) { }
     } while (--outer);
 }
-/* ---------- STC32G12K128：ISP HIRC=24MHz，UART1 115200/8N1 ----------
- * 官方手册页 441/675/774/777；尚待用户真机实测，不假定 ISP 用户时钟默认值。
- * T2 重载=65536-round(24000000/(4*115200))=0xFFCC；实际115384.6，+0.16%。
- * 仅访问标准 SFR，无需打开扩展 SFR。P_SW1全写0也复位其它复用路由，
- * 适用于此独占演示；集成其它外设需重新审计。GPIO与AUXR其余位仍保留。
+/* ---------- 板级 UART1（参数来自生成的 board_config.h） ----------
+ * 当前配置使用 P3.0/P3.1、SCON 模式1和 Timer2 1T；HRIC/BAUD/重载值由
+ * boards 目录下的板级片段提供。仅访问标准 SFR，无需打开扩展 SFR。P_SW1全写0也复位
+ * 其它复用路由，适用于此独占演示；集成其它外设需重新审计。
  */
+#define EXPECTED_UART_RELOAD \
+    (0x10000u - ((HRIC + (2u * BAUD)) / (4u * BAUD)))
+_Static_assert(UART_RELOAD == EXPECTED_UART_RELOAD,
+               "UART_RELOAD 与 HRIC/BAUD 不一致");
 #define AUXR (*(volatile uint8_t *)0x8E)
 #define SCON (*(volatile uint8_t *)0x98)
 #define SBUF (*(volatile uint8_t *)0x99)
@@ -51,8 +55,8 @@ static void uart_init(void)
     AUXR &= (uint8_t)~0x10u; /* T2R=0：停止后写计数/重载寄存器。 */
     AUXR &= (uint8_t)~0x08u; /* T2_C/T=0：内部时钟定时器，非外部计数器。 */
     SCON = 0x50u;           /* 模式1，REN=1，TI/RI清零。 */
-    T2L = 0xCCu;
-    T2H = 0xFFu;
+    T2L = (uint8_t)UART_RELOAD;
+    T2H = (uint8_t)(UART_RELOAD >> 8);
     AUXR |= 0x01u;          /* S1BRT=1：UART1使用Timer2。 */
     AUXR |= 0x04u;          /* T2x12=1：1T。 */
     AUXR |= 0x10u;          /* T2R=1：最后启动；合计置位0x15，不置bit3。 */

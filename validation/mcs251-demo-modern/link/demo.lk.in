@@ -8,10 +8,10 @@
 ; ECALL/EJMP 是 24 位寻址，CSEG 放哪个 64K bank 都可达（此处沿用 selfstart 布局）。
 -b HOME = 0xff0000
 -b VECS = 0xff0003
-; XINIT 放 FF 程序段，避开 ISP 在 FE:0000 起划出的 EEPROM。
--b XINIT = 0xff8000
+; XINIT/CSEG 由所选 boards/*.mk 提供；当前两板均落在 FE/FF 交集区。
+-b XINIT = @XINIT_BASE@
 -b BOOT = 0xff0100
--b CSEG = 0xff0200
+-b CSEG = @CSEG_BASE@
 ; DSEG 由链接器自动布局（不绑定基址），XINIT 记录表指向各 DSEG slice。
 -A stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small stack-auto=0 xstack=0 intlong-reent=0 float-reent=0 reg-params=1 all-callee-saves=0 sdcccall=2 regset=r0-r9,r12-r15 compiler-build=mcs251-abi1.0-r1
 @CRT_REL@

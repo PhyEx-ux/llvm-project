@@ -88,6 +88,21 @@
 #include <stdio.h>
 #endif
 
+/* 单文件分发版的板级默认值；换板可用同名 -D 参数覆盖。 */
+#ifndef HRIC
+#define HRIC 24000000u
+#endif
+#ifndef BAUD
+#define BAUD 115200u
+#endif
+#ifndef UART_RELOAD
+#define UART_RELOAD 0xffccu
+#endif
+#define EXPECTED_UART_RELOAD \
+    (0x10000u - ((HRIC + (2u * BAUD)) / (4u * BAUD)))
+_Static_assert(UART_RELOAD == EXPECTED_UART_RELOAD,
+               "UART_RELOAD 与 HRIC/BAUD 不一致");
+
 /* ---------------- 串口 / 输出 ---------------- */
 
 /*
@@ -98,10 +113,10 @@
  *   SCON 模式、不模拟波特率、不置 TI，因此无需任何初始化或轮询。
  *   （整个测试体系 harness 的 serial oracle 都建立在这个语义上。）
  *
- *  真机路径（-DSTC32_REAL_HW）：STC32G12K128，必须在 AiCube-ISP 中将
- *   用户HIRC设24MHz；本程序不假定用户程序的时钟默认值。
+ *  真机路径（-DSTC32_REAL_HW）：HRIC/BAUD/UART_RELOAD 使用上方板级宏，
+ *   必须与 ISP 中保存的用户时钟一致；本程序不假定用户程序的时钟默认值。
  *   UART1路由00（RxD=P3.0/TxD=P3.1），SCON=0x50，Timer2为1T内部定时器，
- *   重载0xFFCC，115200/8N1（实际115384.6，误差+0.16%）。写SBUF后查TI并清零。
+ *   写SBUF后查TI并清零。
  *   参数依据官方手册页441/675/774/777；编译/QEMU验证不能替代首次真机验收。
  *   栈由crt引用的链接器符号自动置于数据区之上，使用真实4K EDATA范围。
  *   layout-v2：XINIT移到FF:8000程序段，两demo不再读取FE EEPROM窗口。
@@ -129,8 +144,8 @@ static void uart_init(void)
     AUXR &= (uint8_t)~0x10u; /* T2R=0，停止后写入重载。 */
     AUXR &= (uint8_t)~0x08u; /* T2_C/T=0：定时器，不是外部计数器。 */
     SCON = 0x50u;           /* 模式1、REN=1、TI/RI=0。 */
-    T2L = 0xCCu;            /* ISP HIRC=24MHz @115200：0xFFCC。 */
-    T2H = 0xFFu;
+    T2L = (uint8_t)UART_RELOAD;
+    T2H = (uint8_t)(UART_RELOAD >> 8);
     AUXR |= 0x01u;          /* S1BRT=1，UART1选择Timer2。 */
     AUXR |= 0x04u;          /* T2x12=1，1T。 */
     AUXR |= 0x10u;          /* T2R=1，最后启动；合计0x15，不置bit3。 */

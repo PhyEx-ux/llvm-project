@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""G12K128 self-start stack contract; no compiler/QEMU dependency."""
+"""Configurable EDATA self-start stack contract; no compiler/QEMU dependency."""
+from contextlib import redirect_stderr
 import importlib.util
+import io
 from pathlib import Path
 import unittest
 
@@ -10,8 +12,8 @@ spec.loader.exec_module(mld)
 
 
 class StackBaseTest(unittest.TestCase):
-    def linker(self, opt_in=True):
-        linker = mld.Linker()
+    def linker(self, opt_in=True, edata_end=0x0FFF):
+        linker = mld.Linker(edata_end=edata_end)
         if opt_in:
             symbol = linker.lkpsym("__mcs251_stack_base", create=True)
             symbol.ref_modules.append(mld.Head("crt.rel"))
@@ -57,11 +59,44 @@ class StackBaseTest(unittest.TestCase):
         self.area(linker, "DATA", [(0x100, 0xaf0)])
         self.assertEqual(self.value(linker), 0xbff)
 
-    def test_insufficient_capacity_rejected(self):
+    def test_default_4k_edata_insufficient_capacity_rejected(self):
         linker = self.linker()
         self.area(linker, "DATA", [(0x100, 0xaf1)])
-        with self.assertRaisesRegex(mld.LinkError, "stack capacity: data end 0x0BF1 leaves fewer than 1024 bytes"):
+        with self.assertRaisesRegex(
+                mld.LinkError,
+                "data end 0x0BF1 leaves fewer than 1024 bytes in EDATA ending at 0x0FFF"):
             self.value(linker)
+
+    def test_16k_edata_exactly_1k_available(self):
+        linker = self.linker(edata_end=0x3FFF)
+        self.area(linker, "DATA", [(0x100, 0x3af0)])
+        self.assertEqual(self.value(linker), 0x3bff)
+
+    def test_16k_edata_insufficient_capacity_rejected(self):
+        linker = self.linker(edata_end=0x3FFF)
+        self.area(linker, "DATA", [(0x100, 0x3af1)])
+        with self.assertRaisesRegex(
+                mld.LinkError,
+                "data end 0x3BF1 leaves fewer than 1024 bytes in EDATA ending at 0x3FFF"):
+            self.value(linker)
+
+    def test_diagnostic_reports_configured_edata_end_and_capacity(self):
+        linker = self.linker(edata_end=0x3FFF)
+        stream = io.StringIO()
+        with redirect_stderr(stream):
+            self.assertEqual(self.value(linker), 0x10f)
+        self.assertIn("capacity=16112 bytes (EDATA end=0x3FFF)",
+                      stream.getvalue())
+
+    def test_edata_end_parser(self):
+        self.assertEqual(mld.parse_edata_end("0x3fff"), 0x3FFF)
+        self.assertEqual(mld.parse_edata_end("16383"), 0x3FFF)
+        with self.assertRaisesRegex(mld.LinkError,
+                                    "invalid --edata-end value"):
+            mld.parse_edata_end("0x10000")
+        with self.assertRaisesRegex(mld.LinkError,
+                                    "invalid --edata-end value"):
+            mld.parse_edata_end("not-a-number")
 
     def test_legacy_chain_unchanged(self):
         linker = self.linker(False)

@@ -21,6 +21,7 @@ def require_pass(data, label):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qemu", required=True)
+    parser.add_argument("--machine", required=True)
     parser.add_argument("--image", type=Path, required=True)
     parser.add_argument("--serial", type=Path, required=True)
     parser.add_argument("--expected", type=Path)
@@ -30,7 +31,7 @@ def main():
     if expected is not None:
         require_pass(expected, "宿主机")
     args.serial.parent.mkdir(parents=True, exist_ok=True)
-    command = [args.qemu, "-M", "stc32g144k246", "-bios", str(args.image),
+    command = [args.qemu, "-M", args.machine, "-bios", str(args.image),
                "-accel", "tcg", "-icount", "shift=0,align=off,sleep=off",
                "-display", "none", "-monitor", "none", "-serial", "stdio"]
     output = bytearray()

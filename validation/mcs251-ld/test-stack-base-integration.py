@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble/link/QEMU checks for the self-start stack symbol (run in WSL)."""
+"""Assemble/link/QEMU checks for the configurable self-start stack (WSL)."""
 import argparse
 import importlib.util
 import json
@@ -30,12 +30,17 @@ def main():
     app = assemble("app", ".globl _main\n.area CSEG (CODE)\n_main:\nmov r0,0x85\ncmp r0,#2\njne bad\nmov r0,0x81\ncmp r0,#0x92\njne bad\nmov 0x99,#'K'\nhalt: sjmp halt\nbad: mov 0x99,#'F'\nsjmp halt\n")
     data = assemble("data", ".area STATIC (DATA)\n.ds 0x71\n")
     template = (ROOT / "validation/mcs251-firmware/link-selfstart.lk").read_text()
-    def command(name, objects, extra=""):
+    def command(name, objects, extra="", edata_end=None):
         base = work / name
         text = template.replace("@OUTPUT_STEM@", str(base)).replace("@CRT_REL@", str(objects[0])).replace("@MODULE_REL@", "\n".join(map(str, objects[1:])))
         text = text.replace("-e\n", extra + "-e\n")
         lk = base.with_suffix(".lk"); lk.write_text(text)
-        result = subprocess.run(["python3", str(HERE / "mcs251_ld.py"), "--mcs251-abi", "-f", str(lk)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        cmd = ["python3", str(HERE / "mcs251_ld.py"), "--mcs251-abi"]
+        if edata_end is not None:
+            cmd.extend(["--edata-end", hex(edata_end)])
+        cmd.extend(["-f", str(lk)])
+        result = subprocess.run(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
         base.with_suffix(".log").write_bytes(result.stdout)
         return base, result
     # STATIC ends at 0271; align->0280, guard->0290, SPX=028f.
@@ -53,7 +58,21 @@ def main():
     large = assemble("large", ".area STATIC (DATA)\n.ds 0xaf1\n")
     bad, result = command("capacity", [crt, app, large], "-b STATIC=0x100\n")
     assert result.returncode != 0
-    assert b"stack capacity: data end 0x0BF1 leaves fewer than 1024 bytes" in result.stdout
+    assert (b"data end 0x0BF1 leaves fewer than 1024 bytes in EDATA "
+            b"ending at 0x0FFF") in result.stdout
+    assert not bad.with_suffix(".hex").exists()
+    wide_good = assemble("wide_good", ".area STATIC (DATA)\n.ds 0x3af0\n")
+    wide, result = command("wide-good", [crt, app, wide_good],
+                           "-b STATIC=0x100\n", edata_end=0x3fff)
+    assert result.returncode == 0, result.stdout
+    assert b"capacity=1024 bytes (EDATA end=0x3FFF)" in result.stdout
+    assert wide.with_suffix(".hex").exists()
+    wide_bad = assemble("wide_bad", ".area STATIC (DATA)\n.ds 0x3af1\n")
+    bad, result = command("wide-capacity", [crt, app, wide_bad],
+                          "-b STATIC=0x100\n", edata_end=0x3fff)
+    assert result.returncode != 0
+    assert (b"data end 0x3BF1 leaves fewer than 1024 bytes in EDATA "
+            b"ending at 0x3FFF") in result.stdout
     assert not bad.with_suffix(".hex").exists()
     # No opt-in reference: the identical overlarge data layout remains legal,
     # and the synthetic symbol is not introduced (old sdld-compatible mode).
@@ -64,7 +83,8 @@ def main():
     mld = importlib.util.module_from_spec(spec); spec.loader.exec_module(mld)
     linker = mld.Linker(strict_abi=True); linker.parse_command_file(str(old.with_suffix(".lk"))); linker.read_all_rels(); linker.setarea(); linker.lnkarea2()
     assert "__mcs251_stack_base" not in linker.symtab
-    print("STACK-INTEGRATION-PASS: crt SPX=028f, main SPX=0292 serial=K; capacity rejected; legacy unchanged")
+    print("STACK-INTEGRATION-PASS: crt SPX=028f, main SPX=0292 serial=K; "
+          "4K/16K capacity gates passed; legacy unchanged")
 
 
 if __name__ == "__main__":

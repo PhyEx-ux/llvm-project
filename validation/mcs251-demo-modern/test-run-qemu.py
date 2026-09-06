@@ -26,7 +26,8 @@ class RunnerTest(unittest.TestCase):
                 serial.write_text(GOOD)
             result = subprocess.run(
                 [sys.executable, str(RUNNER), "--qemu", str(fake),
-                 "--image", str(root / "unused.hex"), "--serial", str(serial),
+                 "--machine", "test-machine", "--image", str(root / "unused.hex"),
+                 "--serial", str(serial),
                  "--expected", str(oracle), "--timeout", "0.5"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
             return result, serial.read_text() if serial.exists() else None

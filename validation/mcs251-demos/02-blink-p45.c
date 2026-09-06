@@ -14,12 +14,19 @@
  *  volatile计数保证-O2不删除空循环；编译器生成的访存开销使旧6T估算失效。
  *  QEMU观察串口需显式开UART且不定义STC32_REAL_HW；纯LED模式本就没有serial。
  *
+ *  换板需改的值（本文件不引入 Makefile，均可用同名 -D 覆盖）：
+ *    HRIC / BAUD / UART_RELOAD：用户时钟、串口速率与 Timer2 1T 重载；
+ *    LED_PORT / LED_BIT：板载 LED 所在端口和位掩码；若端口不是 P4，还需按
+ *      对应手册改下面的模式寄存器定义及初始化；
+ *    链接命令中的 CSEG/XINIT 与 --edata-end、烧录 EEPROM 上限；
+ *    QEMU 命令的 -M 机器名。工程化多板构建见相邻 mcs251-demo-modern/boards/。
+ *
  *  硬件依据（STC32G 官方头文件 / 手册）：
  *    P4   = 0xC0   P4 数据口
  *    P4M1 = 0xB3   P4 模式寄存器 1
  *    P4M0 = 0xB4   P4 模式寄存器 0
  *    P4.0~P4.7 上电默认高阻 —— 必须先配 P4M1=0/P4M0=0（准双向）才能驱动 LED
- *    延时预算沿用 MAIN_Fosc/6000 次，但volatile访存开销不同，必须实机校准
+ *    延时预算使用 HRIC/6000 次，但volatile访存开销不同，必须实机校准
  *
  *  构建命令（WSL 内，从仓库根；真机版加 -DSTC32_REAL_HW）：
  *    /home/liu/build-clang/bin/clang --target=mcs251-unknown-none \
@@ -50,13 +57,30 @@
 #define BLINK_ENABLE_UART 0
 #endif
 
-#define MAIN_Fosc 24000000UL   /* 主频：与烧录时 ISP 选择的 HIRC 一致 */
+#ifndef HRIC
+#define HRIC 24000000u
+#endif
+#ifndef BAUD
+#define BAUD 115200u
+#endif
+#ifndef UART_RELOAD
+#define UART_RELOAD 0xffccu
+#endif
+#ifndef LED_PORT
+#define LED_PORT P4
+#endif
+#ifndef LED_BIT
+#define LED_BIT 0x20u
+#endif
+#define EXPECTED_UART_RELOAD \
+    (0x10000u - ((HRIC + (2u * BAUD)) / (4u * BAUD)))
+_Static_assert(UART_RELOAD == EXPECTED_UART_RELOAD,
+               "UART_RELOAD 与 HRIC/BAUD 不一致");
 
 /* ---------- GPIO / 串口寄存器（官方头文件地址） ---------- */
 #define P4     (*(volatile uint8_t *)0xC0)   /* P4 数据口 */
 #define P4M1   (*(volatile uint8_t *)0xB3)   /* P4 模式 1 */
 #define P4M0   (*(volatile uint8_t *)0xB4)   /* P4 模式 0 */
-#define LED_BIT 0x20u                         /* P4.5 */
 
 /* ---------- 显式启用时才编译串口路径 ---------- */
 #if BLINK_ENABLE_UART
@@ -71,7 +95,7 @@ static void puthex_(uint32_t v)
     }
 }
 #elif defined(STC32_REAL_HW)
-/* 真机串口：UART1 @ P3.0/P3.1，24MHz 下 115200 8N1（Timer2 1T 重载 0xFFCC） */
+/* 真机串口：UART1 @ P3.0/P3.1，HRIC/BAUD/UART_RELOAD 由上方宏配置。 */
 #define SCON (*(volatile uint8_t *)0x98)
 #define SBUF (*(volatile uint8_t *)0x99)
 #define T2L  (*(volatile uint8_t *)0xD7)
@@ -89,7 +113,8 @@ static void uart_init(void)
     P3M0 &= (uint8_t)~0x03u;
     AUXR &= (uint8_t)~0x10u; /* 停止T2后装入重载，防止继承运行状态。 */
     SCON = 0x50u;             /* 模式 1，REN=1 */
-    T2L = 0xCCu; T2H = 0xFFu; /* 24MHz@115200 重载 */
+    T2L = (uint8_t)UART_RELOAD;
+    T2H = (uint8_t)(UART_RELOAD >> 8);
     AUXR &= (uint8_t)~0x08u;  /* T2_C/T=0：定时器模式 */
     AUXR |= 0x05u;            /* S1BRT=1 选 T2、T2x12=1 1T */
     AUXR |= 0x10u;            /* T2R=1 启动（最后置位） */
@@ -128,7 +153,7 @@ static void delay_ms(uint16_t ms)
     if (!ms) return;
     volatile uint16_t remaining = ms;
     do {
-        volatile uint16_t i = (uint16_t)(MAIN_Fosc / 6000UL);
+        volatile uint16_t i = (uint16_t)(HRIC / 6000u);
         while (--i) { }
     } while (--remaining);
 }
@@ -141,14 +166,14 @@ int main(void)
 
     P4M1 = 0x00u;             /* P4 全口准双向（上电高阻，必须先配） */
     P4M0 = 0x00u;
-    P4 &= (uint8_t)~LED_BIT;  /* 初始熄灭（假设 LED 低电平点亮/高电平熄灭之一） */
+    LED_PORT &= (uint8_t)~LED_BIT; /* 初始电平；实际亮灭极性按开发板确认。 */
 
 #if BLINK_ENABLE_UART
     uart_init();
 #endif
 
     for (;;) {
-        P4 ^= LED_BIT;        /* 翻转在任何可选串口等待之前。 */
+        LED_PORT ^= LED_BIT;  /* 翻转在任何可选串口等待之前。 */
 #if BLINK_ENABLE_UART
         putstr_("tick=");
         puthex_(tick);

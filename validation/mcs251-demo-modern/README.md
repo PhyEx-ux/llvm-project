@@ -15,7 +15,7 @@ llc (MCS251 后端, -filetype=obj)
 mcs251_ld.py (自研链接器, 严格 ABI 模式)
     │  布局 CSEG/DSEG/XINIT/VECS/HOME, 产出 Intel-HEX
     ▼
-qemu-system-mcs251 (-M stc32g144k246)
+qemu-system-mcs251（机器名来自 boards/*.mk）
        串口 transcript 即验收输出
 ```
 
@@ -67,10 +67,31 @@ make check      # 黄金验收：host gcc 编同一份源码生成期望输出�
 make test-runner # 无需目标工具链，测试超时/旧输出/同错伪通过等负例
 make clean      # 清理构建产物
 
+# 选择板型；缺省 BOARD=stc32g12k128
+make BOARD=stc32g12k128 check
+make BOARD=stc32g144k246 check
+
 # 保留独立证据目录；工具路径与构建目录均可覆盖
-make BUILD=/home/liu/mcs251-demo-alice/build check
+make BOARD=stc32g144k246 BUILD=/home/liu/mcs251-demo-g144 check
 # 链接器变量为 MCS251_LD，不使用 GNU make 内置的 LD=ld
 ```
+
+## 板级配置架构
+
+型号差异只存在于构建层：`boards/<BOARD>.mk` 提供 Flash/EDATA、链接布局、
+UART/LED 与 QEMU 参数；Makefile 生成 `$(BUILD)/board_config.h` 给 C 源消费，并把
+`EDATA_END` 作为纯数值 `--edata-end` 参数传给链接器。Clang/LLVM/MC 与链接器
+内部都不含型号表或型号自动探测；编译器只认识 MCS-251 架构。
+
+| BOARD | 数据依据 | EDATA 门禁 | QEMU 说明 |
+|---|---|---:|---|
+| `stc32g12k128`（默认） | 现有真机实证配置 | `0x0FFF` | 当前以 G144 QEMU 机器代跑；镜像只用两型号 Flash 交集区 |
+| `stc32g144k246` | 手册内存数据 + 对应 QEMU 机器 | `0x3FFF` | 原生使用 `stc32g144k246` 机器；不等于 G144 真机 UART/LED 已验证 |
+
+两个片段当前都把 CSEG/XINIT 放在 `FF:0200`/`FF:8000`，因此默认板生成的 HEX
+与多板改造前逐字节一致。若新增板型，必须补齐片段中的全部变量；未知或缺变量的
+BOARD 会在 Makefile 解析阶段失败。同一个 BUILD 目录切换 BOARD 时，型号戳会
+强制刷新生成头和链接命令文件；正式验收仍建议每板使用独立 BUILD 目录。
 
 `make check` 是本工程的验收口径：同一份 C 源在宿主机（gcc）与目标机（QEMU 里的
 STC32）各自运行，逐字比对输出——语义一致才算通过，必须完整输出 14 项 `:OK`
@@ -80,27 +101,30 @@ STC32）各自运行，逐字比对输出——语义一致才算通过，必须
 
 ## QEMU 与真机串口不是同一条验收链
 
-`uart.h` 提供三个互斥路径：`HOST_BUILD` 走宿主 stdio；默认路径走冻结 QEMU
-的 UART test-port（写 SBUF 即输出，不模拟波特率、不置 TI）；`STC32_REAL_HW`
-走 STC32G12K128 的 SCON 模式1、Timer2波特率和写SBUF后TI轮询。
+`uart.h` 提供三个互斥路径：`HOST_BUILD` 走宿主 stdio；默认路径走板片段所选
+QEMU 的 UART test-port（写 SBUF 即输出，不模拟波特率、不置 TI）；
+`STC32_REAL_HW` 走 SCON 模式1、Timer2波特率和写SBUF后TI轮询。
 **真机轮询路径不能拿到当前 QEMU 中运行**。
 
-真机参数已按官方手册填实：ISP用户HIRC必须设24MHz，UART1=P3.0/P3.1，
-SCON=0x50、Timer2 1T重载0xFFCC，对应115200/8N1（实际+0.16%误差）。
-UART入口先显式 `P_SW1=0`（连续UART探针已真机通过的保守配置，不代表测过
-复位值）；该整字节写也复位其它复用路由，本demo不使用那些外设。
-AUXR逐位保留其它配置，清T2_C/T，最后启动T2R。共享crt先写WTST=0，再从
-链接器符号设置4KB EDATA内的动态向上栈，保证静态布局剩余至少1KB。
-**layout-v2待用户真机复验**；XINIT已移至FF:8000程序段，不再与FE:0000起的
-EEPROM窗口冲突。本包统一支持EEPROM≤0x700字节（含1K），推荐0；该上限来自
-独立MOVC探针的FE执行段，两份demo自身全部ROM内容位于FF段。
+`HRIC/BAUD/UART_RELOAD` 来自生成的板级头，并有编译期一致性断言。当前两个
+片段均为24MHz、115200/8N1、Timer2 1T重载0xFFCC；其中 G12 配置已走过连续
+UART真机探针，G144参数只作公共保守配置，尚无 G144 真机闭环。UART入口显式
+`P_SW1=0`；该整字节写也复位其它复用路由，本demo不使用那些外设。AUXR逐位
+保留其它配置，清T2_C/T，最后启动T2R。共享crt从链接器符号设置动态向上栈，
+链接器按所选板的 `EDATA_END` 保证静态布局后至少剩余1KB。
+
+两个板片段均把 XINIT 放在FF:8000程序段，不再与FE:0000起的EEPROM窗口冲突。
+当前 `EEPROM_MAX=0x700` 是本演示包兼容独立MOVC探针的保守上限，推荐0；两份
+自检demo自身全部ROM内容位于FF段。G12单文件selftest layout-v2已有真机闭环，
+modern工程仍待复验；G144真机下载、UART与LED也须按手册和具体开发板单独验收。
 完整接线/下载步骤和QEMU差异矩阵见
 `/mnt/c/Prj/LLVM/MCS251/validation/mcs251-demos/REALHW-GUIDE.md`。
 
 仅验证真机分支编译/链接时，使用独立构建目录（不执行 `make check`）：
 
 ```bash
-make BUILD=/home/liu/mcs251-realhw-alice/layout-v2/modern-real-hw \
+make BOARD=stc32g12k128 \
+  BUILD=/home/liu/mcs251-realhw-alice/layout-v2/modern-real-hw \
   CFLAGS='--target=mcs251-unknown-none -std=c11 -O2 -Wall -Wextra -DSTC32_REAL_HW'
 ```
 

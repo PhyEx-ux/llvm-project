@@ -13,7 +13,12 @@ relocation arithmetic, and writes Intel HEX.
 Usage (aligned with sdld's command-file form):
 
     python3 mcs251_ld.py -f image.lk [--mcs251-abi] [--dump]
+                           [--edata-end <expr>]
     python3 mcs251_ld.py image.lk ...                    # same thing
+
+`--edata-end` supplies the inclusive EDATA limit used by the opt-in stack
+capacity gate (default 0x0FFF for backward compatibility).  It is a plain
+link parameter; the linker has no device-name knowledge.
 
 Command (.lk) file grammar, as consumed by sdld's parse()/doparse()
 (lkmain.c): one directive per line, `;` starts a comment at any token
@@ -329,9 +334,10 @@ def eval_expr(text, symtab=None):
 # ---------------------------------------------------------------------------
 
 class Linker(object):
-    def __init__(self, strict_abi=False, dump=False):
+    def __init__(self, strict_abi=False, dump=False, edata_end=0x0FFF):
         self.strict_abi = strict_abi
         self.dump = dump
+        self.edata_end = edata_end
         self.lkerr = 0          # counted errors (sdld lkerr)
         self.output_stem = None # first non-option token, minus extension
         self.inputs = []        # remaining non-option tokens (.rel files)
@@ -906,7 +912,7 @@ class Linker(object):
         xdatamap = self._Bitmap(0x1000000)  # xdatamap
         rloc = [0, 0, 0, 0]
         # Absolute slices lose their origin during relocation layout. Preserve
-        # their physical bounds for the opt-in G12K128 stack contract.
+        # their physical bounds for the opt-in EDATA stack contract.
         absolute_data_ends = [ax.addr + ax.size for ap in self.areas
                               if ap.flag & A3_ABS and ap.loc_index() == 0
                               for ax in ap.areaxs if ax.size]
@@ -992,7 +998,7 @@ class Linker(object):
         self._define_mcs251_stack_base(absolute_data_ends)
 
     def _define_mcs251_stack_base(self, absolute_data_ends):
-        """Self-start opt-in: place an upward stack in G12K128's 4K EDATA.
+        """Self-start opt-in: place an upward stack within configured EDATA.
 
         s_DSEG/l_DSEG are SDLD usage summaries, not a physical high-water
         mark. Use every byte-addressed internal slice (including OSEG/ISEG
@@ -1010,16 +1016,18 @@ class Linker(object):
                     for ax in ap.areaxs if ax.size)
         data_end = max([0x100] + ends)
         first_byte = ((data_end + 15) & ~15) + 16
-        if first_byte > 0x0C00:
+        capacity = self.edata_end + 1 - first_byte
+        if capacity < 1024:
             raise LinkError("?ASlink-Error-MCS251 stack capacity: data end "
-                            "0x%04X leaves fewer than 1024 bytes in 4K EDATA"
-                            % data_end)
+                            "0x%04X leaves fewer than 1024 bytes in EDATA "
+                            "ending at 0x%04X"
+                            % (data_end, self.edata_end))
         symbol.defined = True
         symbol.addr = first_byte - 1
         symbol.areax = None
         sys.stderr.write("MCS251 stack: data end=0x%04X SPX=0x%04X "
-                         "capacity=%d bytes (EDATA end=0x0FFF)\n"
-                         % (data_end, symbol.addr, 0x1000 - first_byte))
+                         "capacity=%d bytes (EDATA end=0x%04X)\n"
+                         % (data_end, symbol.addr, capacity, self.edata_end))
 
     def lnksect2(self, ap, loc, idatamap, codemap, xdatamap,
                  dram_start, iram_start):
@@ -1685,8 +1693,22 @@ class RelDump(object):
 
 def usage():
     sys.stderr.write(
-        "usage: mcs251_ld.py -f cmd.lk [--mcs251-abi] [--dump]\n"
+        "usage: mcs251_ld.py -f cmd.lk [--mcs251-abi] [--dump] "
+        "[--edata-end expr]\n"
         "       mcs251_ld.py cmd.lk ...\n")
+
+
+def parse_edata_end(text):
+    """Parse the inclusive 16-bit EDATA limit supplied by the build layer."""
+    try:
+        value = eval_expr(text)
+    except LinkError:
+        raise LinkError('?ASlink-Error-invalid --edata-end value "%s"' % text)
+    if value > 0xFFFF:
+        raise LinkError('?ASlink-Error-invalid --edata-end value "%s"; '
+                        'expected 0x0000..0xFFFF' % text)
+    return value
+
 
 def main(argv):
     args = argv[1:]
@@ -1694,30 +1716,43 @@ def main(argv):
     dump = "--dump" in args
     args = [a for a in args if a not in ("--mcs251-abi", "--dump")]
     lkfile = None
+    edata_end = 0x0FFF
     i = 0
-    while i < len(args):
-        a = args[i]
-        if a in ("-f", "--file"):
-            i += 1
-            if i >= len(args):
+    try:
+        while i < len(args):
+            a = args[i]
+            if a in ("-f", "--file"):
+                i += 1
+                if i >= len(args):
+                    usage()
+                    return ER_FATAL
+                lkfile = args[i]
+            elif a.startswith("-f") and len(a) > 2:
+                lkfile = a[2:]
+            elif a == "--edata-end":
+                i += 1
+                if i >= len(args):
+                    usage()
+                    return ER_FATAL
+                edata_end = parse_edata_end(args[i])
+            elif a.startswith("--edata-end="):
+                edata_end = parse_edata_end(a.split("=", 1)[1])
+            elif a in ("-h", "--help"):
                 usage()
-                return ER_FATAL
-            lkfile = args[i]
-        elif a.startswith("-f") and len(a) > 2:
-            lkfile = a[2:]
-        elif a in ("-h", "--help"):
-            usage()
-            return 0
-        elif lkfile is None and not a.startswith("-"):
-            lkfile = a
-        elif a.startswith("-"):
-            sys.stderr.write("?ASlink-Warning-Unkown option %s ignored\n" % a)
-        i += 1
+                return 0
+            elif lkfile is None and not a.startswith("-"):
+                lkfile = a
+            elif a.startswith("-"):
+                sys.stderr.write("?ASlink-Warning-Unkown option %s ignored\n" % a)
+            i += 1
+    except LinkError as e:
+        sys.stderr.write(str(e) + "\n")
+        return ER_FATAL
     if lkfile is None:
         usage()
         return ER_FATAL
 
-    lnk = Linker(strict_abi=strict, dump=dump)
+    lnk = Linker(strict_abi=strict, dump=dump, edata_end=edata_end)
     try:
         lnk.parse_command_file(lkfile)
         if dump:

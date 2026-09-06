@@ -1,7 +1,11 @@
-# STC32G12K128 首次真机验收指南
+# STC32 多型号 demo 验收指南
 
-适用对象：STC32G12K128（手册核对版本为 STC32G12K128-24A，2026-08-19）。
-layout-v2 已从布局上规避 EEPROM 窗口冲突。旧版串口空白不等于首字符前死机：
+## 1. 板型与证据边界
+
+### `BOARD=stc32g12k128`（默认，真机实证板）
+
+手册核对版本为 STC32G12K128-24A（2026-08-19）。layout-v2 已从布局上规避
+EEPROM窗口冲突。旧版串口空白不等于首字符前死机：
 后续M1.5/M1.6/M1.7真机实验已验证asm子集、ECALL/ERET和被测编译器函数路径；
 UART V0观测TI到来，V1连续整行在115200正确输出。早先“全编码错误”“TI永不
 置位”“P_SW1复位值非零”均不能作为已证根因。一次性输出在打开串口前结束是
@@ -17,19 +21,34 @@ UART V0观测TI到来，V1连续整行在115200正确输出。早先“全编码
 本指南区分“手册依据”“QEMU 实测”和“用户真机回报”，不把仿真通过当作实机通过。
 P_SW1复位值仍未实测；modern/MOVC整包真机结果及MOVC bank裁定不从selftest成功外推。
 
-## 1. 固定验收条件
+### `BOARD=stc32g144k246`（手册/QEMU 板）
+
+手册数据为 Flash `0xFC2800–0xFFFFFF`、EDATA 16KB（末地址 `0x3FFF`）、
+XDATA 128KB；现有 QEMU 机器名与该型号对应。工程仍把 CSEG/XINIT 放在
+`0xFF0200`/`0xFF8000`，只使用两型号的 FE/FF Flash 交集区。此配置已用于 QEMU
+验收，**没有 G144 真机下载、UART、LED 或 ISP 设置实证**；不能把 G12 的真机
+闭环外推给 G144。首次 G144 真机验收前必须按对应手册和开发板原理图复核引脚、
+时钟、WTST与EEPROM设置。
+
+型号区分仅存在于 `mcs251-demo-modern/boards/*.mk` 和 Makefile。生成的
+`board_config.h` 给 C 代码提供纯数值宏，链接器只接收 `--edata-end` 数值；
+编译器、MC 层和链接器内部都不含型号表。
+
+## 2. G12 已验证条件与 G144 复核要求
 
 - 官方下载工具：Windows **AiCube-ISP**，选择实际芯片型号及正确 COM 口。
-- 在 ISP 中明确将**用户 HIRC 设为 24MHz**。上电先运行 ISP 的 24MHz HIRC，
-  不代表用户程序必然继承 24MHz；用户程序使用 ISP 保存的时钟配置。
+- G12：在 ISP 中明确将**用户 HIRC 设为 24MHz**。上电先运行 ISP 的24MHz
+  HIRC，不代表用户程序必然继承24MHz；用户程序使用ISP保存的时钟配置。
+- G144：板片段当前也使用24MHz，但这只是与现有demo共享的保守配置；真机前
+  必须按对应手册/ISP选项复核，不能把G12的时钟实证直接外推。
 - **本包统一支持 EEPROM 分区 ≤0x700 字节（1792字节，含现场1K），推荐0**。
   layout-v2 两份demo的 XINIT 已从 `FE:0000` 移至 `FF:8000` 程序区，全部ROM
   内容均在FF段，因此不再依赖EEPROM设0。MOVC探针必须在非FF段执行，现移至
   `FE:0800`，所以它仍要求上述分区上限；不支持将更大分区随意套用到整个包。
   更改分区后完整断电再上电。旧版FE:0000 XINIT及FE:0200探针不能继续烧录。
 - UART1：115200、8 数据位、无校验、1 停止位（8N1），无流控。
-- UART1 默认路由：RxD=P3.0、TxD=P3.1；P3.0/P3.1 配为准双向弱上拉，保留
-  其它 GPIO 配置。代码不操作 P3.2。
+- UART1当前配置：RxD=P3.0、TxD=P3.1；P3.0/P3.1配为准双向弱上拉，保留
+  其它GPIO配置。代码不操作P3.2。该路由在G12闭环通过；G144真机仍需复核。
 - 使用与开发板供电/IO 电平匹配的 **USB-TTL** 串口适配器；禁止将 RS-232
   正负电压接口直接接入芯片。供电电压与封装引脚号以你的板图/芯片手册为准。
 
@@ -42,7 +61,7 @@ B0（S1BRT）、B2（T2x12=1T）、最后置 B4（T2R）。这些置位合计为
 115384.6，误差 +0.16%。发送使用“写 SBUF → 等 TI → 清 TI”，不依赖预置 TI。
 本包占用 Timer2 作为 UART1 波特率发生器，不能同时将 Timer2 分配给别的用途。
 
-## 2. 接线与上电
+## 3. 接线与上电
 
 按信号名找板上排针，不按本文猜测封装管脚编号：
 
@@ -57,7 +76,7 @@ PC USB-TTL GND  ------ 板上 GND
 不要同时把 P3.0/P3.1/P3.2 拉低：该组合参与 USB 下载判断，可能使芯片不进入
 预期用户程序。G12 的 GPIO 不要按其它型号臆设 10K 下拉；本包不启用额外拉电阻。
 
-## 3. 构建要烧录的 HEX
+## 4. 构建要烧录的 HEX
 
 所有命令在 WSL 内执行。使用本包配套的 `crt-selfstart.asm` 和
 `mcs251_ld.py`，不要混用旧 crt（旧值 SPX=0x2fff 在真机上越界）。
@@ -84,13 +103,23 @@ Windows 可通过 `\\wsl.localhost\Debian\home\liu\mcs251-realhw-alice\layout-v2
 
 ### 14 项工程版
 
+G12 真机版（当前有实证参数）：
+
 ```bash
 make -C /mnt/c/Prj/LLVM/MCS251/validation/mcs251-demo-modern \
+  BOARD=stc32g12k128 \
   BUILD=/home/liu/mcs251-realhw-alice/layout-v2/modern-real-hw \
   CFLAGS='--target=mcs251-unknown-none -std=c11 -O2 -Wall -Wextra -DSTC32_REAL_HW'
 ```
 
 烧录 `/home/liu/mcs251-realhw-alice/layout-v2/modern-real-hw/demo.hex`。
+G144 当前只执行 QEMU 验收；在真机参数复核完成前不把下列结果当成真机放行：
+
+```bash
+make -C /mnt/c/Prj/LLVM/MCS251/validation/mcs251-demo-modern \
+  BOARD=stc32g144k246 \
+  BUILD=/home/liu/mcs251-g144-qemu check
+```
 **不要烧默认 `make check` 生成的 QEMU test-port 固件**；不要用 QEMU 跑真机
 TI 轮询分支。编译参数改变时用不同 BUILD 目录，避免复用旧产物。
 
@@ -105,7 +134,7 @@ TI 轮询分支。编译参数改变时用不同 BUILD 目录，避免复用旧�
 旧发布件保留在 `/home/liu/mcs251-realhw-alice/layout-v2/previous-published/`。
 `selftest-eeprom1k.hex`（FE:0400）是现场临时诊断版，不是这里的FF:8000根治版。
 
-## 4. AiCube-ISP 操作顺序
+## 5. AiCube-ISP 操作顺序
 
 1. 关闭占用 COM 口的串口终端；选择芯片型号、COM 口，核对供电和接线。
 2. 打开上节指定的 **layout-v2真机版 `.hex`**；设置用户HIRC=24MHz、
@@ -121,7 +150,7 @@ TI 轮询分支。编译参数改变时用不同 BUILD 目录，避免复用旧�
 `stcgal` 的型号表含 G12K128 的 MCS251 标识，可作为**非官方、尚未实机验证**的
 尝试路径；首次正式验收优先 AiCube-ISP，不把型号识别等同于下载流程已验证。
 
-## 5. 预期串口与判定
+## 6. 预期串口与判定
 
 单文件版完整输出：
 
@@ -147,18 +176,18 @@ SELFTEST-PASS
 或最后一行不能替代完整记录。`-O2` 可能折叠常量特性，demo 的通过不是所有
 机器指令的穷举真机验证。
 
-## 6. 内存与启动契约
+## 7. 分板内存与启动契约
 
 手册页556/559/561、§10.3.1/§11.3.5：
 
-| 用途 | G12K128 真实范围 / 本包布局 |
-|---|---|
-| EDATA、向上生长栈 | `00:0000–00:0FFF`，只有4KB |
-| XDATA | `01:0000–01:1FFF`，8KB |
-| Flash | `FE:0000–FF:FFFF`，128KB |
-| HOME / 向量 | `FF:0000` / `FF:0003 + n*8` |
-| BOOT / CSEG | `FF:0100` / `FF:0200` |
-| XINIT（layout-v2） | `FF:8000`程序区，不再占用FE EEPROM窗口 |
+| 用途 | G12K128（真机实证板） | G144K246（手册/QEMU板） | 当前公共布局 |
+|---|---|---|---|
+| EDATA、向上生长栈 | `00:0000–00:0FFF`，4KB | `00:0000–00:3FFF`，16KB | 链接器按片段 `EDATA_END` 门禁 |
+| XDATA | `01:0000–01:1FFF`，8KB | `01:0000–02:FFFF`，128KB | 当前demo不依赖额外XDATA容量 |
+| Flash | `FE:0000–FF:FFFF`，128KB | `FC:2800–FF:FFFF` | 只用两板共有的FE/FF区 |
+| HOME / 向量 | `FF:0000` / `FF:0003+n*8` | 同左 | 同左 |
+| BOOT / CSEG | `FF:0100` / `FF:0200` | 同左 | CSEG来自板片段 |
+| XINIT（layout-v2） | `FF:8000`程序区 | `FF:8000`程序区 | 来自板片段，不占FE EEPROM窗口 |
 
 当前CSEG只有约8–10KB，低于FF:8000，XINIT与它不重叠。HEX为稀疏记录，不因
 中间空隙填满Flash；后续程序增长必须重新审计各slice，不能假定CSEG永远不会
@@ -168,7 +197,9 @@ SELFTEST-PASS
 `__mcs251_stack_base`：链接器按所有内部字节数据 slice 的真实最大 end 计算，
 至少避开低0x100，再做16字节对齐并加16字节间隔；SPX指向首个栈字节之前。
 数据空洞、多个 DSEG slice 和 OSEG overlay 都计入，不使用并非高水位的
-`s_DSEG+l_DSEG`。**链接器保证剩余至少1KB，空间不足则拒绝链接，无需手工设栈底。**
+`s_DSEG+l_DSEG`。Makefile把所选板的 `EDATA_END` 作为纯数值传入链接器；
+**链接器保证剩余至少1KB，空间不足则拒绝链接，无需手工设栈底。**缺省值仍为
+`0x0FFF`，保证旧调用方和G12行为兼容；G144板显式传入`0x3FFF`。
 
 这只保证静态布局有空间，**不等于运行时无限递归或任意VLA不会栈溢出**。
 本包当前输入（含fib16）用冻结QEMU `one-insn-per-tb=on` 与 `cpu,nochain`
@@ -179,7 +210,9 @@ SELFTEST-PASS
 | 14项工程版 | 0x006B | 0x010F | 0x01C5 | 182字节 |
 | 8项单文件版 | 0x003E | 0x010F | 0x01CA | 187字节 |
 
-两者分配栈容量均3824字节。证据位于 `/home/liu/mcs251-realhw-alice/modern-qemu/demo.stack.json`
+这些既有量测使用G12门禁，两者分配栈容量均3824字节；相同静态数据在G144配置
+下链接容量为16112字节，但运行时峰值没有因此重新外推。证据位于
+`/home/liu/mcs251-realhw-alice/modern-qemu/demo.stack.json`
 与 `/home/liu/mcs251-realhw-alice/selftest-qemu/selftest.stack.json`，对应 `.cpu.log.gz`
 保留每条指令之前的寄存器快照。扩大数据、递归深度或加入中断嵌套后必须重新量测。QEMU专用 SDCC `crt0.asm`
 未改变，仍不属于本包可烧录启动资产。
@@ -187,7 +220,7 @@ SELFTEST-PASS
 BOOT 先写 WTST(0xE9)=0：手册p553规定 G12上电值为7，工作频率低于35MHz
 强烈建议改0。本包24MHz满足条件；改主频/芯片后不能盲目沿用这个值。
 
-## 7. “QEMU过、真机可能失败”的差异矩阵
+## 8. “QEMU过、真机可能失败”的差异矩阵
 
 | 项目 | 冻结 QEMU 与 G12真机差异 | 本包措施 / 扩展时注意 |
 |---|---|---|
@@ -201,7 +234,7 @@ BOOT 先写 WTST(0xE9)=0：手册p553规定 G12上电值为7，工作频率低�
 | ISP / P3.2下载判断 | QEMU不走硬件ISP启动流程 | 按断电→点击下载→上电操作，避免P3.0/1/2全低 |
 | MOVC bank | 模型用当前PC bank，手册例程支持固定FF bank | 用下一节独立双哨兵微固件仲裁，不预先宣布真机结果 |
 
-## 8. MOVC 仲裁（独立烧录，覆盖自检固件）
+## 9. MOVC 仲裁（独立烧录，覆盖自检固件）
 
 构建并复跑冻结 QEMU：
 
@@ -235,7 +268,7 @@ MOVC=3C FE=3C FF=A7
 置信度：官方例程p1589把DPTR0=#1000H注释为读FF1000H，是强支持固定FF的证据；
 p1655规范仅写EA=(A)+(DPTR)，没有明确bank文字。必须保留实际真机输出才能定案。
 
-## 9. 常见故障排查
+## 10. 常见故障排查
 
 - 下载找不到芯片：核对交叉TX/RX、共地、电平、COM占用、真正断电和上电时序。
 - 下载成功但无输出：确认烧的是 `STC32_REAL_HW` 版；终端已打开后再复位；
@@ -246,5 +279,5 @@ p1655规范仅写EA=(A)+(DPTR)，没有明确bank文字。必须保留实际真�
   而不是FE:0000旧版；核对下载校验和HEX SHA256。MOVC还需检查EEPROM上限。
   EEPROM=0是独立诊断手段，但新版两demo不应依赖该设置才能通过。
 - 出现 `S` / `!`：分别表示主函数返回 / 无处理器中断，不属于正常通过输出。
-- 动态栈链接门禁失败：减少内部静态数据或调整有依据的存储方案；不要删除门禁
-  或把EDATA上限改成QEMU的16KB来让真机包“编过”。
+- 动态栈链接门禁失败：核对所选BOARD与真机型号，减少内部静态数据或调整有依据
+  的存储方案；不要删除门禁，也不要给G12构建伪造G144的16KB上限来“编过”。
