@@ -102,6 +102,15 @@ class MCS251AsmPrinter final : public AsmPrinter {
   StringSet<> LocalParameterSlots;
   StringSet<> DeclaredExternalSymbols;
 
+  bool usesELFObjects() const {
+    return static_cast<const MCS251TargetMachine &>(TM).usesELFObjects();
+  }
+
+  void emitASxxxxText(const Twine &Text) {
+    if (!usesELFObjects())
+      OutStreamer->emitRawText(Text);
+  }
+
   static bool isSupportedMutableType(Type *Ty) {
     if (Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32))
       return true;
@@ -209,12 +218,15 @@ public:
         if (MI.isCall() || MI.isInlineAsm())
           Leaf = false;
     std::string Area = Leaf ? "OSEG" : "DSEG";
+    unsigned Flags = ELF::SHF_ALLOC | ELF::SHF_WRITE;
+    if (Leaf && usesELFObjects())
+      Flags |= ELF::SHF_MCS251_OVERLAY;
     MCSection *Sec = OutContext.getELFSection(
         ".mcs251." + Area + "." + Twine(MF.getFunctionNumber()),
-        ELF::SHT_NOBITS, ELF::SHF_ALLOC | ELF::SHF_WRITE);
+        ELF::SHT_NOBITS, Flags);
     OutStreamer->switchSection(Sec);
-    OutStreamer->emitRawText("\t.area " + Area +
-                             (Leaf ? " (OVR,DATA)" : " (DATA)"));
+    emitASxxxxText("\t.area " + Area +
+                    (Leaf ? " (OVR,DATA)" : " (DATA)"));
     unsigned I = 0;
     for (const Argument &Arg : F.args()) {
       if (I++ == 0)
@@ -227,10 +239,16 @@ public:
       if (!F.hasLocalLinkage())
         OutStreamer->emitSymbolAttribute(Slot, MCSA_Global);
       OutStreamer->emitLabel(Slot);
+      if (usesELFObjects()) {
+        OutStreamer->emitSymbolAttribute(Slot, MCSA_ELF_TypeObject);
+        OutStreamer->emitELFSize(
+            Slot, MCConstantExpr::create(Ty->getIntegerBitWidth() / 8,
+                                        OutContext));
+      }
       OutStreamer->emitZeros(Ty->getIntegerBitWidth() / 8);
     }
     OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
-    OutStreamer->emitRawText("\t.area CSEG (CODE)");
+    emitASxxxxText("\t.area CSEG (CODE)");
   }
 
   void emitInstruction(const MachineInstr *MI) override {
@@ -258,11 +276,11 @@ public:
     // validated specimen and the smoke crt0 template (sdas251 accepts it
     // without a file argument; a filename argument was never exercised).
     const std::string ModuleName = getMCS251ModuleName(M);
-    OutStreamer->emitRawText("\t.module " + ModuleName);
-    OutStreamer->emitRawText("\t.source");
-    OutStreamer->emitRawText(OptsdccSignature);
-    OutStreamer->emitRawText("");
-    OutStreamer->emitRawText("\t.area CSEG (CODE)");
+    emitASxxxxText("\t.module " + ModuleName);
+    emitASxxxxText("\t.source");
+    emitASxxxxText(OptsdccSignature);
+    emitASxxxxText("");
+    emitASxxxxText("\t.area CSEG (CODE)");
 
     // Object path (Phase 13a): the MCS251ObjectStreamer deliberately
     // swallows the raw-text prologue above and the REL writer regenerates
@@ -276,9 +294,17 @@ public:
         }) || llvm::any_of(M.globals(), [](const GlobalVariable &GV) {
           return !GV.isDeclaration() && !GV.isConstant();
         })) {
-      // The object writer emits the matching reservation as an A record.
-      OutStreamer->emitRawText("\t.area REG_BANK_0 (OVR,DATA)\n\t.ds 8\n"
-                               "\t.area CSEG (CODE)");
+      // REL synthesizes the A record. ELF needs an actual NOBITS reservation.
+      if (usesELFObjects()) {
+        OutStreamer->switchSection(OutContext.getELFSection(
+            ".mcs251.REG_BANK_0", ELF::SHT_NOBITS,
+            ELF::SHF_ALLOC | ELF::SHF_WRITE | ELF::SHF_MCS251_OVERLAY));
+        OutStreamer->emitZeros(8);
+        OutStreamer->switchSection(
+            OutContext.getObjectFileInfo()->getTextSection());
+      }
+      emitASxxxxText("\t.area REG_BANK_0 (OVR,DATA)\n\t.ds 8\n"
+                      "\t.area CSEG (CODE)");
     }
     LocalParameterSlots.clear();
     DeclaredExternalSymbols.clear();
@@ -322,6 +348,12 @@ public:
 
     const Constant *Init = GV->getInitializer();
     MCSymbol *Sym = getSymbol(GV);
+    if (usesELFObjects()) {
+      OutStreamer->emitSymbolAttribute(Sym, MCSA_ELF_TypeObject);
+      OutStreamer->emitELFSize(
+          Sym, MCConstantExpr::create(DL.getTypeAllocSize(GV->getValueType()),
+                                      OutContext));
+    }
     if (!GV->isConstant()) {
       if (!isSupportedMutableInitializer(Init))
         Reject();
@@ -332,7 +364,7 @@ public:
       const auto &TLOF =
           static_cast<const MCS251TargetObjectFile &>(getObjFileLowering());
       OutStreamer->switchSection(TLOF.getDSEGSection());
-      OutStreamer->emitRawText("\t.area DSEG (DATA)");
+      emitASxxxxText("\t.area DSEG (DATA)");
       emitLinkage(GV, Sym);
       OutStreamer->emitLabel(Sym);
       OutStreamer->emitZeros(Size);
@@ -345,7 +377,7 @@ public:
       // This sparse form remains correct when DSEG has register-bank/bit-area
       // holes or when several modules contribute independently placed slices.
       OutStreamer->switchSection(TLOF.getXINITSection());
-      OutStreamer->emitRawText("\t.area XINIT (CODE)");
+      emitASxxxxText("\t.area XINIT (CODE)");
       OutStreamer->emitValue(MCSymbolRefExpr::create(Sym, OutContext), 2);
       OutStreamer->emitIntValue(Size, 2);
       bool HasPayload = !Init->isNullValue();
@@ -354,7 +386,7 @@ public:
         emitMutableInitializer(DL, Init);
 
       OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
-      OutStreamer->emitRawText("\t.area CSEG (CODE)");
+      emitASxxxxText("\t.area CSEG (CODE)");
       return;
     }
 

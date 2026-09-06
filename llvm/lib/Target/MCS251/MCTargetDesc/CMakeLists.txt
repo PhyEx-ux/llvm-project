@@ -1,5 +1,7 @@
 add_llvm_component_library(LLVMMCS251Desc
   MCS251AsmBackend.cpp
+  MCS251ELFObjectWriter.cpp
+  MCS251ELFStreamer.cpp
   MCS251InstPrinter.cpp
   MCS251MCAsmInfo.cpp
   MCS251MCCodeEmitter.cpp

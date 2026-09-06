@@ -1,0 +1,63 @@
+# RUN: split-file %s %t
+# RUN: llc -mtriple=mcs251 -start-after=finalize-isel -filetype=obj -mcs251-object-format=elf %t/pc8.mir -o %t/pc8.o
+# RUN: llvm-readobj -r --sections --section-data %t/pc8.o | FileCheck %s --check-prefix=PC8
+# RUN: %python %S/Inputs/check-elf-rela.py %t/pc8.o
+# RUN: not --crash llc -mtriple=mcs251 -start-after=finalize-isel -filetype=obj -mcs251-object-format=elf %t/overflow.mir -o %t/overflow.o 2>&1 | FileCheck %s --check-prefix=OVERFLOW
+# RUN: llc -mtriple=mcs251 -start-after=finalize-isel -filetype=obj -mcs251-object-format=elf %t/word.mir -o %t/word.o
+# RUN: llvm-readobj -r --sections --section-data %t/word.o | FileCheck %s --check-prefix=WORD
+# RUN: %python %S/Inputs/check-elf-rela.py %t/word.o
+#
+# Exercise the backend directly, including fixups current IR selection usually
+# resolves locally or represents with three byte-select relocations.
+# PC8: Name: .text
+# PC8: 0000: 8000
+# PC8: 0x1 R_MCS251_PC8 _remote 0x3
+# OVERFLOW: LLVM ERROR: MCS251 ELF: RELA addend does not fit signed 32 bits
+# WORD: Name: .text
+# WORD: 0000: 7E040000 AA
+# WORD: 0x2 R_MCS251_16 _a 0x1234
+#
+#--- pc8.mir
+--- |
+  target triple = "mcs251"
+  declare void @remote()
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SJMP @remote + 3
+...
+#--- overflow.mir
+--- |
+  target triple = "mcs251"
+  @a = external global i8
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri @a + 4294967296
+    ERET implicit $wr0
+...
+#--- word.mir
+--- |
+  target triple = "mcs251"
+  @a = external global i8
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri @a + 4660
+    ERET implicit $wr0
+...

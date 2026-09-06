@@ -18,6 +18,7 @@ namespace llvm {
 class MCS251TargetMachine final : public CodeGenTargetMachineImpl {
   std::unique_ptr<TargetLoweringObjectFile> TLOF;
   MCS251Subtarget Subtarget;
+  const bool ELFObjectOutput;
 
 public:
   MCS251TargetMachine(const Target &T, const Triple &TT, StringRef CPU,
@@ -31,6 +32,8 @@ public:
   getSubtargetImpl(const Function &F) const override {
     return &Subtarget;
   }
+
+  bool usesELFObjects() const { return ELFObjectOutput; }
 
   TargetPassConfig *createPassConfig(PassManagerBase &PM) override;
   Expected<std::unique_ptr<MCStreamer>>

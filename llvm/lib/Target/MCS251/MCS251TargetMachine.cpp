@@ -40,31 +40,42 @@ MCS251TargetMachine::MCS251TargetMachine(
                                getEffectiveRelocModel(RM),
                                getEffectiveCodeModel(CM, CodeModel::Small), OL),
       TLOF(std::make_unique<MCS251TargetObjectFile>()),
-      Subtarget(TT, std::string(CPU), std::string(FS), *this) {
-  // ASxxxx REL has no address-significance table; accept the flag as a no-op.
+      Subtarget(TT, std::string(CPU), std::string(FS), *this),
+      ELFObjectOutput(MCS251::getObjectFormat() == MCS251::ObjectFormat::ELF) {
+  // Neither the REL path nor ELF ABI v1 uses address-significance tables.
+  // Preserve the established no-op behavior of -addrsig.
   this->Options.EmitAddrsig = false;
   initAsmInfo();
 }
 
 MCS251TargetMachine::~MCS251TargetMachine() = default;
 
-// The object path streams ASxxxx REL, not ELF (Phase 13a).  The default
-// implementation would ask the MCAsmBackend for an object writer, which for
-// our (still ELF) TLOF means an ELFObjectWriter, so the REL streamer is
-// supplied explicitly here.  Assembly/null output keeps the generic path.
+// REL remains the default, with its original explicit writer/streamer pair.
+// ELF is opt-in and uses the real MC ELF writer. The triple/TLOF alone cannot
+// select between them. Assembly/null output retains the legacy generic path.
 Expected<std::unique_ptr<MCStreamer>> MCS251TargetMachine::createMCStreamer(
     raw_pwrite_stream &Out, raw_pwrite_stream *, CodeGenFileType FileType,
     MCContext &Ctx) {
+  if (usesELFObjects() && FileType != CodeGenFileType::ObjectFile)
+    return make_error<StringError>(
+        "MCS251 ELF output requires -filetype=obj", inconvertibleErrorCode());
+  if (usesELFObjects() && Options.MCOptions.Crel)
+    return make_error<StringError>(
+        "MCS251 ELF ABI v1 requires RELA; CREL is not supported",
+        inconvertibleErrorCode());
   if (FileType != CodeGenFileType::ObjectFile)
     return CodeGenTargetMachineImpl::createMCStreamer(Out, nullptr, FileType,
                                                        Ctx);
 
-  const MCSubtargetInfo &STI = getMCSubtargetInfo();
-  const MCRegisterInfo &MRI = getMCRegisterInfo();
   const MCInstrInfo &MII = *getMCInstrInfo();
   std::unique_ptr<MCCodeEmitter> E(createMCS251MCCodeEmitter(MII, Ctx));
-  std::unique_ptr<MCAsmBackend> B(
-      createMCS251MCAsmBackend(getTarget(), STI, MRI, Options.MCOptions));
+  std::unique_ptr<MCAsmBackend> B(createMCS251MCAsmBackend(
+      usesELFObjects() ? MCS251::ObjectFormat::ELF : MCS251::ObjectFormat::REL));
+  if (usesELFObjects()) {
+    auto W = B->createObjectWriter(Out);
+    return std::unique_ptr<MCStreamer>(createMCS251ELFStreamer(
+        getTargetTriple(), Ctx, std::move(B), std::move(W), std::move(E)));
+  }
   std::unique_ptr<MCObjectWriter> W(createMCS251ObjectWriter(Out));
   MCStreamer *S = createMCS251RELStreamer(getTargetTriple(), Ctx,
                                           std::move(B), std::move(W),

@@ -25,11 +25,11 @@
 //    compiler's three-part long-branch expansion guarantees in-range skips,
 //    so a failure here is a backend bug, not user input to accommodate.
 //
-//  * createObjectTargetWriter is only reached through the *assembly* text
-//    path, where the throw-away MCAsmBackend handed to MCAsmStreamer never
-//    materializes an object file; the ELF stub writer satisfies that API.
-//    The object path bypasses it entirely: MCS251TargetMachine::
-//    createMCStreamer supplies the ASxxxx REL writer explicitly.
+//  * createObjectTargetWriter supplies real ELF only for the opt-in format.
+//    Legacy assembly still uses the throw-away stub, and REL objects retain
+//    the explicitly supplied writer. ELF records RELA before applying its
+//    zero FixedValue; REL needs the old area-relative payload, so its fixup
+//    application order below is deliberately unchanged.
 //
 //===----------------------------------------------------------------------===//
 
@@ -63,21 +63,58 @@ public:
 };
 
 class MCS251AsmBackend final : public MCAsmBackend {
+  const bool IsELF;
+
 public:
-  MCS251AsmBackend() : MCAsmBackend(llvm::endianness::big) {}
+  explicit MCS251AsmBackend(bool IsELF)
+      : MCAsmBackend(llvm::endianness::big), IsELF(IsELF) {}
   ~MCS251AsmBackend() override = default;
 
   std::unique_ptr<MCObjectTargetWriter>
   createObjectTargetWriter() const override {
-    // The assembly streamer constructs a throw-away MCAssembler whose writer
-    // is only needed for the AsmPrinter's text path. Object output bypasses
-    // this method and supplies the ASxxxx writer explicitly.
+    // The REL path bypasses this method. Its assembly streamer only needs a
+    // throw-away writer; ELF output instead uses the native target writer.
+    if (IsELF)
+      return createMCS251ELFObjectWriter();
     return std::make_unique<MCS251ELFStubWriter>();
   }
 
   void applyFixup(const MCFragment &F, const MCFixup &Fixup,
                   const MCValue &Target, uint8_t *Data, uint64_t Value,
                   bool IsResolved) override {
+    if (!IsResolved && IsELF) {
+      if (Target.getSubSym()) {
+        getContext().reportError(Fixup.getLoc(),
+                                 "MCS251 ELF: symbol-difference relocations are "
+                                 "not supported");
+        return;
+      }
+      // This fork delegates relocation recording to the backend. RELA owns
+      // the addend: record FIRST, then apply the returned FixedValue (zero),
+      // never the section offset which the REL writer needs in its payload.
+      Asm->getWriter().recordRelocation(F, Fixup, Target, Value);
+      unsigned Width;
+      switch (Fixup.getKind()) {
+      case FK_Data_1:
+      case MCS251::fixup_mcs251_lo8:
+      case MCS251::fixup_mcs251_mid8:
+      case MCS251::fixup_mcs251_hi8:
+        Width = 1;
+        break;
+      case FK_Data_2:
+      case MCS251::fixup_mcs251_16:
+        Width = 2;
+        break;
+      case MCS251::fixup_mcs251_24:
+        Width = 3;
+        break;
+      default:
+        llvm_unreachable("ELF writer rejected unsupported fixup");
+      }
+      for (unsigned I = 0; I != Width; ++I)
+        Data[I] = uint8_t(Value >> (8 * (Width - I - 1)));
+      return;
+    }
     if (!IsResolved) {
       uint64_t V = Value;
       if (Fixup.getKind() == FK_Data_2 ||
@@ -172,5 +209,9 @@ public:
 MCAsmBackend *llvm::createMCS251MCAsmBackend(
     const Target &, const MCSubtargetInfo &, const MCRegisterInfo &,
     const MCTargetOptions &) {
-  return new MCS251AsmBackend();
+  return createMCS251MCAsmBackend(MCS251::getObjectFormat());
+}
+
+MCAsmBackend *llvm::createMCS251MCAsmBackend(MCS251::ObjectFormat Format) {
+  return new MCS251AsmBackend(Format == MCS251::ObjectFormat::ELF);
 }

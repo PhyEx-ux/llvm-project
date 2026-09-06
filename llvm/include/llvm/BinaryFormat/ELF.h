@@ -325,6 +325,8 @@ enum {
   EM_VE = 251,            // NEC SX-Aurora VE
   EM_CSKY = 252,          // C-SKY 32-bit processor
   EM_LOONGARCH = 258,     // LoongArch
+  // Experimental fork-local value, not an officially allocated machine ID.
+  EM_MCS251 = 0x9999,
 };
 
 // Object file classes.
@@ -1039,6 +1041,18 @@ enum {
 #include "ELFRelocs/MSP430.def"
 };
 
+// MCS251 experimental object ABI, versioned independently of the CPU ISA.
+enum : unsigned {
+  EF_MCS251_ABI_VERSION_MASK = 0xff,
+  EF_MCS251_ABI_V1 = 1,
+  NT_MCS251_ABI = 1, // Owner: "MCS251".
+};
+
+// ELF relocation types for MCS251.
+enum {
+#include "ELFRelocs/MCS251.def"
+};
+
 // ELF Relocation type for VE.
 enum {
 #include "ELFRelocs/VE.def"
@@ -1301,6 +1315,9 @@ enum : unsigned {
 
   // Bits indicating processor-specific flags.
   SHF_MASKPROC = 0xf0000000,
+
+  // MCS251 NOBITS input sections in one named group share their run address.
+  SHF_MCS251_OVERLAY = 0x10000000,
 
   /// All sections with the "d" flag are grouped together by the linker to form
   /// the data section and the dp register is set to the start of the section by

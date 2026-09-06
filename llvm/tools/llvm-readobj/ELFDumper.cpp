@@ -1331,6 +1331,7 @@ constexpr EnumStringDef<unsigned, 2> ElfMachineTypeDefs[] = {
   ENUM_ENT(EM_VE,            "NEC SX-Aurora Vector Engine"),
   ENUM_ENT(EM_LOONGARCH,     "LoongArch"),
   ENUM_ENT(EM_INTELGT,       "Intel Graphics Technology"),
+  ENUM_ENT(EM_MCS251,        "MCS251 (experimental)"),
 };
 // clang-format on
 constexpr auto ElfMachineType = BUILD_ENUM_STRINGS(ElfMachineTypeDefs);
@@ -1407,6 +1408,11 @@ constexpr EnumStringDef<unsigned, 2> ElfMipsSectionFlagsDefs[] = {
 constexpr auto ElfMipsSectionFlags =
     BUILD_ENUM_STRINGS(ElfMipsSectionFlagsDefs);
 
+constexpr EnumStringDef<unsigned, 2> ElfMCS251SectionFlagsDefs[] = {
+    ENUM_ENT(SHF_MCS251_OVERLAY, "p")};
+constexpr auto ElfMCS251SectionFlags =
+    BUILD_ENUM_STRINGS(ElfMCS251SectionFlagsDefs);
+
 constexpr EnumStringDef<unsigned, 2> ElfX86_64SectionFlagsDefs[] = {
     ENUM_ENT(SHF_X86_64_LARGE, "l")};
 constexpr auto ElfX86_64SectionFlags =
@@ -1434,6 +1440,10 @@ getSectionFlagsForTarget(unsigned EOSAbi, unsigned EMachine) {
     break;
   case EM_ARM:
     for (const auto &Entry : EnumStrings(ElfARMSectionFlags))
+      Ret.push_back(&Entry);
+    break;
+  case EM_MCS251:
+    for (const auto &Entry : EnumStrings(ElfMCS251SectionFlags))
       Ret.push_back(&Entry);
     break;
   case EM_HEXAGON:
@@ -1741,6 +1751,11 @@ constexpr EnumStringDef<unsigned, 2> ElfHeaderSPARCFlagsDefs[] = {
 };
 constexpr auto ElfHeaderSPARCFlags =
     BUILD_ENUM_STRINGS(ElfHeaderSPARCFlagsDefs);
+
+constexpr EnumStringDef<unsigned, 2> ElfHeaderMCS251FlagsDefs[] = {
+    ENUM_ENT(EF_MCS251_ABI_V1, "ABI-v1")};
+constexpr auto ElfHeaderMCS251Flags =
+    BUILD_ENUM_STRINGS(ElfHeaderMCS251FlagsDefs);
 
 constexpr EnumStringDef<unsigned, 2> ElfHeaderAVRFlagsDefs[] = {
     ENUM_ENT_1(EF_AVR_ARCH_AVR1),
@@ -3761,6 +3776,9 @@ template <class ELFT> void GNUELFDumper<ELFT>::printFileHeaders() {
   else if (e.e_machine == EM_SPARC32PLUS || e.e_machine == EM_SPARCV9)
     ElfFlags = printFlags(e.e_flags, EnumStrings(ElfHeaderSPARCFlags),
                           unsigned(ELF::EF_SPARCV9_MM));
+  else if (e.e_machine == EM_MCS251)
+    ElfFlags = printFlags(e.e_flags, EnumStrings(ElfHeaderMCS251Flags),
+                         unsigned(ELF::EF_MCS251_ABI_VERSION_MASK));
   else if (e.e_machine == EM_AVR)
     ElfFlags = printFlags(e.e_flags, EnumStrings(ElfHeaderAVRFlags),
                           unsigned(ELF::EF_AVR_ARCH_MASK));
@@ -6376,6 +6394,8 @@ StringRef getNoteTypeName(const typename ELFT::Note &Note, unsigned ELFType) {
   };
 
   StringRef Name = Note.getName();
+  if (Name == "MCS251" && Type == ELF::NT_MCS251_ABI)
+    return "NT_MCS251_ABI (object and calling ABI)";
   if (Name == "GNU")
     return FindNote(GNUNoteTypes);
   if (Name == "FreeBSD") {
@@ -7662,6 +7682,9 @@ template <class ELFT> void LLVMELFDumper<ELFT>::printFileHeaders() {
     else if (E.e_machine == EM_SPARC32PLUS || E.e_machine == EM_SPARCV9)
       W.printFlags("Flags", E.e_flags, EnumStrings(ElfHeaderSPARCFlags),
                    unsigned(ELF::EF_SPARCV9_MM));
+    else if (E.e_machine == EM_MCS251)
+      W.printFlags("Flags", E.e_flags, EnumStrings(ElfHeaderMCS251Flags),
+                   unsigned(ELF::EF_MCS251_ABI_VERSION_MASK));
     else if (E.e_machine == EM_AVR)
       W.printFlags("Flags", E.e_flags, EnumStrings(ElfHeaderAVRFlags),
                    unsigned(ELF::EF_AVR_ARCH_MASK));

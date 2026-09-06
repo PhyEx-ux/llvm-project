@@ -25,9 +25,20 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
+
+static cl::opt<MCS251::ObjectFormat> ObjectFormatOption(
+    "mcs251-object-format", cl::desc("MCS251 object output format"),
+    cl::init(MCS251::ObjectFormat::REL),
+    cl::values(clEnumValN(MCS251::ObjectFormat::REL, "rel", "ASxxxx REL (default)"),
+               clEnumValN(MCS251::ObjectFormat::ELF, "elf", "ELF32 big-endian RELA")));
+
+MCS251::ObjectFormat llvm::MCS251::getObjectFormat() {
+  return ObjectFormatOption;
+}
 
 #define GET_INSTRINFO_MC_DESC
 #include "MCS251GenInstrInfo.inc"
@@ -159,8 +170,18 @@ LLVMInitializeMCS251TargetMC() {
   TargetRegistry::RegisterMCInstPrinter(T, createMCS251MCInstPrinter);
   TargetRegistry::RegisterMCCodeEmitter(T, createMCS251MCCodeEmitter);
   TargetRegistry::RegisterMCAsmBackend(T, createMCS251MCAsmBackend);
-  // The ELFStreamer slot is the only object-streamer hook in the registry;
-  // the triple claims ELF binformat so far (the TLOF is ELF), so generic
-  // clients (llvm-mc -filetype=obj, MCJIT) get the ASxxxx REL streamer here.
-  TargetRegistry::RegisterELFStreamer(T, createMCS251RELStreamer);
+  // The triple uses ELF MC sections for both formats. Match the explicitly
+  // selected object format here as well as in TargetMachine's llc path.
+  // This registration does not add an MCS251 assembly parser.
+  TargetRegistry::RegisterELFStreamer(
+      T, [](const Triple &TT, MCContext &Ctx,
+            std::unique_ptr<MCAsmBackend> &&B,
+            std::unique_ptr<MCObjectWriter> &&W,
+            std::unique_ptr<MCCodeEmitter> &&E) -> MCStreamer * {
+        if (MCS251::getObjectFormat() == MCS251::ObjectFormat::ELF)
+          return createMCS251ELFStreamer(TT, Ctx, std::move(B), std::move(W),
+                                         std::move(E));
+        return createMCS251RELStreamer(TT, Ctx, std::move(B), std::move(W),
+                                       std::move(E));
+      });
 }

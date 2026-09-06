@@ -1,0 +1,90 @@
+## MCS251 ABI IDs must be usable by independent linker/CRT fixtures, not
+## solely by llc. J11 stores the NORMAL two-byte instruction (01 00), not
+## the legacy three-byte address/address/opcode temporary representation.
+# RUN: yaml2obj %s -o %t.o
+# RUN: llvm-readobj --file-headers --sections --relocations %t.o | FileCheck %s
+# RUN: obj2yaml %t.o | FileCheck %s --check-prefix=YAML
+# RUN: obj2yaml %t.o | yaml2obj -o %t.roundtrip.o
+# RUN: cmp %t.o %t.roundtrip.o
+
+# CHECK: Format: elf32-mcs251
+# CHECK: Arch: mcs251
+# CHECK: Machine: EM_MCS251 (0x9999)
+# CHECK: Name: .mcs251.OSEG.0
+# CHECK: SHF_MCS251_OVERLAY
+# CHECK: R_MCS251_NONE
+# CHECK: R_MCS251_16 _symbol 0x1234
+# CHECK: R_MCS251_24 _symbol 0x10
+# CHECK: R_MCS251_LO8 _symbol 0xFFFFFFFF
+# CHECK: R_MCS251_MID8
+# CHECK: R_MCS251_HI8
+# CHECK: R_MCS251_PC8
+# CHECK: R_MCS251_J16
+# CHECK: R_MCS251_J11
+# YAML: Machine: EM_MCS251
+# YAML: Flags: [ EF_MCS251_ABI_V1 ]
+# YAML: SHF_MCS251_OVERLAY
+# YAML: Type: R_MCS251_J11
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000000000000000000000000100'
+  - Name: .mcs251.OSEG.0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 6
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_NONE
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: _symbol
+        Addend: 0x1234
+      - Offset: 2
+        Type: R_MCS251_24
+        Symbol: _symbol
+        Addend: 16
+      - Offset: 5
+        Type: R_MCS251_LO8
+        Symbol: _symbol
+        Addend: -1
+      - Offset: 6
+        Type: R_MCS251_MID8
+        Symbol: _symbol
+      - Offset: 7
+        Type: R_MCS251_HI8
+        Symbol: _symbol
+      - Offset: 8
+        Type: R_MCS251_PC8
+        Symbol: _symbol
+      - Offset: 10
+        Type: R_MCS251_J16
+        Symbol: _symbol
+      - Offset: 12
+        Type: R_MCS251_J11
+        Symbol: _symbol
+Symbols:
+  - Name: _symbol
+    Binding: STB_GLOBAL

@@ -1306,6 +1306,8 @@ StringRef ELFObjectFile<ELFT>::getFileFormatName() const {
       return "elf32-lanai";
     case ELF::EM_MIPS:
       return "elf32-mips";
+    case ELF::EM_MCS251:
+      return IsLittleEndian ? "elf32-littlemcs251" : "elf32-mcs251";
     case ELF::EM_MSP430:
       return "elf32-msp430";
     case ELF::EM_PPC:
@@ -1390,6 +1392,9 @@ template <class ELFT> Triple::ArchType ELFObjectFile<ELFT>::getArch() const {
     default:
       report_fatal_error("Invalid ELFCLASS!");
     }
+  case ELF::EM_MCS251:
+    return !ELFT::Is64Bits && !IsLittleEndian ? Triple::mcs251
+                                             : Triple::UnknownArch;
   case ELF::EM_MSP430:
     return Triple::msp430;
   case ELF::EM_PPC:

@@ -1,0 +1,21 @@
+//===- MCS251.def - MCS251 ELF relocations -----------------------*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef ELF_RELOC
+#error "ELF_RELOC must be defined"
+#endif
+
+ELF_RELOC(R_MCS251_NONE,  0)
+ELF_RELOC(R_MCS251_16,    1)
+ELF_RELOC(R_MCS251_24,    2)
+ELF_RELOC(R_MCS251_LO8,   3)
+ELF_RELOC(R_MCS251_MID8,  4)
+ELF_RELOC(R_MCS251_HI8,   5)
+ELF_RELOC(R_MCS251_PC8,   6)
+ELF_RELOC(R_MCS251_J16,   7)
+ELF_RELOC(R_MCS251_J11,   8)

@@ -33,6 +33,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MCS251MCAsmInfo.h"
+#include "MCS251MCTargetDesc.h"
 
 using namespace llvm;
 
@@ -43,7 +44,8 @@ MCS251MCAsmInfo::MCS251MCAsmInfo(const Triple &TT,
   CalleeSaveStackSlotSize = 1;
   CommentString = ";";
   SeparatorString = "\n";
-  HasDotTypeDotSizeDirective = false;
+  HasDotTypeDotSizeDirective =
+      MCS251::getObjectFormat() == MCS251::ObjectFormat::ELF;
   HasSingleParameterDotFile = false;
   SupportsDebugInformation = false;
   ExceptionsType = ExceptionHandling::None;

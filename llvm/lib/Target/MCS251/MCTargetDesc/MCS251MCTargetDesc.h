@@ -10,6 +10,7 @@ namespace llvm {
 class MCAsmBackend;
 class MCCodeEmitter;
 class MCContext;
+class MCObjectTargetWriter;
 class MCInstrInfo;
 class MCRegisterInfo;
 class MCSubtargetInfo;
@@ -17,6 +18,18 @@ class MCStreamer;
 class MCTargetOptions;
 class Target;
 class raw_pwrite_stream;
+
+namespace MCS251 {
+enum class ObjectFormat { REL, ELF };
+ObjectFormat getObjectFormat();
+} // namespace MCS251
+
+MCAsmBackend *createMCS251MCAsmBackend(MCS251::ObjectFormat Format);
+std::unique_ptr<MCObjectTargetWriter> createMCS251ELFObjectWriter();
+MCStreamer *createMCS251ELFStreamer(
+    const Triple &T, MCContext &Context, std::unique_ptr<MCAsmBackend> &&TAB,
+    std::unique_ptr<MCObjectWriter> &&OW,
+    std::unique_ptr<MCCodeEmitter> &&Emitter);
 
 MCCodeEmitter *createMCS251MCCodeEmitter(const MCInstrInfo &MCII,
                                          MCContext &Ctx);
