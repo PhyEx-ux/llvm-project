@@ -34,7 +34,7 @@ boot:
         mov spx,#__mcs251_stack_base
         .if REAL_HW
         ; ISP HIRC=24MHz, UART1 115200/8N1, Timer2 reload FFCC.
-        anl P_SW1,#0x3f
+        mov P_SW1,#0x00 ; V1 silicon-tested initialization, reset value not measured.
         anl P3M1,#0xfc
         anl P3M0,#0xfc
         anl AUXR,#0xef
@@ -95,7 +95,21 @@ movc_site:
         mov r0,#10
         ecall putc
 halt:
+        .if REAL_HW
+        ; Re-emit the observation for a terminal opened after programming.
+        ; Explicit assembly counters cannot be optimized away; time uncalibrated.
+        mov wr8,#200
+repeat_outer:
+        mov wr12,#4000
+repeat_inner:
+        dec wr12
+        jne repeat_inner
+        dec wr8
+        jne repeat_outer
+        ejmp test
+        .else
         sjmp halt
+        .endif
 hexbyte:
         mov r0,r1
         srl r0

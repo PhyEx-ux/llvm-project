@@ -123,7 +123,7 @@
 
 static void uart_init(void)
 {
-    P_SW1 &= (uint8_t)~0xC0u; /* 路由00：RxD=P3.0，TxD=P3.1。 */
+    P_SW1 = 0x00u; /* V1真机已验证配置，显式路由；未测复位寄存器值。 */
     P3M1 &= (uint8_t)~0x03u;
     P3M0 &= (uint8_t)~0x03u;  /* P3.0/1准双向；保留其它GPIO。 */
     AUXR &= (uint8_t)~0x10u; /* T2R=0，停止后写入重载。 */
@@ -343,8 +343,25 @@ int main(void)
 
 #ifdef HOST_BUILD
     return 0;                                   /* 宿主机：正常退出 */
+#elif defined(STC32_REAL_HW)
+    for (;;) {
+        /* 防止打开终端晚于开机输出。只重发最终状态，不重跑有副作用的自检。
+         * volatile延时避免O2删除；低速预算，未作精确时间承诺。 */
+        volatile uint16_t outer = 200;
+        do {
+            volatile uint16_t inner = 4000;
+            while (--inner) { }
+        } while (--outer);
+        if (g_fail == 0)
+            puts_("SELFTEST-PASS\n");
+        else {
+            puts_("SELFTEST-FAIL(");
+            putc_((char)('0' + g_fail));
+            puts_(")\n");
+        }
+    }
 #else
-    for (;;) { }                                /* 目标机：固件不返回 */
+    for (;;) { }                                /* QEMU保持一次性精确transcript。 */
 #endif
 }
 #endif

@@ -19,10 +19,21 @@
 #endif
 
 #ifdef STC32_REAL_HW
+/* 防止烧录后再打开终端错过一次性输出。仅延迟重发状态，不重跑自检。
+ * volatile避免O2删除循环；周期只是低速预算，未经真机精确校准。 */
+static void uart_status_pause(void)
+{
+    volatile uint16_t outer = 200;
+    do {
+        volatile uint16_t inner = 4000;
+        while (--inner) { }
+    } while (--outer);
+}
 /* ---------- STC32G12K128：ISP HIRC=24MHz，UART1 115200/8N1 ----------
  * 官方手册页 441/675/774/777；尚待用户真机实测，不假定 ISP 用户时钟默认值。
  * T2 重载=65536-round(24000000/(4*115200))=0xFFCC；实际115384.6，+0.16%。
- * 仅访问标准 SFR，无需打开扩展 SFR。保留其它外设的路由、GPIO和AUXR位。
+ * 仅访问标准 SFR，无需打开扩展 SFR。P_SW1全写0也复位其它复用路由，
+ * 适用于此独占演示；集成其它外设需重新审计。GPIO与AUXR其余位仍保留。
  */
 #define AUXR (*(volatile uint8_t *)0x8E)
 #define SCON (*(volatile uint8_t *)0x98)
@@ -34,7 +45,7 @@
 #define T2L (*(volatile uint8_t *)0xD7)
 static void uart_init(void)
 {
-    P_SW1 &= (uint8_t)~0xC0u; /* UART1路由00：RxD=P3.0，TxD=P3.1。 */
+    P_SW1 = 0x00u; /* V1真机已验证配置：RxD=P3.0、TxD=P3.1；不假定复位读值。 */
     P3M1 &= (uint8_t)~0x03u;
     P3M0 &= (uint8_t)~0x03u;  /* P3.0/1准双向弱上拉；不改P3.2。 */
     AUXR &= (uint8_t)~0x10u; /* T2R=0：停止后写计数/重载寄存器。 */

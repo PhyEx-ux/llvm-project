@@ -91,7 +91,18 @@ int main(void)
 
 #ifdef HOST_BUILD
     return 0;               /* 宿主机路径：正常退出（期望输出即完整 transcript） */
+#elif defined(STC32_REAL_HW)
+    for (;;) {
+        uart_status_pause();
+        if (g_fail_count == 0)
+            uart_puts("DEMO-PASS\n");
+        else {
+            uart_puts("DEMO-FAIL(");
+            uart_hex8(g_fail_count);
+            uart_puts(")\n");
+        }
+    }
 #else
-    for (;;) { }            /* 目标机：固件不返回 */
+    for (;;) { }            /* QEMU保留一次性精确transcript。 */
 #endif
 }

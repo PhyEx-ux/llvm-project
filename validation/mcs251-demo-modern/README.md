@@ -87,6 +87,8 @@ STC32）各自运行，逐字比对输出——语义一致才算通过，必须
 
 真机参数已按官方手册填实：ISP用户HIRC必须设24MHz，UART1=P3.0/P3.1，
 SCON=0x50、Timer2 1T重载0xFFCC，对应115200/8N1（实际+0.16%误差）。
+UART入口先显式 `P_SW1=0`（连续UART探针已真机通过的保守配置，不代表测过
+复位值）；该整字节写也复位其它复用路由，本demo不使用那些外设。
 AUXR逐位保留其它配置，清T2_C/T，最后启动T2R。共享crt先写WTST=0，再从
 链接器符号设置4KB EDATA内的动态向上栈，保证静态布局剩余至少1KB。
 **layout-v2待用户真机复验**；XINIT已移至FF:8000程序段，不再与FE:0000起的
@@ -106,3 +108,7 @@ make BUILD=/home/liu/mcs251-realhw-alice/layout-v2/modern-real-hw \
 
 每个特性一行 `<特性名>:OK` 或 `<特性名>:FAIL got=xxxxxxxx expect=xxxxxxxx`，
 全部通过时最后一行 `DEMO-PASS`，否则 `DEMO-FAIL(<失败数>)`。
+HOST/QEMU协议保持一次性输出；真机完成自检后用volatile软件延时低速重发
+最终状态行，避免烧录后打开串口窗口太晚而看到空白。不重跑会修改全局的自检，
+周期未精确校准。仅收到重发PASS可说明最终状态；完整验收仍应终端就绪后复位
+并捕获全部14项。
