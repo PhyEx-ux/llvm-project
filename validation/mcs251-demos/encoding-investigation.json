@@ -1,7 +1,7 @@
 {
   "title": "Source编码排查与真机可观察性修复",
   "baseline": "f97665e4b",
-  "status": "未发现需要全工具链重编码的证据；QEMU和MC编码器未修改；最终demo收官真机复烧待确认",
+  "status": "闭环达成：用户经PM确认当前发布selftest在真机稳定循环SELFTEST-PASS（观察间隔约330ms）；乱码插曲为串口助手显示设置问题；无需重制QEMU/MC编码器，生产发送代码和四件套保持不变",
   "evidence_root": "/home/liu/mcs251-encoding-alice/",
   "experiment_root": "/home/liu/mcs251-realhw-alice/blink-asm/",
   "classification": {
@@ -12,7 +12,8 @@
       "旧QEMU无需重制解码器即可执行官方初始化到main，随后停在FF0FD3..FF0FDE的USB握手轮询，而非复位跑飞。",
       "M1.5官方子集asm blink、M1.6 ECALL/ERET单变量近似实验、M1.7编译器volatile栈帧函数均由用户经PM报告真机通过。仅证明各实验实际覆盖的路径，不是全部ISA证明。",
       "M1.8 V0由用户报告TI成功的LED慢闪；V1由用户报告UART-PROBE 115200整行重复、无乱码且LED慢闪，115200/24MHz与fresh-TI初始化方案通过。",
-      "02-blink原版把UART输出放在LED翻转之前，并使用可被O2删除的无volatile空延时循环；新版本默认纯LED、翻转前置、volatile计数，时间未经校准。"
+      "02-blink原版把UART输出放在LED翻转之前，并使用可被O2删除的无volatile空延时循环；新版本默认纯LED、翻转前置、volatile计数，时间未经校准。",
+      "用户经PM最终确认当前发布selftest.hex（SHA256 36f15a97ac167a32743ee330525a486ece5a3f3dd6fc96b8a9c929b21339169f）在真机稳定循环SELFTEST-PASS，观察间隔约330ms；先前乱码由串口助手显示设置造成。没有修改生产TI发送路径来迎合乱码假说。"
     ],
     "high_confidence_hypotheses": [
       "一次性开机输出可能在烧录后打开串口终端之前已经完成，能解释空白窗口；V0仅发送一次U，V1改为周期完整行增加了可观察性。尚无开机同步捕获A/B证明这是所有旧镜像空白的唯一根因。",
@@ -22,7 +23,7 @@
       "P_SW1复位实际值未读回。V0实际执行P_SW1&=~0xC0，两demo及旧MOVC也清过路由位；不能写成V0完全没初始化路由。",
       "V1相对V0同时改变整字节P_SW1=0、重复完整文本、每字节fresh TI与P4.4观测，不是仅P_SW1一个变量；不能据此断言复位值非0或旧输出必在其它引脚。",
       "MOVC的固定FF或当前PC bank硅片仲裁尚未报告。",
-      "最终带周期状态重发的selftest/modern/MOVC发布包尚待用户复烧完整验收。"
+      "最终selftest真机PASS已由用户报告；modern/MOVC最终整包真机验收及MOVC bank裁定仍不外推。约330ms为用户观察，不是独立时序仪器测量或跨构建周期保证。"
     ]
   },
   "experiments": [
@@ -72,6 +73,14 @@
       "scope": "P_SW1=00、循环整行、每字节先清TI、P4.4前后观测；多变量对比不能单独归因为P_SW1"
     }
   ],
+  "final_hardware_closure": {
+    "file": "/mnt/c/Prj/LLVM/realhw-hex/selftest.hex",
+    "sha256": "36f15a97ac167a32743ee330525a486ece5a3f3dd6fc96b8a9c929b21339169f",
+    "observation_source": "用户经PM回报；本代理未直接采集原始真机字节流",
+    "observation": "SELFTEST-PASS稳定循环输出，间隔约330ms",
+    "garbled_output_episode": "串口助手显示设置问题；▒等替代字符不能当作已测0xFF或波特率错误证据",
+    "cancelled_diagnostics": "selftest-v1tx/gap只存在沙盒构建脚本，未执行编译或发布，已取消；生产代码和四件套HEX不变"
+  },
   "manual_conflicts": [
     "JE：A-8表写88，但A-5/A-68位图和官方FF1250的68 1A一致，采用68。",
     "ERET：A-8/A-61位图单字节AA，A-22/A-61字节数字段写Source=2；单字节AA已在M1.6/M1.7用户硅片实验路径通过。",
