@@ -75,7 +75,10 @@ define i32 @div32_ten(i32 %a) {
   %q = udiv i32 %a, 10
   ret i32 %q
 }
-; Division by zero is poison; no trap or helper contract is promised.
+; Division by zero is undefined behavior (LangRef); no trap or helper
+; contract is promised. CHECK-NOT: trap here is a codegen regression check
+; for this fixture only, not a runtime behavior promise (division design v4
+; §8.3).
 define i32 @div32_zero(i32 %a) {
 ; CHECK-LABEL: _div32_zero:
 ; CHECK-NOT: trap

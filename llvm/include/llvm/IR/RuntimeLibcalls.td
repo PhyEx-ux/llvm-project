@@ -2951,13 +2951,26 @@ def __mips16_unordsf2 : RuntimeLibcallImpl<UO_F32>;
 //===----------------------------------------------------------------------===//
 
 // The target's '_' prefix turns these C-level names into the SDCC-compatible
-// __divuint/__divulong symbols. No other integer runtime helpers are shipped.
+// __divuint/__divulong/__divsint/__divslong/__moduint/__modulong/__modsint/
+// __modslong symbols. All eight integer division/remainder helpers are
+// provided by llvm/lib/Target/MCS251/Runtime (division design v4 §5.3/§5.4).
+// No i8 or i64 helper exists: i8 promotes to i16 (MCS251ISelLowering, and
+// SDCC promotes char arithmetic too), i64 is unsupported by design (v4
+// §10-Q8) -- widening/expansion of i64 falls to makeLibCall with no impl
+// in MCS251SystemLibrary and fails loudly.
 def mcs251_divuint : RuntimeLibcallImpl<UDIV_I16, "_divuint">;
 def mcs251_divulong : RuntimeLibcallImpl<UDIV_I32, "_divulong">;
+def mcs251_divsint : RuntimeLibcallImpl<SDIV_I16, "_divsint">;
+def mcs251_divslong : RuntimeLibcallImpl<SDIV_I32, "_divslong">;
+def mcs251_moduint : RuntimeLibcallImpl<UREM_I16, "_moduint">;
+def mcs251_modulong : RuntimeLibcallImpl<UREM_I32, "_modulong">;
+def mcs251_modsint : RuntimeLibcallImpl<SREM_I16, "_modsint">;
+def mcs251_modslong : RuntimeLibcallImpl<SREM_I32, "_modslong">;
 def IsMCS251 : LibcallPredicate<[{TT.getArch() == Triple::mcs251}]>;
 def isMCS251 : RuntimeLibcallAvailability<(all_of IsMCS251)>;
 def MCS251SystemLibrary : SystemRuntimeLibrary<isMCS251,
-    (add mcs251_divuint, mcs251_divulong)>;
+    (add mcs251_divuint, mcs251_divulong, mcs251_divsint, mcs251_divslong,
+         mcs251_moduint, mcs251_modulong, mcs251_modsint, mcs251_modslong)>;
 
 //===----------------------------------------------------------------------===//
 // MSP430 Runtime Libcalls

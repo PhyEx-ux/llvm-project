@@ -53,15 +53,39 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   }
 
   setOperationAction(ISD::MUL, MVT::i32, Custom);
+
+  // Division/remainder (division design v4 §5.4 / SPEC
+  // 2026-09-07 §1.1): i8 has no runtime symbols at all,
+  // so all four ops promote to i16. The operation
+  // legalizer's PromoteNode (LegalizeDAG.cpp :5613-5661)
+  // sign-extends SDIV/SREM and zero-extends UDIV/UREM
+  // operands, performs the i16 op, truncates the result --
+  // promoted i8 arithmetic is exact by mechanism.
   setOperationAction(ISD::UDIV, MVT::i8, Promote);
   setOperationPromotedToType(ISD::UDIV, MVT::i8, MVT::i16);
+  setOperationAction(ISD::SDIV, MVT::i8, Promote);
+  setOperationPromotedToType(ISD::SDIV, MVT::i8, MVT::i16);
+  setOperationAction(ISD::UREM, MVT::i8, Promote);
+  setOperationPromotedToType(ISD::UREM, MVT::i8, MVT::i16);
+  setOperationAction(ISD::SREM, MVT::i8, Promote);
+  setOperationPromotedToType(ISD::SREM, MVT::i8, MVT::i16);
   setOperationAction(ISD::UDIV, MVT::i16, LibCall);
   setOperationAction(ISD::UDIV, MVT::i32, LibCall);
+  setOperationAction(ISD::SDIV, MVT::i16, LibCall);
+  setOperationAction(ISD::SDIV, MVT::i32, LibCall);
+  setOperationAction(ISD::SREM, MVT::i16, LibCall);
+  setOperationAction(ISD::SREM, MVT::i32, LibCall);
+  setOperationAction(ISD::UREM, MVT::i16, LibCall);
+  setOperationAction(ISD::UREM, MVT::i32, LibCall);
   setLibcallImpl(RTLIB::UDIV_I16, RTLIB::impl_mcs251_divuint);
   setLibcallImpl(RTLIB::UDIV_I32, RTLIB::impl_mcs251_divulong);
+  setLibcallImpl(RTLIB::SDIV_I16, RTLIB::impl_mcs251_divsint);
+  setLibcallImpl(RTLIB::SDIV_I32, RTLIB::impl_mcs251_divslong);
+  setLibcallImpl(RTLIB::SREM_I16, RTLIB::impl_mcs251_modsint);
+  setLibcallImpl(RTLIB::SREM_I32, RTLIB::impl_mcs251_modslong);
+  setLibcallImpl(RTLIB::UREM_I16, RTLIB::impl_mcs251_moduint);
+  setLibcallImpl(RTLIB::UREM_I32, RTLIB::impl_mcs251_modulong);
   for (MVT VT : {MVT::i8, MVT::i16, MVT::i32}) {
-    for (unsigned Op : {ISD::SDIV, ISD::SREM, ISD::UREM})
-      setOperationAction(Op, VT, Custom);
     setOperationAction(ISD::UDIVREM, VT, Expand);
     setOperationAction(ISD::SDIVREM, VT, Expand);
     setOperationAction(ISD::MULHU, VT, Expand);
@@ -233,10 +257,6 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     llvm_unreachable("custom operation has no registered lowering");
   case ISD::MUL:
     return LowerMul32(Op, DAG);
-  case ISD::SDIV:
-  case ISD::SREM:
-  case ISD::UREM:
-    report_fatal_error("MCS251: signed division and remainder are not supported");
   case ISD::BR_CC:
     return LowerBR_CC(Op, DAG);
   case ISD::ADD:
