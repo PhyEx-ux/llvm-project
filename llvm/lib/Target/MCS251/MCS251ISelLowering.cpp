@@ -105,6 +105,16 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::ZERO_EXTEND, MVT::i32, Custom);
   setOperationAction(ISD::ANY_EXTEND, MVT::i32, Custom);
   setOperationAction(ISD::SIGN_EXTEND, MVT::i32, Custom);
+  // SIGN_EXTEND_INREG (DAGCombiner's sext(trunc x) form) consults the
+  // action table by INNER type, not by result type (LegalizeDAG), so the
+  // two modeled inner widths need explicit entries. All other inner types
+  // (i1, wider scalars, vectors) are deliberately NOT registered this
+  // round: they keep whatever action the generic defaults give them (Legal
+  // for most scalars, Expand for vector INREG and the odd narrow types,
+  // TargetLoweringBase::initActions) -- no support is claimed for them,
+  // and a Legal-but-unselectable node fails loudly at selection.
+  setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i8, Custom);
+  setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i16, Custom);
   // Stack allocations (Phase 9): static allocas surface as FrameIndexSDNode
   // pointers handled by parseAddress (direct @dr60 access) and the FIADDR
   // Select hook (escaping pointer values); variable-length allocas lower
@@ -258,6 +268,8 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     return LowerExtend(Op, DAG);
   case ISD::SIGN_EXTEND:
     return LowerExtend(Op, DAG);
+  case ISD::SIGN_EXTEND_INREG:
+    return LowerSignExtendInReg(Op, DAG);
   case ISD::GlobalAddress: {
     SDLoc DL(Op);
     auto *GA = cast<GlobalAddressSDNode>(Op);
@@ -1326,9 +1338,6 @@ SDValue MCS251TargetLowering::LowerLoad(SDValue Op, SelectionDAG &DAG) const {
     report_fatal_error("MCS251: atomic memory operations are not supported");
   if (MemVT != MVT::i8 && MemVT != MVT::i16 && MemVT != MVT::i32)
     report_fatal_error("MCS251: only i8/i16/i32 memory objects are supported (load)");
-  if (LD->getExtensionType() == ISD::SEXTLOAD)
-    report_fatal_error("MCS251: sign-extending loads are not supported (no "
-                       "8-to-16 bit sign extension yet)");
 
   MCS251Address A = parseAddress(LD->getBasePtr(), DL, DAG,
                                  /*AllowDirect=*/MemVT == MVT::i8);
@@ -1353,7 +1362,15 @@ SDValue MCS251TargetLowering::LowerLoad(SDValue Op, SelectionDAG &DAG) const {
   if (Size == 4)
     Res = makeDR(Res, makeWord(Bytes[2], Bytes[3], DL, DAG), DL, DAG);
   if (ValVT != MemVT)
-    Res = DAG.getNode(ISD::ZERO_EXTEND, DL, ValVT, Res);
+    // Forward the extension kind: SEXTLOAD routes through SIGN_EXTEND into
+    // LowerExtend's bias-identity sequence (the new node re-enters the
+    // legalizer and hits the Custom SIGN_EXTEND action). EXTLOAD is
+    // refined to zero on purpose (legal anyext refinement, existing
+    // behaviour, unchanged).
+    Res = DAG.getNode(LD->getExtensionType() == ISD::SEXTLOAD
+                          ? ISD::SIGN_EXTEND
+                          : ISD::ZERO_EXTEND,
+                      DL, ValVT, Res);
   return DAG.getMergeValues({Res, Chain}, DL);
 }
 
@@ -1434,30 +1451,137 @@ SDValue MCS251TargetLowering::LowerStore(SDValue Op, SelectionDAG &DAG) const {
   return Chain;
 }
 
+// Sign-extension core, shared by LowerExtend (SIGN_EXTEND, including the
+// SIGN_EXTEND that LowerLoad forwards for SEXTLOAD) and LowerSignExtendInReg.
+// Offset-binary identity, proven for ALL inputs (not just boundary samples):
+//
+//     sext_N(x) == zext_N(x ^ 2^(m-1)) + (2^N - 2^(m-1))   (mod 2^N)
+//
+// The bias addition MUST wrap unsigned: for non-negative inputs the sum
+// is 2^N + x (exactly 2^N only at x = 0) and only the wrap lands it back
+// on x (QEMU-observed carry-out, SEXTLOAD P-A2). Machine ADD nodes carry
+// no nuw/nsw semantics -- keep it that way in any future rewrite.
+//
+// Per-width released main forms (all operand encodings QEMU-run-verified,
+// SEXTLOAD-DESIGN 2.5 / P-A verdicts):
+//   i8->i16  (a): zero hi lane + xrl #0x80 + add wr,#0xff80
+//   i8->i32  (c): lanes {00,00,00,x^80} + full 32-bit bias 0xffffff80
+//                 (MOV32ri -> mov dr,#0xff80 / movh dr,#0xffff) + add dr,dr;
+//                 assembled directly at 32 bits, no intermediate i16 sext
+//   i16->i32 (d): lanes {00,00,hi^80,lo} + bias 0xffff8000 + add dr,dr;
+//                 the 0x8000 flip lands on the source's big-endian
+//                 Bytes[0] (sub_hi8) -- the sign-byte position shared by
+//                 all three widths
+//
+// Lane discipline: makeWord/makeDR (REG_SEQUENCE) only assemble lanes and
+// never fabricate zeros; every zero lane is an explicit MOV8ri. Identical
+// MOV8ri(0) and EXTRACT_SUBREG machine nodes CSE together
+// (SelectionDAG::getMachineNode), so zero lanes and lane extractions may
+// be shared by several consumers -- CSE is not a privacy barrier and the
+// source is never written through in the first place: the lowering only
+// reads it (SSA dataflow), the flip is a tied XOR8ri whose operand
+// TwoAddressInstructionPass turns into a COPY whenever the (possibly
+// shared) value has other users, and register-allocation interference
+// keeps a clobbering def from coalescing over a still-live value
+// (sext-pressure.ll binds exactly this as MIR dataflow).
+static SDValue buildSignExtend(SDValue Src, EVT DstVT, const SDLoc &DL,
+                               SelectionDAG &DAG) {
+  EVT SrcVT = Src.getValueType();
+  assert(((SrcVT == MVT::i8 && (DstVT == MVT::i16 || DstVT == MVT::i32)) ||
+          (SrcVT == MVT::i16 && DstVT == MVT::i32)) &&
+         "only i8->i16, i8->i32 and i16->i32 sign extensions are custom");
+
+  // x ^ 0x80 on the sign byte (the source's most significant byte at every
+  // width).
+  auto FlipSignByte = [&](SDValue Byte) {
+    return SDValue(
+        DAG.getMachineNode(MCS251::XOR8ri, DL, MVT::i8,
+                           {Byte, DAG.getTargetConstant(0x80, DL, MVT::i8)}),
+        0);
+  };
+
+  if (SrcVT == MVT::i8) {
+    SDValue Flipped = FlipSignByte(Src);
+    if (DstVT == MVT::i16) {
+      // (a): wr = {00, x^80}; wr += 0xff80 (mod 2^16).
+      SDValue Z16 = makeWord(buildMOV8ri(0, DL, DAG), Flipped, DL, DAG);
+      return SDValue(DAG.getMachineNode(
+                         MCS251::ADD16ri, DL, MVT::i16,
+                         {Z16, DAG.getTargetConstant(0xff80, DL, MVT::i16)}),
+                     0);
+    }
+    // (c): dr = {00, 00, 00, x^80}; dr += 0xffffff80 (mod 2^32).
+    SDValue Z32 = makeDR(makeWord(buildMOV8ri(0, DL, DAG),
+                                  buildMOV8ri(0, DL, DAG), DL, DAG),
+                         makeWord(buildMOV8ri(0, DL, DAG), Flipped, DL, DAG),
+                         DL, DAG);
+    SDValue Bias(DAG.getMachineNode(
+                     MCS251::MOV32ri, DL, MVT::i32,
+                     DAG.getTargetConstant(0xffffff80u, DL, MVT::i32)),
+                 0);
+    return SDValue(
+        DAG.getMachineNode(MCS251::ADD32rr, DL, MVT::i32, {Z32, Bias}), 0);
+  }
+
+  // (d): i16 -> i32. The sub_hi8/sub_lo8 extractions may be CSE-shared
+  // with other consumers of the same word; source preservation rests on
+  // the SSA read-only lowering plus the tied XOR/liveness/RA-interference
+  // mechanism described above, not on any privacy of the extraction.
+  SDValue Hi = DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8, Src);
+  SDValue Lo = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, Src);
+  SDValue Z32 = makeDR(makeWord(buildMOV8ri(0, DL, DAG),
+                                buildMOV8ri(0, DL, DAG), DL, DAG),
+                       makeWord(FlipSignByte(Hi), Lo, DL, DAG), DL, DAG);
+  SDValue Bias(DAG.getMachineNode(
+                   MCS251::MOV32ri, DL, MVT::i32,
+                   DAG.getTargetConstant(0xffff8000u, DL, MVT::i32)),
+               0);
+  return SDValue(
+      DAG.getMachineNode(MCS251::ADD32rr, DL, MVT::i32, {Z32, Bias}), 0);
+}
+
 SDValue MCS251TargetLowering::LowerExtend(SDValue Op, SelectionDAG &DAG) const {
   SDLoc DL(Op);
   SDValue Src = Op.getOperand(0);
   EVT SrcVT = Src.getValueType();
   bool Signed = Op.getOpcode() == ISD::SIGN_EXTEND;
   if (Signed) {
-    // Compare before widening: signed byte comparisons use the measured
-    // offset-binary fallback, signed words use CMP16 N/OV.
-    SDValue Sign = DAG.getSetCC(DL, MVT::i8, Src,
-                                DAG.getConstant(0, DL, SrcVT), ISD::SETLT);
-    SDValue Hi = DAG.getSelect(DL, MVT::i16, Sign,
-                              DAG.getConstant(0xffff, DL, MVT::i16),
-                              DAG.getConstant(0, DL, MVT::i16));
-    if (SrcVT == MVT::i8) {
-      SDValue Byte = DAG.getNode(ISD::TRUNCATE, DL, MVT::i8, Hi);
-      Src = makeWord(Byte, Src, DL, DAG);
-    }
-    return Op.getValueType() == MVT::i32 ? makeDR(Hi, Src, DL, DAG) : Src;
+    // Offset-binary bias identity -- see buildSignExtend above. One
+    // implementation point covers explicit sext and the SIGN_EXTEND that
+    // LowerLoad forwards for SEXTLOAD.
+    return buildSignExtend(Src, Op.getValueType(), DL, DAG);
   }
   if (SrcVT == MVT::i8)
     Src = SDValue(DAG.getMachineNode(MCS251::ZEXT8, DL, MVT::i16, Src), 0);
   if (Op.getValueType() == MVT::i16)
     return Src;
   return makeDR(buildMOV16ri(0, DL, DAG), Src, DL, DAG);
+}
+
+// SIGN_EXTEND_INREG is DAGCombiner's sext(trunc x) form (result type equals
+// the widened operand's type; operand 1 is a VTSDNode carrying the inner
+// width). The action table is keyed by that INNER type, so i8/i16 are the
+// registered Custom entries; anything else keeps the default action and
+// never reaches this hook. The operand's upper bits are unspecified;
+// only the effective inner-width lanes contribute to the result, so drop
+// the rest and reuse the plain widening core.
+SDValue MCS251TargetLowering::LowerSignExtendInReg(SDValue Op,
+                                                   SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  EVT InnerVT = cast<VTSDNode>(Op.getOperand(1))->getVT();
+  EVT DstVT = Op.getValueType();
+  SDValue Src = Op.getOperand(0);
+  if (InnerVT == MVT::i8) {
+    // Effective byte = big-endian Bytes[3]: low byte of the low word.
+    if (DstVT == MVT::i32)
+      Src = DAG.getTargetExtractSubreg(MCS251::sub_lo16, DL, MVT::i16, Src);
+    Src = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, Src);
+  } else {
+    assert(InnerVT == MVT::i16 && DstVT == MVT::i32 &&
+           "SIGN_EXTEND_INREG shape without a registered action");
+    Src = DAG.getTargetExtractSubreg(MCS251::sub_lo16, DL, MVT::i16, Src);
+  }
+  return buildSignExtend(Src, DstVT, DL, DAG);
 }
 
 SDValue MCS251TargetLowering::LowerArithmetic32(SDValue Op,
