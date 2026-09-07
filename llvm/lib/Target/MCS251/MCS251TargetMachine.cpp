@@ -25,6 +25,8 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/TargetParser/MCS251TargetParser.h"
 
 using namespace llvm;
 
@@ -32,12 +34,36 @@ static Reloc::Model getEffectiveRelocModel(std::optional<Reloc::Model> RM) {
   return RM.value_or(Reloc::Static);
 }
 
+static StringRef getMCS251DataLayout(const TargetOptions &Options) {
+  const MCS251::MemoryContract &Contract = Options.MCS251Memory;
+  if (!Contract.isSpecified())
+    return MCS251::getCompatibilityDataLayout();
+
+  if (!MCS251::isValidMemoryContract(Contract))
+    reportFatalUsageError("MCS251: invalid numeric memory contract");
+
+  const auto Version =
+      static_cast<MCS251::ASLayoutVersion>(Contract.ASLayoutVersion);
+  const auto AS0Bits =
+      static_cast<MCS251::AS0PointerBits>(Contract.AS0PointerBits);
+  if (AS0Bits == MCS251::AS0PointerBits::Bits16)
+    reportFatalUsageError(
+        "MCS251: AS0 pointer width 16 is recognized but execution is not "
+        "supported");
+
+  auto Desc = MCS251::getLayoutDesc(Version, AS0Bits);
+  if (!Desc)
+    reportFatalUsageError(
+        "MCS251: numeric memory contract has no data layout");
+  return Desc->DataLayout;
+}
+
 MCS251TargetMachine::MCS251TargetMachine(
     const Target &T, const Triple &TT, StringRef CPU, StringRef FS,
     const TargetOptions &Options, std::optional<Reloc::Model> RM,
     std::optional<CodeModel::Model> CM, CodeGenOptLevel OL, bool JIT)
-    : CodeGenTargetMachineImpl(T, TT.computeDataLayout(), TT, CPU, FS, Options,
-                               getEffectiveRelocModel(RM),
+    : CodeGenTargetMachineImpl(T, getMCS251DataLayout(Options), TT, CPU, FS,
+                               Options, getEffectiveRelocModel(RM),
                                getEffectiveCodeModel(CM, CodeModel::Small), OL),
       TLOF(std::make_unique<MCS251TargetObjectFile>()),
       Subtarget(TT, std::string(CPU), std::string(FS), *this),

@@ -79,6 +79,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/TargetParser/Host.h"
+#include "llvm/TargetParser/MCS251TargetParser.h"
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <cassert>
@@ -5042,6 +5043,10 @@ static void GenerateTargetArgs(const TargetOptions &Opts,
 #include "clang/Options/Options.inc"
 #undef TARGET_OPTION_WITH_MARSHALLING
 
+  if (Opts.MCS251Memory.isSpecified())
+    GenerateArg(Consumer, OPT_mcs251_memory_contract_EQ,
+                llvm::MCS251::formatMemoryContract(Opts.MCS251Memory));
+
   if (!Opts.SDKVersion.empty())
     GenerateArg(Consumer, OPT_target_sdk_version_EQ,
                 Opts.SDKVersion.getAsString());
@@ -5089,6 +5094,28 @@ static bool ParseTargetArgs(TargetOptions &Opts, ArgList &Args,
           << A->getAsString(Args) << A->getValue();
     else
       Opts.DarwinTargetVariantSDKVersion = Version;
+  }
+
+  if (Arg *A = Args.getLastArg(options::OPT_mcs251_memory_contract_EQ)) {
+    if (!Opts.Triple.empty() &&
+        llvm::Triple(Opts.Triple).getArch() != llvm::Triple::mcs251) {
+      Opts.MCS251Memory = {};
+      Diags.Report(diag::err_drv_unsupported_opt_for_target)
+          << A->getSpelling() << Opts.Triple;
+    } else if (!llvm::MCS251::parseMemoryContract(A->getValue(),
+                                                   Opts.MCS251Memory) ||
+               !llvm::MCS251::isValidMemoryContract(Opts.MCS251Memory)) {
+      Opts.MCS251Memory = {};
+      Diags.Report(diag::err_drv_invalid_value) << A->getSpelling()
+                                                << A->getValue();
+    }
+  } else if (!Opts.Triple.empty() &&
+             llvm::Triple(Opts.Triple).getArch() == llvm::Triple::mcs251) {
+    // Materialize the no-flag default before TargetInfo and code generation
+    // consume the shared TargetOptions contract.
+    Opts.MCS251Memory = {1, 2, 32, 8, 1};
+  } else {
+    Opts.MCS251Memory = {};
   }
 
   if (Arg *A = Args.getLastArg(options::OPT_mxnack, options::OPT_mno_xnack)) {

@@ -238,7 +238,8 @@ public:
   std::unique_ptr<TargetMachine> TM;
 
   // Emit output using the new pass manager for the optimization pipeline.
-  void emitAssembly(BackendAction Action, std::unique_ptr<raw_pwrite_stream> OS,
+  bool emitAssembly(BackendAction Action,
+                    std::unique_ptr<raw_pwrite_stream> OS,
                     BackendConsumer *BC);
 };
 } // namespace
@@ -417,6 +418,9 @@ static bool initTargetOptions(const CompilerInstance &CI,
 
   // Set EABI version.
   Options.EABIVersion = TargetOpts.EABIVersion;
+
+  // Forward the numeric MCS-251 storage-model contract to the backend.
+  Options.MCS251Memory = TargetOpts.MCS251Memory;
 
   if (CodeGenOpts.hasSjLjExceptions())
     Options.ExceptionModel = llvm::ExceptionHandling::SjLj;
@@ -1343,7 +1347,7 @@ void EmitAssemblyHelper::TimeCodegenPasses(
     timer.yieldTo(CI.getFrontendTimer());
 }
 
-void EmitAssemblyHelper::emitAssembly(BackendAction Action,
+bool EmitAssemblyHelper::emitAssembly(BackendAction Action,
                                       std::unique_ptr<raw_pwrite_stream> OS,
                                       BackendConsumer *BC) {
   setCommandLineOpts(CodeGenOpts, CI.getVirtualFileSystem());
@@ -1352,9 +1356,19 @@ void EmitAssemblyHelper::emitAssembly(BackendAction Action,
   CreateTargetMachine(RequiresCodeGen);
 
   if (RequiresCodeGen && !TM)
-    return;
-  if (TM)
-    TheModule->setDataLayout(TM->createDataLayout());
+    return false;
+  if (TM) {
+    const std::string &OriginalDL = TheModule->getDataLayoutStr();
+    std::string ContractDL =
+        TM->createDataLayout().getStringRepresentation();
+    if (TM->getTargetTriple().getArch() == llvm::Triple::mcs251 &&
+        !OriginalDL.empty() && OriginalDL != ContractDL) {
+      Diags.Report(diag::err_data_layout_mismatch) << ContractDL << OriginalDL;
+      TM.reset();
+      return false;
+    }
+    TheModule->setDataLayout(ContractDL);
+  }
 
   // Before executing passes, print the final values of the LLVM options.
   cl::PrintOptionValues();
@@ -1367,6 +1381,7 @@ void EmitAssemblyHelper::emitAssembly(BackendAction Action,
     ThinLinkOS->keep();
   if (DwoOS)
     DwoOS->keep();
+  return true;
 }
 
 static void
@@ -1487,7 +1502,7 @@ runThinLTOBackend(CompilerInstance &CI, ModuleSummaryIndex *CombinedIndex,
   }
 }
 
-static void createAndEmbedModuleForDynamicDebugging(
+static bool createAndEmbedModuleForDynamicDebugging(
     CompilerInstance &CI, CodeGenOptions &CGOpts, llvm::Module *M,
     IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, BackendConsumer *BC) {
   /// Helper for saving the module(s) at various dyndbg stages.
@@ -1548,7 +1563,8 @@ static void createAndEmbedModuleForDynamicDebugging(
     // assertion failures if there's no registered backend which is why we
     // disable the feature if that's the case (see
     // warn_dyndbg_unable_to_create_target above).
-    AsmHelper.emitAssembly(Backend_EmitObj, std::move(UnoptOS), BC);
+    if (!AsmHelper.emitAssembly(Backend_EmitObj, std::move(UnoptOS), BC))
+      return false;
     assert(!UnoptBuf.empty() && "Expected emitAssembly to fill UnoptBuf");
 
     // Inject the inner ELF into the outer module.
@@ -1570,6 +1586,7 @@ static void createAndEmbedModuleForDynamicDebugging(
                           /*sh_entsize*/ getU32Metadata(0)}));
   }
   SaveModule("dyndbg.2.outer", *M);
+  return true;
 }
 
 void clang::emitBackendOutput(CompilerInstance &CI, CodeGenOptions &CGOpts,
@@ -1642,11 +1659,13 @@ void clang::emitBackendOutput(CompilerInstance &CI, CodeGenOptions &CGOpts,
       EnableDynamicDebugging = false;
     }
   }
-  if (EnableDynamicDebugging)
-    createAndEmbedModuleForDynamicDebugging(CI, CGOpts, M, VFS, BC);
+  if (EnableDynamicDebugging &&
+      !createAndEmbedModuleForDynamicDebugging(CI, CGOpts, M, VFS, BC))
+    return;
 
   EmitAssemblyHelper AsmHelper(CI, CGOpts, M, VFS);
-  AsmHelper.emitAssembly(Action, std::move(OS), BC);
+  if (!AsmHelper.emitAssembly(Action, std::move(OS), BC))
+    return;
 
   // Verify clang's TargetInfo DataLayout against the LLVM TargetMachine's
   // DataLayout.

@@ -1085,6 +1085,60 @@ TEST_F(CommandLineTest, TestModuleFileExtension) {
       Contains(StrEq("-ftest-module-file-extension=second:3:2:1:second")));
 }
 
+TEST_F(CommandLineTest, MCS251MemoryContractSyntaxErrorClearsPriorValue) {
+  const char *ValidArgs[] = {"-triple", "mcs251-unknown-none",
+                             "-mcs251-memory-contract=1,2,32,8,1",
+                             "-no-round-trip-args"};
+  ASSERT_TRUE(
+      CompilerInvocation::CreateFromArgs(Invocation, ValidArgs, *Diags));
+  const auto &ValidContract = Invocation.getTargetOpts().MCS251Memory;
+  EXPECT_EQ(ValidContract.TransportVersion, 1u);
+  EXPECT_EQ(ValidContract.ASLayoutVersion, 2u);
+  EXPECT_EQ(ValidContract.AS0PointerBits, 32u);
+  EXPECT_EQ(ValidContract.DefaultPlacement, 8u);
+  EXPECT_EQ(ValidContract.ExecutionContract, 1u);
+
+  const char *InvalidArgs[] = {"-triple", "mcs251-unknown-none",
+                               "-mcs251-memory-contract=1,2,32",
+                               "-no-round-trip-args"};
+  ASSERT_FALSE(
+      CompilerInvocation::CreateFromArgs(Invocation, InvalidArgs, *Diags));
+
+  const auto &Contract = Invocation.getTargetOpts().MCS251Memory;
+  EXPECT_EQ(Contract.TransportVersion, 0u);
+  EXPECT_EQ(Contract.ASLayoutVersion, 0u);
+  EXPECT_EQ(Contract.AS0PointerBits, 0u);
+  EXPECT_EQ(Contract.DefaultPlacement, 0u);
+  EXPECT_EQ(Contract.ExecutionContract, 0u);
+}
+
+TEST_F(CommandLineTest, MCS251MemoryContractInvalidFieldsClearPriorValue) {
+  const char *ValidArgs[] = {"-triple", "mcs251-unknown-none",
+                             "-mcs251-memory-contract=1,2,32,8,1",
+                             "-no-round-trip-args"};
+  ASSERT_TRUE(
+      CompilerInvocation::CreateFromArgs(Invocation, ValidArgs, *Diags));
+  const auto &ValidContract = Invocation.getTargetOpts().MCS251Memory;
+  EXPECT_EQ(ValidContract.TransportVersion, 1u);
+  EXPECT_EQ(ValidContract.ASLayoutVersion, 2u);
+  EXPECT_EQ(ValidContract.AS0PointerBits, 32u);
+  EXPECT_EQ(ValidContract.DefaultPlacement, 8u);
+  EXPECT_EQ(ValidContract.ExecutionContract, 1u);
+
+  const char *InvalidArgs[] = {"-triple", "mcs251-unknown-none",
+                               "-mcs251-memory-contract=1,3,32,8,1",
+                               "-no-round-trip-args"};
+  ASSERT_FALSE(
+      CompilerInvocation::CreateFromArgs(Invocation, InvalidArgs, *Diags));
+
+  const auto &Contract = Invocation.getTargetOpts().MCS251Memory;
+  EXPECT_EQ(Contract.TransportVersion, 0u);
+  EXPECT_EQ(Contract.ASLayoutVersion, 0u);
+  EXPECT_EQ(Contract.AS0PointerBits, 0u);
+  EXPECT_EQ(Contract.DefaultPlacement, 0u);
+  EXPECT_EQ(Contract.ExecutionContract, 0u);
+}
+
 TEST_F(CommandLineTest, RoundTrip) {
   // Testing one marshalled and one manually generated option from each
   // CompilerInvocation member.

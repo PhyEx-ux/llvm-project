@@ -13,6 +13,18 @@
 // RUN: %clang --target=mcs251-unknown-none -### -O2 -c -foptimize-sibling-calls %s 2>&1 | FileCheck %s --check-prefix=TAIL --implicit-check-not=error:
 // RUN: %clang --target=mcs251-unknown-none -### -O2 -c -fno-optimize-sibling-calls %s 2>&1 | FileCheck %s --check-prefix=NO-TAIL --implicit-check-not=error:
 
+// The driver maps its default and all supported 32-bit models to canonical
+// five-field cc1 contracts.
+// RUN: %clang --target=mcs251-unknown-none -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-DEFAULT --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=small -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-SMALL --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=xsmall -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-XSMALL --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=large -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-LARGE --implicit-check-not=error:
+// MEMORY-DEFAULT: "-cc1"
+// MEMORY-DEFAULT-SAME: "-mcs251-memory-contract=1,2,32,8,1"
+// MEMORY-SMALL: "-mcs251-memory-contract=1,2,32,1,1"
+// MEMORY-XSMALL: "-mcs251-memory-contract=1,2,32,8,1"
+// MEMORY-LARGE: "-mcs251-memory-contract=1,2,32,3,1"
+
 // TAIL: "-cc1"
 // TAIL-NOT: "-fno-optimize-sibling-calls"
 // TAIL: "-faddrsig"
