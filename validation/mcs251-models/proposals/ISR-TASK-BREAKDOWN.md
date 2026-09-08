@@ -2170,9 +2170,9 @@ NOP(4)不是每次写寄存器后的自动动作,不是SPX两写原子证明,本
 
 T04 发现冻结测试与三条现实接口冲突(默认契约 V2 使裸 ptr 前向引用解析失败;MIR 强制显式隐式操作数;AS4 used 根在 T06 步骤 8 落地前无法出 ELF 对象——V1 契约实测同样撞 doFinalization 全局数据拒,不是出路)。裁定:采修订版 (a)。
 
-1. T04/T05/T06 三卡冻结测试统一形态:显式 `-mcs251-memory-contract=1,2,32,8,1`;ISR 定义显式 `addrspace(4)`;llvm.used 根用标准 addrspacecast 形态(`[ptr addrspacecast (ptr addrspace(4) @fn to ptr)]`);AS4 直接数组根同为合法形态,须另有正例。
-2. T04 正式 RUN 三行(46 字节断言不变);阶段性开发证据可用 `-stop-before=mcs251-asm-printer`(实际注册名,非 asm-printer)。
-3. MIR 隐式操作数显式化规则(push/pop/RETI 全套,含 DR8→A/B、DPX→DPL/DPH/DPTR 别名)按 Alice 给定;指令顺序与编码串不变。
+1. T04/T05/T06 三卡冻结测试统一形态:显式 `-mcs251-memory-contract=1,2,32,8,1`;ISR 定义显式 `addrspace(4)`;llvm.used 根用标准 addrspacecast 形态(`[ptr addrspacecast (ptr addrspace(4) @fn to ptr)]`);AS4 直接数组根同为合法形态(正例已由 T01 mcs251-isr-invalid.ll 的 as4-direct-ok/as4-cast-ok 段覆盖)。
+2. T04 正式 RUN 三行(41 字节断言不变;附录初稿误写 46)。阶段性开发证据可用 `-stop-before=mcs251-asm-printer`(实际注册名,非 asm-printer)。
+3. MIR 隐式操作数显式化规则(push/pop/RETI 全套,含 DR8→A/B、DPX→DPL/DPH/DPTR 别名)按 Alice 给定;指令顺序与编码串不变。**T04 复审补充(2026-09-09):20 条 PUSH/POP 实际为 2 字节指令,TD 须显式 Size=2(RETI 保持 1);PUSH 须完整建模待保存主寄存器的读取(Uses 含 PSW/各自 DR/DR56),冻结 MIR 正文 PUSH 行同步加 implicit use。**
 4. T06 步骤 8 = 三卡完整对象验收硬前置,精确豁免必须同时含:(i) 按 A2.2 逐成员路径检查的保活例外(非按名字/整表跳过,不放宽共享常量另一路逃逸);(ii) 已验证保活元数据在 finalization 走非数据路径,不进 v1 DSEG/XINIT/initializer 发射,不触发可变全局存储预留;(iii) 负例覆盖普通 AS4 逃逸、shared cast 双路、compiler.used/坏根、混合成员,维持 fail-loud。
 5. T05 补充:LowerFormalArguments 须支持已验证的 MCS251_INTR void() 入口(现 :2266 只接 C/Fast),保留 FnAS==ProgramAS 检查;LowerReturn ISR→RETI、普通仍 ERET。
 6. 排序:T04 实现(定义/编码)审查 → T05/T06 按依赖推进 → T06 精确豁免落地 → 三卡正式 lit/真实 ELF 统一重跑后闭卡。T04 状态="实现完成/正式集成验收阻塞",41 字节证据为编码层证据。
