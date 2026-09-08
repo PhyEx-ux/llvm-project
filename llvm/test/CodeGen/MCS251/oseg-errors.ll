@@ -8,7 +8,7 @@
 ; RUN: not --crash llc -mtriple=mcs251 %t/float.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
 ; RUN: not --crash llc -mtriple=mcs251 %t/indirect.ll -o - 2>&1 | FileCheck %s --check-prefix=INDIRECT
 ; RUN: not --crash llc -mtriple=mcs251 %t/weak.ll -o - 2>&1 | FileCheck %s --check-prefix=LINKAGE
-; PTR: LLVM ERROR: MCS251: static pointer parameters are not supported (SDCC uses three-byte slots)
+; PTR: LLVM ERROR: MCS251: static pointer parameters are not supported by the compatibility ABI
 ; TYPE: LLVM ERROR: MCS251: arguments must be unsplit i8/i16/i32 scalars
 ; INDIRECT: LLVM ERROR: MCS251: multi-argument indirect calls are not supported
 ; LINKAGE: LLVM ERROR: MCS251: static parameter slots require local or external function linkage

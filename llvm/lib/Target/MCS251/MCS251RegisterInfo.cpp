@@ -18,7 +18,11 @@ using namespace llvm;
 #define GET_REGINFO_TARGET_DESC
 #include "MCS251GenRegisterInfo.inc"
 
-MCS251RegisterInfo::MCS251RegisterInfo() : MCS251GenRegisterInfo(0) {}
+MCS251RegisterInfo::MCS251RegisterInfo(unsigned PointerBits)
+    : MCS251GenRegisterInfo(0), PointerBits(PointerBits) {
+  assert((PointerBits == 16 || PointerBits == 32) &&
+         "unexpected MCS251 pointer width");
+}
 
 const MCPhysReg *
 MCS251RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
@@ -74,7 +78,7 @@ BitVector MCS251RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
 
 const TargetRegisterClass *
 MCS251RegisterInfo::getPointerRegClass(unsigned Kind) const {
-  return &MCS251::GPR32RegClass;
+  return PointerBits == 16 ? &MCS251::GPR16RegClass : &MCS251::GPR32RegClass;
 }
 
 // Frame-index elimination (Phase 9).

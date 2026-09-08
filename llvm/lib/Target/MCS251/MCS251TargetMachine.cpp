@@ -12,8 +12,11 @@
 #include "MCTargetDesc/MCS251MCTargetDesc.h"
 #include "MCTargetDesc/MCS251RELObjectWriter.h"
 #include "TargetInfo/MCS251TargetInfo.h"
+#include "llvm/Analysis/ConstantFolding.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
+#include "llvm/CodeGen/MCS251ContractVerifier.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
@@ -23,6 +26,7 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -46,11 +50,6 @@ static StringRef getMCS251DataLayout(const TargetOptions &Options) {
       static_cast<MCS251::ASLayoutVersion>(Contract.ASLayoutVersion);
   const auto AS0Bits =
       static_cast<MCS251::AS0PointerBits>(Contract.AS0PointerBits);
-  if (AS0Bits == MCS251::AS0PointerBits::Bits16)
-    reportFatalUsageError(
-        "MCS251: AS0 pointer width 16 is recognized but execution is not "
-        "supported");
-
   auto Desc = MCS251::getLayoutDesc(Version, AS0Bits);
   if (!Desc)
     reportFatalUsageError(
@@ -85,6 +84,13 @@ Expected<std::unique_ptr<MCStreamer>> MCS251TargetMachine::createMCStreamer(
   if (usesELFObjects() && FileType != CodeGenFileType::ObjectFile)
     return make_error<StringError>(
         "MCS251 ELF output requires -filetype=obj", inconvertibleErrorCode());
+  ObjectFileOutput = FileType == CodeGenFileType::ObjectFile;
+  if (ObjectFileOutput && Options.MCS251Memory.isSpecified() &&
+      Options.MCS251Memory.AS0PointerBits == 16)
+    return make_error<StringError>(
+        "MCS251 16-bit pointer ABI cannot emit relocatable objects until the "
+        "v2 ABI attributes and linker compatibility gate are implemented",
+        inconvertibleErrorCode());
   if (usesELFObjects() && Options.MCOptions.Crel)
     return make_error<StringError>(
         "MCS251 ELF ABI v1 requires RELA; CREL is not supported",
@@ -121,12 +127,54 @@ public:
     setEnableTailMerge(false);
   }
 
+  void addIRPasses() override {
+    // This target contract is stricter than generic LLVM IR validity. Run it
+    // before any optimizer can erase an unused illegal declaration, alloca or
+    // pointer payload, and do not tie it to the generic -disable-verify flag.
+    // RC-6: only structural checks (types, address spaces) run here. The
+    // arithmetic checks (i64/f32/f64 ops) run post-optimization in addPreISel
+    // so that foldable or dead wide/float operations are not falsely rejected.
+    addPass(MCS251::createMCS251ContractVerifierPass(
+        &getTM<MCS251TargetMachine>().Options, /*CheckArithmetic=*/false));
+    TargetPassConfig::addIRPasses();
+  }
+
+  bool addPreISel() override {
+    // RC-6: After IR optimization, check that no unsupported i64/f32/f64
+    // arithmetic survives to the backend. Foldable constants and dead code
+    // have been eliminated by this point, so only genuinely live operations
+    // that would reach instruction selection are rejected. The verifier also
+    // performs minimal constant propagation (ignoring optnone) so that
+    // foldable i64 operations at -O0 are eliminated before checking.
+    addPass(MCS251::createMCS251ContractVerifierPass(
+        &getTM<MCS251TargetMachine>().Options, /*CheckArithmetic=*/true));
+    return false;
+  }
+
   bool addInstSelector() override {
     addPass(createMCS251ISelDag(getTM<MCS251TargetMachine>(), getOptLevel()));
     return false;
   }
 };
 } // namespace
+
+void MCS251TargetMachine::registerPassBuilderCallbacks(PassBuilder &PB) {
+  // RC-6: Structural checks (types, address spaces) run at pipeline start,
+  // before optimization can erase unused illegal declarations or payloads.
+  PB.registerPipelineStartEPCallback(
+      [this](ModulePassManager &MPM, OptimizationLevel) {
+        MPM.addPass(
+            MCS251::MCS251ContractVerifierPass(&Options, /*CheckArithmetic=*/false));
+      });
+  // RC-6: Arithmetic checks run after optimization so that foldable or dead
+  // i64/f32/f64 operations are not falsely rejected.
+  PB.registerOptimizerLastEPCallback(
+      [this](ModulePassManager &MPM, OptimizationLevel,
+             ThinOrFullLTOPhase) {
+        MPM.addPass(
+            MCS251::MCS251ContractVerifierPass(&Options, /*CheckArithmetic=*/true));
+      });
+}
 
 TargetPassConfig *
 MCS251TargetMachine::createPassConfig(PassManagerBase &PM) {

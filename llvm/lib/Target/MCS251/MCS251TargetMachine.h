@@ -19,6 +19,7 @@ class MCS251TargetMachine final : public CodeGenTargetMachineImpl {
   std::unique_ptr<TargetLoweringObjectFile> TLOF;
   MCS251Subtarget Subtarget;
   const bool ELFObjectOutput;
+  bool ObjectFileOutput = false;
 
 public:
   MCS251TargetMachine(const Target &T, const Triple &TT, StringRef CPU,
@@ -34,7 +35,9 @@ public:
   }
 
   bool usesELFObjects() const { return ELFObjectOutput; }
+  bool emitsObjectFile() const { return ObjectFileOutput; }
 
+  void registerPassBuilderCallbacks(PassBuilder &PB) override;
   TargetPassConfig *createPassConfig(PassManagerBase &PM) override;
   Expected<std::unique_ptr<MCStreamer>>
   createMCStreamer(raw_pwrite_stream &Out, raw_pwrite_stream *DwoOut,

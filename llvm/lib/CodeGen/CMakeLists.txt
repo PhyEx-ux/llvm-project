@@ -126,6 +126,7 @@ add_llvm_component_library(LLVMCodeGen
   MachineCFGPrinter.cpp
   MachineCombiner.cpp
   MachineConvergenceVerifier.cpp
+  MCS251ContractVerifier.cpp
   MachineCopyPropagation.cpp
   MachineCSE.cpp
   MachineCheckDebugify.cpp

@@ -12699,6 +12699,9 @@ def err_omp_wrong_dependency_iterator_type : Error<
 def err_target_unsupported_type
     : Error<"%0 requires %select{|%2 bit size}1 %3 %select{|return }4type support,"
             " but target '%5' does not support it">;
+def err_mcs251_interrupt_not_implemented
+    : Error<"MCS251 interrupt support not yet implemented; "
+            "ISR code generation is not available">;
 def err_omp_lambda_capture_in_declare_target_not_to : Error<
   "variable captured in declare target region must appear in a to clause">;
 def err_omp_device_type_mismatch : Error<

@@ -43,6 +43,7 @@
 #include "MCS251TargetObjectFile.h"
 #include "MCTargetDesc/MCS251ABISignature.h"
 #include "TargetInfo/MCS251TargetInfo.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/ELF.h"
@@ -102,8 +103,68 @@ class MCS251AsmPrinter final : public AsmPrinter {
   StringSet<> LocalParameterSlots;
   StringSet<> DeclaredExternalSymbols;
 
-  bool usesELFObjects() const {
-    return static_cast<const MCS251TargetMachine &>(TM).usesELFObjects();
+  const MCS251TargetMachine &getMCS251TM() const {
+    return static_cast<const MCS251TargetMachine &>(TM);
+  }
+
+  bool usesELFObjects() const { return getMCS251TM().usesELFObjects(); }
+
+  static bool hasV1PointerTypes(Type *Ty,
+                                SmallPtrSetImpl<Type *> &Seen) {
+    if (!Seen.insert(Ty).second)
+      return true;
+    if (auto *PT = dyn_cast<PointerType>(Ty))
+      return PT->getAddressSpace() == 0;
+    for (Type *SubTy : Ty->subtypes())
+      if (!hasV1PointerTypes(SubTy, Seen))
+        return false;
+    return true;
+  }
+
+  bool isV1ObjectCompatible(const Module &M) const {
+    const auto &Contract = getMCS251TM().Options.MCS251Memory;
+    if (!Contract.isSpecified() || Contract.ASLayoutVersion == 1)
+      return true;
+    // Of the layout-v2 requests, only the 32-bit/InternalExtended profile can
+    // be downgraded to the implemented v1 placement and pointer ABI. Tiny,
+    // Small/InternalMovable and Large/ExternalData require v2 identity even if
+    // this particular module happens not to define storage.
+    if (M.getDataLayout().getPointerSizeInBits(0) != 32 ||
+        Contract.DefaultPlacement != 8 || !M.alias_empty() ||
+        !M.ifunc_empty())
+      return false;
+
+    SmallPtrSet<Type *, 32> Seen;
+    for (const GlobalVariable &GV : M.globals()) {
+      if (GV.getAddressSpace() != 0 ||
+          !hasV1PointerTypes(GV.getValueType(), Seen))
+        return false;
+    }
+    for (const Function &F : M) {
+      if (!hasV1PointerTypes(F.getFunctionType(), Seen))
+        return false;
+      unsigned Index = 0;
+      for (const Argument &Arg : F.args())
+        if (Index++ && Arg.getType()->isPointerTy())
+          return false; // v2-sized static pointer slot.
+      for (const BasicBlock &BB : F)
+        for (const Instruction &I : BB) {
+          if (!hasV1PointerTypes(I.getType(), Seen))
+            return false;
+          for (const Use &U : I.operands()) {
+            // A known Function is already a typed direct CODE symbol; it does
+            // not turn into a v2 function-pointer value merely by being the
+            // callee operand. Any other non-AS0 pointer operand is a capability
+            // which the v1 identity cannot describe.
+            if (const auto *CB = dyn_cast<CallBase>(&I))
+              if (&U == &CB->getCalledOperandUse() && CB->getCalledFunction())
+                continue;
+            if (!hasV1PointerTypes(U->getType(), Seen))
+              return false;
+          }
+        }
+    }
+    return true;
   }
 
   void emitASxxxxText(const Twine &Text) {
@@ -232,8 +293,17 @@ public:
       if (I++ == 0)
         continue;
       Type *Ty = Arg.getType();
-      if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) && !Ty->isIntegerTy(32))
-        report_fatal_error("MCS251: static parameters require i8/i16/i32");
+      if (auto *PT = dyn_cast<PointerType>(Ty)) {
+        unsigned AS = PT->getAddressSpace();
+        if (AS == 5 || AS == 6 || AS == 7 || AS > 9)
+          report_fatal_error("MCS251: pointer parameter address space has no "
+                             "ordinary static-slot ABI");
+      } else if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) &&
+                 !Ty->isIntegerTy(32)) {
+        report_fatal_error("MCS251: static parameters require i8/i16/i32 or "
+                           "an ordinary data/CODE pointer");
+      }
+      uint64_t SlotSize = F.getDataLayout().getTypeStoreSize(Ty).getFixedValue();
       MCSymbol *Slot = OutContext.getOrCreateSymbol(
           getSymbol(&F)->getName() + "_PARM_" + Twine(I));
       if (!F.hasLocalLinkage())
@@ -242,10 +312,9 @@ public:
       if (usesELFObjects()) {
         OutStreamer->emitSymbolAttribute(Slot, MCSA_ELF_TypeObject);
         OutStreamer->emitELFSize(
-            Slot, MCConstantExpr::create(Ty->getIntegerBitWidth() / 8,
-                                        OutContext));
+            Slot, MCConstantExpr::create(SlotSize, OutContext));
       }
-      OutStreamer->emitZeros(Ty->getIntegerBitWidth() / 8);
+      OutStreamer->emitZeros(SlotSize);
     }
     OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
     emitASxxxxText("\t.area CSEG (CODE)");
@@ -276,9 +345,20 @@ public:
     // validated specimen and the smoke crt0 template (sdas251 accepts it
     // without a file argument; a filename argument was never exercised).
     const std::string ModuleName = getMCS251ModuleName(M);
+    bool V1Compatible = isV1ObjectCompatible(M);
+    if (getMCS251TM().emitsObjectFile() && !V1Compatible)
+      report_fatal_error(
+          "MCS251: module uses an ABI capability that cannot be represented "
+          "by the v1 relocatable-object identity; v2 object output is not "
+          "implemented");
     emitASxxxxText("\t.module " + ModuleName);
     emitASxxxxText("\t.source");
-    emitASxxxxText(OptsdccSignature);
+    if (V1Compatible)
+      emitASxxxxText(OptsdccSignature);
+    else
+      // Deliberately not accepted by ASxxxx: v2 assembly is an inspection
+      // artifact and cannot be assembled into an identity-less or v1 object.
+      emitASxxxxText("\t.mcs251_v2_nonobject");
     emitASxxxxText("");
     emitASxxxxText("\t.area CSEG (CODE)");
 
@@ -337,6 +417,12 @@ public:
           "empty aggregates and initializer relocations are not supported");
     };
     const DataLayout &DL = GV->getDataLayout();
+    if (GV->isConstant() && GV->getAddressSpace() == 0 &&
+        DL.getPointerSizeInBits(0) == 16)
+      report_fatal_error(
+          "MCS251: ordinary AS0 constants are not supported by the 16-bit "
+          "memory contract until RAM runtime-copy initialization is "
+          "implemented; use an explicit CODE object when that ABI is available");
     if (GV->isThreadLocal() || GV->getAddressSpace() != 0 || GV->hasSection() ||
         GV->hasComdat() ||
         (!GV->hasExternalLinkage() && !GV->hasLocalLinkage()) ||

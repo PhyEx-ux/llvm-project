@@ -10,8 +10,10 @@
 
 namespace llvm {
 class MCS251RegisterInfo final : public MCS251GenRegisterInfo {
+  unsigned PointerBits;
+
 public:
-  MCS251RegisterInfo();
+  explicit MCS251RegisterInfo(unsigned PointerBits = 32);
 
   const MCPhysReg *getCalleeSavedRegs(const MachineFunction *MF) const override;
   const uint32_t *getCallPreservedMask(const MachineFunction &MF,

@@ -5540,6 +5540,10 @@ def miamcu : Flag<["-"], "miamcu">, Group<m_Group>, Flags<[NoXarchOption]>,
   HelpText<"Use Intel MCU ABI">;
 def mno_iamcu : Flag<["-"], "mno-iamcu">, Group<m_Group>,
   Flags<[NoXarchOption]>, Visibility<[ClangOption, CLOption]>;
+def mcs251_memory_model_EQ : Joined<["-"], "mcs251-memory-model=">,
+  Group<m_Group>, Visibility<[ClangOption]>, Flags<[TargetSpecific]>,
+  Values<"tiny,xtiny,small,xsmall,large">,
+  HelpText<"Select the MCS-251 storage model">;
 def malign_functions_EQ : Joined<["-"], "malign-functions=">, Group<clang_ignored_m_Group>;
 def malign_loops_EQ : Joined<["-"], "malign-loops=">, Group<clang_ignored_m_Group>;
 def malign_jumps_EQ : Joined<["-"], "malign-jumps=">, Group<clang_ignored_m_Group>;
@@ -7795,6 +7799,9 @@ defm android_pad_segment : BooleanFFlag<"android-pad-segment">, Group<f_Group>;
 
 let Visibility = [CC1Option, CC1AsOption] in {
 
+def mcs251_memory_contract_EQ : Joined<["-"], "mcs251-memory-contract=">,
+  Visibility<[CC1Option]>,
+  HelpText<"Numeric MCS-251 memory contract">;
 def target_abi : Separate<["-"], "target-abi">,
   HelpText<"Target a particular ABI type">,
   MarshallingInfoString<TargetOpts<"ABI">>;

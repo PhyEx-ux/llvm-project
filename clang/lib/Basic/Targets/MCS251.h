@@ -11,13 +11,16 @@
 
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/TargetOptions.h"
+#include "llvm/TargetParser/MCS251TargetParser.h"
 
 namespace clang::targets {
 
 class LLVM_LIBRARY_VISIBILITY MCS251TargetInfo final : public TargetInfo {
+  llvm::MCS251::MemoryContract Contract;
+
 public:
-  MCS251TargetInfo(const llvm::Triple &Triple, const TargetOptions &)
-      : TargetInfo(Triple) {
+  MCS251TargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
+      : TargetInfo(Triple), Contract(Opts.MCS251Memory) {
     // The default C model is ILP32. +int16 selects the traditional C model;
     // it is a translation-unit language option, not an ISA feature.
     ShortWidth = 16;
@@ -36,8 +39,49 @@ public:
     VLASupported = false;
     HasMustTail = false;
     UserLabelPrefix = "_";
-    resetDataLayout();
+
+    // The no-flag default is xsmall/v2. Compatibility is available only when
+    // a caller explicitly supplies the legacy layout contract.
+    if (!Contract.isSpecified())
+      Contract = {1, 2, 32, 8, 1};
+    if (auto Desc = llvm::MCS251::getLayoutDesc(
+            static_cast<llvm::MCS251::ASLayoutVersion>(Contract.ASLayoutVersion),
+            static_cast<llvm::MCS251::AS0PointerBits>(Contract.AS0PointerBits))) {
+      for (const auto &P : Desc->Pointers)
+        if (P.AddressSpace == 0) {
+          PointerWidth = P.Size;
+          PointerAlign = P.ABIAlignment;
+          break;
+        }
+      resetDataLayout(Desc->DataLayout);
+    } else {
+      resetDataLayout();
+    }
   }
+
+  uint64_t getMaxPointerWidth() const override { return 32; }
+
+  uint64_t getPointerWidthV(LangAS AS) const override {
+    unsigned TargetAS = getTargetAddressSpace(AS);
+    if (auto Desc = llvm::MCS251::getLayoutDesc(
+            static_cast<llvm::MCS251::ASLayoutVersion>(Contract.ASLayoutVersion),
+            static_cast<llvm::MCS251::AS0PointerBits>(Contract.AS0PointerBits)))
+      for (const auto &P : Desc->Pointers)
+        if (P.AddressSpace == TargetAS)
+          return P.Size;
+    return PointerWidth;
+  }
+  uint64_t getPointerAlignV(LangAS AS) const override {
+    unsigned TargetAS = getTargetAddressSpace(AS);
+    if (auto Desc = llvm::MCS251::getLayoutDesc(
+            static_cast<llvm::MCS251::ASLayoutVersion>(Contract.ASLayoutVersion),
+            static_cast<llvm::MCS251::AS0PointerBits>(Contract.AS0PointerBits)))
+      for (const auto &P : Desc->Pointers)
+        if (P.AddressSpace == TargetAS)
+          return P.ABIAlignment;
+    return PointerAlign;
+  }
+  bool validateTarget(DiagnosticsEngine &Diags) const override;
 
   void getTargetDefines(const LangOptions &Opts,
                         MacroBuilder &Builder) const override;

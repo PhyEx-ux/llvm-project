@@ -3,7 +3,7 @@
 ; RUN: not --crash llc -mtriple=mcs251 -O2 %t/i64-div-dynhi.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=I64
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 %t/i64-folded-control.ll -o - | FileCheck %s --check-prefix=FOLD
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 %t/i64-folded-control.ll -o - | FileCheck %s --check-prefix=FOLD
-; I64: LLVM ERROR: unsupported library call operation
+; I64: LLVM ERROR: MCS251 contract violation: i64 integer arithmetic is not yet implemented; wide-integer runtime is not connected
 ; FOLD-LABEL: _folded:
 ; FOLD-NOT: ecall
 ; FOLD: eret

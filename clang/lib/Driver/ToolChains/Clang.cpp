@@ -1547,6 +1547,29 @@ void Clang::RenderTargetOptions(const llvm::Triple &EffectiveTriple,
                                 ArgStringList &CmdArgs) const {
   const ToolChain &TC = getToolChain();
 
+  if (EffectiveTriple.getArch() == llvm::Triple::mcs251) {
+    Arg *A = Args.getLastArg(options::OPT_mcs251_memory_model_EQ);
+    StringRef Model = A ? A->getValue() : "xsmall";
+    StringRef Contract;
+    if (Model == "tiny")
+      Contract = "1,2,16,1,1";
+    else if (Model == "xtiny")
+      Contract = "1,2,16,8,1";
+    else if (Model == "small")
+      Contract = "1,2,32,1,1";
+    else if (Model == "xsmall")
+      Contract = "1,2,32,8,1";
+    else if (Model == "large")
+      Contract = "1,2,32,3,1";
+    else {
+      TC.getDriver().Diag(diag::err_drv_unsupported_option_argument)
+          << "-mcs251-memory-model" << Model;
+      Contract = "1,2,32,8,1";
+    }
+    CmdArgs.push_back(Args.MakeArgString(
+        std::string("-mcs251-memory-contract=") + Contract.str()));
+  }
+
   // Add the target features
   getTargetFeatures(TC.getDriver(), EffectiveTriple, Args, CmdArgs, false);
 

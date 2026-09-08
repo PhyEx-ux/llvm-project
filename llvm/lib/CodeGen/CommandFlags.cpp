@@ -31,6 +31,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Host.h"
+#include "llvm/TargetParser/MCS251TargetParser.h"
 #include "llvm/TargetParser/SubtargetFeature.h"
 #include "llvm/TargetParser/Triple.h"
 #include <cassert>
@@ -66,6 +67,7 @@ using namespace llvm;
   }
 
 CGOPT(std::string, MArch)
+CGOPT_EXP(std::string, MCS251MemoryContract)
 CGOPT(std::string, MCPU)
 CGOPT(std::string, MTune)
 CGLIST(std::string, MAttrs)
@@ -131,6 +133,11 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
   static cl::opt<std::string> MArch(
       "march", cl::desc("Architecture to generate code for (see --version)"));
   CGBINDOPT(MArch);
+
+  static cl::opt<std::string> MCS251MemoryContract(
+      "mcs251-memory-contract", cl::Hidden,
+      cl::desc("Numeric MCS-251 memory contract"), cl::init(""));
+  CGBINDOPT(MCS251MemoryContract);
 
   static cl::opt<std::string> MCPU(
       "mcpu", cl::desc("Target a specific cpu type (-mcpu=help for details)"),
@@ -585,6 +592,16 @@ TargetOptions
 codegen::InitTargetOptionsFromCodeGenFlags(const Triple &TheTriple) {
   TargetOptions Options;
   Options.AllowFPOpFusion = getFuseFPOps();
+  if (TheTriple.getArch() == Triple::mcs251) {
+    if (std::optional<std::string> Contract =
+            getExplicitMCS251MemoryContract()) {
+      // Presence and value are distinct: an explicitly empty wire contract is
+      // malformed and must not select the compatibility fallback.
+      if (!MCS251::parseMemoryContract(*Contract, Options.MCS251Memory) ||
+          !MCS251::isValidMemoryContract(Options.MCS251Memory))
+        report_fatal_error("invalid -mcs251-memory-contract");
+    }
+  }
   Options.NoTrappingFPMath = getEnableNoTrappingFPMath();
 
   Options.HonorSignDependentRoundingFPMathOption =

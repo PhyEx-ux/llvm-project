@@ -17,6 +17,7 @@
 #include "clang/Basic/OpenCLOptions.h"
 #include "llvm/Support/VersionTuple.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/MCS251TargetParser.h"
 #include <string>
 #include <vector>
 
@@ -25,6 +26,11 @@ namespace clang {
 /// Options for controlling the target.
 class TargetOptions {
 public:
+  /// Numeric MCS-251 storage-model contract. A zero transport version means
+  /// that no contract was supplied by a caller.
+  using MCS251MemoryContract = llvm::MCS251::MemoryContract;
+  MCS251MemoryContract MCS251Memory;
+
   /// The name of the target triple to compile for.
   std::string Triple;
 

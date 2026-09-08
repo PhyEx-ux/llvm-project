@@ -18,7 +18,7 @@ def MCS251eret : SDNode<"MCS251ISD::ERET", SDTNone,
 // ties the argument CopyToReg chain to the call and the call to the result
 // CopyFromReg chain. SDNPOptInGlue (not SDNPInGlue) because a zero-argument
 // call carries no input glue.
-def SDT_MCS251Call : SDTypeProfile<0, -1, [SDTCisVT<0, iPTR>]>;
+def SDT_MCS251Call : SDTypeProfile<0, -1, [SDTCisVT<0, i32>]>;
 def MCS251call : SDNode<"MCS251ISD::CALL", SDT_MCS251Call,
                         [SDNPHasChain, SDNPOutGlue, SDNPOptInGlue,
                          SDNPVariadic]>;
@@ -70,7 +70,7 @@ def brtarget : Operand<OtherVT>;
 // MCS251MCInstLower turns into an MCSymbolRefExpr. The symbol is resolved to
 // a 24-bit address by the sdas251/linker (the 9A-prefix ecall encoding is
 // 4 bytes, addr24), so the compiler never truncates or splits it.
-def calltarget : Operand<iPTR>;
+def calltarget : Operand<i32>;
 
 //===----------------------------------------------------------------------===//
 //  Move instructions
@@ -591,8 +591,8 @@ let isCall = 1, hasSideEffects = 1, Defs = [PSW], Size = 2 in
 def : Pat<(MCS251call GPR32:$addr), (ECALLr GPR32:$addr)>;
 
 // Direct calls retain full addr24 symbol relocations; registers use ECALLr.
-def : Pat<(MCS251call (iPTR tglobaladdr:$dst)), (ECALL tglobaladdr:$dst)>;
-def : Pat<(MCS251call (iPTR texternalsym:$dst)), (ECALL texternalsym:$dst)>;
+def : Pat<(MCS251call (i32 tglobaladdr:$dst)), (ECALL tglobaladdr:$dst)>;
+def : Pat<(MCS251call (i32 texternalsym:$dst)), (ECALL texternalsym:$dst)>;
 
 //===----------------------------------------------------------------------===//
 //  Return instruction

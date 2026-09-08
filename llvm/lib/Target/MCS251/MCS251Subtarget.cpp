@@ -1,6 +1,7 @@
 //===-- MCS251Subtarget.cpp - MCS-251 subtarget information --------------===//
 
 #include "MCS251Subtarget.h"
+#include "llvm/Target/TargetMachine.h"
 
 using namespace llvm;
 
@@ -22,5 +23,6 @@ MCS251Subtarget::MCS251Subtarget(const Triple &TT, const std::string &CPU,
                                  const std::string &FS,
                                  const TargetMachine &TM)
     : MCS251GenSubtargetInfo(TT, CPU, CPU, FS),
-      InstrInfo(initializeSubtargetDependencies(CPU, FS)), TLInfo(TM, *this),
-      FrameLowering() {}
+      InstrInfo(initializeSubtargetDependencies(CPU, FS),
+                TM.createDataLayout().getPointerSizeInBits(0)),
+      TLInfo(TM, *this), FrameLowering() {}

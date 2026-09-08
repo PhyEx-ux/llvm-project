@@ -658,7 +658,19 @@ static int compileModule(char **argv, SmallVectorImpl<PassPlugin> &PluginList,
     // Set PGO options based on command line flags
     setPGOOptions(*Target);
 
-    return Target->createDataLayout().getStringRepresentation();
+    DataLayout TargetDL = Target->createDataLayout();
+    if (TheTriple.getArch() == Triple::mcs251 && !OldDLStr.empty()) {
+      Expected<DataLayout> InputDL = DataLayout::parse(OldDLStr);
+      if (!InputDL)
+        reportError("invalid input MCS251 data layout: " +
+                    toString(InputDL.takeError()),
+                    InputFilename);
+      if (*InputDL != TargetDL)
+        reportError("input MCS251 data layout conflicts with the selected "
+                    "memory contract",
+                    InputFilename);
+    }
+    return TargetDL.getStringRepresentation();
   };
   if (InputLanguage == "mir" ||
       (InputLanguage == "" && StringRef(InputFilename).ends_with(".mir"))) {

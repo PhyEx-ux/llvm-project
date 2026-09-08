@@ -19,6 +19,7 @@
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/TargetParser/MCS251TargetParser.h"
 
 #include <memory>
 
@@ -392,6 +393,10 @@ public:
 public:
   /// What exception model to use
   ExceptionHandling ExceptionModel = ExceptionHandling::None;
+
+  /// Numeric MCS-251 storage-model contract. TransportVersion == 0 means
+  /// that no contract was specified by the caller.
+  MCS251::MemoryContract MCS251Memory;
 
   /// Machine level options.
   MCTargetOptions MCOptions;

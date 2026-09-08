@@ -56,6 +56,11 @@ void MCS251DAGToDAGISel::Select(SDNode *N) {
     int FI = cast<FrameIndexSDNode>(N)->getIndex();
     SDValue TFI = CurDAG->getTargetFrameIndex(FI, MVT::i16);
     SDValue Lo(CurDAG->getMachineNode(MCS251::FIADDR, DL, MVT::i16, TFI), 0);
+    if (N->getValueType(0) == MVT::i16) {
+      ReplaceNode(N, Lo.getNode());
+      return;
+    }
+    assert(N->getValueType(0) == MVT::i32 && "unexpected frame-index type");
     SDValue Hi(CurDAG->getMachineNode(MCS251::MOV16ri, DL, MVT::i16,
                                     CurDAG->getTargetConstant(0, DL, MVT::i16)), 0);
     SDNode *DR = CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, DL, MVT::i32,

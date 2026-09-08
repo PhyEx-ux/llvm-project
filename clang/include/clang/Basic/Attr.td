@@ -486,6 +486,7 @@ def TargetMips32 : TargetArch<["mips", "mipsel"]>;
 def TargetAnyMips : TargetArch<["mips", "mipsel", "mips64", "mips64el"]>;
 def TargetMSP430 : TargetArch<["msp430"]>;
 def TargetM68k : TargetArch<["m68k"]>;
+def TargetMCS251 : TargetArch<["mcs251"]>;
 def TargetRISCV : TargetArch<["riscv32", "riscv64", "riscv32be", "riscv64be"]>;
 def TargetX86 : TargetArch<["x86"]>;
 def TargetX86_64 : TargetArch<["x86_64"]>;
@@ -1085,6 +1086,18 @@ def AVRInterrupt : InheritableAttr, TargetSpecificAttr<TargetAVR> {
   let Subjects = SubjectList<[Function]>;
   let ParseKind = "Interrupt";
   let Documentation = [AVRInterruptDocs];
+}
+
+// MI0: MCS-251 interrupt attribute is recognized (so it is not silently
+// ignored as an unknown attribute) but hard-rejected in handleInterruptAttr
+// until ISR lowering (MI1-MI3) is implemented.  Uses the same ParseKind as
+// the other target-specific interrupt attributes so the shared dispatch in
+// SemaDeclAttr routes it to the mcs251 branch.
+def MCS251Interrupt : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
+  let Spellings = [GCC<"interrupt">];
+  let Subjects = SubjectList<[Function]>;
+  let ParseKind = "Interrupt";
+  let Documentation = [Undocumented];
 }
 
 def AVRSignal : InheritableAttr, TargetSpecificAttr<TargetAVR> {

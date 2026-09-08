@@ -6689,6 +6689,17 @@ static void handleInterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   case llvm::Triple::riscv64be:
     S.RISCV().handleInterruptAttr(D, AL);
     break;
+  case llvm::Triple::mcs251:
+    // MI0 (MINIMAL-ISR-SLICE §2.1): MCS-251 interrupt support is not yet
+    // implemented. The ARM default dispatch below would silently accept the
+    // attribute with ARM semantics (false acceptance). Hard-reject here so
+    // users get a clear diagnostic instead of miscompiled ISR code.
+    // TODO(MI1-MI3): once the MCS251_INTR calling convention, vector table
+    // registration and RETI lowering are implemented, replace this with a
+    // dedicated MCS251 handleInterruptAttr (validate vector slot, ISR
+    // signature, register the slot, etc.).
+    S.Diag(AL.getLoc(), diag::err_mcs251_interrupt_not_implemented);
+    break;
   default:
     S.ARM().handleInterruptAttr(D, AL);
     break;

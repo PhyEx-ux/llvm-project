@@ -8,6 +8,7 @@
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/TargetParser/ARMTargetParser.h"
+#include "llvm/TargetParser/MCS251TargetParser.h"
 #include "llvm/TargetParser/Triple.h"
 using namespace llvm;
 
@@ -601,9 +602,10 @@ std::string Triple::computeDataLayout(StringRef ABIName) const {
   case Triple::mips64el:
     return computeMipsDataLayout(*this, ABIName);
   case Triple::mcs251:
-    // Canonical pointers use legal i32 DR values; physical addresses occupy
-    // the low 24 bits. SPX remains a byte-aligned 16-bit stack pointer.
-    return "E-m:s-p:32:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8";
+    // Triple layout remains the historical compatibility layout. The selected
+    // v2 layout is a numeric target contract and is supplied by TargetInfo and
+    // the TargetMachine through MCS251TargetParser.
+    return MCS251::getCompatibilityDataLayout().str();
   case Triple::msp430:
     return "e-m:e-p:16:16-i32:16-i64:16-f32:16-f64:16-a:8-n8:16-S16";
   case Triple::ppc:

@@ -35,6 +35,9 @@ namespace codegen {
 
 LLVM_ABI std::string getMArch();
 
+LLVM_ABI std::string getMCS251MemoryContract();
+LLVM_ABI std::optional<std::string> getExplicitMCS251MemoryContract();
+
 LLVM_ABI std::string getMCPU();
 
 LLVM_ABI std::string getMTune();

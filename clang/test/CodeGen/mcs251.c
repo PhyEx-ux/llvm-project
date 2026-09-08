@@ -1,6 +1,8 @@
 // REQUIRES: mcs251-registered-target
 // RUN: %clang_cc1 -triple mcs251-unknown-none -ffreestanding -emit-llvm -o - %s | FileCheck %s --check-prefixes=CHECK,DEFAULT,INT32
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -ffreestanding -emit-llvm -o - %s | FileCheck %s --check-prefixes=CHECK,COMPAT,INT32
+// RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,16,1,1 -DMCS251_NEAR=1 -ffreestanding -emit-llvm -o - %s | FileCheck %s --check-prefixes=CHECK,TINY,INT32
+// RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,16,8,1 -DMCS251_NEAR=1 -ffreestanding -emit-llvm -o - %s | FileCheck %s --check-prefixes=CHECK,TINY,INT32
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -target-feature +int16 -ffreestanding -emit-llvm -o - %s | FileCheck %s --check-prefixes=CHECK,COMPAT,INT16
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -ffreestanding -O2 -emit-obj -o %t %s
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -target-feature +int16 -ffreestanding -O2 -emit-obj -o %t %s
@@ -9,13 +11,15 @@
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -ffreestanding -debug-info-kind=limited -emit-llvm -o %t.compat.ll %s
 // RUN: not %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,32,8,1 -fdynamic-debugging -emit-llvm -o - -x ir %t.compat.ll 2>&1 | FileCheck %s --check-prefix=DYNDBG-CONFLICT
 // RUN: %clang_cc1 -triple mcs251-unknown-none -round-trip-args -Rround-trip-cc1-args -ffreestanding -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=MEMORY-CC1-DEFAULT --implicit-check-not=error:
-// RUN: not %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,16,8,1 -round-trip-args -Rround-trip-cc1-args -ffreestanding -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=MEMORY-ROUNDTRIP-ON
-// RUN: not %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,16,8,1 -no-round-trip-args -Rround-trip-cc1-args -ffreestanding -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=MEMORY-ROUNDTRIP-OFF --implicit-check-not=remark:
+// RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,16,8,1 -round-trip-args -Rround-trip-cc1-args -ffreestanding -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=MEMORY-ROUNDTRIP-ON --implicit-check-not=error:
+// RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,16,8,1 -no-round-trip-args -Rround-trip-cc1-args -ffreestanding -fsyntax-only -x c /dev/null
 // RUN: not %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,3,32,8,1 -ffreestanding -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=MEMORY-INVALID
+// RUN: not %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,16,3,1 -ffreestanding -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=MEMORY-INVALID-NEAR
 // RUN: %clang_cc1 -triple x86_64-unknown-linux-gnu -round-trip-args -Rround-trip-cc1-args -E -o /dev/null -x c /dev/null 2>&1 | FileCheck %s --check-prefix=NON-MCS251 --implicit-check-not=mcs251-memory-contract --implicit-check-not=error:
 // RUN: not %clang_cc1 -triple x86_64-unknown-linux-gnu -mcs251-memory-contract=1,2,32,8,1 -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=NON-MCS251-EXPLICIT
 
 // DEFAULT: target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
+// TINY: target datalayout = "E-m:s-p:16:8:8:16-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
 // COMPAT: target datalayout = "E-m:s-p:32:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8"
 // CHECK: target triple = "mcs251-unknown-none"
 // DYNDBG-CONFLICT: error: backend data layout '{{.*}}-P4-A0-G0' does not match expected target description 'E-m:s-p:32:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8'
@@ -26,9 +30,8 @@
 // DYNDBG-CONFLICT-NOT: target datalayout
 // MEMORY-CC1-DEFAULT-COUNT-2: "-mcs251-memory-contract=1,2,32,8,1"
 // MEMORY-ROUNDTRIP-ON-COUNT-2: "-mcs251-memory-contract=1,2,16,8,1"
-// MEMORY-ROUNDTRIP-ON: error: invalid feature combination: MCS-251 AS0 pointer width 16 is recognized but execution is not supported
-// MEMORY-ROUNDTRIP-OFF: error: invalid feature combination: MCS-251 AS0 pointer width 16 is recognized but execution is not supported
 // MEMORY-INVALID: error: invalid value '1,3,32,8,1' in '-mcs251-memory-contract='
+// MEMORY-INVALID-NEAR: error: invalid value '1,2,16,3,1' in '-mcs251-memory-contract='
 // NON-MCS251: remark: generated arguments #1 in round-trip:
 // NON-MCS251-EXPLICIT: error: unsupported option '-mcs251-memory-contract=' for target 'x86_64-unknown-linux-gnu'
 
@@ -36,6 +39,9 @@
 #define MCS251_INT16 1
 #else
 #define MCS251_INT16 0
+#endif
+#ifndef MCS251_NEAR
+#define MCS251_NEAR 0
 #endif
 
 typedef unsigned char u8;
@@ -45,7 +51,8 @@ typedef unsigned long u32;
 _Static_assert(sizeof(int) == (MCS251_INT16 ? 2 : 4), "C int model");
 _Static_assert(sizeof(short) == 2, "16-bit short in both models");
 _Static_assert(sizeof(long) == 4, "32-bit long in both models");
-_Static_assert(sizeof(void *) == 4, "32-bit flat pointers");
+_Static_assert(sizeof(void *) == (MCS251_NEAR ? 2 : 4),
+               "contract-selected default pointer width");
 _Static_assert(sizeof(__INTMAX_TYPE__) == 8, "64-bit intmax_t");
 _Static_assert(sizeof(__SIZE_TYPE__) == 4, "32-bit size_t");
 _Static_assert(sizeof(__PTRDIFF_TYPE__) == 4, "32-bit ptrdiff_t");
@@ -82,6 +89,32 @@ u8 increment(u8 value) { return value + 3; }
 // CHECK-LABEL: define {{.*}}i32 @read_pointer(ptr noundef
 // CHECK: load i32, ptr {{.*}}, align 1
 u32 read_pointer(const u32 *p) { return *p; }
+
+// The v2 Tiny layout uses a 16-bit pointer index independently of the 32-bit
+// size_t/ptrdiff_t language types.
+// TINY-LABEL: define {{.*}}ptr @bump_pointer(
+// TINY: getelementptr inbounds i8, ptr {{.*}}, i16 1
+void *bump_pointer(void *p) { return (u8 *)p + 1; }
+
+// TINY-LABEL: define {{.*}}zeroext i8 @local_roundtrip(
+// TINY: alloca i8, align 1
+// TINY: store volatile i8
+// TINY: load volatile i8
+u8 local_roundtrip(u8 value) {
+  volatile u8 local = value;
+  return local;
+}
+
+#if MCS251_NEAR
+// ptrdiff_t stays 32 bits even when AS0 pointers are 16 bits. Form the complete
+// mathematical address difference in i32; never subtract modulo 2^16 first.
+// TINY-LABEL: define {{.*}}i32 @pointer_delta(
+// TINY: ptrtoint ptr {{.*}} to i32
+// TINY: ptrtoint ptr {{.*}} to i32
+// TINY: sub i32
+// TINY-NOT: sub i16
+long pointer_delta(const u8 *lhs, const u8 *rhs) { return lhs - rhs; }
+#endif
 
 // A result cast cannot hide the different intermediate integer promotions.
 // CHECK-LABEL: define {{.*}}zeroext i8 @traditional_wrap(

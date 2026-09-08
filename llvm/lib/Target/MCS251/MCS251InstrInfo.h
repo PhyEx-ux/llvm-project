@@ -18,7 +18,7 @@ class MCS251InstrInfo final : public MCS251GenInstrInfo {
   [[noreturn]] void reportBadSpillClass(const TargetRegisterClass *RC) const;
 
 public:
-  explicit MCS251InstrInfo(const MCS251Subtarget &STI);
+  MCS251InstrInfo(const MCS251Subtarget &STI, unsigned PointerBits);
   const MCS251RegisterInfo &getRegisterInfo() const { return RI; }
 
   bool expandPostRAPseudo(MachineInstr &MI) const override;

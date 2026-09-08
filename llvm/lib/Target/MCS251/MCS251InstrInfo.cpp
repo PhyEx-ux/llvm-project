@@ -11,9 +11,10 @@ using namespace llvm;
 #define GET_INSTRINFO_CTOR_DTOR
 #include "MCS251GenInstrInfo.inc"
 
-MCS251InstrInfo::MCS251InstrInfo(const MCS251Subtarget &STI)
+MCS251InstrInfo::MCS251InstrInfo(const MCS251Subtarget &STI,
+                                 unsigned PointerBits)
     : MCS251GenInstrInfo(STI, RI, MCS251::ADJCALLSTACKDOWN,
-                        MCS251::ADJCALLSTACKUP), RI() {}
+                        MCS251::ADJCALLSTACKUP), RI(PointerBits) {}
 
 bool MCS251InstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
   if (MI.getOpcode() != MCS251::SRL32one &&

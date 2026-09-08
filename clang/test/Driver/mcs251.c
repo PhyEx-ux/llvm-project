@@ -13,14 +13,18 @@
 // RUN: %clang --target=mcs251-unknown-none -### -O2 -c -foptimize-sibling-calls %s 2>&1 | FileCheck %s --check-prefix=TAIL --implicit-check-not=error:
 // RUN: %clang --target=mcs251-unknown-none -### -O2 -c -fno-optimize-sibling-calls %s 2>&1 | FileCheck %s --check-prefix=NO-TAIL --implicit-check-not=error:
 
-// The driver maps its default and all supported 32-bit models to canonical
-// five-field cc1 contracts.
+// The driver maps its default and all five models to canonical five-field
+// numeric cc1 contracts.
 // RUN: %clang --target=mcs251-unknown-none -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-DEFAULT --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=tiny -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-TINY --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=xtiny -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-XTINY --implicit-check-not=error:
 // RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=small -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-SMALL --implicit-check-not=error:
 // RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=xsmall -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-XSMALL --implicit-check-not=error:
 // RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=large -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-LARGE --implicit-check-not=error:
 // MEMORY-DEFAULT: "-cc1"
 // MEMORY-DEFAULT-SAME: "-mcs251-memory-contract=1,2,32,8,1"
+// MEMORY-TINY: "-mcs251-memory-contract=1,2,16,1,1"
+// MEMORY-XTINY: "-mcs251-memory-contract=1,2,16,8,1"
 // MEMORY-SMALL: "-mcs251-memory-contract=1,2,32,1,1"
 // MEMORY-XSMALL: "-mcs251-memory-contract=1,2,32,8,1"
 // MEMORY-LARGE: "-mcs251-memory-contract=1,2,32,3,1"
@@ -61,7 +65,7 @@
 // RUN: not %clang --target=mcs251-unknown-none -Xclang -target-feature -Xclang +ptr16 -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix=BAD-MODEL
 // INT16-DAG: #define __MCS251_INT16__ 1
 // INT16-DAG: #define __SIZEOF_INT__ 2
-// BAD-MODEL: error: invalid feature combination: MCS251 supports only +int16/-int16; long and pointer widths are fixed at 32 bits
+// BAD-MODEL: error: invalid feature combination: MCS251 supports only +int16/-int16; long is fixed at 32 bits and pointer widths come from the numeric memory contract
 
 #include <stddef.h>
 #include <stdint.h>
