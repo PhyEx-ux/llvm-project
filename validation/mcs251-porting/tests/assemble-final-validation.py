@@ -120,7 +120,15 @@ def verify_generated_makefiles(root: Path, uvproj: dict[str, object]) -> dict[st
     return {"makefiles": len(makefiles), "c_projects": c_projects, "build_c_rules": build_rules}
 
 
-DEFAULT_SELFCHECK_STEMS = ("stc32g-direct-sfr-selfcheck", "stc32g144k246-direct-sfr-selfcheck")
+DEFAULT_SELFCHECK_STEMS = (
+    "stc32g-direct-sfr-selfcheck",
+    "stc32g144k246-direct-sfr-selfcheck",
+    # AS6 flavors compile the same register uses through address-space-6
+    # macros; both flavors assemble under the default layout, while only
+    # AS6 lowers to direct SFR moves under the v2 memory contract.
+    "stc32g-direct-sfr-selfcheck-as6",
+    "stc32g144k246-direct-sfr-selfcheck-as6",
+)
 
 
 def compile_sfr_selfchecks(

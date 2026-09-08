@@ -1,6 +1,7 @@
 # Regenerated per corpus snapshot; not source of truth.
-# Note: generated/stc32g-v1.h and generated/stc32g144k246-v1.h stay tracked;
-# only the 270 project Makefiles under generated/projects/ are ignorable.
+# Note: generated/stc32g-v1.h, generated/stc32g144k246-v1.h, and their AS6
+# flavors (stc32g-as6.h, stc32g144k246-as6.h) stay tracked; only the 270
+# project Makefiles under generated/projects/ are ignorable.
 generated/projects/
 examples/*/build/
 reports/*.log
@@ -13,5 +14,7 @@ reports/intrinsics-audit.json
 reports/sfr-artifact-validation.json
 reports/stc32g-v1-report.json
 reports/stc32g144k246-v1-report.json
+reports/stc32g-as6-report.json
+reports/stc32g144k246-as6-report.json
 __pycache__/
 *.pyc

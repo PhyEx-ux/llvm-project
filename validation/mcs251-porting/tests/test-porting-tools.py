@@ -8,7 +8,16 @@ the binaries are absent, e.g. on a host without the WSL environment).
 
 It encodes the review's regression list: Make/shell injection (B1), fake-PASS
 gates (B2), lexical SFR classification (M1), three counting bases (M2), build
-selection semantics (M3), and SFR artifact cross-checking (M5).
+selection semantics (M3), SFR artifact cross-checking (M5), and the
+``--sfr-address-space=0|6`` flavor switching of the direct-SFR converter
+(AS6: v2 memory-contract headers, including the backend-forbidden 0xFF
+demotion and the flavor/report mismatch rejections). The verifier's AS6
+tightening is pinned too: the direct window ends at 0xFE and every 0xFF
+demotion registration comment must match an ignored audit record by name and
+address (deleting the comment or synthesizing a 0xFF macro is rejected).
+Demotion identity is the converter's structured ``as6_demoted`` flag, never
+the reason text: a decoy comment inside an inactive ``#if 0`` declaration
+can quote the demotion wording verbatim (recheck regression).
 """
 
 from __future__ import annotations
@@ -302,6 +311,202 @@ class SfrConvertLexical(unittest.TestCase):
             any("unparsed Keil declaration" in (entry.reason or "") for entry in result.ignored),
             result.ignored,
         )
+
+
+# --------------------------------------------------------------------------
+# AS6: sfr-convert.py --sfr-address-space mode switching
+# --------------------------------------------------------------------------
+
+
+class SfrConvertAddressSpace(unittest.TestCase):
+    SOURCE = "sfr P0 = 0x80;\nsfr SBUF = 0x99;\n"
+
+    def render(self, address_space: int, output_name: str = "device-v1.h") -> str:
+        classification = sfr_convert.classify(self.SOURCE)
+        return sfr_convert.render_header(
+            Path("stc.h"), Path(output_name), classification, address_space
+        )
+
+    def test_default_mode_keeps_as0_macro_unchanged(self):
+        # The compatibility default must render the exact v1 macro text.
+        rendered = self.render(0)
+        self.assertIn("#define P0               (*(volatile unsigned char *)0x80)", rendered)
+        self.assertNotIn("address_space", rendered)
+        default = sfr_convert.render_header(
+            Path("stc.h"), Path("device-v1.h"), sfr_convert.classify(self.SOURCE)
+        )
+        self.assertEqual(default, rendered)
+
+    def test_as6_mode_qualifies_pointer_with_address_space(self):
+        rendered = self.render(6, "device-as6.h")
+        self.assertIn(
+            "#define SBUF             "
+            "(*(volatile unsigned char __attribute__((address_space(6))) *)0x99)",
+            rendered,
+        )
+        self.assertNotIn("(*(volatile unsigned char *)0x", rendered)
+
+    def test_as6_xfr_and_sbit_registration_is_unchanged(self):
+        # sbit and XFR are frontend-pending registrations: the AS6 mode must
+        # not change their comment-only output (AS6 only denotes the 8-bit
+        # direct window 0x80..0xFE).
+        source = (
+            "sfr P0 = 0x80;\n"
+            "sbit P00 = P0 ^ 0;\n"
+            "#define DMA (*(unsigned char volatile far *)0x7EF000)\n"
+        )
+        classification = sfr_convert.classify(source)
+        as0 = sfr_convert.render_header(
+            Path("stc.h"), Path("device-v1.h"), classification, 0
+        )
+        as6 = sfr_convert.render_header(
+            Path("stc.h"), Path("device-as6.h"), classification, 6
+        )
+        entry = re.compile(r"^/\* (XFR \w+ = 0x|sbit \w+ = \w+\^)")
+        xfr0 = [line for line in as0.splitlines() if entry.match(line) and " = 0x" in line]
+        xfr6 = [line for line in as6.splitlines() if entry.match(line) and " = 0x" in line]
+        sbit0 = [line for line in as0.splitlines() if entry.match(line) and "^" in line]
+        sbit6 = [line for line in as6.splitlines() if entry.match(line) and "^" in line]
+        self.assertEqual(xfr0, xfr6)
+        self.assertEqual(sbit0, sbit6)
+        self.assertTrue(xfr6 and xfr6[0].endswith("not defined in v1. */"), xfr6)
+        self.assertTrue(sbit6 and sbit6[0].endswith("not defined in v1. */"), sbit6)
+
+    def test_mode_switch_preserves_address_and_name_payload(self):
+        # Only the pointer flavor differs: names and addresses must be the
+        # pure-address payload in both modes (no device-conditional text).
+        import re as _re
+
+        pattern = _re.compile(
+            r"^#define (\w+)\s+\(\*\((?P<type>.+?)\)0x([0-9A-F]{2})\)$", _re.MULTILINE
+        )
+        as0 = {m.group(1): m.group(3) for m in pattern.finditer(self.render(0))}
+        as6 = {m.group(1): m.group(3) for m in pattern.finditer(self.render(6, "device-as6.h"))}
+        self.assertEqual(as0, {"P0": "80", "SBUF": "99"})
+        self.assertEqual(as0, as6)
+
+    def test_unsupported_address_space_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.render(1)
+        with self.assertRaises(ValueError):
+            sfr_convert.report_object(
+                Path("stc.h"), Path("o.h"), sfr_convert.classify(self.SOURCE), 3
+            )
+
+    def test_report_records_address_space(self):
+        with tempfile.TemporaryDirectory(prefix="mcs251-as6-report-") as tmp:
+            source = Path(tmp) / "device.h"
+            source.write_text(self.SOURCE, encoding="utf-8")
+            report0 = sfr_convert.report_object(
+                source, Path("o.h"), sfr_convert.classify(self.SOURCE), 0
+            )
+            report6 = sfr_convert.report_object(
+                source, Path("o.h"), sfr_convert.classify(self.SOURCE), 6
+            )
+        self.assertEqual(report0["sfr_address_space"], 0)
+        self.assertEqual(report6["sfr_address_space"], 6)
+        # Classification payload is mode-independent.
+        self.assertEqual(report0["counts"], report6["counts"])
+
+    def test_as6_demotes_0xff_to_registered_comment(self):
+        # The fork backend forbids direct address 0xFF in AS6 (llc aborts with
+        # "SFR address 0xff is permanently forbidden"), and the official STC
+        # headers declare RSTCFG there. AS6 must not emit a poison macro: the
+        # entry becomes a named comment in the header and an ignored record
+        # with an explicit reason in the report.
+        source = "sfr OK = 0xFE;\nsfr RSTCFG = 0xFF;\n"
+        classification = sfr_convert.classify(source)
+        self.assertEqual(names(classification, "direct_sfr"), {"OK", "RSTCFG"})
+        with tempfile.TemporaryDirectory(prefix="mcs251-as6-ff-") as tmp:
+            src = Path(tmp) / "device.h"
+            src.write_text(source, encoding="utf-8")
+            as6 = sfr_convert.render_header(Path(src), Path("device-as6.h"), classification, 6)
+            self.assertIn(
+                "#define OK               "
+                "(*(volatile unsigned char __attribute__((address_space(6))) *)0xFE)",
+                as6,
+            )
+            self.assertFalse(
+                [line for line in as6.splitlines() if line.startswith("#define") and "0xFF" in line]
+            )
+            self.assertIn("/* sfr RSTCFG = 0xFF; not representable in AS6. */", as6)
+            report6 = sfr_convert.report_object(src, Path("device-as6.h"), classification, 6)
+            self.assertEqual([e["name"] for e in report6["direct_sfr"]], ["OK"])
+            demoted = [e for e in report6["ignored"] if e["name"] == "RSTCFG"]
+            self.assertEqual(len(demoted), 1)
+            self.assertIn("permanently forbidden", demoted[0]["reason"])
+            # The structured flag—not the reason text—is the demotion marker
+            # consumers must key off (reasons quote source excerpts).
+            self.assertIs(demoted[0]["as6_demoted"], True)
+            self.assertEqual(
+                [e.get("as6_demoted") for e in report6["direct_sfr"]], [None]
+            )
+            self.assertEqual(
+                report6["counts"], {"direct_sfr": 1, "xfr": 0, "sbit": 0, "ignored": 1}
+            )
+            # The raw lexical count stays mode-independent.
+            self.assertEqual(report6["raw_declaration_counts"]["direct_sfr"], 2)
+            # AS0 keeps both macros: the demotion is flavor-specific.
+            as0 = sfr_convert.render_header(Path(src), Path("device-v1.h"), classification, 0)
+            self.assertTrue(
+                re.search(r"^#define RSTCFG\s+\(\*\(volatile unsigned char \*\)0xFF\)$", as0, re.MULTILINE),
+                "AS0 flavor must keep the plain 0xFF macro",
+            )
+            report0 = sfr_convert.report_object(src, Path("device-v1.h"), classification, 0)
+            self.assertEqual(report0["counts"]["ignored"], 0)
+
+    def test_cli_flag_selects_mode_and_rejects_others(self):
+        with tempfile.TemporaryDirectory(prefix="mcs251-as6-cli-") as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "device.h"
+            source.write_text(self.SOURCE, encoding="utf-8")
+            for space, marker in (
+                (0, "(*(volatile unsigned char *)0x80)"),
+                (6, "(*(volatile unsigned char __attribute__((address_space(6))) *)0x80)"),
+            ):
+                output = tmp_path / f"device-as{space}.h"
+                report = tmp_path / f"device-as{space}-report.json"
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "tools" / "sfr-convert.py"),
+                        str(source),
+                        "-o",
+                        str(output),
+                        "--report",
+                        str(report),
+                        f"--sfr-address-space={space}",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    encoding="utf-8",
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn(marker, output.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    json.loads(report.read_text(encoding="utf-8"))["sfr_address_space"], space
+                )
+                self.assertIn(f"sfr_address_space={space}", completed.stdout)
+            bad = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "tools" / "sfr-convert.py"),
+                    str(source),
+                    "-o",
+                    str(tmp_path / "x.h"),
+                    "--report",
+                    str(tmp_path / "x.json"),
+                    "--sfr-address-space=5",
+                ],
+                text=True,
+                capture_output=True,
+                encoding="utf-8",
+                check=False,
+            )
+            self.assertNotEqual(bad.returncode, 0)
+            self.assertIn("invalid choice", bad.stderr)
+            self.assertFalse((tmp_path / "x.h").exists())
 
 
 # --------------------------------------------------------------------------
@@ -723,13 +928,21 @@ class VerifySfrArtifacts(unittest.TestCase):
         self.check = self.tmp / "selfcheck.c"
         self.regenerate()
 
-    def regenerate(self) -> None:
+    def regenerate(self, address_space: int = 0) -> None:
         self.header.write_text(
-            sfr_convert.render_header(self.source, self.header, self.classification),
+            sfr_convert.render_header(
+                self.source, self.header, self.classification, address_space
+            ),
             encoding="utf-8",
         )
         self.report_path.write_text(
-            json.dumps(sfr_convert.report_object(self.source, self.header, self.classification), indent=2) + "\n",
+            json.dumps(
+                sfr_convert.report_object(
+                    self.source, self.header, self.classification, address_space
+                ),
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
         uses = "\n".join(f"    sink ^= {e.name};" for e in self.classification.direct_sfr)
@@ -808,6 +1021,267 @@ class VerifySfrArtifacts(unittest.TestCase):
         report["counts"]["xfr"] = len(report["xfr"])
         self.report_path.write_text(json.dumps(report), encoding="utf-8")
         with self.assertRaises(verify_sfr.VerificationError):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_as6_artifacts_pass_and_report_flavor(self):
+        # Positive AS6 shape: same classification rendered with address
+        # space 6 must verify, and the verifier must report the flavor.
+        self.regenerate(address_space=6)
+        result = verify_sfr.verify_one(self.report_path, self.header, self.check)
+        self.assertEqual(result["sfr_address_space"], 6)
+        self.assertEqual(result["rendered_direct_macros"], 2)
+
+    def test_as6_report_with_as0_header_is_rejected(self):
+        # Mode mismatch: an AS6 report must never bless plain AS0 macros.
+        self.regenerate(address_space=6)
+        as0_header = self.tmp / "device-as0.h"
+        as0_header.write_text(
+            sfr_convert.render_header(
+                self.source, as0_header, self.classification, 0
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(verify_sfr.VerificationError):
+            verify_sfr.verify_one(self.report_path, as0_header, self.check)
+
+    def test_as0_report_with_as6_header_is_rejected(self):
+        # The inverse mismatch: an AS0 report with AS6 macros has zero
+        # matching direct defines and must be rejected.
+        self.regenerate(address_space=0)
+        as6_header = self.tmp / "device-as6.h"
+        as6_header.write_text(
+            sfr_convert.render_header(
+                self.source, as6_header, self.classification, 6
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(verify_sfr.VerificationError):
+            verify_sfr.verify_one(self.report_path, as6_header, self.check)
+
+    def test_unknown_address_space_in_report_is_rejected(self):
+        self.regenerate(address_space=6)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        report["sfr_address_space"] = 2
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaises(verify_sfr.VerificationError):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def use_fixture(self, source: str, address_space: int = 6) -> None:
+        # Re-classify from a new source and regenerate all three artifacts.
+        # The self-check uses the flavor's effective set, like the repo's real
+        # AS6 self-check sources (regenerate() walks the raw set, which may
+        # contain registers the flavor demotes or skips as inactive).
+        self.source.write_text(source, encoding="utf-8")
+        self.classification = sfr_convert.classify(source)
+        self.regenerate(address_space=address_space)
+        effective = sfr_convert.effective_for_address_space(self.classification, address_space)
+        uses = "\n".join(f"    sink ^= {e.name};" for e in effective.direct_sfr)
+        self.check.write_text(
+            "volatile unsigned char sink;\nint main(void) {\n" + uses + "\n    return 0;\n}\n",
+            encoding="utf-8",
+        )
+
+    def use_0xff_fixture(self, address_space: int = 6) -> None:
+        # Official-header shape: a plain direct SFR plus a register declared
+        # at the AS6-forbidden 0xFF (RSTCFG in the real STC headers).
+        self.use_fixture("sfr P0 = 0x80;\nsfr RSTCFG = 0xFF;\n", address_space)
+
+    def test_as6_0xff_register_demotes_and_still_verifies(self):
+        # Positive shape: in AS6 the 0xFF register must leave the effective
+        # direct set and appear as an ignored record plus a named registration
+        # comment; untampered artifacts still verify.
+        self.use_0xff_fixture(address_space=6)
+        self.assertIn(
+            "/* sfr RSTCFG = 0xFF; not representable in AS6. */",
+            self.header.read_text(encoding="utf-8"),
+        )
+        result = verify_sfr.verify_one(self.report_path, self.header, self.check)
+        self.assertEqual(result["sfr_address_space"], 6)
+        self.assertEqual(result["rendered_direct_macros"], 1)
+        self.assertEqual(result["rendered_as6_demoted_comments"], 1)
+        self.assertEqual(result["counts"]["ignored"], 1)
+        # The demotion is identified by the structured flag, not by reason
+        # text that ignored excerpts could impersonate.
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        flagged = [e for e in report["ignored"] if e.get("as6_demoted") is True]
+        self.assertEqual([(e["name"], e["address"]) for e in flagged], [("RSTCFG", 0xFF)])
+
+    def test_inactive_decoy_reason_excerpt_still_verifies(self):
+        # Alice recheck regression: an inactive "#if 0" declaration whose
+        # source excerpt quotes the demotion wording used to be mistaken for a
+        # demotion record (marker substring matched the ignored reason), and
+        # the verifier crashed on int(None) for both flavors. With the
+        # structured as6_demoted flag the untampered artifacts must verify.
+        source = (
+            "sfr P0 = 0x80;\n"
+            "#if 0\n"
+            "sfr RSTCFG = 0xFF /* permanently forbidden in address space 6 */;\n"
+            "#endif\n"
+        )
+        for space in (0, 6):
+            with self.subTest(flavor=space):
+                self.use_fixture(source, address_space=space)
+                result = verify_sfr.verify_one(self.report_path, self.header, self.check)
+                self.assertEqual(result["rendered_direct_macros"], 1)
+                self.assertEqual(result["rendered_as6_demoted_comments"], 0)
+                self.assertEqual(result["counts"]["ignored"], 1)
+                report = json.loads(self.report_path.read_text(encoding="utf-8"))
+                self.assertIn(
+                    "permanently forbidden in address space 6", report["ignored"][0]["reason"]
+                )
+                self.assertEqual(
+                    [e.get("as6_demoted") for e in report["ignored"]], [None]
+                )
+
+    def test_malformed_as6_demoted_flag_is_rejected(self):
+        # A record claiming as6_demoted=true must sit at the integer 0xFF
+        # slot. Forcing the flag onto the decoy inactive record (address
+        # None) must be rejected as a clean VerificationError, never crash
+        # with TypeError and never be filtered away by address alone.
+        source = (
+            "sfr P0 = 0x80;\n"
+            "#if 0\n"
+            "sfr RSTCFG = 0xFF /* permanently forbidden in address space 6 */;\n"
+            "#endif\n"
+        )
+        self.use_fixture(source, address_space=6)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        self.assertIsNone(report["ignored"][0]["address"])
+        report["ignored"][0]["as6_demoted"] = True
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaisesRegex(
+            verify_sfr.VerificationError, "malformed as6_demoted record"
+        ):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_float_address_flagged_record_is_rejected(self):
+        # Alice final negative: JSON 255.0 compares equal to 255 under plain
+        # equality, so a float address on a flagged record used to verify as a
+        # well-formed demotion. The slot must be exactly the integer type.
+        self.use_0xff_fixture(address_space=6)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        record = next(e for e in report["ignored"] if e.get("as6_demoted") is True)
+        record["address"] = 255.0
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaisesRegex(
+            verify_sfr.VerificationError, "must be the integer address 0xFF"
+        ):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_flagged_record_missing_name_is_rejected(self):
+        # Alice final negative: a flagged record without a name used to
+        # escape as a raw KeyError instead of a clean rejection; the name
+        # must be validated as a string identifier before building mappings.
+        self.use_0xff_fixture(address_space=6)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        record = next(e for e in report["ignored"] if e.get("as6_demoted") is True)
+        del record["name"]
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaisesRegex(
+            verify_sfr.VerificationError, "name must be a string identifier"
+        ):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_duplicate_name_at_0xff_is_not_a_demotion(self):
+        # Alice recheck adjacent shapes: duplicate-name rejections legitimately
+        # sit at 0xFF without being demotions, and a duplicated RSTCFG@0xFF
+        # yields exactly one flagged demotion plus unflagged duplicate audit
+        # records. Both flavors of both shapes must verify untampered.
+        shapes = {
+            "redeclared_other_at_0xff": "sfr P0 = 0x80;\nsfr P0 = 0xFF;\n",
+            "triplicate_0xff": (
+                "sfr P0 = 0x80;\n"
+                "sfr RSTCFG = 0xFF;\n"
+                "sfr RSTCFG = 0xFF;\n"
+                "sfr RSTCFG = 0xFF;\n"
+            ),
+        }
+        for shape, source in shapes.items():
+            for space in (0, 6):
+                with self.subTest(shape=shape, flavor=space):
+                    self.use_fixture(source, address_space=space)
+                    report = json.loads(self.report_path.read_text(encoding="utf-8"))
+                    flagged = [e for e in report["ignored"] if e.get("as6_demoted") is True]
+                    expected_flagged = 1 if (shape == "triplicate_0xff" and space == 6) else 0
+                    self.assertEqual(len(flagged), expected_flagged)
+                    result = verify_sfr.verify_one(self.report_path, self.header, self.check)
+                    self.assertEqual(
+                        result["rendered_as6_demoted_comments"], expected_flagged
+                    )
+                    # Every unflagged ignored record sits at 0xFF without a
+                    # registration comment (duplicate audit trail only).
+                    for entry in report["ignored"]:
+                        if entry.get("as6_demoted") is not True:
+                            self.assertEqual(entry["address"], 0xFF)
+
+    def test_as6_deleting_0xff_registration_comment_is_rejected(self):
+        # Alice quick-review negative 1: silently deleting the demotion
+        # registration comment used to pass because the comment was never
+        # cross-checked against the report's ignored audit record.
+        self.use_0xff_fixture(address_space=6)
+        text = self.header.read_text(encoding="utf-8")
+        self.header.write_text(
+            "\n".join(
+                line for line in text.splitlines() if "not representable in AS6" not in line
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            verify_sfr.VerificationError, "registration comments differ"
+        ):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_as6_synthesized_0xff_direct_macro_is_rejected(self):
+        # Alice quick-review negative 2: a consistently forged triple (report
+        # keeps RSTCFG in direct_sfr, header renders an AS6 macro at 0xFF,
+        # self-check uses it) used to pass because the AS6 address bound was
+        # 0xFF instead of the backend's real 0x80..0xFE direct window.
+        self.use_0xff_fixture(address_space=6)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        demoted = [e for e in report["ignored"] if e["name"] == "RSTCFG"]
+        self.assertEqual(len(demoted), 1)
+        report["ignored"] = [e for e in report["ignored"] if e["name"] != "RSTCFG"]
+        report["direct_sfr"].append({**demoted[0], "reason": None})
+        report["counts"]["direct_sfr"] = len(report["direct_sfr"])
+        report["counts"]["ignored"] = len(report["ignored"])
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        macro = (
+            "#define RSTCFG           "
+            "(*(volatile unsigned char __attribute__((address_space(6))) *)0xFF)"
+        )
+        text = self.header.read_text(encoding="utf-8")
+        self.assertIn("/* sfr RSTCFG = 0xFF; not representable in AS6. */", text)
+        self.header.write_text(
+            text.replace("/* sfr RSTCFG = 0xFF; not representable in AS6. */", macro),
+            encoding="utf-8",
+        )
+        check_text = self.check.read_text(encoding="utf-8")
+        self.check.write_text(
+            check_text.replace("sink ^= P0;", "sink ^= P0;\n    sink ^= RSTCFG;", 1),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(verify_sfr.VerificationError, "outside 0x80..0xFE"):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_as0_header_with_as6_demotion_comment_is_rejected(self):
+        # Flavor binding: the converter renders demotion registration comments
+        # only in the AS6 flavor. In AS0 the 0xFF register is a legal plain
+        # macro, so a stray "not representable in AS6" comment paired with an
+        # AS0 report can only come from tampering.
+        self.use_0xff_fixture(address_space=0)
+        text = self.header.read_text(encoding="utf-8")
+        self.assertIn("#define RSTCFG", text)
+        self.header.write_text(
+            text.replace(
+                "#endif",
+                "/* sfr RSTCFG = 0xFF; not representable in AS6. */\n#endif",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            verify_sfr.VerificationError, "paired with an address-space-0 report"
+        ):
             verify_sfr.verify_one(self.report_path, self.header, self.check)
 
 

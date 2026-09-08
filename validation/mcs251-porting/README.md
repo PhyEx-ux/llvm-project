@@ -11,9 +11,10 @@
 | `stc32g.h`（1,232 行） | 117 个直寻址 SFR、418 个 XFR 登记、280 个 sbit 登记、0 个忽略声明 |
 | `STC32G144K246.H`（2,810 行） | 119 个直寻址 SFR、1,706 个唯一 XFR 登记（原始声明 1,708 条，2 条重复名入 ignored）、323 个 sbit 登记、13 个忽略声明（2 条重复 XFR + 11 条官方头自身 `))` 括号笔误的 XFR，全部带行号保留） |
 | 直 SFR 自检 | 两份生成头均以 `-Werror` 由 s1 Clang 编译为 MCS251 IR，并经 s1 `llc -verify-machineinstrs` 降低成功 |
+| AS6 双版头（2026-09-08） | `stc32g-as6.h`：116 个 AS6 宏 + `RSTCFG@0xFF` 降级登记；`stc32g144k246-as6.h`：118 个 AS6 宏 + `RSTCFG@0xFF` 降级登记。两版在 `-mcs251-memory-contract=1,2,32,8,1` 下全量降低为 direct SFR 访问（写抽查 5 宏 `mov 0xNN,r0`，读全量 116 个地址均为 `mov rN,0xNN`，无 @dr SFR 误访问） |
 | `<intrins.h>` 调用审计 | 三口径：原始文本命中 `_nop_()` 608 次/80 文件（含被注释调用）；去注释词法候选 585 次/79 文件；再剔除整数 `#if 0` 死分支后 507 次/79 文件。ELF 路径使用已审计的 `NOP; ERET` helper（`00 AA`，逐字节核验） |
 | `.uvproj` | 270/270 XML 成功解析并生成 270 个 Makefile；GNU make dry-run 270/270 成功；201 个含启用 C 源工程的全部 467 条编译规则逐规则核验为显式 ELF `llc`（Keil `IncludeInBuild=0` 的 1 条 `song.c` 保留登记但不构建；其余 69 个为纯汇编/无启用 C 工程不生成编译规则） |
-| 自包含负例测试 | `tests/test-porting-tools.py` 53 例全过：注入拒绝、假 PASS 门禁负例、词法分类、三口径计数、构建选择语义、不可表示路径与终审衔接 |
+| 自包含负例测试 | `tests/test-porting-tools.py` 74 例全过：注入拒绝、假 PASS 门禁负例、词法分类、三口径计数、构建选择语义、不可表示路径与终审衔接、AS6 模式切换、0xFF 降级、AS6 0xFE 上界/登记注释交叉核对、inactive 诱饵 reason 正例与畸形 `as6_demoted` 负例（缺地址/浮点 255.0/缺 name） |
 
 原始可重放证据位于 `/home/liu/porting-tools-v1-evidence/`；仓库内的 JSON、日志和生成物位于 `reports/` 与 `generated/`。工具链与语料身份（二进制 SHA-256、语料 2,303 文件快照哈希、两输入头哈希）见 `reports/provenance.json`。
 
@@ -31,13 +32,42 @@ python3 tools/sfr-convert.py \
   '/home/liu/stcex/src/t24732_63-QSPI-TFT_DMA_P2P外设到外设_显示视频级动画效果程序-ILI9341/63-QSPI-TFT_DMA_P2P外设到外设_显示视频级动画效果程序-ILI9341/Sources/STC32G144K246.H' \
   -o generated/stc32g144k246-v1.h --report reports/stc32g144k246-v1-report.json
 
+python3 tools/sfr-convert.py \
+  '...同上 stc32g.h 路径...' \
+  -o generated/stc32g-as6.h --report reports/stc32g-as6-report.json \
+  --sfr-address-space=6
+
+python3 tools/sfr-convert.py \
+  '...同上 STC32G144K246.H 路径...' \
+  -o generated/stc32g144k246-as6.h --report reports/stc32g144k246-as6-report.json \
+  --sfr-address-space=6
+
 python3 tests/verify-sfr-artifacts.py . \
   --output reports/sfr-artifact-validation.json
 ```
 
+### 直 SFR 宏的两种地址空间风味（`--sfr-address-space=0|6`）
+
+2026-09-08 Alice 四审裁定：v2 存储契约下 AS0 指针不再保留 direct SFR 歧义——`*(volatile uint8_t*)0x99` 生成 @dr RAM 访问而非 SFR 直写。SFR 访问必须显式 AS6。转换器因此提供两种输出模式，默认 `0` 完全保持 v1 兼容输出（字节级不变）：
+
+| 模式 | 宏形态 | 适用链 |
+| --- | --- | --- |
+| `0`（默认，`*-v1.h`） | `(*(volatile unsigned char *)0x80)` | 显式 compatibility 契约链：clang 与 llc **两侧均传** `-mcs251-memory-contract=1,1,32,8,1`（旧布局下 AS0 绝对地址保留 direct SFR 歧义，行为与 v1 完全一致）。注意当前 s1 工具链 clang 无旗标默认已是 v2，不是 compatibility——默认链用 AS0 版会得到 @dr RAM 访问 |
+| `6`（`*-as6.h`） | `(*(volatile unsigned char __attribute__((address_space(6))) *)0x80)` | v2 布局链：**含当前 s1 无旗标默认链**（`clang/lib/Basic/Targets/MCS251.h` 缺省契约即 `{1,2,32,8,1}`）与显式 `-mcs251-memory-contract=1,2,32,8,1` 的链。AS6 访问降低为 direct SFR 指令（实测 `mov 0x99,r0` / `mov r7,0x99`）；AS0 宏在 v2 布局下是 @dr RAM 访问，不能用于 SFR |
+
+两种风味的选择时机按**两侧实际生效的存储布局**判断，而不是按“是否传了契约旗标”（2026-09-08 快审修正）：**v2 布局一律用 AS6 版（`stc32g-as6.h` 等）——当前 s1 工具链的 clang 不传旗标时默认即 v2（`clang/lib/Basic/Targets/MCS251.h` 缺省契约 `{1,2,32,8,1}`），因此 s1 默认链（clang、llc 均不传契约）也必须选 AS6 版，否则 AS0 的 SBUF 宏实测生成 `mov dr4,#0x0099; mov @dr4,r0` 的 @dr RAM 访问；AS0 版（`stc32g-v1.h` 等）仅供 clang 与 llc 两侧显式传同一 compatibility 契约（如 `1,1,32,8,1`）的链——五元组为 `TransportVersion,ASLayoutVersion,AS0PointerBits,DefaultPlacement,ExecutionContract`，第二字段 1=Compatibility、2=V2**。推荐做法保持不变：契约参数显式同时传给 clang IR 生成（`-Xclang -mcs251-memory-contract=1,1,32,8,1`）和 `llc`（`-mcs251-memory-contract=1,1,32,8,1`），不依赖任何一侧的默认值。真正的拒绝条件是**两侧实际 layout 不一致**（例如 clang 传 `1,1,32,8,1` 而 llc 传 `1,2,32,8,1`，或反向）：实测 clang 不传旗标（默认 v2）+ 仅 llc 传 `1,2,32,8,1` 可以成功，因为两侧布局恰好一致；旧表述“只传 llc 必因 datalayout 冲突被拒”不准确。
+
+AS6 模式的三条边界：
+
+* **0xFF 是后端硬禁区。** `llvm/lib/Target/MCS251/MCS251ISelLowering.cpp` 对 AS6 常量地址 `0xFF` 直接 `report_fatal_error`（direct 窗口为 `0x80..0xFE`）。官方头恰好把 `RSTCFG` 声明在 `0xFF`，因此 AS6 风味不为其生成宏，而是输出具名登记注释（`/* sfr RSTCFG = 0xFF; not representable in AS6. */`）并在报告 `ignored` 中以结构化字段 `as6_demoted: true` 加原因记录；引用它会得到前端干净的“未声明标识符”诊断而非 llc 中止。AS0 风味不受影响（`RSTCFG` 宏照常输出）。校验器把 AS6 报告的 direct 上界收紧到 `0xFE`，并逐条交叉核对登记注释与带 `as6_demoted: true` 的 `ignored` 记录的名称/地址——降级身份只认该结构化字段、不解析 reason 文本（2026-09-08 快审：删登记注释、或合成 `0xFF` 宏并同步改报告/头/自检均可假 PASS，已拒绝；同日复审：inactive 记录的 reason 摘录可能原样引用降级措辞，靠文本匹配会误判+崩溃，已改为结构化字段；终审：字段记录须 name 为合法标识符且 address 恰为整数 0xFF（浮点 255.0、缺 name 均拒绝），协同清除标记+删注释属一致性检查固有边界、见校验器头部说明）。
+* **XFR 不适用 AS6。** AS6 只表示 8 位 direct 空间；XFR（`0xFE00..0xFFFF` 别名窗 / `0x7EF000..0x7EFFFF` 物理窗）走数据指针访问，两种模式下都维持现状：仅登记注释，不生成宏。
+* **sbit 不受模式影响。** 位寻址是方言前端后续工作；两种模式下 sbit 都照常输出到登记文件（报告 `sbit` 列表 + 头内规范化注释）。
+
+报告 JSON 以 `sfr_address_space` 字段记录风味（旧报告缺省该字段按 0 解释）；`counts` 是风味相关的有效映射计数（AS6 下 `stc32g` 为 116 direct + 1 ignored），`raw_declaration_counts` 始终是词法原始计数（117）；AS6 降级记录在 `ignored` 中额外携带 `as6_demoted: true` 结构化标记（其余记录该字段为 null），下游只认此字段识别降级，不解析 reason 文本。
+
 分类规则如下。
 
-* `sfr NAME = 0x80..0xff;` 生成 `(*(volatile unsigned char *)0xNN)` 宏。这是 v1 唯一启用的寄存器访问形式。
+* `sfr NAME = 0x80..0xff;` 生成 `(*(volatile unsigned char *)0xNN)` 宏（默认 AS0 风味）；`--sfr-address-space=6` 时生成 `(*(volatile unsigned char __attribute__((address_space(6))) *)0xNN)`，且 `0xFF` 条目降级为登记注释（见上）。直 SFR 宏是 v1 唯一启用的寄存器访问形式。
 * 位于 `0xFE00..0xFFFF` 或 `0x7EF000..0x7EFFFF` 且带 Keil `xdata`/`far` 限定的 XFR 指针宏仅登记到报告，并输出为注释；开区间式 `>=0xFE00` 判定被显式拒绝，区间外的值记 ignored。
 * `sbit NAME = P3 ^ 2;` 仅登记，并在生成头中规范为 `P3^2` 注释。
 * `sfr16`、同名重复声明（保留原行号与原因）、地址/位号范围不合法或无法识别的 Keil 声明记为 `ignored`；不会被静默丢弃。`STC32G144K246.H` 中 11 条 `#define X (*(unsigned char volatile far *)0x7ef4xx))` 双右括号笔误即以此路径完整保留。
@@ -57,6 +87,22 @@ python3 tests/verify-sfr-artifacts.py . \
 /home/liu/mcs251-demo-test/bin-frozen/llc -mtriple=mcs251-unknown-none \
   -verify-machineinstrs /tmp/stc32g-sfr.ll -o /tmp/stc32g-sfr.s
 ```
+
+AS6 风味的对应自检是 `tests/stc32g-direct-sfr-selfcheck-as6.c` / `tests/stc32g144k246-direct-sfr-selfcheck-as6.c`（使用各自 AS6 头的有效宏集，即不含 `RSTCFG`）。除上述默认布局编译外，v2 契约链验证形态如下（契约参数推荐同时显式传给 clang 与 llc 两侧；只要两侧实际布局一致即可 lowering，见上文选择时机——实测 clang 侧缺省 v2 + llc 侧显式 `1,2,32,8,1` 亦可，但双侧显式一致不依赖默认值）：
+
+```sh
+/home/liu/build-mcs251-s1/bin/clang --target=mcs251-unknown-none \
+  -std=c11 -Wall -Wextra -Werror \
+  -Xclang -mcs251-memory-contract=1,2,32,8,1 \
+  -S -emit-llvm tests/stc32g-direct-sfr-selfcheck-as6.c -o /tmp/stc32g-as6.ll
+/home/liu/build-mcs251-s1/bin/llc -mtriple=mcs251-unknown-none \
+  -verify-machineinstrs -mcs251-memory-contract=1,2,32,8,1 \
+  /tmp/stc32g-as6.ll -o /tmp/stc32g-as6.s
+# 抽查 direct SFR 形态（写：mov 0x99,r0；读：mov rN,0xNN）
+grep -nE 'mov (0x99|r[0-9]+, 0x99)' /tmp/stc32g-as6.s
+```
+
+实测（2026-09-08，s1 树 31c5e7d6cc）：写抽查 5 宏（`P0/SCON/SBUF/IE2/P3` → `mov 0x80|0x98|0x99|0xAF|0xB0, r0`）全中；读侧全量 116 个有效地址均为 `mov rN, 0xNN` direct 形态，唯一非 direct 访问是栈溢出槽 `@dr60`；同一 IR 中 AS0 宏则降低为 `mov dr4,#0x0099; mov @dr4,r0` @dr RAM 访问，与四审裁定一致。
 
 ## 2. `<intrins.h>` 最小兼容层
 
@@ -143,12 +189,12 @@ make run
 
 ## 测试与门禁
 
-`tests/` 共 8 个 Python 脚本与 3 个自检 C 文件：
+`tests/` 共 8 个 Python 脚本与 5 个自检 C 文件：
 
 | 脚本 | 角色 |
 | --- | --- |
-| `test-porting-tools.py` | 自包含边界/负例套件（53 例，输入内嵌，不依赖语料；有冻结工具链时自动加测真实编译/ELF 负例） |
-| `verify-sfr-artifacts.py` | SFR 报告/生成头/源身份/自检用例的独立交叉核对（拒绝重复宏、删注释、计数不符） |
+| `test-porting-tools.py` | 自包含边界/负例套件（74 例，输入内嵌，不依赖语料；有冻结工具链时自动加测真实编译/ELF 负例；含 `--sfr-address-space` 正例、模式切换、0xFF 降级、AS6 0xFE 上界与登记注释交叉核对负例、inactive 诱饵 reason 正例、畸形 `as6_demoted` 拒绝（缺地址/浮点 255.0/缺 name）、报告/头风味失配拒绝） |
+| `verify-sfr-artifacts.py` | SFR 报告/生成头/源身份/自检用例的独立交叉核对（拒绝重复宏、删注释、计数不符；按报告 `sfr_address_space` 绑定宏风味，AS6 报告不得背书 AS0 宏，反之亦然；AS6 报告 direct 上界 `0xFE`，`0xFF` 必须以 ignored（带 `as6_demoted: true` 结构化字段，不解析 reason 文本；字段记录须 name 为合法标识符且 address 恰为整数 0xFF，浮点 255.0/缺 name 均拒绝）+登记注释出现且名称/地址逐条对得上；当前核对 2×AS0 + 2×AS6 共 4 份头，报告格式 `…-validation-v3`。边界：协同清除标记+删注释的一致性篡改不在本工具范围，见脚本头部说明） |
 | `validate-generated-projects.py` | 全量 270 Makefile `make -n` dry-run 验证 |
 | `run-elf-smoke.py` | 最小 clang→llc(ELF)→lld→objcopy 生产链 smoke |
 | `run-minimal-direct-sfr.py` | 样板从零构建 + QEMU UART 哨兵 + NOP helper 符号核验 |
@@ -162,7 +208,7 @@ python3 tests/test-porting-tools.py   # 自包含套件，工作站在无语料/
 
 ## v1 限制和待办
 
-1. **Keil 语言方言尚未移植。** `sbit`、`bit`、`xdata`、`far`、`_at_`、中断声明、绝对放置、启动代码及 Keil 汇编均不由 v1 翻译或编译。XFR 和 sbit 仅是完整登记，不是 C 可访问定义。
+1. **Keil 语言方言尚未移植。** `sbit`、`bit`、`xdata`、`far`、`_at_`、中断声明、绝对放置、启动代码及 Keil 汇编均不由 v1 翻译或编译。XFR 和 sbit 仅是完整登记，不是 C 可访问定义。AS6 风味同理只影响直 SFR 宏：XFR/sbit 登记与 AS0 完全相同，且 `RSTCFG@0xFF` 在 AS6 下因后端禁区降级为登记注释（见第 1 节）。
 2. **生成 Makefile 不代表官方例程可端到端构建。** 270 个 Makefile 的解析/dry-run 已验收；例程真实编译验收必须等待上述源语言特性落地。
 3. **ELF 旗标是生产模板的硬要求。** s1 `llc -filetype=obj` 的默认值是 ASxxxx `XH3`/`.rel`，不是 lld 缺陷；llc 必须显式使用 `-mcs251-object-format=elf`（已内置在 `tools/uvproj2make.py` 模板中），否则 mcs251-lld 不能接受该旧格式。ELF 链还要求 HOME、VECS、BOOT、CSEG、XINIT 五个 `--area-start` 参数和板级 `--edata-end`。本目录的最小 smoke 及 QEMU 样板均已通过该完整链。
 4. **ELF `_nop_()` 有时序限制。** 当前 ELF streamer 缺少 MCS251 inline-asm parser，所以在 ELF 模式下公共头改调 `runtime/elf-nop.yaml` 中 `00 AA`（NOP; ERET）helper。它证明确实执行 NOP，却增加 call/return，暂不适用于依赖 Keil inline NOP 精确周期的例程；原 `.rel` 路径仍直接发射一条 inline `nop`。
