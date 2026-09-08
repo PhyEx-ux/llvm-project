@@ -1,8 +1,11 @@
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 < %s | FileCheck %s
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 < %s | FileCheck %s
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj %s -o %t.O0.rel
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj %s -o %t.O2.rel
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -stop-after=finalize-isel %s -o - | FileCheck %s --check-prefix=MIR
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs -O0 < %s | FileCheck %s
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs -O2 < %s | FileCheck %s
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs -O0 -filetype=obj %s -o %t.O0.rel
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs -O2 -filetype=obj %s -o %t.O2.rel
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs -O2 -stop-after=finalize-isel %s -o - | FileCheck %s --check-prefix=MIR
+;
+; Pinned to the v1 compatibility contract: this is a legacy-layout suite. The
+; llc no-flag default is the xsmall/v2-Small model (clang cc1 default).
 
 ; IPO can select fastcc for local functions. MCS251 deliberately uses the
 ; same physical ABI as C: the first argument/result occupies DPL/DPTR or

@@ -1,11 +1,14 @@
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -addrsig < %s | FileCheck %s --implicit-check-not=.addrsig
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -addrsig < %s > %t.asm
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs -O0 -addrsig < %s | FileCheck %s --implicit-check-not=.addrsig
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs -O2 -addrsig < %s > %t.asm
 ; RUN: FileCheck %s --implicit-check-not=.addrsig < %t.asm
-; RUN: llc -mtriple=mcs251 -O2 -addrsig=false < %s > %t.no-addrsig.asm
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O2 -addrsig=false < %s > %t.no-addrsig.asm
 ; RUN: diff %t.asm %t.no-addrsig.asm
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj -addrsig < %s > %t.rel
-; RUN: llc -mtriple=mcs251 -O2 -filetype=obj -addrsig=false < %s > %t.no-addrsig.rel
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs -O2 -filetype=obj -addrsig < %s > %t.rel
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O2 -filetype=obj -addrsig=false < %s > %t.no-addrsig.rel
 ; RUN: diff %t.rel %t.no-addrsig.rel
+;
+; Pinned to the v1 compatibility contract: this is a legacy-layout suite. The
+; llc no-flag default is the xsmall/v2-Small model (clang cc1 default).
 
 ; Tail hints fall back to ordinary calls, including indirect calls and calls
 ; with a live frame. ASxxxx REL ignores address-significance emission requests.

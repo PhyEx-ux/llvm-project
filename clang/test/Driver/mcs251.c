@@ -21,6 +21,9 @@
 // RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=small -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-SMALL --implicit-check-not=error:
 // RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=xsmall -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-XSMALL --implicit-check-not=error:
 // RUN: %clang --target=mcs251-unknown-none -mcs251-memory-model=large -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-LARGE --implicit-check-not=error:
+// Unknown model names are rejected instead of guessing a contract.
+// RUN: not %clang --target=mcs251-unknown-none -mcs251-memory-model=compact -### -c %s 2>&1 | FileCheck %s --check-prefix=MEMORY-BAD
+// MEMORY-BAD: error: unsupported argument 'compact' to option '-mcs251-memory-model'
 // MEMORY-DEFAULT: "-cc1"
 // MEMORY-DEFAULT-SAME: "-mcs251-memory-contract=1,2,32,8,1"
 // MEMORY-TINY: "-mcs251-memory-contract=1,2,16,1,1"

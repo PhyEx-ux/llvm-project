@@ -1,5 +1,8 @@
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs %s -o - | FileCheck %s --check-prefix=ASM
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -filetype=obj %s -o - | FileCheck %s --check-prefix=OBJ
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs %s -o - | FileCheck %s --check-prefix=ASM
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs -filetype=obj %s -o - | FileCheck %s --check-prefix=OBJ
+;
+; Pinned to the v1 compatibility contract: this is a legacy-layout suite. The
+; llc no-flag default is the xsmall/v2-Small model (clang cc1 default).
 ;
 ; Defined globals are deliberately unsupported, but function prefix data goes
 ; through generic AsmPrinter constant emission. Test scalar, array, struct and

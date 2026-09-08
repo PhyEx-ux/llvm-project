@@ -1,12 +1,15 @@
-; RUN: llc -mtriple=mcs251 -filetype=obj %S/oseg-multi.ll -o %t.multi.rel
-; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %S/oseg-multi.ll -o %t.multi.o
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj %S/oseg-multi.ll -o %t.multi.rel
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %S/oseg-multi.ll -o %t.multi.o
 ; RUN: %python %S/Inputs/check-elf-rela.py %t.multi.o %t.multi.rel
-; RUN: llc -mtriple=mcs251 -filetype=obj %S/Inputs/oseg-caller.ll -o %t.caller.rel
-; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %S/Inputs/oseg-caller.ll -o %t.caller.o
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj %S/Inputs/oseg-caller.ll -o %t.caller.rel
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %S/Inputs/oseg-caller.ll -o %t.caller.o
 ; RUN: %python %S/Inputs/check-elf-rela.py %t.caller.o %t.caller.rel
 ; RUN: llvm-readobj -r %t.caller.o | FileCheck %s --check-prefix=CALLER
-; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %s -o %t.address.o
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %s -o %t.address.o
 ; RUN: llvm-readobj -s -r %t.address.o | FileCheck %s --check-prefix=ADDRESS --implicit-check-not=PARM
+;
+; Pinned to the v1 compatibility contract: this is a legacy-layout suite. The
+; llc no-flag default is the xsmall/v2-Small model (clang cc1 default).
 ;
 ; Cross-module slots remain ordinary symbol references. Taking a function's
 ; address alone must not invent undefined parameter-slot dependencies.

@@ -68,6 +68,7 @@ using namespace llvm;
 
 CGOPT(std::string, MArch)
 CGOPT_EXP(std::string, MCS251MemoryContract)
+CGOPT_EXP(std::string, MCS251MemoryModel)
 CGOPT(std::string, MCPU)
 CGOPT(std::string, MTune)
 CGLIST(std::string, MAttrs)
@@ -138,6 +139,12 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
       "mcs251-memory-contract", cl::Hidden,
       cl::desc("Numeric MCS-251 memory contract"), cl::init(""));
   CGBINDOPT(MCS251MemoryContract);
+
+  static cl::opt<std::string> MCS251MemoryModel(
+      "mcs251-memory-model",
+      cl::desc("MCS-251 storage model (tiny, xtiny, small, xsmall, large)"),
+      cl::value_desc("model"), cl::init(""));
+  CGBINDOPT(MCS251MemoryModel);
 
   static cl::opt<std::string> MCPU(
       "mcpu", cl::desc("Target a specific cpu type (-mcpu=help for details)"),
@@ -586,6 +593,37 @@ codegen::getBBSectionsMode(llvm::TargetOptions &Options) {
   }
 }
 
+// Translate a user-facing -mcs251-memory-model name into the numeric
+// transport contract. This command-line translation layer is one of the two
+// places (with the clang driver) where model names may appear; everything
+// downstream consumes the numeric fields only.
+static bool translateMCS251MemoryModel(StringRef Model,
+                                       MCS251::MemoryContract &Contract) {
+  unsigned AS0Bits = 0, Placement = 0;
+  if (Model == "tiny") {
+    AS0Bits = 16;
+    Placement = 1;
+  } else if (Model == "xtiny") {
+    AS0Bits = 16;
+    Placement = 8;
+  } else if (Model == "small") {
+    AS0Bits = 32;
+    Placement = 1;
+  } else if (Model == "xsmall") {
+    AS0Bits = 32;
+    Placement = 8;
+  } else if (Model == "large") {
+    AS0Bits = 32;
+    Placement = 3;
+  } else {
+    return false;
+  }
+  Contract = MCS251::MemoryContract{/*TransportVersion=*/1,
+                                    /*ASLayoutVersion=*/2, AS0Bits, Placement,
+                                    /*ExecutionContract=*/1};
+  return true;
+}
+
 // Common utility function tightly tied to the options listed here. Initializes
 // a TargetOptions object with CodeGen flags and returns it.
 TargetOptions
@@ -593,13 +631,27 @@ codegen::InitTargetOptionsFromCodeGenFlags(const Triple &TheTriple) {
   TargetOptions Options;
   Options.AllowFPOpFusion = getFuseFPOps();
   if (TheTriple.getArch() == Triple::mcs251) {
-    if (std::optional<std::string> Contract =
-            getExplicitMCS251MemoryContract()) {
+    std::optional<std::string> Model = getExplicitMCS251MemoryModel();
+    std::optional<std::string> Contract = getExplicitMCS251MemoryContract();
+    if (Model && Contract)
+      report_fatal_error("-mcs251-memory-model and -mcs251-memory-contract "
+                         "are mutually exclusive");
+    if (Model) {
+      // Presence and value are distinct: an explicitly empty model name is
+      // malformed, like an explicitly empty wire contract.
+      if (!translateMCS251MemoryModel(*Model, Options.MCS251Memory))
+        report_fatal_error("invalid -mcs251-memory-model");
+    } else if (Contract) {
       // Presence and value are distinct: an explicitly empty wire contract is
       // malformed and must not select the compatibility fallback.
       if (!MCS251::parseMemoryContract(*Contract, Options.MCS251Memory) ||
           !MCS251::isValidMemoryContract(Options.MCS251Memory))
         report_fatal_error("invalid -mcs251-memory-contract");
+    } else {
+      // No user selection: materialize the same xsmall contract that the
+      // clang cc1 default uses, so clang-produced IR and a bare llc
+      // invocation agree on the data layout instead of conflicting.
+      Options.MCS251Memory = MCS251::MemoryContract{1, 2, 32, 8, 1};
     }
   }
   Options.NoTrappingFPMath = getEnableNoTrappingFPMath();

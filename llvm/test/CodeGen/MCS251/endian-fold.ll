@@ -1,10 +1,13 @@
 ; RUN: opt -mtriple=mcs251 -passes=instcombine -S %s -o - | FileCheck %s
 ; RUN: opt -mtriple=mcs251 -passes='function(instcombine),globaldce' -S %s -o %t.ll
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs %t.ll -o %t.s
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs %t.ll -o %t.s
 ;
 ; These constants are removed before codegen: this tests LLVM core byte
 ; interpretation without depending on unsupported target global emission.
-; opt must obtain the big-endian DataLayout from the target triple.
+; opt must obtain the big-endian DataLayout from the target triple. That
+; triple-derived layout is the legacy compatibility contract, so the llc step
+; passes the matching numeric contract explicitly (the llc no-flag default is
+; the xsmall/v2-Small model, matching the clang cc1 default).
 ; CHECK: target datalayout = "E-m:s-p:32:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8"
 @bytes = private constant [4 x i8] [i8 18, i8 52, i8 86, i8 120]
 @scalar = private constant i32 2309737967

@@ -1,13 +1,16 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 %t/pointer-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
-; RUN: not --crash llc -mtriple=mcs251 %t/pointer-call.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
-; RUN: not --crash llc -mtriple=mcs251 %t/aggregate-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not --crash llc -mtriple=mcs251 %t/aggregate-call.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not --crash llc -mtriple=mcs251 %t/empty.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not --crash llc -mtriple=mcs251 %t/i64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not --crash llc -mtriple=mcs251 %t/float.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not --crash llc -mtriple=mcs251 %t/indirect.ll -o - 2>&1 | FileCheck %s --check-prefix=INDIRECT
-; RUN: not --crash llc -mtriple=mcs251 %t/weak.ll -o - 2>&1 | FileCheck %s --check-prefix=LINKAGE
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/pointer-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/pointer-call.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/aggregate-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/aggregate-call.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/empty.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/i64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/float.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/indirect.ll -o - 2>&1 | FileCheck %s --check-prefix=INDIRECT
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/weak.ll -o - 2>&1 | FileCheck %s --check-prefix=LINKAGE
+;
+; Pinned to the v1 compatibility contract: this is a legacy-layout suite. The
+; llc no-flag default is the xsmall/v2-Small model (clang cc1 default).
 ; PTR: LLVM ERROR: MCS251: static pointer parameters are not supported by the compatibility ABI
 ; TYPE: LLVM ERROR: MCS251: arguments must be unsplit i8/i16/i32 scalars
 ; INDIRECT: LLVM ERROR: MCS251: multi-argument indirect calls are not supported

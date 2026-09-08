@@ -1,4 +1,7 @@
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs < %s | FileCheck %s
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs < %s | FileCheck %s
+;
+; Pinned to the v1 compatibility contract: this is a legacy-layout suite. The
+; llc no-flag default is the xsmall/v2-Small model (clang cc1 default).
 
 ; Phase 11: canonical pointer loads. Addressing forms (encodings verified against sdas251
 ; V05.50.4):
