@@ -1,0 +1,16 @@
+# T08: independent IRQ-mode CRT (crt-irq.yaml). The object must build with the
+# frozen yaml2obj, pass the standalone checker check-crt-irq.py (v1 identity,
+# frozen HOME/BOOT/default content at instruction boundaries, new .mcs251.isr
+# records with asset_profile=1, R_MCS251_ISR_REF associations, no VECS, no IP
+# init, no SETB EA), and expose the frozen fingerprint through llvm-readobj.
+#
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o %t.o
+# RUN: %python %S/../../../validation/mcs251-elf/runtime/check-crt-irq.py %t.o
+# RUN: llvm-readobj --file-headers --sections --symbols --relocations %t.o | FileCheck %s
+
+# CHECK: EF_MCS251_ABI_V1
+# CHECK: Name: .mcs251.HOME
+# CHECK: Name: .mcs251.BOOT
+# CHECK: Name: .mcs251.isr
+# CHECK: R_MCS251_ISR_REF
+# CHECK: R_MCS251_ISR_REF

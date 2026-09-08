@@ -1,0 +1,284 @@
+# crt-irq.yaml - pure ELF32/MSB/ET_REL MCS251 IRQ-mode crt fixture (T08).
+#
+# ISR-campaign replacement startup for links that register real handlers
+# through .mcs251.isr records (ISR-TASK-BREAKDOWN.md A3). It provides NO VECS:
+# in IRQ mode lld synthesizes the only vector table from .mcs251.isr inputs and
+# rejects any input VECS (A3.6/T07), so this asset carries only:
+#
+#   .mcs251.HOME   3-byte ljmp reset trampoline (J16 -> __mcs251_selfstart_boot)
+#   .mcs251.BOOT   frozen startup flow + the reusable XINIT walker + the
+#                  4-byte IRQ default fail-stop entry
+#   .mcs251.BSEG_BYTES  16-byte writable NOBITS reservation through which the
+#                  new CRT owns the bit-addressable byte window [0x20,0x30)
+#                  (T08 step 6); lld registers the section in its BSEG_BYTES
+#                  region accounting (writable NOBITS only) and allocates it
+#                  at the fixed 0x20-0x2F window (SPEC 4.1/5.2), so the
+#                  reservation is declared to the linker, not just cleared
+#                  by BOOT code. ET_REL sh_addr stays 0; the 0x20 base comes
+#                  from the frozen link-time allocation rule.
+#   .mcs251.isr    two 24-byte metadata records, asset_profile=1 (A3.2/A3.3):
+#                    IRQ_DEFAULT (kind 3, entry_kind 2 IRQ_STOP)  -> default entry
+#                    IRQ_RESET   (kind 4, entry_kind 3 RESET)     -> HOME reset
+#                  each record carries a four-byte zero symbol_reference
+#                  associated by exactly one R_MCS251_ISR_REF (A3.4) at
+#                  r_offset = record_offset + 12.
+#
+# Machine-byte evidence:
+#   clr EA          = C2 AF            (bit opcode C2, EA = IE.7 = 0xAF;
+#                                       identical bytes to the frozen A5
+#                                       default-entry word)
+#   mov direct,#imm = 75 <dir> <imm>   (crt-selfstart.lst lines 70/80:
+#                                       WTST=0xE9, SBUF=0x99)
+#   PSW = 0xD0, DPS = 0xE3             (T08 card step 3 freezes both encodings)
+#   ljmp            = 02 + J16 field   (crt-selfstart.lst line 46; SPEC 7.2)
+#   ecall           = 9A + addr24      (crt-selfstart.lst lines 78-79;
+#                                       QEMU-verified, runtime/README.md)
+#   sjmp self       = 80 FE            (crt-selfstart.lst line 82)
+#   XINIT walker    = 86 bytes reused verbatim from the frozen crt-selfstart
+#                       BOOT[0x14,0x6A) (ground truth:
+#                       selfstart-smoke/build/crt-selfstart.lst 0x14-0x69);
+#                       all four relocations were recomputed for the walker's
+#                       new BOOT offset 0x46: MID8@0x48, LO8@0x49, HI8@0x4D,
+#                       R_MCS251_16@0x50. Internal relative branches
+#                       (je/sjmp 0x43/0x09/0xC7/0xF1/0xEA) are position
+#                       independent and stay inside the moved block; the
+#                       trailing ERET (lst line 125) is the walker's legitimate
+#                       ECALL return, reached only via the BOOT ecall below.
+#   default entry   = C2 AF 80 FE      (A5 frozen: clr EA; sjmp halt;
+#                                       STT_FUNC size 4, no relocation inside,
+#                                       no call/push/return, no RETI)
+#
+# Deliberately NOT carried over from the old BOOT (T08 card: no old default
+# prints, no new WTST/board-clock policy):
+#   - mov WTST,#0          (board WTST policy is out of scope)
+#   - mov SBUF,#'S' / #'!' (old serial markers; main-return is a bare no-stack
+#                           halt, the default entry is the frozen 4-byte word)
+#   - the eight VECS fragments
+#
+# BOOT layout (160 = 0xA0 bytes, section-relative offsets):
+#   0x00 C2 AF        clr EA                       (__mcs251_selfstart_boot)
+#   0x02 75 D0 00     mov PSW,#0
+#   0x05 75 E3 00     mov DPS,#0
+#   0x08 7E F8 00 00  mov spx,#__mcs251_stack_base (R_MCS251_16 @0x0A)
+#   0x0C 75 20 00 x16 mov 0x20,#0 .. mov 0x2F,#0   (BSEG_BYTES clear, then
+#                                                     the XINIT walker may
+#                                                     overwrite byte 0x20-0x2F
+#                                                     targets; T08 step 6;
+#                                                     the 16B window itself is
+#                                                     declared by the writable
+#                                                     NOBITS .mcs251.BSEG_BYTES
+#                                                     section below)
+#   0x3C 9A 00 00 00  ecall __mcs251_globals_init  (R_MCS251_24 @0x3D)
+#   0x40 9A 00 00 00  ecall _main                  (R_MCS251_24 @0x41)
+#   0x44 80 FE        sjmp self                    (__mcs251_halt; no stack)
+#   0x46 [86B]        XINIT walker                 (__mcs251_globals_init)
+#   0x9C C2 AF 80 FE  IRQ default entry            (__mcs251_isr_unhandled)
+#
+# Normal interrupts stay masked (clr EA only, never setb EA) and NMI is left
+# untouched, matching the reset premise (T08 step 4); no IP/IPH initialization
+# anywhere.
+#
+# Reloc offsets are field starts inside their section (byte after the opcode,
+# or after the 7E-subop byte for the two 7E forms), matching SPEC 7.1/7.2 and
+# the old crt fixture. All fields are zero placeholders; addresses come from
+# lld at link time. Area bases (HOME 0xff0000, BOOT >= 0xff0210, XINIT
+# 0xff8000) are link parameters (--area-start), never encoded here (SPEC 3.1);
+# the BOOT asset itself defaults to 0xff0210 via the link (T07 step 11).
+#
+# Build with gen-crt-irq.sh (caller-supplied frozen yaml2obj/llvm-readobj);
+# independently checked by check-crt-irq.py. The old crt-selfstart assets are
+# frozen and untouched.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  # HOME: reset trampoline. ljmp __mcs251_selfstart_boot (3 bytes; T07 requires
+  # HOME to be exactly a 3-byte J16 to the paired BOOT, never a 4-byte EJMP).
+  - Name: .mcs251.HOME
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '020000'
+  # BOOT: startup flow + reusable XINIT walker + IRQ default entry, 0xA0 bytes.
+  - Name: .mcs251.BOOT
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C2AF75D00075E3007EF80000752000752100752200752300752400752500752600752700752800752900752A00752B00752C00752D00752E00752F009A0000009A00000080FE7E0800007A0C00007E240000BE24000068430B0A400B0C0B0C7DA40B0A600B0C0B0C0B0A800B0C0B0C9E2400067EE000BE64000068097A49E00B441B6480F1BE84000068C77E0BE00B0C7AA9E00BA41B841B2480EAAAC2AF80FE'
+  # T08 step 6 (frozen): the new CRT owns a 16-byte BSEG_BYTES reservation for
+  # the bit-addressable byte window at 0x20-0x2F. Writable NOBITS per the
+  # BSEG_BYTES section contract (SPEC 4.1; lld LinkerCore accepts exactly
+  # SHT_NOBITS with ALLOC|WRITE and allocates Region BSEG_BYTES inside the
+  # fixed [0x20,0x2f] window), size 16 covers that window exactly. Alignment 1
+  # and the plain ".mcs251.BSEG_BYTES" name follow the existing BSEG_BYTES
+  # input-section precedent (lld/test/MCS251/reserved-symbols.test). ET_REL
+  # sh_addr stays 0 - the 0x20 base is the frozen link-time allocation rule,
+  # and it matches the 16 BOOT "mov 0xNN,#0" clears (0x20..0x2F) above. This
+  # CRT carries no .mcs251.xinit section of its own (no explicit bit-byte
+  # initial values here): link-time XINIT records targeting these bytes are
+  # applied by the walker ecall that runs strictly after the clear, i.e. the
+  # "clear first, explicit XINIT values overwrite afterwards" order of
+  # T08 step 6. No s_BSEG_BYTES/l_BSEG_BYTES symbol is defined here (both are
+  # lld-synthesized; user definitions are rejected).
+  - Name: .mcs251.BSEG_BYTES
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 16
+  # New ISR metadata: exactly two asset records for this CRT object, no ALLOC,
+  # no address payload. All fields big-endian (A3.2):
+  #   protocol_version=0001  record_size=0018
+  #   IRQ_DEFAULT: kind=03 entry=02 hw=01 save=00 slot=FFFF caps=0001
+  #                symbol_reference=00000000 (R_MCS251_ISR_REF) asset=00000001
+  #                reserved=00000000
+  #   IRQ_RESET:   kind=04 entry=03 hw=00 save=00 slot=FFFF caps=0001
+  #                symbol_reference=00000000 (R_MCS251_ISR_REF) asset=00000001
+  #                reserved=00000000
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0001001803020100FFFF00010000000000000001000000000001001804030000FFFF0001000000000000000100000000'
+  - Name: .rela.mcs251.HOME
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.HOME
+    Relocations:
+      # ljmp __mcs251_selfstart_boot: 02 [J16]
+      - Offset: 0x1
+        Type: R_MCS251_J16
+        Symbol: __mcs251_selfstart_boot
+        Addend: 0
+  - Name: .rela.mcs251.BOOT
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.BOOT
+    Relocations:
+      # mov spx,#__mcs251_stack_base: 7E F8 [imm16]; lld synthesizes the ABS
+      # stack base (SPEC 6.3) because this object carries the UNDEF request.
+      - Offset: 0xA
+        Type: R_MCS251_16
+        Symbol: __mcs251_stack_base
+        Addend: 0
+      # ecall __mcs251_globals_init: 9A [addr24]
+      - Offset: 0x3D
+        Type: R_MCS251_24
+        Symbol: __mcs251_globals_init
+        Addend: 0
+      # ecall _main: 9A [addr24]
+      - Offset: 0x41
+        Type: R_MCS251_24
+        Symbol: _main
+        Addend: 0
+      # walker hand-prologue: mov wr8,#<s_XINIT mid/lo>: 7E 08 [MID8] [LO8]
+      - Offset: 0x48
+        Type: R_MCS251_MID8
+        Symbol: s_XINIT
+        Addend: 0
+      - Offset: 0x49
+        Type: R_MCS251_LO8
+        Symbol: s_XINIT
+        Addend: 0
+      # mov r12,#<s_XINIT hi>: 7A 0C 00 [HI8] (dr0 24-bit bank byte)
+      - Offset: 0x4D
+        Type: R_MCS251_HI8
+        Symbol: s_XINIT
+        Addend: 0
+      # mov wr4,#l_XINIT: 7E 24 [imm16]
+      - Offset: 0x50
+        Type: R_MCS251_16
+        Symbol: l_XINIT
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      # IRQ_DEFAULT record @0: zero-width symbol association, r_offset=0+12.
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: __mcs251_isr_unhandled
+        Addend: 0
+      # IRQ_RESET record @24: r_offset=24+12. Precise named STT_FUNC symbols,
+      # never section+addend (A3.4).
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: __mcs251_reset
+        Addend: 0
+  # Exactly one ABI note per object (SPEC 3.2): namesz=7 descsz=32 type=1,
+  # owner "MCS251", eight BE u32 descriptor words.
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  # Reset entry: named STT_FUNC in executable PROGBITS so the IRQ_RESET record
+  # association points at a precise in-object function of range 3 (A3.4).
+  - Name: __mcs251_reset
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .mcs251.HOME
+    Value: 0x0
+    Size: 3
+  # IRQ default fail-stop entry: STT_FUNC size 4 (A5); no relocation may fall
+  # inside [0x9C,0xA0); checked byte-exactly by check-crt-irq.py.
+  - Name: __mcs251_isr_unhandled
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x9C
+    Size: 4
+  # BOOT entry (HOME J16 target) and XINIT walker (keeps the SPEC 6.2
+  # __mcs251_globals_init-defined validation trigger of the v1 chain).
+  - Name: __mcs251_selfstart_boot
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x0
+  - Name: __mcs251_globals_init
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x46
+  # Local labels mirroring the frozen walker asset (crt-selfstart.lst).
+  - Name: __mcs251_halt
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x44
+  - Name: __mcs251_xinit_record
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x52
+  - Name: __mcs251_xinit_clear
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x76
+  - Name: __mcs251_xinit_copy
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x85
+  - Name: __mcs251_xinit_done
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x9B
+  # Undefined globals resolved by lld: module entry, synthesized stack base,
+  # synthesized XINIT boundary symbols (SPEC 6.1/6.3).
+  - Name: _main
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: __mcs251_stack_base
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: s_XINIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: l_XINIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
