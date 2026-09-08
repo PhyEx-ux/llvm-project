@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "description": "MCS251 ISR per-board acceptance ledger (T10). Six frozen states; real-board results are booked per board. A QEMU run against one board's firmware must never be booked as that board's real-hardware PASS.",
+  "status_enum": [
+    "PASS",
+    "FAIL",
+    "NOT_RUN",
+    "MODEL_UNSUPPORTED",
+    "BASELINE_MISMATCH",
+    "BLOCKED_NO_BOARD"
+  ],
+  "status_rules": {
+    "PASS": "item executed on the named physical board with the frozen firmware assets and every assertion held",
+    "FAIL": "executed on the physical board and at least one assertion failed",
+    "NOT_RUN": "board available but the item was not attempted",
+    "MODEL_UNSUPPORTED": "executed and the item hit a model/chip capability limit; expectations were never lowered to manufacture PASS",
+    "BASELINE_MISMATCH": "tool/image identity (sha256) or frozen baseline bytes did not match the manifest",
+    "BLOCKED_NO_BOARD": "no physical board provided; this is the initial state of every item"
+  },
+  "boards": {
+    "G12": {
+      "part": "STC32G12K128",
+      "board_provided": false,
+      "firmware": {
+        "path": null,
+        "sha256": null
+      },
+      "items": {
+        "single-shot-timer": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "single timer interrupt, one shot"
+        },
+        "repeated-isr": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "repeated ISR entries on the same source"
+        },
+        "integer-state-spx": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "full 37B integer state plus SPX across save/restore window"
+        },
+        "helper-ecall-eret": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "ordinary helper ECALL/ERET from inside the ISR"
+        },
+        "controlled-two-level": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "controlled two-level nesting via fixture IP/IPH configuration"
+        },
+        "default-entry": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "unregistered legal slot hits the fail-stop default entry"
+        },
+        "hw-frame-profile": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "chip-specific hardware frame profile (4B, PSW1/PC order)"
+        },
+        "save-restore-windows": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "reachable save/restore window snapshots"
+        },
+        "reti-ie-ip-timing": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "hardware timing after RETI/IE/IP writes, booked as an independent item"
+        }
+      }
+    },
+    "G144": {
+      "part": "STC32G144K246",
+      "board_provided": false,
+      "firmware": {
+        "path": null,
+        "sha256": null
+      },
+      "items": {
+        "single-shot-timer": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "single timer interrupt, one shot"
+        },
+        "repeated-isr": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "repeated ISR entries on the same source"
+        },
+        "integer-state-spx": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "full 37B integer state plus SPX across save/restore window"
+        },
+        "helper-ecall-eret": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "ordinary helper ECALL/ERET from inside the ISR"
+        },
+        "controlled-two-level": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "controlled two-level nesting via fixture IP/IPH configuration"
+        },
+        "default-entry": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "unregistered legal slot hits the fail-stop default entry"
+        },
+        "hw-frame-profile": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "chip-specific hardware frame profile (4B, PSW1/PC order)"
+        },
+        "save-restore-windows": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "reachable save/restore window snapshots"
+        },
+        "reti-ie-ip-timing": {
+          "status": "BLOCKED_NO_BOARD",
+          "evidence": null,
+          "notes": "hardware timing after RETI/IE/IP writes, booked as an independent item"
+        }
+      }
+    }
+  }
+}
