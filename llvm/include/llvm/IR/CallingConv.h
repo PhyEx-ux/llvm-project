@@ -297,6 +297,14 @@ namespace CallingConv {
     /// stateless compartment.
     CHERIoT_LibraryCall = 127,
 
+    /// Calling convention for MCS-251 interrupt service routines (ISR). An
+    /// ISR is entered by hardware through the vector table, saves the fixed
+    /// 37-byte integer frame, and returns with RETI instead of ERET. It must
+    /// carry the "mcs251-isr-vector" string attribute and may not be called
+    /// or referenced as an ordinary value; see
+    /// llvm/BinaryFormat/MCS251ISR.h for the slot protocol.
+    MCS251_INTR = 128,
+
     /// The highest possible ID. Must be some 2^k - 1.
     MaxID = 1023
   };

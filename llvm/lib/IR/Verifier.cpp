@@ -61,6 +61,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/BinaryFormat/MCS251ISR.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/AttributeMask.h"
 #include "llvm/IR/Attributes.h"
@@ -149,6 +150,32 @@ static cl::opt<bool> VerifyNoAliasScopeDomination(
 
 namespace {
 
+//===----------------------------------------------------------------------===//
+// MCS251 ISR helpers (frozen protocol in llvm/BinaryFormat/MCS251ISR.h).
+// These decide whether a use path is a structurally correct keepalive
+// structure; all diagnostics are issued by Verifier::verifyMCS251ISR.
+//===----------------------------------------------------------------------===//
+
+// \return true when \p GV is the standard llvm.used keepalive container in
+// its full frozen structure: appending linkage, an array-of-pointers
+// initializer, the "llvm.metadata" section, and no ordinary use of the
+// container itself. Every other global terminates a use path as an ordinary
+// escape.
+static bool mMCS251IsLegalUsedRoot(const GlobalVariable &GV) {
+  if (GV.getName() != "llvm.used" || !GV.hasInitializer())
+    return false;
+  if (!GV.hasAppendingLinkage())
+    return false;
+  const auto *ArrTy = dyn_cast<ArrayType>(GV.getInitializer()->getType());
+  if (!ArrTy || !ArrTy->getElementType()->isPointerTy())
+    return false;
+  if (!GV.hasSection() || GV.getSection() != "llvm.metadata")
+    return false;
+  if (!GV.materialized_use_empty())
+    return false;
+  return true;
+}
+
 class Verifier : public InstVisitor<Verifier>, VerifierSupport {
   friend class InstVisitor<Verifier>;
   DominatorTree DT;
@@ -209,6 +236,9 @@ class Verifier : public InstVisitor<Verifier>, VerifierSupport {
   // twice, if they have multiple operands. In particular for very large
   // constant expressions, we can arrive at a particular user many times.
   SmallPtrSet<const Value *, 32> GlobalValueVisited;
+
+  // MCS251 ISR: vector slot -> first definition seen registering that slot.
+  DenseMap<uint64_t, const Function *> MCS251ISRSlotDefs;
 
   // Keeps track of duplicate function argument debug info.
   SmallVector<const DILocalVariable *, 16> DebugFnArgs;
@@ -360,6 +390,7 @@ private:
                        SmallVectorImpl<const MDNode *> &Requirements);
   void visitModuleFlagCGProfileEntry(const MDOperand &MDO);
   void visitFunction(const Function &F);
+  void verifyMCS251ISR(const Function &F);
   void visitBasicBlock(BasicBlock &BB);
   void verifyRangeLikeMetadata(const Value &V, const MDNode *Range, Type *Ty,
                                RangeLikeMetadataKind Kind);
@@ -3141,6 +3172,169 @@ void Verifier::verifySiblingFuncletUnwinds() {
 
 // visitFunction - Verify that a function is ok.
 //
+/// Verify the MCS251 ISR entry contract (A2 interface freeze): the MCS251_INTR
+/// convention (128) and the "mcs251-isr-vector" string attribute must appear
+/// together, the slot must be canonical decimal text naming a legal slot of
+/// the frozen 0-51 profile, the type must be non-vararg void(), linkage and
+/// attribute restrictions hold, uses are limited to structurally correct
+/// llvm.used keepalive entries, and every definition is noinline, kept alive
+/// by llvm.used, and registers its slot at most once per module. Declarations
+/// carry the identity but require neither noinline nor a keepalive root.
+/// Ordinary functions without the pair are completely unaffected.
+void Verifier::verifyMCS251ISR(const Function &F) {
+  Attribute VecAttr = F.getFnAttribute("mcs251-isr-vector");
+  bool HasCC = F.getCallingConv() == CallingConv::MCS251_INTR;
+  bool HasVector = VecAttr.isValid();
+
+  if (!HasCC && !HasVector)
+    return;
+
+  // The convention and the vector attribute are inseparable.
+  Check(HasCC && HasVector,
+        "MCS251 ISR: calling convention and vector attribute must appear "
+        "together", &F);
+
+  // The slot value is canonical decimal text ("0" and "1" are legal;
+  // "01", "+1", "0x1", the empty string and negative values are not) and
+  // must name a legal slot. Reserved, system and out-of-profile slots are
+  // never user-assignable.
+  uint64_t SlotVal = 0;
+  StringRef SlotText = VecAttr.getValueAsString();
+  bool Canonical = !SlotText.empty() &&
+                   (SlotText.size() == 1 || SlotText.front() != '0');
+  if (Canonical) {
+    for (char C : SlotText) {
+      if (!isDigit(C)) {
+        Canonical = false;
+        break;
+      }
+      SlotVal = SlotVal * 10 + (C - '0');
+      if (SlotVal > 51)
+        break; // already out of profile; no need to accumulate further
+    }
+  }
+  Check(Canonical && MCS251ISR::isLegalISRSlot(SlotVal),
+        "MCS251 ISR: vector is not a legal slot in profile 0-51", &F);
+
+  // An entry has hardware-fixed frame; only non-vararg void() is an entry.
+  Check(F.getFunctionType()->getReturnType()->isVoidTy() &&
+            F.getFunctionType()->getNumParams() == 0 && !F.isVarArg(),
+        "MCS251 ISR: interrupt entry must have non-vararg type void()", &F);
+
+  // External, internal and private linkage only. Weak, linkonce, comdat,
+  // available_externally and similar linkage kinds are rejected; alias and
+  // ifunc are separate global kinds and are rejected as ordinary uses below.
+  Check(F.hasExternalLinkage() || F.hasInternalLinkage() ||
+            F.hasPrivateLinkage(),
+        "MCS251 ISR: unsupported interrupt entry linkage", &F);
+  Check(!F.hasComdat(), "MCS251 ISR: interrupt entry may not be in a COMDAT",
+        &F);
+
+  // Only structurally correct llvm.used keepalive entries may reference the
+  // entry; ordinary calls and ordinary pointer values may not. The traversal
+  // walks every use path upward with an iterative worklist and a visited
+  // set. A legal root terminates only the branch that reached it; the
+  // remaining worklist entries are still examined, so the verdict never
+  // depends on use-list order even when constants are shared between the
+  // registration root and an ordinary escape (e.g. one shared aggregate
+  // feeding both llvm.used and a normal global, or one shared array feeding
+  // both llvm.used and llvm.compiler.used). Only aggregates and
+  // single-operand no-op pointer casts (bitcast/addrspacecast, the standard
+  // address-space adaptation of a used member) may act as intermediate
+  // nodes; aliases, ifuncs, every other constant kind and every instruction
+  // are rejected as non-registration escapes.
+  SmallPtrSet<const User *, 32> VisitedUses;
+  SmallVector<const User *, 32> UseWorklist;
+  bool Rooted = false;
+  // Walks every use path upward from \p Seed. A legal llvm.used root
+  // terminates only the branch that reached it; all other reachable
+  // terminals must pass the whitelist as well, so the verdict never depends
+  // on use-list order even when constants are shared between the
+  // registration root and an ordinary escape (e.g. one shared aggregate
+  // feeding both llvm.used and a normal global, or one shared array feeding
+  // both llvm.used and llvm.compiler.used). Only aggregates and
+  // single-operand no-op pointer casts (bitcast/addrspacecast, the standard
+  // address-space adaptation of a used member) may act as intermediate
+  // nodes; aliases, ifuncs, every other constant kind and every instruction
+  // are rejected as non-registration escapes.
+  auto WalkUsePaths = [&](const User *Seed) {
+    UseWorklist.push_back(Seed);
+    while (!UseWorklist.empty()) {
+      const User *U = UseWorklist.pop_back_val();
+      if (!VisitedUses.insert(U).second)
+        continue;
+      if (const auto *CB = dyn_cast<CallBase>(U)) {
+        // A call-like instruction entering the ISR is rejected regardless of
+        // the calling convention written on the call itself.
+        if (CB->getCalledOperand()->stripPointerCasts() == &F)
+          CheckFailed("MCS251 ISR: interrupt entry may not be called", &F, CB);
+        else
+          CheckFailed("MCS251 ISR: interrupt entry has a non-registration use",
+                      &F, CB);
+        continue;
+      }
+      if (const auto *GV = dyn_cast<GlobalVariable>(U)) {
+        // A global is a terminal of the traversal: the standard keepalive
+        // container completes only this branch, anything else (an ordinary
+        // escaped global, llvm.compiler.used, a malformed container) is a
+        // non-registration use.
+        if (mMCS251IsLegalUsedRoot(*GV))
+          Rooted = true;
+        else
+          CheckFailed("MCS251 ISR: interrupt entry has a non-registration use",
+                      &F, GV);
+        continue;
+      }
+      const Constant *C = dyn_cast<Constant>(U);
+      const Operator *Op = C ? dyn_cast<Operator>(C) : nullptr;
+      bool MayContinue =
+          C && (isa<ConstantAggregate>(C) ||
+                (Op && Op->getNumOperands() == 1 &&
+                 (Op->getOpcode() == Instruction::BitCast ||
+                  Op->getOpcode() == Instruction::AddrSpaceCast)));
+      if (MayContinue) {
+        for (const User *UU : U->users())
+          UseWorklist.push_back(UU);
+        continue;
+      }
+      // Aliases, ifuncs, all other constant kinds and plain instructions are
+      // not permitted as intermediate nodes of a registration structure.
+      CheckFailed("MCS251 ISR: interrupt entry has a non-registration use", &F,
+                  U);
+    }
+  };
+  for (const User *U : F.users())
+    WalkUsePaths(U);
+
+  if (F.isDeclaration())
+    return;
+
+  // BlockAddress constants hold their BasicBlock* raw and have no operands,
+  // so they never appear in the use graph entered from the function's own
+  // use list. For every block with its address taken, each real use of the
+  // cached BlockAddress must pass the same registration whitelist; a cached
+  // constant without any real use is not an escape.
+  for (const BasicBlock &BB : F)
+    if (const BlockAddress *BA = BlockAddress::lookup(&BB))
+      for (const User *U : BA->users())
+        WalkUsePaths(U);
+
+  // Definitions must be noinline, rooted by a legal llvm.used container (a
+  // llvm.compiler.used root is an ordinary use, not a registration), and
+  // each slot is registered by at most one definition per module.
+  Check(F.hasFnAttribute(Attribute::NoInline),
+        "MCS251 ISR: interrupt definition must be noinline", &F);
+
+  Check(Rooted,
+        "MCS251 ISR: interrupt definition must be kept alive by llvm.used",
+        &F);
+
+  auto SlotIt = MCS251ISRSlotDefs.insert({SlotVal, &F}).first;
+  Check(SlotIt->second == &F,
+        "MCS251 ISR: vector slot is already registered by another definition "
+        "in this module", &F);
+}
+
 void Verifier::visitFunction(const Function &F) {
   visitGlobalValue(F);
 
@@ -3259,6 +3453,11 @@ void Verifier::visitFunction(const Function &F) {
           &F);
     break;
   }
+
+  // MCS251 ISR: structural contract for the interrupt entry identity. This
+  // covers CC 128 paired with "mcs251-isr-vector", slot legality, linkage,
+  // and use restrictions; ordinary functions are unaffected.
+  verifyMCS251ISR(F);
 
   // Check that the argument values match the function type for this function...
   unsigned i = 0;
@@ -3614,6 +3813,18 @@ static bool isSupportedCallBrIntrinsic(Intrinsic::ID ID) {
 }
 
 void Verifier::visitCallBrInst(CallBrInst &CBI) {
+  // MCS251 ISR: CC 128 is the hardware entry convention, not a legal calling
+  // convention for a call site, and no call-like instruction may enter an
+  // interrupt entry. visitCallBrInst does not route through visitCallBase,
+  // so the call/invoke/callbr-wide rejection is repeated here.
+  if (CBI.getCallingConv() == CallingConv::MCS251_INTR)
+    Check(false, "MCS251 ISR: interrupt entry may not be called", &CBI);
+  if (const auto *Callee =
+          dyn_cast<Function>(CBI.getCalledOperand()->stripPointerCasts()))
+    if (Callee->getCallingConv() == CallingConv::MCS251_INTR)
+      Check(false, "MCS251 ISR: interrupt entry may not be called", Callee,
+            &CBI);
+
   if (!CBI.isInlineAsm()) {
     Check(CBI.getCalledFunction(),
           "callbr: indirect function / invalid signature");
@@ -3976,6 +4187,19 @@ void Verifier::visitCallBase(CallBase &Call) {
   // Verify if the calling convention of the callee is callable.
   Check(isCallableCC(Call.getCallingConv()),
         "calling convention does not permit calls", Call);
+
+  // MCS251 ISR: no call-like instruction may enter an interrupt entry. This
+  // covers ordinary-CC calls pointing at an ISR and calls that themselves
+  // declare CC 128.
+  if (Callee && Callee->getCallingConv() == CallingConv::MCS251_INTR)
+    Check(false, "MCS251 ISR: interrupt entry may not be called", Callee, Call);
+
+  // MCS251 ISR: CC 128 is the hardware entry convention, not a legal calling
+  // convention for a call site. Any call/invoke/callbr that itself carries
+  // CC 128 is rejected, whether it targets an ISR, an ordinary function, or
+  // an indirect callee.
+  if (Call.getCallingConv() == CallingConv::MCS251_INTR)
+    Check(false, "MCS251 ISR: interrupt entry may not be called", &Call);
 
   // Disallow passing/returning values with alignment higher than we can
   // represent.

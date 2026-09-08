@@ -447,6 +447,9 @@ static void printCallingConv(unsigned cc, raw_ostream &Out) {
   case CallingConv::CHERIoT_LibraryCall:
     Out << "cheriot_librarycallcc";
     break;
+  case CallingConv::MCS251_INTR:
+    Out << "mcs251_intrcc";
+    break;
   }
 }
 

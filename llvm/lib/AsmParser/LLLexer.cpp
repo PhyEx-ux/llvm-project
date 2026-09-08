@@ -705,6 +705,7 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(cheriot_compartmentcallcc);
   KEYWORD(cheriot_compartmentcalleecc);
   KEYWORD(cheriot_librarycallcc);
+  KEYWORD(mcs251_intrcc);
 
   KEYWORD(cc);
   KEYWORD(c);
