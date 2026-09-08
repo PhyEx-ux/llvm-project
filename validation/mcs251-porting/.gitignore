@@ -1,0 +1,17 @@
+# Regenerated per corpus snapshot; not source of truth.
+# Note: generated/stc32g-v1.h and generated/stc32g144k246-v1.h stay tracked;
+# only the 270 project Makefiles under generated/projects/ are ignorable.
+generated/projects/
+examples/*/build/
+reports/*.log
+reports/uvproj-summary.json
+reports/generated-makefile-validation.json
+reports/elf-template-regeneration.json
+reports/minimal-direct-sfr-validation.json
+reports/toolchain-smoke.json
+reports/intrinsics-audit.json
+reports/sfr-artifact-validation.json
+reports/stc32g-v1-report.json
+reports/stc32g144k246-v1-report.json
+__pycache__/
+*.pyc

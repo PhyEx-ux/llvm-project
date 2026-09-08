@@ -1,0 +1,155 @@
+{
+  "format": "mcs251-porting-v1-final-validation-v4",
+  "passed": true,
+  "input_binding": {
+    "sfr_reports_verified": [
+      "5d01141b1034acee83db900881f8cb30a228f47a45d1a710112df46b3b4e3a7c",
+      "3050fe879ea10b5c92da660be37bf8cfaea32233bff127d074ef020266de74a4"
+    ],
+    "uvproj_records": 270,
+    "generated_makefiles": 270
+  },
+  "sfr": {
+    "artifact_report_format": "mcs251-porting-sfr-artifact-validation-v2",
+    "compiler_selfchecks": [
+      {
+        "name": "stc32g-direct-sfr-selfcheck",
+        "ir_sha256": "62feef49937f81312b5edf6f39a217bb297e1f4544fa417fb40e92c556a27f40",
+        "assembly_sha256": "85ab224503730f5023c56f30cb620ddd344a1099cbc0b8dad52d438c96302d0f",
+        "steps": [
+          {
+            "command": [
+              "/home/liu/build-clang/bin/clang",
+              "--target=mcs251-unknown-none",
+              "-std=c11",
+              "-Wall",
+              "-Wextra",
+              "-Werror",
+              "-S",
+              "-emit-llvm",
+              "/mnt/c/Prj/LLVM/MCS251/validation/mcs251-porting/tests/stc32g-direct-sfr-selfcheck.c",
+              "-o",
+              "/home/liu/porting-tools-v1-evidence/mcs251-final-pjbeiadf/stc32g-direct-sfr-selfcheck.ll"
+            ],
+            "returncode": 0
+          },
+          {
+            "command": [
+              "/home/liu/mcs251-demo-test/bin-frozen/llc",
+              "-mtriple=mcs251-unknown-none",
+              "-verify-machineinstrs",
+              "/home/liu/porting-tools-v1-evidence/mcs251-final-pjbeiadf/stc32g-direct-sfr-selfcheck.ll",
+              "-o",
+              "/home/liu/porting-tools-v1-evidence/mcs251-final-pjbeiadf/stc32g-direct-sfr-selfcheck.s"
+            ],
+            "returncode": 0
+          }
+        ]
+      },
+      {
+        "name": "stc32g144k246-direct-sfr-selfcheck",
+        "ir_sha256": "b3f01870193b9b9201afc9e1184e68865befe8176ff521b8b7525a2e950dd5fc",
+        "assembly_sha256": "ccdfa1cde92f20b76192aa2ae41095fe529ba1a44ab1aa6551a06d6ded4cb601",
+        "steps": [
+          {
+            "command": [
+              "/home/liu/build-clang/bin/clang",
+              "--target=mcs251-unknown-none",
+              "-std=c11",
+              "-Wall",
+              "-Wextra",
+              "-Werror",
+              "-S",
+              "-emit-llvm",
+              "/mnt/c/Prj/LLVM/MCS251/validation/mcs251-porting/tests/stc32g144k246-direct-sfr-selfcheck.c",
+              "-o",
+              "/home/liu/porting-tools-v1-evidence/mcs251-final-pjbeiadf/stc32g144k246-direct-sfr-selfcheck.ll"
+            ],
+            "returncode": 0
+          },
+          {
+            "command": [
+              "/home/liu/mcs251-demo-test/bin-frozen/llc",
+              "-mtriple=mcs251-unknown-none",
+              "-verify-machineinstrs",
+              "/home/liu/porting-tools-v1-evidence/mcs251-final-pjbeiadf/stc32g144k246-direct-sfr-selfcheck.ll",
+              "-o",
+              "/home/liu/porting-tools-v1-evidence/mcs251-final-pjbeiadf/stc32g144k246-direct-sfr-selfcheck.s"
+            ],
+            "returncode": 0
+          }
+        ]
+      }
+    ]
+  },
+  "intrinsics": {
+    "raw_text_matches": {
+      "counts": {
+        "_nop_": 608
+      },
+      "file_counts": {
+        "_nop_": 80
+      },
+      "only_nop_called": true
+    },
+    "lexical_call_candidates": {
+      "counts": {
+        "_nop_": 585
+      },
+      "file_counts": {
+        "_nop_": 79
+      },
+      "only_nop_called": true
+    },
+    "preprocessed_call_candidates": {
+      "counts": {
+        "_nop_": 507
+      },
+      "file_counts": {
+        "_nop_": 79
+      },
+      "only_nop_called": true
+    }
+  },
+  "uvproj": {
+    "projects": 270,
+    "listed_c_source_entries": 468,
+    "enabled_c_source_entries": 467,
+    "build_rule_c_source_entries": 467,
+    "excluded_c_source_entries": 1,
+    "makefile_coverage": {
+      "makefiles": 270,
+      "c_projects": 201,
+      "build_c_rules": 467
+    },
+    "dry_run_checked": 270,
+    "dry_run_binding": {
+      "checked": 270,
+      "passed": 270,
+      "failed": 0,
+      "samples": 5
+    }
+  },
+  "elf_production": {
+    "smoke": {
+      "steps": 4,
+      "object_magic": "7f454c46",
+      "elf_magic": "7f454c46"
+    },
+    "verified_nop_helper": {
+      "object_sha256": "912d587823b5fba42f2d17879844efcdc4f8d42dd642fb54195d15ef08b3d9b5",
+      "text_bytes": "00 AA",
+      "nop_opcode_count": 1,
+      "yaml2obj_returncode": 0
+    },
+    "minimal_qemu": {
+      "steps": 2,
+      "object_magic": "7f454c46",
+      "elf_magic": "7f454c46"
+    }
+  },
+  "remaining_v1_limits": [
+    "Keil sbit/bit/xdata/far/_at_/interrupt declarations and Keil assembly remain outside source migration v1.",
+    "ELF _nop_() uses an audited NOP; ERET helper and is not cycle-identical to Keil inline _nop_()."
+  ]
+}

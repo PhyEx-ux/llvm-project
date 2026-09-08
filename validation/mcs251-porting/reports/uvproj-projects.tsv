@@ -1,0 +1,271 @@
+uvproj	makefile	target_name	device	board	listed_files	listed_c_sources	enabled_c_sources	buildable_c_sources	excluded_c_sources	asm_sources	unresolved_c_sources	unrepresentable_c_sources	case_corrected_c_sources	include_paths	defines
+t24307_09-看门狗复位测试程序/09-看门狗复位测试程序/C语言/sample.uvproj	sample-b3fd09d50cb0/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24307_09-看门狗复位测试程序/09-看门狗复位测试程序/汇编/watch_dog.uvproj	watch-dog-f947e47cea61/Makefile	watch_dog	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24308_00-端口模式设置/00-端口模式设置/C语言/sample.uvproj	sample-e9423759f1df/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24308_00-端口模式设置/00-端口模式设置/汇编/IO_Mode.uvproj	io-mode-a6a4107c8edd/Makefile	IO_Mode	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24310_01.2-用P6口做跑马灯/01.2-用P6口做跑马灯/C语言/sample.uvproj	sample-603c6ba333e8/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24310_01.2-用P6口做跑马灯/01.2-用P6口做跑马灯/汇编/LED.uvproj	led-3271c10520b0/Makefile	LED	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24311_02-Timer0-Timer1-Timer2-Timer3-Timer4测试程序/02-Timer0-Timer1-Timer2-Timer3-Timer4测试程序/C语言/sample.uvproj	sample-0fb9c9c3dbcf/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24311_02-Timer0-Timer1-Timer2-Timer3-Timer4测试程序/02-Timer0-Timer1-Timer2-Timer3-Timer4测试程序/汇编/TIMER.uvproj	timer-15504a937055/Makefile	TIMER	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24312_03-用P6，P7口驱动8个数码管/03-用P6，P7口驱动8个数码管/C语言/sample.uvproj	sample-4ee517874f81/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24312_03-用P6，P7口驱动8个数码管/03-用P6，P7口驱动8个数码管/汇编/D-LED.uvproj	d-led-2b53f6bd0ac3/Makefile	D-LED	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24313_04-利用T0,T1做外部计数器/04-利用T0,T1做外部计数器/C语言/sample.uvproj	sample-519ada88e9d7/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24313_04-利用T0,T1做外部计数器/04-利用T0,T1做外部计数器/汇编/Counter.uvproj	counter-c0b0d001528f/Makefile	Counter	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24314_05-利用定时器测量脉冲宽度/05-利用定时器测量脉冲宽度/C语言/sample.uvproj	sample-a23b6cbaa5a3/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24314_05-利用定时器测量脉冲宽度/05-利用定时器测量脉冲宽度/汇编/TIMER.uvproj	timer-56f4a439d693/Makefile	timer	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24315_06-外中断INT0-INT1-INT2-INT3-_INT4测试/06-外中断INT0-INT1-INT2-INT3- INT4测试/C语言/sample.uvproj	sample-d6f1740bab50/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24315_06-外中断INT0-INT1-INT2-INT3-_INT4测试/06-外中断INT0-INT1-INT2-INT3- INT4测试/汇编/INT.uvproj	int-fb8dad0ac84c/Makefile	INT	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24316_07-睡眠-唤醒定时器唤醒/07-睡眠-唤醒定时器唤醒/C语言/sample.uvproj	sample-c4be52fed114/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24316_07-睡眠-唤醒定时器唤醒/07-睡眠-唤醒定时器唤醒/汇编/wakeup_timer.uvproj	wakeup-timer-13de94a3932e/Makefile	wakeup_timer	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24317_08-睡眠-外部中断唤醒/08-睡眠-外部中断唤醒/C语言/sample.uvproj	sample-0c12a9dc2345/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24317_08-睡眠-外部中断唤醒/08-睡眠-外部中断唤醒/汇编/wake_up.uvproj	wake-up-8c094da0878e/Makefile	wake_up	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24325_10-串口1中断模式与电脑收发测试/10-串口1中断模式与电脑收发测试/C语言/sample.uvproj	sample-af9077a24ad0/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24325_10-串口1中断模式与电脑收发测试/10-串口1中断模式与电脑收发测试/汇编/UART1.uvproj	uart1-18e9a4ec5856/Makefile	UART1	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24326_11-串口2中断模式与电脑收发测试/11-串口2中断模式与电脑收发测试/C语言/sample.uvproj	sample-e2c6e364e95f/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24326_11-串口2中断模式与电脑收发测试/11-串口2中断模式与电脑收发测试/汇编/UART2.uvproj	uart2-696012f300c1/Makefile	UART2	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24327_12-串口3中断模式与电脑收发测试/12-串口3中断模式与电脑收发测试/C语言/sample.uvproj	sample-dfdf683196e7/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24327_12-串口3中断模式与电脑收发测试/12-串口3中断模式与电脑收发测试/汇编/UART3.uvproj	uart3-ac007f52dfae/Makefile	UART3	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24328_13-串口4中断模式与电脑收发测试/13-串口4中断模式与电脑收发测试/C语言/sample.uvproj	sample-04875e5c330a/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24328_13-串口4中断模式与电脑收发测试/13-串口4中断模式与电脑收发测试/汇编/UART4.uvproj	uart4-1f4f0487e668/Makefile	UART4	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24330_14.1-串口1串口2中断模式与电脑收发测试/14.1-串口1串口2中断模式与电脑收发测试/C语言/sample.uvproj	sample-b16aa650fcdb/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24330_14.1-串口1串口2中断模式与电脑收发测试/14.1-串口1串口2中断模式与电脑收发测试/汇编/UART1-UART2.uvproj	uart1-uart2-a95163b558de/Makefile	UART1-UART2	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24331_14.2-串口2与串口3通信测试程序/14.2-串口2与串口3通信测试程序/UART.uvproj	uart-87fbf5b63153/Makefile	UART	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24333_15-IO行列扫描键盘数码管显示键值和调整时间/15-IO行列扫描键盘数码管显示键值和调整时间/C语言/sample.uvproj	sample-96272d94b96b/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24333_15-IO行列扫描键盘数码管显示键值和调整时间/15-IO行列扫描键盘数码管显示键值和调整时间/汇编/IO_KeyScan.uvproj	io-keyscan-26682350d3a1/Makefile	IO_KeyScan	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24334_16-ADC键盘扫描数码管显示键值和调整时间/16-ADC键盘扫描数码管显示键值和调整时间/C语言/sample.uvproj	sample-fb58f1d93205/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24334_16-ADC键盘扫描数码管显示键值和调整时间/16-ADC键盘扫描数码管显示键值和调整时间/汇编/ADC_KeyScan.uvproj	adc-keyscan-8a5d0cfd6ee6/Makefile	ADC_KeyScan	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24335_17-NTC测温度数码管显示/17-NTC测温度数码管显示/C语言/sample.uvproj	sample-86cd52e65fb6/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24335_17-NTC测温度数码管显示/17-NTC测温度数码管显示/汇编/NTC.uvproj	ntc-9468439773d1/Makefile	NTC	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24336_18-通过串口2发送命令读写EEPROM测试程序/18-通过串口2发送命令读写EEPROM测试程序/C语言/UART-EEPROM.uvproj	uart-eeprom-497c8a6c2cad/Makefile	UART-EEPROM	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24336_18-通过串口2发送命令读写EEPROM测试程序/18-通过串口2发送命令读写EEPROM测试程序/汇编/UART-EEPROM.uvproj	uart-eeprom-5232bc3f3332/Makefile	UART-EEPROM	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24337_19-使用LVD低压检测中断保存EEPROM/19-使用LVD低压检测中断保存EEPROM/C语言/PownDownSave.uvproj	powndownsave-f560db681f2e/Makefile	PownDownSave	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24337_19-使用LVD低压检测中断保存EEPROM/19-使用LVD低压检测中断保存EEPROM/汇编/PownDownSave.uvproj	powndownsave-5750ac432808/Makefile	PownDownSave	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24338_20-使用比较器检测低电压时保存数据到EEPROM/20-使用比较器检测低电压时保存数据到EEPROM/C语言/SaveEEPROM.uvproj	saveeeprom-df2e81042df1/Makefile	PownDownSave	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24338_20-使用比较器检测低电压时保存数据到EEPROM/20-使用比较器检测低电压时保存数据到EEPROM/汇编/SaveEEPROM.uvproj	saveeeprom-30de78256431/Makefile	SaveEEPROM	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24339_23-利用P3.7做比较器正极输入源，内部1.19V或P3.6口做负极输入源/23-利用P3.7做比较器正极输入源，内部1.19V或P3.6口做负极输入源/C语言/sample.uvproj	sample-f19894ea49a2/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24339_23-利用P3.7做比较器正极输入源，内部1.19V或P3.6口做负极输入源/23-利用P3.7做比较器正极输入源，内部1.19V或P3.6口做负极输入源/汇编/Comparator.uvproj	comparator-5ac6c0144770/Makefile	Comparator	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24340_25-高级PWM1-PWM2-PWM3-PWM4，驱动P6口呼吸灯实验程序/25-高级PWM1-PWM2-PWM3-PWM4，驱动P6口呼吸灯实验程序/C语言/sample.uvproj	sample-d3855239b7d5/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24340_25-高级PWM1-PWM2-PWM3-PWM4，驱动P6口呼吸灯实验程序/25-高级PWM1-PWM2-PWM3-PWM4，驱动P6口呼吸灯实验程序/汇编/PWMA.uvproj	pwma-86d5b55230ec/Makefile	PWMA	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24341_26-高级PWM5-PWM6-PWM7-PWM8输出测试程序/26-高级PWM5-PWM6-PWM7-PWM8输出测试程序/C语言/sample.uvproj	sample-d4fc6b783a15/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24341_26-高级PWM5-PWM6-PWM7-PWM8输出测试程序/26-高级PWM5-PWM6-PWM7-PWM8输出测试程序/汇编/PWMB.uvproj	pwmb-e4bc25d61b4e/Makefile	PWMA	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24342_27-I2C从机中断模式与IO口模拟I2C主机进行自发自收/27-I2C从机中断模式与IO口模拟I2C主机进行自发自收/C语言/sample.uvproj	sample-430409489813/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24342_27-I2C从机中断模式与IO口模拟I2C主机进行自发自收/27-I2C从机中断模式与IO口模拟I2C主机进行自发自收/汇编/I2C_Slave_INT.uvproj	i2c-slave-int-e6f76e645819/Makefile	I2C_Slave_INT	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24343_28-I2C主机模式访问AT24C02程序/28-I2C主机模式访问AT24C02程序/C语言/I2C.uvproj	i2c-3599ed915c55/Makefile	I2C	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24343_28-I2C主机模式访问AT24C02程序/28-I2C主机模式访问AT24C02程序/汇编/I2C.uvproj	i2c-f462498a22c8/Makefile	I2C	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24346_29-红外遥控接收程序(NEC码)-数码管显示用户地址和键值/29-红外遥控接收程序(NEC码)-数码管显示用户地址和键值/C语言/sample.uvproj	sample-ed6e57c637ff/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24346_29-红外遥控接收程序(NEC码)-数码管显示用户地址和键值/29-红外遥控接收程序(NEC码)-数码管显示用户地址和键值/汇编/IR_Remote_Rx.uvproj	ir-remote-rx-6fa900ca134f/Makefile	IR_Remote_Rx	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24347_30-红外发射程序(NEC码)-使用PWM4产生38KHz载波/30-红外发射程序(NEC码)-使用PWM4产生38KHz载波/C语言/sample.uvproj	sample-d18ca36feac2/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24347_30-红外发射程序(NEC码)-使用PWM4产生38KHz载波/30-红外发射程序(NEC码)-使用PWM4产生38KHz载波/汇编/IR-Tx.uvproj	ir-tx-708b2cd5b52a/Makefile	IR-Tx	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24348_31-IO扫描键红外发射-同时接收数码管显示用户码键值程序/31-IO扫描键红外发射-同时接收数码管显示用户码键值程序/C语言/sample.uvproj	sample-6768b9cd5215/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24348_31-IO扫描键红外发射-同时接收数码管显示用户码键值程序/31-IO扫描键红外发射-同时接收数码管显示用户码键值程序/汇编/IR_Remote_Rx.uvproj	ir-remote-rx-fa076214ef53/Makefile	IR_Remote_Rx	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24349_32-硬件SPI访问FLASH-PM25LV040-串口2监控/32-硬件SPI访问FLASH-PM25LV040-串口2监控/sample.uvproj	sample-7c066c468a82/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24350_33-IO模拟SPI访问FLASH-PM25LV040-串口2监控/33-IO模拟SPI访问FLASH-PM25LV040-串口2监控/sample.uvproj	sample-fb620e465b98/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24351_34-P1.3做ADC-使用内部基准计算外部电压/34-P1.3做ADC-使用内部基准计算外部电压/C语言/sample.uvproj	sample-e7d00cab3e8f/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24351_34-P1.3做ADC-使用内部基准计算外部电压/34-P1.3做ADC-使用内部基准计算外部电压/汇编/voltage.uvproj	voltage-c54e83b1f542/Makefile	voltage	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24352_35-板上的32K_xdata测试程序/35-板上的32K xdata测试程序/sample.uvproj	sample-0e855b1354ab/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24353_36.1-LCD1602显示程序/36.1-LCD1602显示程序/LCD1602.uvproj	lcd1602-f81353fc9cab/Makefile	LCD128x64	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24355_36.2-LCD128x64显示图形文字-ST7920/36.2-LCD128x64显示图形文字-ST7920/sample.uvproj	sample-3b3b0436604a/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24356_37-2.4寸ILI9341驱动TFT显示屏实验程序/37-2.4寸ILI9341驱动TFT显示屏实验程序/Project/ceshi.uvproj	ceshi-af0d7115d10e/Makefile	QD-TFT	STC32G12K128 Series	stc32g12k128	6	5	5	5	0	0	0	0	0	../font;../GUI;../LCD;../sys;../USER;../../COMM	
+t24357_38-2.4寸ILI9325驱动TFT显示屏实验程序-带触摸功能/38-2.4寸ILI9325驱动TFT显示屏实验程序-带触摸功能/Project/ceshi.uvproj	ceshi-6cb323f85718/Makefile	QD-TFT	STC32G12K128 Series	stc32g12k128	7	6	6	6	0	0	0	0	0	../font;../GUI;../LCD;../sys;../touch;../USER;../../COMM	
+t24358_39-通过USB发送命令读取ADC测试程序/39-通过USB发送命令读取ADC测试程序/sample.uvproj	sample-2970eb5b812c/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24359_40-科学计算器使用CDC虚拟液晶屏显示/40-科学计算器使用CDC虚拟液晶屏显示/stc_usb_ser.uvproj	stc-usb-ser-ff8d43d46db2/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	20	18	18	18	0	0	0	0	0	Resource;ware;src;middle;user	
+t24360_41-软件修改内部RC主频/41-软件修改内部RC主频/C语言/sample.uvproj	sample-bebd4c0ea697/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24360_41-软件修改内部RC主频/41-软件修改内部RC主频/汇编/MCLK.uvproj	mclk-70c570afb258/Makefile	MCLK	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24361_42-一线制温度传感器_DS18B20_测温/42-一线制温度传感器 DS18B20 测温/C语言/sample.uvproj	sample-02341c9bce1e/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24361_42-一线制温度传感器_DS18B20_测温/42-一线制温度传感器 DS18B20 测温/汇编/DS18B20.uvproj	ds18b20-602dd2ee0432/Makefile	DS18B20	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24369_43-IO口推挽输出驱动有源蜂鸣器实验程序/43-IO口推挽输出驱动有源蜂鸣器实验程序/C语言/sample.uvproj	sample-03fb5c6bbc54/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24369_43-IO口推挽输出驱动有源蜂鸣器实验程序/43-IO口推挽输出驱动有源蜂鸣器实验程序/汇编/buzzer.uvproj	buzzer-d29c48d43b16/Makefile	buzzer	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24370_44-高级PWM输出两路互补SPWM/44-高级PWM输出两路互补SPWM/C语言/sample.uvproj	sample-487d5b238369/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24370_44-高级PWM输出两路互补SPWM/44-高级PWM输出两路互补SPWM/汇编/SPWM.uvproj	spwm-5e98b83b4ac7/Makefile	SPWM	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24371_45-内部RTC时钟程序/45-内部RTC时钟程序/C语言/RTC.uvproj	rtc-7677a604f375/Makefile	RTC	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24371_45-内部RTC时钟程序/45-内部RTC时钟程序/汇编/RTC.uvproj	rtc-00b0e7db3dd7/Makefile	RTC	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24372_46-MDU32–乘法和除法单元/46-MDU32–乘法和除法单元/sample.uvproj	sample-8fdc4f3fc413/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	0	0	0	0		
+t24373_47-SPI互为主从-SS设置主从-串口透传/47-SPI互为主从-SS设置主从-串口透传/sample.uvproj	sample-8a6daeda4bcc/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24374_48-SPI互为主从-主模式忽略SS-串口透传/48-SPI互为主从-主模式忽略SS-串口透传/sample.uvproj	sample-0f6e6237835f/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24375_49-CAN总线标准帧收发测试/49-CAN总线标准帧收发测试/C语言/sample.uvproj	sample-ca045c65761f/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24375_49-CAN总线标准帧收发测试/49-CAN总线标准帧收发测试/汇编/CAN.uvproj	can-32bde1c3cc65/Makefile	CAN	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24376_50-CAN总线扩展帧收发测试/50-CAN总线扩展帧收发测试/C语言/sample.uvproj	sample-42e8b6bbe227/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24376_50-CAN总线扩展帧收发测试/50-CAN总线扩展帧收发测试/汇编/CAN.uvproj	can-dff3d606197c/Makefile	CAN	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24377_51-CAN1-CAN2总线标准帧扩展帧同时使用收发测试/51-CAN1-CAN2总线标准帧扩展帧同时使用收发测试/sample.uvproj	sample-98e0fc47619d/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24378_89-USB_CDC转双串口-做自动停电上电烧录器/89-USB CDC转双串口-做自动停电上电烧录器/stc_usb_2ser.uvproj	stc-usb-2ser-41be91ed25e9/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	10	9	9	9	0	0	0	0	0	src/inc	
+t24379_52-CAN1-CAN2同时连接总线最多可用4组过滤器/52-CAN1-CAN2同时连接总线最多可用4组过滤器/sample.uvproj	sample-0ad5441bfdc4/Makefile	Sample	STC32G12K128 Series	stc32g12k128	1	1	1	1	0	0	0	0	0		
+t24380_53-UART转LIN总线报文测试程序/53-UART转LIN总线报文测试程序/sample.uvproj	sample-e5c4e126f86f/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24381_88-USB-CDC转双串口-根据串口波特率自动调整主频/88-USB-CDC转双串口-根据串口波特率自动调整主频/stc_usb_2ser.uvproj	stc-usb-2ser-d482799d6ce5/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	10	9	9	9	0	0	0	0	0	src/inc	
+t24382_54-LIN总线从机收发测试/54-LIN总线从机收发测试/sample.uvproj	sample-b0fec3523344/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24383_55-LIN总线主机收发测试/55-LIN总线主机收发测试/sample.uvproj	sample-2f30b680e681/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24384_56-LIN总线从机收发测试-USART/56-LIN总线从机收发测试-USART/sample.uvproj	sample-a414016fe0b1/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24385_57-LIN总线主机收发测试-USART/57-LIN总线主机收发测试-USART/sample.uvproj	sample-97248e08c653/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24386_87.2-利用高级PWMA_PWMB实现8个定时器/87.2-利用高级PWMA+PWMB实现8个定时器/PWM.uvproj	pwm-8043f8638ede/Makefile	PWM	STC32G12K128 Series	stc32g12k128	1	1	1	1	0	0	0	0	0		
+t24387_58-LIN总线从机收发测试-USART2/58-LIN总线从机收发测试-USART2/sample.uvproj	sample-32ab3c60ee99/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24388_59-LIN总线主机收发测试-USART2/59-LIN总线主机收发测试-USART2/sample.uvproj	sample-4843e79d8062/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24389_60-DMA-ADC采样数据自动存储/60-DMA-ADC采样数据自动存储/16路ADC转换-串口返回结果/ADC.uvproj	adc-3e064d35be41/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24389_60-DMA-ADC采样数据自动存储/60-DMA-ADC采样数据自动存储/16路ADC转换使用DMA-串口返回结果/ADC.uvproj	adc-56e7e40d4db1/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24389_60-DMA-ADC采样数据自动存储/60-DMA-ADC采样数据自动存储/16路ADC转换使用DMA-串口返回结果-结构体存储结果/ADC.uvproj	adc-7636ed9a9fa6/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24390_87.1-利用高级PWMA_PWMB溢出中断做2个定时器/87.1-利用高级PWMA+PWMB溢出中断做2个定时器/PWM.uvproj	pwm-12c91428b6d4/Makefile	PWM	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24391_61-DMA-M2M存储器与存储器之间读写/61-DMA-M2M存储器与存储器之间读写/M2M.uvproj	m2m-0e1d705b472d/Makefile	UART1	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24392_62-DMA-SPI与存储器数据自动收发/62-DMA-SPI与存储器数据自动收发/硬件SPI使用DMA访问FLASH-串口2监控/SPI-PM25LV040.uvproj	spi-pm25lv040-7551652dba61/Makefile	SPI-PM25LV040	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24392_62-DMA-SPI与存储器数据自动收发/62-DMA-SPI与存储器数据自动收发/硬件SPI访问FLASH-串口2监控-2T/SPI-PM25LV040.uvproj	spi-pm25lv040-125974be1472/Makefile	SPI-PM25LV040	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24393_86.2-串口绘图-使用USB-CDC串口/86.2-串口绘图-使用USB-CDC串口/wave.uvproj	wave-41b58434f433/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24394_63-DMA-UART串口与存储器数据自动收发/63-DMA-UART串口与存储器数据自动收发/串口1使用DMA中断模式与电脑收发测试/UART1.uvproj	uart1-cdccf9724dab/Makefile	UART1	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24394_63-DMA-UART串口与存储器数据自动收发/63-DMA-UART串口与存储器数据自动收发/串口2使用DMA中断模式与电脑收发测试/UART2.uvproj	uart2-1a381c9dea6b/Makefile	USART2	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24394_63-DMA-UART串口与存储器数据自动收发/63-DMA-UART串口与存储器数据自动收发/串口3使用DMA中断模式与电脑收发测试/UART3.uvproj	uart3-1920f94000d3/Makefile	UART3	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24394_63-DMA-UART串口与存储器数据自动收发/63-DMA-UART串口与存储器数据自动收发/串口4使用DMA中断模式与电脑收发不定长数据-软件超时/UART4.uvproj	uart4-cd206151fb41/Makefile	UART4	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24394_63-DMA-UART串口与存储器数据自动收发/63-DMA-UART串口与存储器数据自动收发/串口4使用DMA中断模式与电脑收发测试/UART4.uvproj	uart4-8761e0572a4f/Makefile	UART4	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24395_86.1-串口绘图-使用UART1接口/86.1-串口绘图-使用UART1接口/wave.uvproj	wave-88031150344b/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	1	1	1	1	0	0	0	0	0		
+t24396_64-DMA综合应用-SPI互为主从-M2M-串口透传/64-DMA综合应用-SPI互为主从-M2M-串口透传/SPI-M-S.uvproj	spi-m-s-f276a80f1a68/Makefile	SPI-PM25LV040	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24397_65-DMA-LCM液晶屏接口测试/65-DMA-LCM液晶屏接口测试/LCM_Test_6800_DMA_8bit_ST7920/LCM_Test.uvproj	lcm-test-3eb7892d1ba3/Makefile	LCM_Test	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24397_65-DMA-LCM液晶屏接口测试/65-DMA-LCM液晶屏接口测试/LCM_Test_8080_DMA_8bit_ILI9341/LCM_Test.uvproj	lcm-test-e27ff8abdbc1/Makefile	LCM_Test	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24397_65-DMA-LCM液晶屏接口测试/65-DMA-LCM液晶屏接口测试/LCM_Test_8080_LCM_8bit_ILI9341/LCM_Test.uvproj	lcm-test-2988a2f5a363/Makefile	LCM_Test	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24398_66-DMA-I2C与存储器数据自动收发/66-DMA-I2C与存储器数据自动收发/DMA-I2C主机模式读写AT24C02-串口监控/I2C.uvproj	i2c-5c10ffb23d6a/Makefile	I2C	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24398_66-DMA-I2C与存储器数据自动收发/66-DMA-I2C与存储器数据自动收发/DMA-I2C从机中断模式与IO口模拟I2C主机进行自发自收/sample.uvproj	sample-8bffaf69bf65/Makefile	Sample	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24399_67-硬件高速HSSPI访问FLASH-PM25LV040-串口2监控/67-硬件高速HSSPI访问FLASH-PM25LV040-串口2监控/sample.uvproj	sample-799cb58ff31d/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24400_68-高速HSPWM1-HSPWM2-HSPWM3-HSPWM4，驱动P6口呼吸灯实验程序/68-高速HSPWM1-HSPWM2-HSPWM3-HSPWM4，驱动P6口呼吸灯实验程序/sample.uvproj	sample-e399737b0d3f/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24401_69-HID(Human_Interface_Device)协议范例/69-HID(Human Interface Device)协议范例/stc_usb_hid.uvproj	stc-usb-hid-cead268a7fbd/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	8	7	7	7	0	0	0	0	0		
+t24402_70-CDC(Communication_Device_Class)协议范例/70-CDC(Communication Device Class)协议范例/stc_usb_ser.uvproj	stc-usb-ser-bafde65179f8/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	9	8	8	8	0	0	0	0	0		
+t24403_71-基于HID协议的USB键盘范例/71-基于HID协议的USB键盘范例/stc_usb_keyboard.uvproj	stc-usb-keyboard-7e4a5e7f6ead/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	9	8	8	8	0	0	0	0	0		
+t24404_72-基于HID协议的USB鼠标范例/72-基于HID协议的USB鼠标范例/stc_usb_mouse.uvproj	stc-usb-mouse-e0364d6d5fb3/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	9	8	8	8	0	0	0	0	0		
+t24405_73-基于WINUSB协议的范例/73-基于WINUSB协议的范例/stc_usb_winusb.uvproj	stc-usb-winusb-5627d6314945/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	8	7	7	7	0	0	0	0	0		
+t24406_74-MSC(Mass_Storage_Class)协议范例/74-MSC(Mass Storage Class)协议范例/stc_usb_msd.uvproj	stc-usb-msd-6dae1f746b26/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	10	9	9	9	0	0	0	0	0		
+t24407_75-通过定时器周期性调度任务综合例程/75-通过定时器周期性调度任务综合例程/sample.uvproj	sample-31b94bb83bd3/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	12	11	11	11	0	0	0	0	1	Sources/inc	
+t24408_76-通过USB_HID协议打印数据信息-可用于调试/76-通过USB HID协议打印数据信息-可用于调试/stc_usb_hid.uvproj	stc-usb-hid-71aadd296058/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	0	0	0	0		
+t24409_77-USART1复用SPI_使用DMA和寄存器方式访问Flash例程/77-USART1复用SPI_使用DMA和寄存器方式访问Flash例程/STC32G-usart_spi_dma-demo.uvproj	stc32g-usart-spi-dma-demo-8a751f3c7bbd/Makefile	demo	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0	src;src/inc;src/usb	
+t24410_78-USART1复用SPI与USART2复用SPI相互通信例程/78-USART1复用SPI与USART2复用SPI相互通信例程/STC32G-usart1_spi_usart2_spi-demo.uvproj	stc32g-usart1-spi-usart2-spi-demo-78d3d2e79a08/Makefile	demo	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0	src;src/inc;src/usb	
+t24412_79-UART-SPI-LCM_DMA_交替使用下载显示图片例程/79-UART-SPI-LCM_DMA_交替使用下载显示图片例程/LCM_Test.uvproj	lcm-test-aa79622c1330/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	7	5	5	5	0	1	0	0	0	Sources	
+t24413_81-内部RTC时钟低功耗休眠唤醒-比较器检测电压程序/81-内部RTC时钟低功耗休眠唤醒-比较器检测电压程序/RTC.uvproj	rtc-87dfd9d6bb2f/Makefile	RTC	STC32G12K128 Series	stc32g12k128	3	1	1	1	0	1	0	0	0		
+t24414_82-老刘爱捣鼓示波器，使用OLED屏显示或者虚拟OLED接口显示/82-老刘爱捣鼓示波器，使用OLED屏显示或者虚拟OLED接口显示/1-老刘爱捣鼓示波器，使用SPI OLED屏显示或者虚拟OLED接口显示-CDC协议通信/Mini DSO.uvproj	mini-dso-548ec6bbbd74/Makefile	Mini_DSO	STC32G12K128 Series	stc32g12k128	9	8	8	8	0	0	0	0	0		
+t24414_82-老刘爱捣鼓示波器，使用OLED屏显示或者虚拟OLED接口显示/82-老刘爱捣鼓示波器，使用OLED屏显示或者虚拟OLED接口显示/2-老刘爱捣鼓示波器，使用I2C OLED屏显示或者虚拟OLED接口显示-CDC协议通信/Mini DSO.uvproj	mini-dso-3a6ca2bec1ff/Makefile	Mini_DSO	STC32G12K128 Series	stc32g12k128	9	8	8	8	0	0	0	0	0		
+t24415_83-老梁示波器-CDC虚拟显示/83-老梁示波器-CDC虚拟显示/stc_usb_cdc_dso.uvproj	stc-usb-cdc-dso-07a661389044/Makefile	dso	STC32G12K128 Series	stc32g12k128	9	9	9	9	0	0	0	0	0	src;src/inc;src/usb	
+t24416_84-USB鼠标-键盘复合设备例程/84-USB鼠标-键盘复合设备例程/stc_usb_keyboard_mouse.uvproj	stc-usb-keyboard-mouse-dc533d6a9d8d/Makefile	Target 1	STC32G12K128 Series	stc32g12k128	8	8	8	8	0	0	0	0	0		
+t24417_85-老梁示波器-信号发生器/85-老梁示波器-信号发生器/stc_usb_cdc_dso.uvproj	stc-usb-cdc-dso-becd57a0b45c/Makefile	dso	STC32G12K128 Series	stc32g12k128	1	1	1	1	0	0	0	0	0		
+t24430_00-端口模式设置/00-端口模式设置/C语言/sample.uvproj	sample-57c75dc88346/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24430_00-端口模式设置/00-端口模式设置/汇编/IO_Mode.uvproj	io-mode-406bc0aca6fc/Makefile	IO_Mode	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24433_01.1-用P0口做跑马灯-入门版/01.1-用P0口做跑马灯-入门版/C语言/sample.uvproj	sample-f021565ebec0/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24433_01.1-用P0口做跑马灯-入门版/01.1-用P0口做跑马灯-入门版/汇编/LED.uvproj	led-78ff4be83659/Makefile	LED	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24435_01.2-用P0口做跑马灯/01.2-用P0口做跑马灯/C语言/sample.uvproj	sample-86ec3d66c9c7/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24435_01.2-用P0口做跑马灯/01.2-用P0口做跑马灯/汇编/LED.uvproj	led-f1b3220bb5de/Makefile	LED	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24457_02-13个定时器测试程序/02-13个定时器测试程序/C语言/sample.uvproj	sample-059b59ac8be7/Makefile	Sample	STC32G12K128 Series	stc32g12k128	3	2	2	2	0	0	0	0	0		
+t24457_02-13个定时器测试程序/02-13个定时器测试程序/汇编/TIMER.uvproj	timer-50acfb224f0b/Makefile	TIMER	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24458_03-用P0，PA口驱动8个数码管/03-用P0，PA口驱动8个数码管/C语言/sample.uvproj	sample-1084c519cdde/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24458_03-用P0，PA口驱动8个数码管/03-用P0，PA口驱动8个数码管/汇编/D-LED.uvproj	d-led-249a711f18f6/Makefile	D-LED	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24459_04-利用T0,T1做外部计数器/04-利用T0,T1做外部计数器/C语言/sample.uvproj	sample-cd7fc3d57551/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24459_04-利用T0,T1做外部计数器/04-利用T0,T1做外部计数器/汇编/Counter.uvproj	counter-117e69874ac2/Makefile	Counter	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24460_05-利用定时器1测量INT1引脚低电平脉冲宽度/05-利用定时器1测量INT1引脚低电平脉冲宽度/C语言/sample.uvproj	sample-64876ea60422/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24460_05-利用定时器1测量INT1引脚低电平脉冲宽度/05-利用定时器1测量INT1引脚低电平脉冲宽度/汇编/TIMER.uvproj	timer-42e44d9d0706/Makefile	timer	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24461_06-外中断INT0-INT1-INT2-INT3-_INT4测试/06-外中断INT0-INT1-INT2-INT3- INT4测试/C语言/sample.uvproj	sample-47bbba9a017c/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24461_06-外中断INT0-INT1-INT2-INT3-_INT4测试/06-外中断INT0-INT1-INT2-INT3- INT4测试/汇编/INT.uvproj	int-31e34ac4119a/Makefile	INT	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24462_07-主时钟停振低功耗模式-专用唤醒定时器唤醒/07-主时钟停振低功耗模式-专用唤醒定时器唤醒/C语言/sample.uvproj	sample-e8bce3bb4a24/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24462_07-主时钟停振低功耗模式-专用唤醒定时器唤醒/07-主时钟停振低功耗模式-专用唤醒定时器唤醒/汇编/wakeup_timer.uvproj	wakeup-timer-b482dfb8880a/Makefile	wakeup_timer	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24463_08-主时钟停振低功耗模式-外部中断INT0-INT4唤醒/08-主时钟停振低功耗模式-外部中断INT0-INT4唤醒/C语言/sample.uvproj	sample-be38f3c81d81/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24463_08-主时钟停振低功耗模式-外部中断INT0-INT4唤醒/08-主时钟停振低功耗模式-外部中断INT0-INT4唤醒/汇编/wake_up.uvproj	wake-up-7301b17e14ce/Makefile	wake_up	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24464_09-看门狗复位测试程序/09-看门狗复位测试程序/C语言/sample.uvproj	sample-5d490c2d19fa/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24464_09-看门狗复位测试程序/09-看门狗复位测试程序/汇编/watch_dog.uvproj	watch-dog-4b385c1e7e6e/Makefile	watch_dog	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24465_10-串口1中断模式与电脑收发测试/10-串口1中断模式与电脑收发测试/C语言/sample.uvproj	sample-01ea240fca2b/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24465_10-串口1中断模式与电脑收发测试/10-串口1中断模式与电脑收发测试/汇编/UART1.uvproj	uart1-c3dbd633219c/Makefile	UART1	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24488_11-串口2中断模式与电脑收发测试/11-串口2中断模式与电脑收发测试/C语言/sample.uvproj	sample-637b985a4e22/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24488_11-串口2中断模式与电脑收发测试/11-串口2中断模式与电脑收发测试/汇编/UART2.uvproj	uart2-96b01cdd5047/Makefile	UART2	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24489_12-串口3与串口2通信测试程序/12-串口3与串口2通信测试程序/UART.uvproj	uart-e7b395aae74d/Makefile	UART	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24519_13-8个串口同时使用收发测试程序/13-8个串口同时使用收发测试程序/UART.uvproj	uart-6547166a9255/Makefile	UART	STC32G144K246 Series	stc32g144k246	3	2	2	2	0	0	0	0	0		
+t24520_14-IO行列扫描键盘数码管显示键值和调整时间/14-IO行列扫描键盘数码管显示键值和调整时间/C语言/sample.uvproj	sample-ea695139ddd2/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24520_14-IO行列扫描键盘数码管显示键值和调整时间/14-IO行列扫描键盘数码管显示键值和调整时间/汇编/IO_KeyScan.uvproj	io-keyscan-5b35aceee4d4/Makefile	IO_KeyScan	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24521_15-ADC键盘扫描数码管显示键值和调整时间/15-ADC键盘扫描数码管显示键值和调整时间/C语言/sample.uvproj	sample-fe4a86b0125d/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24521_15-ADC键盘扫描数码管显示键值和调整时间/15-ADC键盘扫描数码管显示键值和调整时间/汇编/ADC_KeyScan.uvproj	adc-keyscan-8a2e54d1106c/Makefile	ADC_KeyScan	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24523_16-NTC测温度数码管显示/16-NTC测温度数码管显示/C语言/sample.uvproj	sample-cd3c8c62ecad/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24523_16-NTC测温度数码管显示/16-NTC测温度数码管显示/汇编/NTC.uvproj	ntc-523b113f9a5d/Makefile	NTC	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24524_17-USB-CDC-简单的收发测试/17-USB-CDC-简单的收发测试/C语言/usb_cdc.uvproj	usb-cdc-97f91e95bfec/Makefile	Target 1	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24524_17-USB-CDC-简单的收发测试/17-USB-CDC-简单的收发测试/汇编/stc32g_cdc_query_demo.uvproj	stc32g-cdc-query-demo-2c9ec988257c/Makefile	Target 1	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24526_18-通过USB-CDC发送命令读写EEPROM测试程序/18-通过USB-CDC发送命令读写EEPROM测试程序/EEPROM.uvproj	eeprom-7463f0aa7569/Makefile	EEPROM	STC32G144K246 Series	stc32g144k246	3	1	1	1	0	0	0	0	0		
+t24527_19-使用LVD低压检测中断保存EEPROM/19-使用LVD低压检测中断保存EEPROM/C语言/PownDownSave.uvproj	powndownsave-b408ccd7b061/Makefile	PownDownSave	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24527_19-使用LVD低压检测中断保存EEPROM/19-使用LVD低压检测中断保存EEPROM/汇编/PownDownSave.uvproj	powndownsave-98d16a4b00d3/Makefile	PownDownSave	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24528_20-利用P5.0做比较器正极输入源，内部1.19V或P5.1口做负极输入源/20-利用P5.0做比较器正极输入源，内部1.19V或P5.1口做负极输入源/C语言/sample.uvproj	sample-7dc0015306f8/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24528_20-利用P5.0做比较器正极输入源，内部1.19V或P5.1口做负极输入源/20-利用P5.0做比较器正极输入源，内部1.19V或P5.1口做负极输入源/汇编/Comparator.uvproj	comparator-af6d63fb5173/Makefile	Comparator	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24575_21-使用比较器检测低电压时保存数据到EEPROM/21-使用比较器检测低电压时保存数据到EEPROM/C语言/SaveEEPROM.uvproj	saveeeprom-4722ee32a813/Makefile	PownDownSave	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24575_21-使用比较器检测低电压时保存数据到EEPROM/21-使用比较器检测低电压时保存数据到EEPROM/汇编/SaveEEPROM.uvproj	saveeeprom-432a521d77c8/Makefile	SaveEEPROM	STC32G12K128 Series	stc32g12k128	2	0	0	0	0	1	0	0	0		
+t24578_22-高级PWM1-PWM2-PWM3-PWM4输出测试程序/22-高级PWM1-PWM2-PWM3-PWM4输出测试程序/C语言/sample.uvproj	sample-5feecc70d155/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24578_22-高级PWM1-PWM2-PWM3-PWM4输出测试程序/22-高级PWM1-PWM2-PWM3-PWM4输出测试程序/汇编/PWMA.uvproj	pwma-c09ad7b8d637/Makefile	PWMA	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24580_23-高级PWM5-PWM6-PWM7-PWM8输出测试程序/23-高级PWM5-PWM6-PWM7-PWM8输出测试程序/C语言/sample.uvproj	sample-818c5b259f36/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24580_23-高级PWM5-PWM6-PWM7-PWM8输出测试程序/23-高级PWM5-PWM6-PWM7-PWM8输出测试程序/汇编/PWMB.uvproj	pwmb-4ed869d6d9a3/Makefile	PWMA	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24582_24-高级PWMA-PWMB-PWMC-PWMD-PWME-PWMF输出测试程序/24-高级PWMA-PWMB-PWMC-PWMD-PWME-PWMF输出测试程序/sample.uvproj	sample-e694fb48fb20/Makefile	Sample	STC32G144K246 Series	stc32g144k246	3	2	2	2	0	0	0	0	0		
+t24583_25-I2C主机模式访问AT24C02程序/25-I2C主机模式访问AT24C02程序/C语言/I2C.uvproj	i2c-2e0ccb6da649/Makefile	I2C	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24583_25-I2C主机模式访问AT24C02程序/25-I2C主机模式访问AT24C02程序/汇编/I2C.uvproj	i2c-e03d853811e6/Makefile	I2C	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24585_26-I2C从机中断模式与IO口模拟I2C主机进行自发自收/26-I2C从机中断模式与IO口模拟I2C主机进行自发自收/C语言/sample.uvproj	sample-07458204fe5e/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24585_26-I2C从机中断模式与IO口模拟I2C主机进行自发自收/26-I2C从机中断模式与IO口模拟I2C主机进行自发自收/汇编/I2C_Slave_INT.uvproj	i2c-slave-int-134e31f8fcfd/Makefile	I2C_Slave_INT	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24586_27-红外遥控接收程序(NEC码)-数码管显示用户地址和键值/27-红外遥控接收程序(NEC码)-数码管显示用户地址和键值/C语言/sample.uvproj	sample-24ba1fa7f64f/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24586_27-红外遥控接收程序(NEC码)-数码管显示用户地址和键值/27-红外遥控接收程序(NEC码)-数码管显示用户地址和键值/汇编/IR_Remote_Rx.uvproj	ir-remote-rx-dd9debb90a89/Makefile	IR_Remote_Rx	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24587_28-红外发射程序(NEC码)-使用PWM4产生38KHz载波/28-红外发射程序(NEC码)-使用PWM4产生38KHz载波/C语言/sample.uvproj	sample-07f7162ece55/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24587_28-红外发射程序(NEC码)-使用PWM4产生38KHz载波/28-红外发射程序(NEC码)-使用PWM4产生38KHz载波/汇编/IR-Tx.uvproj	ir-tx-cd423b18c144/Makefile	IR-Tx	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24589_29-IO扫描键红外发射-同时接收数码管显示用户码键值程序/29-IO扫描键红外发射-同时接收数码管显示用户码键值程序/C语言/sample.uvproj	sample-6dbffc540915/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24589_29-IO扫描键红外发射-同时接收数码管显示用户码键值程序/29-IO扫描键红外发射-同时接收数码管显示用户码键值程序/汇编/IR_Remote_Rx.uvproj	ir-remote-rx-a484115f811f/Makefile	IR_Remote_Rx	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24591_30-通过PWM驱动无源蜂鸣器实验程序/30-通过PWM驱动无源蜂鸣器实验程序/C语言/sample.uvproj	sample-8bc1e4f1f5c2/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24591_30-通过PWM驱动无源蜂鸣器实验程序/30-通过PWM驱动无源蜂鸣器实验程序/汇编/buzzer.uvproj	buzzer-641b1db47954/Makefile	buzzer	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24684_31-软件设置CPU工作的内部时钟源-HIRC-PLL-IRC32K/31-软件设置CPU工作的内部时钟源-HIRC-PLL-IRC32K/C语言/sample.uvproj	sample-e0424ecf040c/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24684_31-软件设置CPU工作的内部时钟源-HIRC-PLL-IRC32K/31-软件设置CPU工作的内部时钟源-HIRC-PLL-IRC32K/汇编/MCLK.uvproj	mclk-2be0935190f1/Makefile	MCLK	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24685_32-通过定时器周期性调度任务综合例程，简单实用的任务调度系统，推荐/32-通过定时器周期性调度任务综合例程，简单实用的任务调度系统，推荐/sample.uvproj	sample-62f4df0fdb14/Makefile	Target 1	STC32G144K246 Series	stc32g144k246	12	11	11	11	0	0	0	0	1	Sources/inc	
+t24686_33-IO模拟SPI访问FLASH-W25Q80-串口监控/33-IO模拟SPI访问FLASH-W25Q80-串口监控/sample.uvproj	sample-f45fbef2c19d/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24687_34-P1.5做ADC-使用内部基准计算外部电压/34-P1.5做ADC-使用内部基准计算外部电压/C语言/sample.uvproj	sample-fe7d2a9765a9/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24687_34-P1.5做ADC-使用内部基准计算外部电压/34-P1.5做ADC-使用内部基准计算外部电压/汇编/voltage.uvproj	voltage-804344d0bdc1/Makefile	voltage	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24688_35-内部RTC时钟程序/35-内部RTC时钟程序/C语言/RTC.uvproj	rtc-25d701de3f21/Makefile	RTC	STC32G144K246 Series	stc32g144k246	3	1	1	1	0	1	0	0	0		
+t24688_35-内部RTC时钟程序/35-内部RTC时钟程序/汇编/RTC.uvproj	rtc-0be48033eeff/Makefile	RTC	STC32G144K246 Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24689_36-一线制温度传感器_DS18B20_测温/36-一线制温度传感器 DS18B20 测温/sample.uvproj	sample-378a722f812e/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24690_37-科学计算器使用CDC虚拟液晶屏显示/37-科学计算器使用CDC虚拟液晶屏显示/stc_usb_ser.uvproj	stc-usb-ser-e80073c421ad/Makefile	Target 1	STC32G144K246 Series	stc32g144k246	20	18	18	18	0	0	0	0	0	Resource;ware;src;middle;user	
+t24691_38-TFPU–三角函数和单精度浮点运算单元/38-TFPU–三角函数和单精度浮点运算单元/sample.uvproj	sample-14f2fc8245c6/Makefile	Target 1	STC32G144K246 Series	stc32g144k246	3	1	1	1	0	0	0	0	0		
+t24692_39-DSP32–DSP指令-32位64位整数运算器/39-DSP32–DSP指令-32位64位整数运算器/sample.uvproj	sample-99808641f0ca/Makefile	Target 1	STC32G144K246 Series	stc32g144k246	3	1	1	1	0	0	0	0	0		
+t24693_40-LCD1602显示程序-硬件M6800并行接口驱动/40-LCD1602显示程序-硬件M6800并行接口驱动/LCD1602.uvproj	lcd1602-f5f865897421/Makefile	LCD128x64	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24708_41-3.2寸ILI9341驱动TFT显示屏实验程序-硬件I8080接口程序/41-3.2寸ILI9341驱动TFT显示屏实验程序-硬件I8080接口程序/Project/ceshi.uvproj	ceshi-5660124741ef/Makefile	QD-TFT	STC32G144K246 Series	stc32g144k246	7	5	5	5	0	1	0	0	0	../font;../GUI;../LCD;../sys;../touch;../USER;../../COMM	
+t24710_42-硬件SPI接口驱动1.3寸TFT显示屏实验程序/42-硬件SPI接口驱动1.3寸TFT显示屏实验程序/Project/ceshi.uvproj	ceshi-67b8dff0678f/Makefile	QD-TFT	STC32G144K246 Series	stc32g144k246	7	5	5	5	0	1	0	0	0	../font;../GUI;../LCD;../sys;../touch;../USER;../../COMM	
+t24711_43-硬件USART1复用SPI驱动1.3寸TFT显示屏实验程序/43-硬件USART1复用SPI驱动1.3寸TFT显示屏实验程序/Project/ceshi.uvproj	ceshi-378915d730b9/Makefile	QD-TFT	STC32G144K246 Series	stc32g144k246	7	5	5	5	0	1	0	0	0	../font;../GUI;../LCD;../sys;../touch;../USER;../../COMM	
+t24712_44-CANFD1-CANFD2同时使用收发测试/44-CANFD1-CANFD2同时使用收发测试/CANFD.uvproj	canfd-b1d4bbd7fc79/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	2	2	2	2	0	0	0	0	0		
+t24713_45.1-LIN1-LIN2主从收发测试/45.1-LIN1-LIN2主从收发测试/sample.uvproj	sample-5c9d18dd2640/Makefile	Sample	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24714_45.2-LIN1-LIN2主从收发测试-软件实现自动波特率/45.2-LIN1-LIN2主从收发测试-软件实现自动波特率/sample.uvproj	sample-097f16c5766a/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24715_46-LIN总线从机收发测试/46-LIN总线从机收发测试/sample.uvproj	sample-fc00975533eb/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24716_47-LIN总线主机收发测试/47-LIN总线主机收发测试/sample.uvproj	sample-fd8d225de311/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24717_48-LIN2总线从机收发测试/48-LIN2总线从机收发测试/sample.uvproj	sample-a7c11cdc3c6f/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24718_49-LIN2总线主机收发测试/49-LIN2总线主机收发测试/sample.uvproj	sample-3affb2f37f67/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24719_50-LIN1-LIN2同时做从机通信/50-LIN1-LIN2同时做从机通信/sample.uvproj	sample-9cee7a2810df/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24720_51-LIN总线从机收发测试-USART1/51-LIN总线从机收发测试-USART1/sample.uvproj	sample-dcae24ed5247/Makefile	Sample	STC32G144K246 Series	stc32g144k246	3	1	1	1	0	0	0	0	0		
+t24721_52-LIN总线主机收发测试-USART1/52-LIN总线主机收发测试-USART1/sample.uvproj	sample-ce33a176b321/Makefile	Sample	STC32G144K246 Series	stc32g144k246	3	1	1	1	0	0	0	0	0		
+t24722_53-LIN总线从机收发测试-USART2/53-LIN总线从机收发测试-USART2/sample.uvproj	sample-1c170e1cb410/Makefile	Sample	STC32G144K246 Series	stc32g144k246	3	1	1	1	0	0	0	0	0		
+t24723_54-LIN总线主机收发测试-USART2/54-LIN总线主机收发测试-USART2/sample.uvproj	sample-f86b872b498b/Makefile	Sample	STC32G144K246 Series	stc32g144k246	3	1	1	1	0	0	0	0	0		
+t24724_55-UART转LIN总线报文测试程序/55-UART转LIN总线报文测试程序/sample.uvproj	sample-7e1e6e82869a/Makefile	Sample	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24725_56-DMA-ADC采样数据自动存储/56-DMA-ADC采样数据自动存储/16路ADC转换-串口返回结果/ADC.uvproj	adc-250fed7a4e78/Makefile	Target 1	STC32G144K246 Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24725_56-DMA-ADC采样数据自动存储/56-DMA-ADC采样数据自动存储/16路ADC转换使用DMA-串口返回结果-指定缓冲区地址/ADC.uvproj	adc-c92c7b482582/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24725_56-DMA-ADC采样数据自动存储/56-DMA-ADC采样数据自动存储/16路ADC转换使用DMA-串口返回结果-结构体存储结果/ADC.uvproj	adc-7cb7a44400b1/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24726_57-DMA-M2M存储器与存储器之间读写/57-DMA-M2M存储器与存储器之间读写/M2M.uvproj	m2m-75458da230cd/Makefile	UART1	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24727_58-DMA-SPI驱动显示屏/58-DMA-SPI驱动显示屏/DMA-SPI刷新OLED12864显示屏程序，SSD1306驱动，0.96寸/test.uvproj	test-58c77c690824/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	1	1	1	1	0	0	0	0	0		
+t24727_58-DMA-SPI驱动显示屏/58-DMA-SPI驱动显示屏/DMA-SPI驱动1.3寸TFT显示屏-ST7789-240x240/SPI-DMA.uvproj	spi-dma-1ab46ae2f44c/Makefile	SPI-DMA	STC32G144K246-32Bit Series	stc32g144k246	3	2	2	2	0	0	0	0	0		
+t24728_59-DMA-UART串口与存储器数据自动收发/59-DMA-UART串口与存储器数据自动收发/串口1使用DMA中断模式与电脑收发测试/UART1.uvproj	uart1-5e1dd180e928/Makefile	UART1	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24728_59-DMA-UART串口与存储器数据自动收发/59-DMA-UART串口与存储器数据自动收发/串口2使用DMA中断模式与电脑收发测试/UART.uvproj	uart-aea7f3493754/Makefile	UART	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24728_59-DMA-UART串口与存储器数据自动收发/59-DMA-UART串口与存储器数据自动收发/串口3使用DMA中断模式与电脑收发测试/UART.uvproj	uart-e38152080b13/Makefile	UART	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24728_59-DMA-UART串口与存储器数据自动收发/59-DMA-UART串口与存储器数据自动收发/串口4使用DMA中断模式与电脑收发测试/UART.uvproj	uart-7c3c1d7dd878/Makefile	UART	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24728_59-DMA-UART串口与存储器数据自动收发/59-DMA-UART串口与存储器数据自动收发/串口5使用DMA中断模式与电脑收发测试/UART.uvproj	uart-f37111d1d203/Makefile	UART	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24728_59-DMA-UART串口与存储器数据自动收发/59-DMA-UART串口与存储器数据自动收发/串口6使用DMA中断模式与电脑收发测试/UART.uvproj	uart-9129e0526ccd/Makefile	UART	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24728_59-DMA-UART串口与存储器数据自动收发/59-DMA-UART串口与存储器数据自动收发/串口7使用DMA中断模式与电脑收发测试/UART.uvproj	uart-fb473ebc0609/Makefile	UART	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24728_59-DMA-UART串口与存储器数据自动收发/59-DMA-UART串口与存储器数据自动收发/串口8使用DMA中断模式与电脑收发测试/UART.uvproj	uart-364807094204/Makefile	UART	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24729_60-DMA-I2C与存储器数据自动收发/60-DMA-I2C与存储器数据自动收发/I2C.uvproj	i2c-e847dcb34ca6/Makefile	I2C	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24730_61-DMA-LCM液晶屏接口测试/61-DMA-LCM液晶屏接口测试/LCD1602显示程序-硬件M6800并行接口+DMA刷新/LCD1602.uvproj	lcd1602-bcc9fc3043d8/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	1	1	1	1	0	0	0	0	0		
+t24730_61-DMA-LCM液晶屏接口测试/61-DMA-LCM液晶屏接口测试/TFT320240显示程序-硬件I8080并行接口+DMA刷新/LCM_Test.uvproj	lcm-test-bb4adc50f16e/Makefile	LCM_Test	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24731_62-USART1复用SPI-DMA驱动1.3寸TFT显示屏/62-USART1复用SPI-DMA驱动1.3寸TFT显示屏/SPI-DMA.uvproj	spi-dma-8f0eb5a2b99b/Makefile	SPI-DMA	STC32G144K246-32Bit Series	stc32g144k246	3	2	2	2	0	0	0	0	0		
+t24732_63-QSPI-TFT_DMA_P2P外设到外设_显示视频级动画效果程序-ILI9341/63-QSPI-TFT_DMA_P2P外设到外设_显示视频级动画效果程序-ILI9341/QSPI_TFT_Demo.uvproj	qspi-tft-demo-531ffcb2d3fe/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	9	7	7	7	0	0	0	0	0		
+t24733_64-QSPI-Flash_DMA_P2P_SPI_TFT_显示视频级动画效果程序/64-QSPI-Flash_DMA_P2P_SPI_TFT_显示视频级动画效果程序/QSPI_TFT_Demo.uvproj	qspi-tft-demo-6164d424afdf/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	8	6	6	6	0	0	0	0	0		
+t24734_65-高速HSPWM1-HSPWM2-HSPWM3-HSPWM4输出测试程序/65-高速HSPWM1-HSPWM2-HSPWM3-HSPWM4输出测试程序/sample.uvproj	sample-96479b9309d5/Makefile	Sample	STC32G12K128 Series	stc32g12k128	2	1	1	1	0	0	0	0	0		
+t24735_66-高级PWM输出-周期可调-脉冲计数/66-高级PWM输出-周期可调-脉冲计数/PWM.uvproj	pwm-f0ca6e477e80/Makefile	PWM	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24736_67-内部RTC时钟低功耗休眠唤醒-比较器检测电压程序/67-内部RTC时钟低功耗休眠唤醒-比较器检测电压程序/RTC.uvproj	rtc-f78c32629cb9/Makefile	RTC	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24737_68-普通IO口中断-休眠唤醒/68-普通IO口中断-休眠唤醒/C语言/sample.uvproj	sample-cf14b5f6e8c0/Makefile	Sample	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24737_68-普通IO口中断-休眠唤醒/68-普通IO口中断-休眠唤醒/汇编/wake_up.uvproj	wake-up-1969937b91b2/Makefile	wake_up	STC32G144K246-32Bit Series	stc32g144k246	2	0	0	0	0	1	0	0	0		
+t24738_69-HID(Human_Interface_Device)协议范例/69-HID(Human Interface Device)协议范例/stc_usb_hid.uvproj	stc-usb-hid-b358b7a4e799/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	8	7	7	7	0	0	0	0	0		
+t24739_70-CDC(Communication_Device_Class)协议范例/70-CDC(Communication Device Class)协议范例/stc_usb_ser.uvproj	stc-usb-ser-bb38abba2aa4/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	9	8	8	8	0	0	0	0	0		
+t24740_71-基于HID协议的USB键盘范例/71-基于HID协议的USB键盘范例/stc_usb_keyboard.uvproj	stc-usb-keyboard-b86560f402b3/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	9	8	8	8	0	0	0	0	0		
+t24741_72-基于HID协议的USB鼠标范例/72-基于HID协议的USB鼠标范例/stc_usb_mouse.uvproj	stc-usb-mouse-3ecceb8787aa/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	9	8	8	8	0	0	0	0	0		
+t24742_73-基于WINUSB协议的范例/73-基于WINUSB协议的范例/stc_usb_winusb.uvproj	stc-usb-winusb-6b73f35efc85/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	8	7	7	7	0	0	0	0	0		
+t24743_74-MSC(Mass_Storage_Class)协议范例/74-MSC(Mass Storage Class)协议范例/stc_usb_msd.uvproj	stc-usb-msd-b799bfba4715/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	10	9	9	9	0	0	0	0	0		
+t24744_75-通过USB_HID协议打印数据信息-可用于调试/75-通过USB HID协议打印数据信息-可用于调试/stc_usb_hid.uvproj	stc-usb-hid-12fc4be257f7/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	3	1	1	1	0	0	0	0	0		
+t24745_76-串口绘图-使用UART1接口/76-串口绘图-使用UART1接口/wave.uvproj	wave-1d9e6be1a614/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	1	1	1	1	0	0	0	0	0		
+t24746_77-串口绘图-使用USB-CDC串口/77-串口绘图-使用USB-CDC串口/wave.uvproj	wave-9c69305a3781/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24747_78-USB鼠标-键盘复合设备例程/78-USB鼠标-键盘复合设备例程/stc_usb_keyboard_mouse.uvproj	stc-usb-keyboard-mouse-1acc064fe369/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	8	8	8	8	0	0	0	0	0		
+t24748_79-利用高级PWMA_PWMB更新中断实现2个定时器/79-利用高级PWMA+PWMB更新中断实现2个定时器/PWM.uvproj	pwm-cc85325c06a2/Makefile	PWM	STC32G144K246-32Bit Series	stc32g144k246	2	1	1	1	0	0	0	0	0		
+t24749_80-利用高级PWMA_PWMB比较中断实现8个定时器/80-利用高级PWMA+PWMB比较中断实现8个定时器/PWM.uvproj	pwm-21b52e87aa4c/Makefile	PWM	STC32G144K246-32Bit Series	stc32g144k246	1	1	1	1	0	0	0	0	0		
+t24750_81-USB_CDC转双串口-做自动停电上电烧录器/81-USB CDC转双串口-做自动停电上电烧录器/stc_usb_2ser.uvproj	stc-usb-2ser-6fd2ef45aa49/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	10	9	9	9	0	0	0	0	0	src/inc	
+t24751_82-CANFD使用DMA收发测试/82-CANFD使用DMA收发测试/CANFD.uvproj	canfd-927352c9f622/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	3	3	3	3	0	0	0	0	0		
+t24752_83-老刘爱捣鼓示波器，使用OLED屏显示或者虚拟OLED接口显示/83-老刘爱捣鼓示波器，使用OLED屏显示或者虚拟OLED接口显示/1-老刘爱捣鼓示波器，使用SPI OLED屏显示或者虚拟OLED接口显示-CDC协议通信/Mini DSO.uvproj	mini-dso-a841fb4ec2d6/Makefile	Mini_DSO	STC32G144K246-32Bit Series	stc32g144k246	9	8	8	8	0	0	0	0	0		
+t24752_83-老刘爱捣鼓示波器，使用OLED屏显示或者虚拟OLED接口显示/83-老刘爱捣鼓示波器，使用OLED屏显示或者虚拟OLED接口显示/2-老刘爱捣鼓示波器，使用I2C OLED屏显示或者虚拟OLED接口显示-CDC协议通信/Mini DSO.uvproj	mini-dso-61a1bcc0417d/Makefile	Mini_DSO	STC32G144K246-32Bit Series	stc32g144k246	9	8	8	8	0	0	0	0	0		
+t24753_84-MP3播放器/84-MP3播放器/audio_play-demo.uvproj	audio-play-demo-17087b512fcc/Makefile	demo	STC32G144K246-32Bit Series	stc32g144k246	17	14	13	13	1	0	0	0	0	src;3rd/ff;3rd/minimp3	
+t24754_85-内部148K字节SRAM读写测试/85-内部148K字节SRAM读写测试/sample.uvproj	sample-98848aabc9a7/Makefile	Target 1	STC32G144K246-32Bit Series	stc32g144k246	1	1	1	1	0	0	0	0	0		

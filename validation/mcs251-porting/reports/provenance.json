@@ -1,0 +1,108 @@
+{
+  "format": "mcs251-porting-v1-provenance",
+  "generated_utc": "2026-09-08T00:50:00+00:00",
+  "official_sources": {
+    "corpus_root": "/home/liu/stcex/src",
+    "corpus_note": "local snapshot of the official STC example pack (t#### bundles); read-only",
+    "corpus_file_count": 2303,
+    "corpus_snapshot_sha256": "8e3b7a48dcc8f02261c99ebfc5a2b62f635b133cbeed1b1b6e36bd12eaf580fd",
+    "device_headers": [
+      {
+        "header": "/home/liu/stcex/src/t24401_69-HID(Human_Interface_Device)协议范例/69-HID(Human Interface Device)协议范例/src/stc32g.h",
+        "sha256": "5d01141b1034acee83db900881f8cb30a228f47a45d1a710112df46b3b4e3a7c",
+        "report": "reports/stc32g-v1-report.json",
+        "generated_header": "generated/stc32g-v1.h"
+      },
+      {
+        "header": "/home/liu/stcex/src/t24732_63-QSPI-TFT_DMA_P2P外设到外设_显示视频级动画效果程序-ILI9341/63-QSPI-TFT_DMA_P2P外设到外设_显示视频级动画效果程序-ILI9341/Sources/STC32G144K246.H",
+        "sha256": "3050fe879ea10b5c92da660be37bf8cfaea32233bff127d074ef020266de74a4",
+        "report": "reports/stc32g144k246-v1-report.json",
+        "generated_header": "generated/stc32g144k246-v1.h"
+      }
+    ],
+    "crt_selfstart_source": {
+      "path": "validation/mcs251-elf/runtime/crt-selfstart.yaml",
+      "sha256": "d181d4d3fee802a423cd82f154dc9eaff407e7dc8c2a3bfcf0f633e318d02e5e",
+      "note": "CRT object for examples/minimal-direct-sfr is regenerated from this YAML via yaml2obj; no bare crt.o is committed or consumed"
+    }
+  },
+  "toolchain_identity": {
+    "clang": {
+      "path": "/home/liu/build-clang/bin/clang",
+      "sha256": "d9ad2e5c82244f443af3a7203d28863f4216fff468e222ef95515d4a97194429",
+      "version": "clang version 24.0.0git"
+    },
+    "llc": {
+      "path": "/home/liu/mcs251-demo-test/bin-frozen/llc",
+      "sha256": "72e5dbbd5d9b043474c8dbfebf7721455e7695d4410df80f66b2cdd3170dc1ee",
+      "version": "LLVM (http://llvm.org/): LLVM version 24.0.0git",
+      "frozen": true,
+      "md5": "454a031e4fe258df18062c4791bc1818",
+      "identity_file": "/home/liu/mcs251-demo-test/bin-frozen/porting-v1-tools.identity.txt"
+    },
+    "lld": {
+      "path": "/home/liu/build-mcs251-lld/bin/lld",
+      "sha256": "bc2ad1e63b4206c44a10679a14dfe580b6fc0dd3de4e5d6160249b668de8d1c8",
+      "version": "mcs251-lld (LLVM MCS251)"
+    },
+    "llvm-objcopy": {
+      "path": "/home/liu/mcs251-demo-test/bin-frozen/llvm-objcopy",
+      "sha256": "beaed78b200f286f7825e92503bdcbbca09070ba7940e9846772caceedb613b2",
+      "version": "llvm-objcopy, compatible with GNU objcopy",
+      "frozen": true,
+      "identity_file": "/home/liu/mcs251-demo-test/bin-frozen/porting-v1-tools.identity.txt"
+    },
+    "yaml2obj": {
+      "path": "/home/liu/mcs251-demo-test/bin-frozen/yaml2obj",
+      "sha256": "93215edb6c26e344c3c2b6189371ba7dc6a2d4879e99e05315906d4c8adc9c8b",
+      "version": "OVERVIEW: Create an object file from a YAML description",
+      "frozen": true,
+      "identity_file": "/home/liu/mcs251-demo-test/bin-frozen/porting-v1-tools.identity.txt"
+    },
+    "qemu-system-mcs251": {
+      "path": "/home/liu/build-qemu/qemu-system-mcs251",
+      "sha256": "0907e2e4e90df94ea29d273c7750b097fe3cc3eb0a3f98e5cbac1a3f7ba87377",
+      "version": "QEMU emulator version 11.1.0"
+    },
+    "llvm-readobj": {
+      "path": "/home/liu/mcs251-demo-test/bin-frozen/llvm-readobj",
+      "sha256": "00c9d4a2ed61e00898f5b1a72c127b8eee75e022bc0721fa8b47aa827fb44496",
+      "version": "LLVM (http://llvm.org/): LLVM version 24.0.0git",
+      "frozen": true,
+      "identity_file": "/home/liu/mcs251-demo-test/bin-frozen/porting-v1-tools.identity.txt"
+    }
+  },
+  "acceptance": {
+    "final_validation": {
+      "path": "reports/final-validation.json",
+      "format": "mcs251-porting-v1-final-validation-v4",
+      "makefile_coverage": {
+        "makefiles": 270,
+        "c_projects": 201,
+        "build_c_rules": 467
+      },
+      "dry_run_checked": 270,
+      "intrinsics_raw_text": {
+        "_nop_": 608
+      },
+      "intrinsics_lexical": {
+        "_nop_": 585
+      }
+    },
+    "self_contained_tests": "tests/test-porting-tools.py (51 cases; no corpus or frozen binary required except optional gated checks)"
+  },
+  "evidence_archive": {
+    "path": "/home/liu/porting-tools-v1-evidence",
+    "note": "replayable artifacts copied by tests/assemble-final-validation.py and per-step probe outputs"
+  },
+  "regeneration": [
+    "python3 tools/sfr-convert.py <header> -o generated/<out>.h --report reports/<out>-report.json",
+    "python3 tests/verify-sfr-artifacts.py . --output reports/sfr-artifact-validation.json",
+    "python3 tools/uvproj2make.py /home/liu/stcex/src -o generated/projects --report reports/uvproj-summary.json --tsv reports/uvproj-projects.tsv",
+    "python3 tests/validate-generated-projects.py reports/uvproj-summary.json generated/projects --output reports/generated-makefile-validation.json",
+    "python3 tests/run-elf-smoke.py . --work <workdir> --output reports/toolchain-smoke.json",
+    "python3 tests/run-minimal-direct-sfr.py . --output reports/minimal-direct-sfr-validation.json",
+    "python3 tests/audit-intrinsics.py /home/liu/stcex/src --output reports/intrinsics-audit.json",
+    "python3 tests/assemble-final-validation.py . /home/liu/porting-tools-v1-evidence"
+  ]
+}

@@ -1,0 +1,319 @@
+# crt-selfstart.yaml - pure ELF32/MSB/ET_REL MCS251 crt fixture (E4 chain-B).
+#
+# Machine-byte transcription of validation/mcs251-firmware/crt-selfstart.asm
+# (frozen asset; ground truth: validation/mcs251-firmware/selfstart-smoke/build/
+# crt-selfstart.lst and crt-selfstart.rel). LLVM has no MCS251 AsmParser, so the
+# object is hand-authored YAML per SPEC.md section 9.3 and assembled with the
+# frozen yaml2obj (see gen-crt-elf.sh).
+#
+# Encoding evidence:
+#   ljmp  = 02 + J16 field            (crt .lst line 46; SPEC 7.2 R_MCS251_J16)
+#   ejmp  = 8A + addr24 big-endian    (crt .lst line 49; mcs251-models-probe/p2
+#                                      linked image 8A FF 01 19, QEMU-verified)
+#   ecall = 9A + addr24 big-endian    (crt .lst lines 78-79; p2 image
+#                                      9A FF 04 00, QEMU-verified)
+#   eret  = AA                        (crt .lst line 125; p5 image)
+#   mov spx,#imm16 = 7E F8 hh ll      (crt .lst line 77; p5 cmp spx = BE F8 hh ll)
+#   mov direct,#imm8 = 75 <dir> <imm> (crt .lst: WTST=0xE9, SBUF=0x99)
+#   sjmp = 80 + signed off8           (self-jumps 80 FE fully resolved, no reloc)
+#
+# Reloc offsets are field starts (byte after opcode), matching SPEC 7.1/7.2 and
+# the llc convention seen in main.o (e.g. 0x1 R_MCS251_24 on a 9A ecall).
+# All fields are zero placeholders; addresses come from lld at link time.
+#
+# Area bases (HOME 0xff0000, VECS 0xff0003, BOOT 0xff0100, XINIT 0xff8000) are
+# link parameters (--area-start), never encoded here (SPEC 3.1).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  # HOME: reset trampoline. ljmp __mcs251_selfstart_boot (3 bytes).
+  - Name: .mcs251.HOME
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '020000'
+  # VECS: 8 x { 4-byte ejmp default net, 4-byte NOBITS hole } per SPEC 4.3.
+  # Fragment pairs must alternate in section-header order.
+  - Name: .mcs251.VECS.0.bytes
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '8A000000'
+  - Name: .mcs251.VECS.0.hole
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.VECS.1.bytes
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '8A000000'
+  - Name: .mcs251.VECS.1.hole
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.VECS.2.bytes
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '8A000000'
+  - Name: .mcs251.VECS.2.hole
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.VECS.3.bytes
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '8A000000'
+  - Name: .mcs251.VECS.3.hole
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.VECS.4.bytes
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '8A000000'
+  - Name: .mcs251.VECS.4.hole
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.VECS.5.bytes
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '8A000000'
+  - Name: .mcs251.VECS.5.hole
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.VECS.6.bytes
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '8A000000'
+  - Name: .mcs251.VECS.6.hole
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.VECS.7.bytes
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '8A000000'
+  - Name: .mcs251.VECS.7.hole
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+  # BOOT: startup flow + XINIT walker, 0x6F bytes, byte-for-byte the .lst image.
+  - Name: .mcs251.BOOT
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '75E9007EF800009A0000009A00000075995380FE7E0800007A0C00007E240000BE24000068430B0A400B0C0B0C7DA40B0A600B0C0B0C0B0A800B0C0B0C9E2400067EE000BE64000068097A49E00B441B6480F1BE84000068C77E0BE00B0C7AA9E00BA41B841B2480EAAA75992180FE'
+  - Name: .rela.mcs251.HOME
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.HOME
+    Relocations:
+      # ljmp __mcs251_selfstart_boot: 02 [J16]
+      - Offset: 0x1
+        Type: R_MCS251_J16
+        Symbol: __mcs251_selfstart_boot
+        Addend: 0
+  - Name: .rela.mcs251.VECS.0.bytes
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.VECS.0.bytes
+    Relocations:
+      # ejmp __mcs251_isr_unhandled: 8A [addr24]
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: __mcs251_isr_unhandled
+        Addend: 0
+  - Name: .rela.mcs251.VECS.1.bytes
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.VECS.1.bytes
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: __mcs251_isr_unhandled
+        Addend: 0
+  - Name: .rela.mcs251.VECS.2.bytes
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.VECS.2.bytes
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: __mcs251_isr_unhandled
+        Addend: 0
+  - Name: .rela.mcs251.VECS.3.bytes
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.VECS.3.bytes
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: __mcs251_isr_unhandled
+        Addend: 0
+  - Name: .rela.mcs251.VECS.4.bytes
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.VECS.4.bytes
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: __mcs251_isr_unhandled
+        Addend: 0
+  - Name: .rela.mcs251.VECS.5.bytes
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.VECS.5.bytes
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: __mcs251_isr_unhandled
+        Addend: 0
+  - Name: .rela.mcs251.VECS.6.bytes
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.VECS.6.bytes
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: __mcs251_isr_unhandled
+        Addend: 0
+  - Name: .rela.mcs251.VECS.7.bytes
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.VECS.7.bytes
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: __mcs251_isr_unhandled
+        Addend: 0
+  - Name: .rela.mcs251.BOOT
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.BOOT
+    Relocations:
+      # mov spx,#__mcs251_stack_base: 7E F8 [imm16]; lld synthesizes the ABS
+      # stack base (SPEC 6.3) because this object carries the UNDEF request.
+      - Offset: 0x5
+        Type: R_MCS251_16
+        Symbol: __mcs251_stack_base
+        Addend: 0
+      # ecall __mcs251_globals_init: 9A [addr24]
+      - Offset: 0x8
+        Type: R_MCS251_24
+        Symbol: __mcs251_globals_init
+        Addend: 0
+      # ecall _main: 9A [addr24]
+      - Offset: 0xC
+        Type: R_MCS251_24
+        Symbol: _main
+        Addend: 0
+      # mov wr8,#<s_XINIT mid/lo>: 7E 08 [MID8] [LO8] (hand-coded .db prologue)
+      - Offset: 0x16
+        Type: R_MCS251_MID8
+        Symbol: s_XINIT
+        Addend: 0
+      - Offset: 0x17
+        Type: R_MCS251_LO8
+        Symbol: s_XINIT
+        Addend: 0
+      # mov r12,#<s_XINIT hi>: 7A 0C 00 [HI8] (dr0 24-bit bank byte)
+      - Offset: 0x1B
+        Type: R_MCS251_HI8
+        Symbol: s_XINIT
+        Addend: 0
+      # mov wr4,#l_XINIT: 7E 24 [imm16]
+      - Offset: 0x1E
+        Type: R_MCS251_16
+        Symbol: l_XINIT
+        Addend: 0
+  # Exactly one ABI note per object (SPEC 3.2): namesz=7 descsz=32 type=1,
+  # owner "MCS251", eight BE u32 descriptor words.
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  # Locals (crt .lst single-colon labels; NOTYPE mirrors the typeless .rel asset).
+  - Name: __mcs251_reset
+    Type: STT_NOTYPE
+    Section: .mcs251.HOME
+    Value: 0x0
+  - Name: __mcs251_halt
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x12
+  - Name: __mcs251_xinit_record
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x20
+  - Name: __mcs251_xinit_clear
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x44
+  - Name: __mcs251_xinit_copy
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x53
+  - Name: __mcs251_xinit_done
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x69
+  - Name: __mcs251_ispin
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x6D
+  # Globals defined here (old .globl / :: labels).
+  - Name: __mcs251_selfstart_boot
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x0
+  - Name: __mcs251_globals_init
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x14
+  - Name: __mcs251_isr_unhandled
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x6A
+  # Undefined globals resolved by lld: module entry, synthesized stack base,
+  # synthesized XINIT boundary symbols (SPEC 6.1/6.3).
+  - Name: _main
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: __mcs251_stack_base
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: s_XINIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: l_XINIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL

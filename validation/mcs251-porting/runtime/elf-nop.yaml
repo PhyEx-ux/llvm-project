@@ -1,0 +1,31 @@
+# ELF32/MSB MCS251 helper for the current ELF object streamer.
+# _mcs251_porting_elf_nop: NOP (0x00), then ERET (0xAA).
+# Hand-authored because this target has no ELF-safe inline-assembly parser.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00AA'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  # C front end ABI prefixes external C symbols with one underscore.
+  - Name: _mcs251_porting_elf_nop
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 0x2
