@@ -2480,9 +2480,11 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // Calls always use the 32-bit AS4 CODE address, independently of AS0 data
   // pointer width. A Tiny/Huge translation unit must never truncate a function
   // symbol to its 16-bit default data-pointer type.
-  MVT CodePtrVT = getPointerTy(DAG.getDataLayout(),
-                               DAG.getDataLayout().getProgramAddressSpace());
-  if (CodePtrVT != MVT::i32)
+  // Do not derive this from the generic/default pointer VT.  The MCS-251
+  // executable address is always the region-qualified 32-bit CODE container;
+  // in particular this must stay i32 when AS0 is the 16-bit Tiny pointer ABI.
+  constexpr MVT CodePtrVT = MVT::i32;
+  if (getPointerTy(DAG.getDataLayout(), ProgramAS) != CodePtrVT)
     report_fatal_error("MCS251: CODE call target must use a 32-bit pointer");
   if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee))
     Callee = DAG.getTargetGlobalAddress(G->getGlobal(), DL, CodePtrVT,

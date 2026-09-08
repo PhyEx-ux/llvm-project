@@ -111,13 +111,69 @@ class MCS251AsmPrinter final : public AsmPrinter {
 
   static bool hasV1PointerTypes(Type *Ty,
                                 SmallPtrSetImpl<Type *> &Seen) {
-    if (!Seen.insert(Ty).second)
-      return true;
+    // Check a pointer before consulting Seen.  An unsupported pointer type is
+    // rejected on every encounter, rather than becoming acceptable merely
+    // because a previous walk inserted it before returning false.
     if (auto *PT = dyn_cast<PointerType>(Ty))
       return PT->getAddressSpace() == 0;
+    if (!Seen.insert(Ty).second)
+      return true;
     for (Type *SubTy : Ty->subtypes())
       if (!hasV1PointerTypes(SubTy, Seen))
         return false;
+    return true;
+  }
+
+  // XSmall/v2 AS6 has one object-identity-safe form: a constant byte SFR
+  // address used directly as a load/store base. It lowers to a direct-byte
+  // instruction and carries neither a pointer payload nor a relocation. AS6
+  // in a global, function signature, value result, or any other expression
+  // still requires a future v2 object identity.
+  static bool isDirectSFRMemoryOperand(const Use &U, const Instruction &I) {
+    bool IsLoadBase = isa<LoadInst>(I) &&
+                      &U == &I.getOperandUse(LoadInst::getPointerOperandIndex());
+    bool IsStoreBase =
+        isa<StoreInst>(I) &&
+        &U == &I.getOperandUse(StoreInst::getPointerOperandIndex());
+    if ((!IsLoadBase && !IsStoreBase) ||
+        U->getType()->getPointerAddressSpace() != 6)
+      return false;
+
+    const auto *CE = dyn_cast<ConstantExpr>(U.get());
+    if (!CE || CE->getOpcode() != Instruction::IntToPtr)
+      return false;
+    const auto *Address = dyn_cast<ConstantInt>(CE->getOperand(0));
+    if (!Address || !Address->getType()->isIntegerTy(16))
+      return false;
+    uint64_t Value = Address->getZExtValue();
+    if (Value < 0x80 || Value > 0xfe)
+      return false;
+
+    if (IsLoadBase)
+      return cast<LoadInst>(I).getType()->isIntegerTy(8);
+    return cast<StoreInst>(I).getValueOperand()->getType()->isIntegerTy(8);
+  }
+
+  // ConstantExpr can hide an address-space-bearing operand behind an integer
+  // result, for example `ptrtoint (ptr addrspace(4) @fn to i32)`. The emitted
+  // byte-select relocations would serialize that CODE capability into a v1
+  // object even though the outer expression itself is i32. Walk the complete
+  // constant operand tree; callers exempt only an exact direct Function callee
+  // or the validated direct-AS6 memory base above.
+  static bool hasV1ObjectCompatibleConstant(
+      const Constant *C, SmallPtrSetImpl<Type *> &SeenTypes,
+      SmallPtrSetImpl<const Constant *> &SeenConstants) {
+    if (!SeenConstants.insert(C).second)
+      return true;
+    if (!hasV1PointerTypes(C->getType(), SeenTypes))
+      return false;
+    for (const Use &U : C->operands()) {
+      if (!hasV1PointerTypes(U->getType(), SeenTypes))
+        return false;
+      if (const auto *Child = dyn_cast<Constant>(U.get()))
+        if (!hasV1ObjectCompatibleConstant(Child, SeenTypes, SeenConstants))
+          return false;
+    }
     return true;
   }
 
@@ -134,14 +190,19 @@ class MCS251AsmPrinter final : public AsmPrinter {
         !M.ifunc_empty())
       return false;
 
-    SmallPtrSet<Type *, 32> Seen;
+    SmallPtrSet<Type *, 32> SeenTypes;
+    SmallPtrSet<const Constant *, 32> SeenConstants;
     for (const GlobalVariable &GV : M.globals()) {
       if (GV.getAddressSpace() != 0 ||
-          !hasV1PointerTypes(GV.getValueType(), Seen))
+          !hasV1PointerTypes(GV.getValueType(), SeenTypes))
+        return false;
+      if (GV.hasInitializer() && !hasV1ObjectCompatibleConstant(
+                                     GV.getInitializer(), SeenTypes,
+                                     SeenConstants))
         return false;
     }
     for (const Function &F : M) {
-      if (!hasV1PointerTypes(F.getFunctionType(), Seen))
+      if (!hasV1PointerTypes(F.getFunctionType(), SeenTypes))
         return false;
       unsigned Index = 0;
       for (const Argument &Arg : F.args())
@@ -149,18 +210,24 @@ class MCS251AsmPrinter final : public AsmPrinter {
           return false; // v2-sized static pointer slot.
       for (const BasicBlock &BB : F)
         for (const Instruction &I : BB) {
-          if (!hasV1PointerTypes(I.getType(), Seen))
+          if (!hasV1PointerTypes(I.getType(), SeenTypes))
             return false;
           for (const Use &U : I.operands()) {
-            // A known Function is already a typed direct CODE symbol; it does
-            // not turn into a v2 function-pointer value merely by being the
-            // callee operand. Any other non-AS0 pointer operand is a capability
-            // which the v1 identity cannot describe.
+            // The only direct-CODE exception is the exact Function value used
+            // as the call operand. Do not strip casts or descend through a
+            // ConstantExpr here: either would make a serialized CODE pointer
+            // look like a direct ecall target.
             if (const auto *CB = dyn_cast<CallBase>(&I))
-              if (&U == &CB->getCalledOperandUse() && CB->getCalledFunction())
+              if (&U == &CB->getCalledOperandUse() && isa<Function>(U.get()))
                 continue;
-            if (!hasV1PointerTypes(U->getType(), Seen))
+            if (isDirectSFRMemoryOperand(U, I))
+              continue;
+            if (!hasV1PointerTypes(U->getType(), SeenTypes))
               return false;
+            if (const auto *C = dyn_cast<Constant>(U.get()))
+              if (!hasV1ObjectCompatibleConstant(C, SeenTypes,
+                                                  SeenConstants))
+                return false;
           }
         }
     }

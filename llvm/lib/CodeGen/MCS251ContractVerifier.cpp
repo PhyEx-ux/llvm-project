@@ -383,6 +383,24 @@ static Error checkValue(const Value &V, SmallPtrSetImpl<const Type *> &Seen) {
   return checkType(V.getType(), Seen);
 }
 
+// Calls through a named LLVM function lower as GlobalAddress nodes.  Validate
+// their identity before ISel, rather than relying on pointer width or allowing
+// a default-AS0 declaration to reach LowerCall in a v2 module.  In particular,
+// a 32-bit AS0/AS3 function pointer must not be mistaken for the AS4 CODE
+// container merely because it has the same scalar width.
+static Error checkDirectCallTarget(const CallBase &CB, unsigned ProgramAS) {
+  const Value *Callee = CB.getCalledOperand()->stripPointerCasts();
+  const auto *GV = dyn_cast<GlobalValue>(Callee);
+  if (!GV)
+    return Error::success();
+  if (!isa<Function>(GV))
+    return reject("direct call target is not a function");
+  if (GV->getAddressSpace() != ProgramAS)
+    return reject("direct call target function is not in the configured CODE "
+                  "address space");
+  return Error::success();
+}
+
 // RC-3: Constant expressions (e.g. ptrtoint of a ptr addrspace(5)) can embed
 // unsupported address spaces behind an innocent result type. checkType only
 // inspects the type tree, so we must also walk the operand tree of Constants.
@@ -633,6 +651,7 @@ Error llvm::MCS251::verifyModuleContract(const Module &M,
     return Error::success();
 
   const DataLayout &DL = M.getDataLayout();
+  const unsigned ProgramAS = DL.getProgramAddressSpace();
   unsigned AS0Bits = DL.getPointerSizeInBits(0);
   if (AS0Bits != 16 && AS0Bits != 32)
     return reject("AS0 pointer width must be 16 or 32 bits");
@@ -697,6 +716,12 @@ Error llvm::MCS251::verifyModuleContract(const Module &M,
       MaybeDT.emplace(const_cast<Function &>(F));
     for (const BasicBlock &BB : F)
       for (const Instruction &I : BB) {
+        // Direct function calls must use the module's executable address
+        // space.  This catches a stale AS0 declaration in v2 before the DAG
+        // has an opportunity to coerce its scalar representation.
+        if (const auto *CB = dyn_cast<CallBase>(&I))
+          if (Error Err = checkDirectCallTarget(*CB, ProgramAS))
+            return Err;
         // RC-6: arithmetic checks run post-optimization only, so that
         // foldable or dead i64/f32/f64 operations are not falsely rejected.
         // Structural checks (types, address spaces) always run.
