@@ -27,7 +27,14 @@ public:
     IntWidth = LongWidth = PointerWidth = 32;
     LongLongWidth = 64;
     ShortAlign = IntAlign = LongAlign = LongLongAlign = PointerAlign = 8;
-    FloatAlign = DoubleAlign = LongDoubleAlign = 8;
+    FloatWidth = 32;
+    FloatAlign = 8;
+    DoubleWidth = 32;
+    DoubleAlign = 8;
+    DoubleFormat = &llvm::APFloat::IEEEsingle();
+    LongDoubleWidth = 32;
+    LongDoubleAlign = 8;
+    LongDoubleFormat = &llvm::APFloat::IEEEsingle();
     SuitableAlign = DefaultAlignForAttributeAligned = 8;
     SizeType = UnsignedLong;
     PtrDiffType = IntPtrType = SignedLong;
