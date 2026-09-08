@@ -45,8 +45,9 @@ $(error 未知 BOARD=$(BOARD)；可用型号：$(AVAILABLE_BOARDS))
 endif
 include $(BOARD_FILE)
 
-BOARD_VARIABLES := FLASH_BASE EDATA_END CSEG_BASE XINIT_BASE EEPROM_MAX \
-                   HRIC BAUD UART_RELOAD LED_PORT LED_BIT QEMU_MACHINE QEMU_NOTE
+BOARD_VARIABLES := FLASH_BASE FLASH_SIZE EDATA_END CSEG_BASE XINIT_BASE \
+                   EEPROM_MAX HRIC BAUD UART_RELOAD LED_PORT LED_BIT \
+                   QEMU_MACHINE QEMU_NOTE
 $(foreach var,$(BOARD_VARIABLES),\
   $(if $($(var)),,$(error $(BOARD_FILE) 缺少板级变量 $(var))))
 BOARD_CONFIG := $(BUILD)/board_config.h
@@ -90,6 +91,7 @@ $(BOARD_CONFIG): $(BOARD_STAMP) $(BOARD_FILE) $(HERE)Makefile | $(BUILD)
 	  printf '%s\n' '#ifndef MCS251_DEMO_BOARD_CONFIG_H'; \
 	  printf '%s\n' '#define MCS251_DEMO_BOARD_CONFIG_H'; \
 	  printf '%s\n' '#define FLASH_BASE $(FLASH_BASE)u'; \
+	  printf '%s\n' '#define FLASH_SIZE $(FLASH_SIZE)u'; \
 	  printf '%s\n' '#define EDATA_END $(EDATA_END)u'; \
 	  printf '%s\n' '#define CSEG_BASE $(CSEG_BASE)u'; \
 	  printf '%s\n' '#define XINIT_BASE $(XINIT_BASE)u'; \
@@ -128,8 +130,14 @@ $(BUILD)/demo.lk: $(HERE)link/demo.lk.in $(RELS) $(BUILD)/crt.rel $(BOARD_STAMP)
 	    -e "s|@FEATURES_REL@|$(BUILD)/features.rel|" $< | grep -v '^;' | sed '/^$$/d' > $@
 
 # 链接：板片段把实际 EDATA 末地址显式传给无型号知识的链接器。
+# FLASH_BASE/FLASH_SIZE 是 Code ROM 越界门禁（E3 lld --flash-base/--flash-size，
+# 纯数值、型号知识留在构建层）：链接器据此拒绝任何越出板上 Flash 窗口的
+# CODE 区布局（HOME/VECS/BOOT/CSEG/XINIT）。当前 mcs251_ld.py 对未知
+# --opt=value 选项仅告警忽略，接线保持前向兼容；换用 mcs251-lld 后门禁即生效。
 $(BUILD)/demo.hex: $(BUILD)/demo.lk $(RELS) $(BUILD)/crt.rel $(LINKER)
-	$(MCS251_LD) --mcs251-abi --edata-end $(EDATA_END) -f $(BUILD)/demo.lk
+	$(MCS251_LD) --mcs251-abi --edata-end $(EDATA_END) \
+	  --flash-base=$(FLASH_BASE) --flash-size=$(FLASH_SIZE) \
+	  -f $(BUILD)/demo.lk
 
 # ---------- 运行与验收 ----------
 

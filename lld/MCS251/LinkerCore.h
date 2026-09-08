@@ -31,6 +31,16 @@ struct LinkerConfig {
   uint32_t IramSize = 128;
   uint32_t EdataEnd = 0;
   uint32_t StackSize = 0;
+  // E3/M4 Code ROM gate.  Off by default: the build layer owns the decision
+  // to pass a flash window, the linker never presumes one.  When on, every
+  // occupied CODE-class section (HOME/VECS/BOOT/CSEG/XINIT) must lie entirely
+  // within [FlashBase, FlashBase + FlashSize).  Holes inside an area remain
+  // legal (sparse layout is a design feature); only occupied sections are
+  // checked.  XSEG is XDATA NOBITS in a separate address space (SPEC §4.1:
+  // no ROM load bytes) and is not gated.  The window is plain numbers only.
+  bool FlashGate = false;
+  uint32_t FlashBase = 0;
+  uint32_t FlashSize = 0;
   std::vector<std::pair<std::string, uint32_t>> AreaStarts;
   std::vector<Range> ReservedData;
   std::vector<std::string> Inputs;

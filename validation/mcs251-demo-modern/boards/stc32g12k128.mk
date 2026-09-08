@@ -3,6 +3,8 @@
 # bring-up.  QEMU currently substitutes its G144 machine; the linked image
 # stays in the FE/FF Flash intersection and retains the 4 KiB EDATA gate.
 FLASH_BASE := 0xfe0000
+# STC32G12K128: 128 KiB on-chip Flash, 0xFE0000..0xFFFFFF (24-bit top).
+FLASH_SIZE := 0x20000
 EDATA_END := 0x0fff
 CSEG_BASE := 0xff0200
 XINIT_BASE := 0xff8000

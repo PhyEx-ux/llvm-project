@@ -223,6 +223,12 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
   // either output policy or the stack gate.
   O.Core.EdataEnd = MCS251_DEFAULT_EDATA_END;
   O.Core.EnableStackGate = true;
+  // E3/M4 Code ROM gate: both flash parameters or neither. The default is no
+  // gate at all; the build layer owns the decision to pass a flash window.
+  uint32_t FlashBase = 0;
+  uint32_t FlashSize = 0;
+  bool FlashBaseGiven = false;
+  bool FlashSizeGiven = false;
   for (size_t I = 1; I < Args.size(); ++I) {
     StringRef A(Args[I]);
     auto take = [&](StringRef Name) -> std::optional<StringRef> {
@@ -264,6 +270,21 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
       if (!N)
         return fail(Err, "invalid --stack-size");
       O.Core.StackSize = *N;
+    } else if (auto V = take("--flash-base")) {
+      // Flash window start, a plain 24-bit address. No board-model knowledge
+      // lives here; the build layer supplies the number (E.5 red line).
+      auto N = number(*V);
+      if (!N || *N > 0xffffff)
+        return fail(Err, "invalid --flash-base (expected a 24-bit address)");
+      FlashBase = *N;
+      FlashBaseGiven = true;
+    } else if (auto V = take("--flash-size")) {
+      // Flash capacity in bytes; 1..0x1000000 keeps base+size in 24-bit space.
+      auto N = number(*V);
+      if (!N || *N == 0 || uint64_t(*N) > 0x1000000)
+        return fail(Err, "invalid --flash-size (expected 1..0x1000000)");
+      FlashSize = *N;
+      FlashSizeGiven = true;
     } else if (auto V = take("--area-start")) {
       size_t Eq = V->find('=');
       if (Eq == StringRef::npos)
@@ -332,6 +353,17 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
     } else {
       O.Core.Inputs.push_back(A.str());
     }
+  }
+  if (FlashBaseGiven != FlashSizeGiven)
+    return fail(Err, "--flash-base and --flash-size must be given together");
+  if (FlashBaseGiven &&
+      uint64_t(FlashBase) + uint64_t(FlashSize) > 0x1000000)
+    return fail(Err,
+                "--flash-base and --flash-size exceed the 24-bit address space");
+  if (FlashBaseGiven) {
+    O.Core.FlashGate = true;
+    O.Core.FlashBase = FlashBase;
+    O.Core.FlashSize = FlashSize;
   }
   if (O.Core.Inputs.empty())
     return fail(Err, "no input files");

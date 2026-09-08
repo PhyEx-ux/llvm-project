@@ -491,6 +491,7 @@ private:
   bool hasAreaStart(StringRef Name) const;
   bool resolveSymbols();
   bool layout();
+  bool checkFlashGate();
   bool layoutCode();
   bool layoutData();
   bool allocate(InputSection &S, uint32_t Lo, uint32_t Hi);
@@ -1006,6 +1007,48 @@ bool Linker::layoutData() {
 
 bool Linker::layout() { return layoutCode() && layoutData(); }
 
+// E3/M4: Code ROM gate.  The build layer supplies the on-board flash window
+// as two plain numbers (--flash-base/--flash-size); the linker never knows a
+// board model.  Every occupied CODE-class section (HOME/VECS/BOOT/CSEG/XINIT)
+// must fit entirely inside [FlashBase, FlashBase+FlashSize); holes between
+// sections are a design feature of the sparse layout and are not checked.
+// XSEG is XDATA NOBITS in a separate address space (SPEC §4.1: XDATA
+// reservations generate no ROM load bytes) and is exempt from this gate.
+bool Linker::checkFlashGate() {
+  if (!Config.FlashGate)
+    return true;
+  if (Config.FlashSize == 0 ||
+      uint64_t(Config.FlashBase) + Config.FlashSize > 0x1000000)
+    return fail(Err, "invalid flash window: need 0 < size and "
+                     "base+size <= 0x1000000");
+  const uint64_t Lo = Config.FlashBase;
+  const uint64_t Hi = Lo + Config.FlashSize; // One past the last flash byte.
+  auto Hex = [](uint64_t V) { return "0x" + Twine::utohexstr(V); };
+  auto IsCodeArea = [](StringRef N) {
+    return N == "HOME" || N == "VECS" || N == "BOOT" || N == "CSEG" ||
+           N == "XINIT";
+  };
+  // A configured CODE-class area start must itself sit inside the window,
+  // even when the area turns out to hold no bytes at all.
+  for (const auto &P : Config.AreaStarts)
+    if (IsCodeArea(StringRef(P.first)) && (P.second < Lo || P.second >= Hi))
+      return fail(Err, "--area-start=" + P.first + "=" + Hex(P.second) +
+                           " is outside the flash window " + Hex(Lo) + ".." +
+                           Hex(Hi) + " (--flash-base/--flash-size)");
+  for (const InputSection *S : AllSections) {
+    if (!IsCodeArea(StringRef(S->Region)) || S->Size == 0)
+      continue;
+    const uint64_t Start = S->Address;
+    const uint64_t End = Start + S->Size;
+    if (Start < Lo || End > Hi)
+      return fail(Err, "CODE ROM overflow: " + S->Name + " (" + S->Region +
+                           ") occupies " + Hex(Start) + ".." + Hex(End) +
+                           " which exceeds the flash window " + Hex(Lo) +
+                           ".." + Hex(Hi) + " (--flash-base/--flash-size)");
+  }
+  return true;
+}
+
 bool Linker::errorUndefined() {
   for (const auto &F : Files)
     for (const InputSymbol &S : F->Symbols) {
@@ -1204,8 +1247,13 @@ bool Linker::run(LinkerResult &Result) {
   InputOS.flush();
   if (Config.PrintInput)
     return true;
-  if (!resolveSymbols() || !layout() || !errorUndefined() ||
-      !applyRelocations() || !validateXInit())
+  if (!resolveSymbols() || !layout())
+    return false;
+  // The ROM gate runs after layout and before any output is produced, so a
+  // rejected image never reaches a firmware file or a map.
+  if (!checkFlashGate())
+    return false;
+  if (!errorUndefined() || !applyRelocations() || !validateXInit())
     return false;
   Result.Entry = llvm::any_of(AllSections,
                               [](const InputSection *S) { return S->Region == "HOME"; })

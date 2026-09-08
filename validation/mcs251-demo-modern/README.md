@@ -80,8 +80,12 @@ make BOARD=stc32g144k246 BUILD=/home/liu/mcs251-demo-g144 check
 
 型号差异只存在于构建层：`boards/<BOARD>.mk` 提供 Flash/EDATA、链接布局、
 UART/LED 与 QEMU 参数；Makefile 生成 `$(BUILD)/board_config.h` 给 C 源消费，并把
-`EDATA_END` 作为纯数值 `--edata-end` 参数传给链接器。Clang/LLVM/MC 与链接器
-内部都不含型号表或型号自动探测；编译器只认识 MCS-251 架构。
+`EDATA_END` 与 Flash 窗口（`FLASH_BASE`/`FLASH_SIZE`）作为纯数值参数传给链接器。
+`--flash-base`/`--flash-size` 是 E3 lld 的 Code ROM 越界门禁：任何越出板上 Flash
+窗口的 CODE 区布局（HOME/VECS/BOOT/CSEG/XINIT）都会被响亮拒绝，杜绝产出烧不进
+的坏固件；当前 `mcs251_ld.py` 对未知 `--opt=value` 选项仅告警忽略，该接线保持
+前向兼容。Clang/LLVM/MC 与链接器内部都不含型号表或型号自动探测；编译器只认识
+MCS-251 架构。
 
 | BOARD | 数据依据 | EDATA 门禁 | QEMU 说明 |
 |---|---|---:|---|

@@ -3,6 +3,8 @@
 # XDATA.  The demo deliberately keeps the same conservative FE/FF layout as
 # the real-hardware profile so one source and one set of link rules serve both.
 FLASH_BASE := 0xfc2800
+# STC32G144K246: Flash 0xFC2800..0xFFFFFF = 0x3D800 bytes (246 KiB usable).
+FLASH_SIZE := 0x3d800
 EDATA_END := 0x3fff
 CSEG_BASE := 0xff0200
 XINIT_BASE := 0xff8000

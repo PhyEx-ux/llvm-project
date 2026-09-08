@@ -1,0 +1,194 @@
+#
+# E3/M4: Code ROM gate (--flash-base/--flash-size).
+# - Default (no flash args): no gate at all, behavior unchanged.
+# - Area starts of CODE-class areas (HOME/VECS/BOOT/CSEG/XINIT) must sit in
+#   the flash window, even when the area is empty.
+# - Every occupied CODE-class section must fit entirely in the window;
+#   ending exactly at FLASH_END-1 passes, one byte over is rejected.
+# - base+size == 0x1000000 is the legal upper edge of the 24-bit space.
+# - XSEG is XDATA (separate address space, no ROM bytes; SPEC 4.1) and is
+#   exempt from the gate.
+# - Pair validation: both options or neither; size >= 1; base is 24-bit.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj code2.yaml -o code2.o
+# RUN: yaml2obj code3.yaml -o code3.o
+# RUN: yaml2obj vecs.yaml -o vecs.o
+# RUN: yaml2obj xseg.yaml -o xseg.o
+
+# --- No flash arguments: no gate, CSEG far below any board flash links ---
+# RUN: mcs251-lld code2.o --area-start=CSEG=0x000100 \
+# RUN:   -o %t/nogate.elf && test -f %t/nogate.elf
+
+# --- G12-shaped window: base+size == 0x1000000 is legal, CSEG inside ---
+# RUN: mcs251-lld code2.o --area-start=CSEG=0xff0200 \
+# RUN:   --flash-base=0xfe0000 --flash-size=0x20000 \
+# RUN:   -o %t/g12.elf && test -f %t/g12.elf
+
+# --- CSEG above the flash upper bound: reject the area start ---
+# RUN: not mcs251-lld code2.o --area-start=CSEG=0xff0200 \
+# RUN:   --flash-base=0x000000 --flash-size=0x010000 \
+# RUN:   -o %t/above.elf 2>&1 | FileCheck %s --check-prefix=ABOVE
+# ABOVE: mcs251 linker: error: --area-start=CSEG=0xff0200 is outside the flash window 0x0..0x10000 (--flash-base/--flash-size)
+
+# --- VECS area start below the flash base: rejected with the window printed ---
+# RUN: not mcs251-lld vecs.o --area-start=VECS=0x000003 \
+# RUN:   --area-start=CSEG=0xff0200 \
+# RUN:   --flash-base=0xfe0000 --flash-size=0x20000 \
+# RUN:   -o %t/vec.elf 2>&1 | FileCheck %s --check-prefix=VECSOUT
+# VECSOUT: mcs251 linker: error: --area-start=VECS=0x3 is outside the flash window 0xfe0000..0x1000000 (--flash-base/--flash-size)
+
+# --- XINIT area start outside flash is rejected even with no XINIT section ---
+# RUN: not mcs251-lld code2.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0x000000 \
+# RUN:   --flash-base=0xfe0000 --flash-size=0x20000 \
+# RUN:   -o %t/xinitout.elf 2>&1 | FileCheck %s --check-prefix=XINITOUT
+# XINITOUT: mcs251 linker: error: --area-start=XINIT=0x0 is outside the flash window 0xfe0000..0x1000000 (--flash-base/--flash-size)
+
+# --- Boundary positive: section ends exactly at FLASH_END (last byte = END-1) ---
+# RUN: mcs251-lld code2.o --area-start=CSEG=0xfefffe \
+# RUN:   --flash-base=0xfe0000 --flash-size=0x10000 \
+# RUN:   -o %t/edge-ok.elf && test -f %t/edge-ok.elf
+
+# --- Boundary negative: one byte over FLASH_END is rejected, no firmware ---
+# RUN: rm -f %t/edge-over.elf
+# RUN: not mcs251-lld code3.o --area-start=CSEG=0xfefffe \
+# RUN:   --flash-base=0xfe0000 --flash-size=0x10000 \
+# RUN:   -o %t/edge-over.elf 2>%t/edge-over.err
+# RUN: test ! -f %t/edge-over.elf
+# RUN: FileCheck %s --check-prefix=EDGE < %t/edge-over.err
+# EDGE: mcs251 linker: error: CODE ROM overflow: .text (CSEG) occupies 0xfefffe..0xff0001 which exceeds the flash window 0xfe0000..0xff0000 (--flash-base/--flash-size)
+
+# --- XSEG is XDATA (no ROM bytes), outside flash must NOT be gated ---
+# RUN: mcs251-lld xseg.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XSEG=0x000000 \
+# RUN:   --flash-base=0xfe0000 --flash-size=0x20000 \
+# RUN:   -o %t/xseg.elf && test -f %t/xseg.elf
+
+# --- Pair validation: only one of the two options is rejected ---
+# RUN: not mcs251-lld code2.o --area-start=CSEG=0xff0200 \
+# RUN:   --flash-base=0xfe0000 \
+# RUN:   -o %t/only-base.elf 2>&1 | FileCheck %s --check-prefix=PAIR
+# PAIR: --flash-base and --flash-size must be given together
+# RUN: not mcs251-lld code2.o --area-start=CSEG=0xff0200 \
+# RUN:   --flash-size=0x20000 \
+# RUN:   -o %t/only-size.elf 2>&1 | FileCheck %s --check-prefix=PAIR
+
+# --- base+size over the 24-bit address space is rejected ---
+# RUN: not mcs251-lld code2.o --area-start=CSEG=0xff0200 \
+# RUN:   --flash-base=0xfe0000 --flash-size=0x30000 \
+# RUN:   -o %t/sum.elf 2>&1 | FileCheck %s --check-prefix=SUM
+# SUM: --flash-base and --flash-size exceed the 24-bit address space
+
+# --- size=0 and base beyond 24 bits are rejected ---
+# RUN: not mcs251-lld code2.o --area-start=CSEG=0xff0200 \
+# RUN:   --flash-base=0x0 --flash-size=0 \
+# RUN:   -o %t/zero.elf 2>&1 | FileCheck %s --check-prefix=ZEROSIZE
+# ZEROSIZE: invalid --flash-size
+# RUN: not mcs251-lld code2.o --area-start=CSEG=0xff0200 \
+# RUN:   --flash-base=0x1000000 --flash-size=0x10 \
+# RUN:   -o %t/badbase.elf 2>&1 | FileCheck %s --check-prefix=BADBASE
+# BADBASE: invalid --flash-base
+
+#--- code2.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- code3.yaml
+# Same as code2.yaml but 3 bytes: used to cross FLASH_END by exactly one byte.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- vecs.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.VECS
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- xseg.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
