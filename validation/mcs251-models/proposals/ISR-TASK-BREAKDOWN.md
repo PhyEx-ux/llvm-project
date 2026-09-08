@@ -23,7 +23,7 @@
    ```bash
    wsl.exe -d Debian -e bash -c '...'
    ```
-7. **构建前先 `pgrep -a ninja`,取得 PM 的构建树锁后才运行 `ninja -j4`。**
+7. **构建前先 `pgrep -a ninja`,取得 PM 的构建树锁后才运行 `ninja -j8`。**(并行度 8 为用户 2026-09-09 批准,覆盖本文最初的 -j4。)
 8. 不允许自行修改 CMake 配置、提高并行度、终止其他人的构建。
 9. 不允许 `git commit`、push、reset、clean、stash 或整文件恢复。
 10. 工作区原有未跟踪文件一律不碰,不纳入整理、格式化、测试输入或删除范围。
@@ -691,7 +691,7 @@ cmake -G Ninja \
 wsl.exe -d Debian -e bash -c '
 set -eu
 pgrep -a ninja || true
-ninja -C TREE -j4 clang llc opt llvm-as llvm-dis llvm-readobj \
+ninja -C TREE -j8 clang llc opt llvm-as llvm-dis llvm-readobj \
   llvm-objcopy yaml2obj FileCheck not split-file
 '
 ```
@@ -721,7 +721,7 @@ lld:
 wsl.exe -d Debian -e bash -c '
 set -eu
 pgrep -a ninja || true
-ninja -C /home/liu/build-mcs251-isr-lld -j4 lld
+ninja -C /home/liu/build-mcs251-isr-lld -j8 lld
 /home/liu/build-mcs251-isr-link/bin/llvm-lit -sv \
   /home/liu/build-mcs251-isr-lld/test/MCS251
 '
