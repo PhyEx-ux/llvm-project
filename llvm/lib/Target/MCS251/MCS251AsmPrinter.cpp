@@ -247,6 +247,48 @@ class MCS251AsmPrinter final : public AsmPrinter {
     emitInitializerZeros(DL.getTypeStoreSize(ST) - Pos);
   }
 
+  // Read-only CSEG data: i8/i16/i32 scalars and (possibly nested) arrays of
+  // them, nonempty at every level, every leaf a ConstantInt.  Struct
+  // aggregates, zeroinitializers, undef elements and initializer relocations
+  // (pointer tables) are all rejected here and reported by the caller's
+  // policy message.
+  static bool isSupportedROInitializer(const Constant *C) {
+    Type *Ty = C->getType();
+    if (isa<ConstantInt>(C))
+      return Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32);
+    auto *AT = dyn_cast<ArrayType>(Ty);
+    if (!AT || !AT->getNumElements() ||
+        (!isa<ConstantDataArray>(C) && !isa<ConstantArray>(C)))
+      return false;
+    for (unsigned I = 0; I != AT->getNumElements(); ++I) {
+      const Constant *Element = C->getAggregateElement(I);
+      if (!Element || !isSupportedROInitializer(Element))
+        return false;
+    }
+    return true;
+  }
+
+  // Emits the CSEG byte image of a read-only initializer: scalars in the
+  // established target (big-endian) memory order, nested arrays element by
+  // element with stride padding (zero for the packed integer layouts this
+  // path accepts).  The image is always byte-aligned: any IR-level alignment
+  // above 1 on the global is deliberately demoted, because MCS-251 needs no
+  // address alignment for word accesses (QEMU + real hardware verified).
+  void emitROInitializer(const DataLayout &DL, const Constant *C) {
+    if (auto *CI = dyn_cast<ConstantInt>(C)) {
+      OutStreamer->emitIntValue(CI->getZExtValue(),
+                                DL.getTypeStoreSize(C->getType()));
+      return;
+    }
+    auto *AT = cast<ArrayType>(C->getType());
+    uint64_t StoreSize = DL.getTypeStoreSize(AT->getElementType());
+    uint64_t Stride = DL.getTypeAllocSize(AT->getElementType());
+    for (unsigned I = 0; I != AT->getNumElements(); ++I) {
+      emitROInitializer(DL, C->getAggregateElement(I));
+      emitInitializerZeros(Stride - StoreSize);
+    }
+  }
+
 public:
   static char ID;
 
@@ -407,8 +449,9 @@ public:
       if (GV->isConstant())
         report_fatal_error(
             "MCS251: defined global data requires a byte-aligned read-only "
-            "CSEG i8/i16/i32 scalar or nonempty initialized integer array; "
-            "mutable data, zeroinitializers, custom sections, TLS, weak/COMDAT, "
+            "CSEG i8/i16/i32 scalar or nonempty initialized integer array "
+            "of any alignment (emitted byte-aligned); mutable data, "
+            "zeroinitializers, custom sections, TLS, weak/COMDAT, "
             "aggregates and initializer relocations are not supported");
       report_fatal_error(
           "MCS251: defined global data requires byte-aligned default-address-"
@@ -423,13 +466,20 @@ public:
           "MCS251: ordinary AS0 constants are not supported by the 16-bit "
           "memory contract until RAM runtime-copy initialization is "
           "implemented; use an explicit CODE object when that ABI is available");
+    // Read-only integer arrays accept any declared alignment: the CSEG byte
+    // image is emitted packed (byte-aligned) regardless, which MCS-251
+    // permits for word accesses (QEMU + real hardware verified).  Scalars
+    // and all mutable DSEG storage keep the byte-alignment requirement.
+    const bool AlignedROArrayOK =
+        GV->isConstant() && isa<ArrayType>(GV->getValueType());
     if (GV->isThreadLocal() || GV->getAddressSpace() != 0 || GV->hasSection() ||
         GV->hasComdat() ||
         (!GV->hasExternalLinkage() && !GV->hasLocalLinkage()) ||
         GV->getVisibility() != GlobalValue::DefaultVisibility ||
         GV->getDLLStorageClass() != GlobalValue::DefaultStorageClass ||
-        GV->getAlign().valueOrOne() != Align(1) ||
-        DL.getABITypeAlign(GV->getValueType()) != Align(1))
+        (!AlignedROArrayOK && (GV->getAlign().valueOrOne() != Align(1) ||
+                               DL.getABITypeAlign(GV->getValueType()) !=
+                                   Align(1))))
       Reject();
 
     const Constant *Init = GV->getInitializer();
@@ -476,34 +526,14 @@ public:
       return;
     }
 
-    auto IsSupportedInt = [](Type *Ty) {
-      return Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32);
-    };
-    if (auto *AT = dyn_cast<ArrayType>(Init->getType())) {
-      if (!AT->getNumElements() || !IsSupportedInt(AT->getElementType()) ||
-          (!isa<ConstantDataArray>(Init) && !isa<ConstantArray>(Init)))
-        Reject();
-      for (uint64_t I = 0; I != AT->getNumElements(); ++I)
-        if (!isa_and_nonnull<ConstantInt>(Init->getAggregateElement(I)))
-          Reject();
-    } else if (!isa<ConstantInt>(Init) || !IsSupportedInt(Init->getType())) {
+    if (!isSupportedROInitializer(Init))
       Reject();
-    }
 
     // Read-only globals and string literals stay in the established CSEG path.
     OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
     emitLinkage(GV, Sym);
     OutStreamer->emitLabel(Sym);
-    if (auto *AT = dyn_cast<ArrayType>(Init->getType())) {
-      unsigned Bytes = DL.getTypeStoreSize(AT->getElementType());
-      for (uint64_t I = 0; I != AT->getNumElements(); ++I)
-        OutStreamer->emitIntValue(
-            cast<ConstantInt>(Init->getAggregateElement(I))->getZExtValue(),
-            Bytes);
-    } else {
-      OutStreamer->emitIntValue(cast<ConstantInt>(Init)->getZExtValue(),
-                               DL.getTypeStoreSize(Init->getType()));
-    }
+    emitROInitializer(DL, Init);
   }
 };
 } // namespace
