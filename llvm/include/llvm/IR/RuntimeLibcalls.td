@@ -483,6 +483,9 @@ def FPROUND_F80_F64 : RuntimeLibcall;
 def FPROUND_F128_F64 : RuntimeLibcall;
 def FPROUND_PPCF128_F64 : RuntimeLibcall;
 def FPROUND_F128_F80 : RuntimeLibcall;
+// Unlike most targets, MCS251 requires FNEG to preserve an explicit runtime
+// ABI boundary instead of softening it to integer XOR.
+def NEG_F32 : RuntimeLibcall;
 def FPTOSINT_F16_I32 : RuntimeLibcall;
 def FPTOSINT_F16_I64 : RuntimeLibcall;
 def FPTOSINT_F16_I128 : RuntimeLibcall;
@@ -2950,14 +2953,16 @@ def __mips16_unordsf2 : RuntimeLibcallImpl<UO_F32>;
 // MCS251 Runtime Libcalls
 //===----------------------------------------------------------------------===//
 
-// The target's '_' prefix turns these C-level names into the SDCC-compatible
-// __divuint/__divulong/__divsint/__divslong/__moduint/__modulong/__modsint/
-// __modslong symbols. All eight integer division/remainder helpers are
-// provided by llvm/lib/Target/MCS251/Runtime (division design v4 §5.3/§5.4).
-// No i8 or i64 helper exists: i8 promotes to i16 (MCS251ISelLowering, and
-// SDCC promotes char arithmetic too), i64 is unsupported by design (v4
-// §10-Q8) -- widening/expansion of i64 falls to makeLibCall with no impl
-// in MCS251SystemLibrary and fails loudly.
+// The target's '_' prefix turns these C-level names into SDCC-compatible
+// linker symbols with a leading '__'. MCS251ConnectedF32Libcalls is the sole
+// supported-f32 contract: RuntimeLibcalls.td exposes exactly these helpers,
+// while the generated isMCS251ConnectedF32Libcall classifier is consumed by
+// MCS251 ISel and the contract verifier. Do not add unsigned, DI, f64 or libm
+// helpers here without an implemented runtime and a corresponding ABI review.
+//
+// Integer division/remainder helpers are provided by
+// llvm/lib/Target/MCS251/Runtime. No i8 or i64 helper exists: i8 promotes to
+// i16 and i64 is unsupported by design.
 def mcs251_divuint : RuntimeLibcallImpl<UDIV_I16, "_divuint">;
 def mcs251_divulong : RuntimeLibcallImpl<UDIV_I32, "_divulong">;
 def mcs251_divsint : RuntimeLibcallImpl<SDIV_I16, "_divsint">;
@@ -2966,11 +2971,31 @@ def mcs251_moduint : RuntimeLibcallImpl<UREM_I16, "_moduint">;
 def mcs251_modulong : RuntimeLibcallImpl<UREM_I32, "_modulong">;
 def mcs251_modsint : RuntimeLibcallImpl<SREM_I16, "_modsint">;
 def mcs251_modslong : RuntimeLibcallImpl<SREM_I32, "_modslong">;
+
+// IEEE-754 binary32 helpers implemented by validation/mcs251-runtime.
+// This defset is intentionally the one source for the exposed f32 subset.
+defset list<RuntimeLibcallImpl> MCS251ConnectedF32Libcalls = {
+  def mcs251_addsf3 : RuntimeLibcallImpl<ADD_F32, "_addsf3">;
+  def mcs251_subsf3 : RuntimeLibcallImpl<SUB_F32, "_subsf3">;
+  def mcs251_mulsf3 : RuntimeLibcallImpl<MUL_F32, "_mulsf3">;
+  def mcs251_divsf3 : RuntimeLibcallImpl<DIV_F32, "_divsf3">;
+  def mcs251_negsf2 : RuntimeLibcallImpl<NEG_F32, "_negsf2">;
+  def mcs251_eqsf2 : RuntimeLibcallImpl<FCMP3_PRED_OEQ_F32, "_eqsf2">;
+  def mcs251_nesf2 : RuntimeLibcallImpl<FCMP3_PRED_UNE_F32, "_nesf2">;
+  def mcs251_ltsf2 : RuntimeLibcallImpl<FCMP3_PRED_OLT_F32, "_ltsf2">;
+  def mcs251_lesf2 : RuntimeLibcallImpl<FCMP3_PRED_OLE_F32, "_lesf2">;
+  def mcs251_gtsf2 : RuntimeLibcallImpl<FCMP3_PRED_OGT_F32, "_gtsf2">;
+  def mcs251_gesf2 : RuntimeLibcallImpl<FCMP3_PRED_OGE_F32, "_gesf2">;
+  def mcs251_unordsf2 : RuntimeLibcallImpl<UO_F32, "_unordsf2">;
+  def mcs251_floatsisf : RuntimeLibcallImpl<SINTTOFP_I32_F32, "_floatsisf">;
+  def mcs251_fixsfsi : RuntimeLibcallImpl<FPTOSINT_F32_I32, "_fixsfsi">;
+}
 def IsMCS251 : LibcallPredicate<[{TT.getArch() == Triple::mcs251}]>;
 def isMCS251 : RuntimeLibcallAvailability<(all_of IsMCS251)>;
 def MCS251SystemLibrary : SystemRuntimeLibrary<isMCS251,
     (add mcs251_divuint, mcs251_divulong, mcs251_divsint, mcs251_divslong,
-         mcs251_moduint, mcs251_modulong, mcs251_modsint, mcs251_modslong)>;
+         mcs251_moduint, mcs251_modulong, mcs251_modsint, mcs251_modslong,
+         MCS251ConnectedF32Libcalls)>;
 
 //===----------------------------------------------------------------------===//
 // MSP430 Runtime Libcalls

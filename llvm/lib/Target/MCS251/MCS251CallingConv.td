@@ -6,12 +6,14 @@
 //   i8  return value: dpl                    (mov dpl, ... ; eret)
 //   i16 return value: dpl:dph (dpl = low byte, dph = high byte)
 //   i32 return value: dpl:dph:b:a (least-significant byte first)
+//   f32 return value: same binary32 payload lanes as i32
 //
 // Argument ABI, also measured on the same toolchain/hardware:
 //
 //   i8  first argument: dpl
 //   i16 first argument: dpl:dph (dpl = low byte, dph = high byte), i.e. dptr
 //   i32 first argument: dpl:dph:b:a (least-significant byte first)
+//   f32 first argument: same binary32 payload lanes as i32
 //
 // SDCC passes the second and later arguments in static OSEG overlay slots
 // (_FUNCNAME_PARM_n), not on the stack and not in registers. That scheme is
@@ -29,11 +31,11 @@
 def RetCC_MCS251 : CallingConv<[
   CCIfType<[i8],  CCAssignToReg<[DPL]>>,
   CCIfType<[i16], CCAssignToReg<[DPTR]>>,
-  CCIfType<[i32], CCAssignToReg<[DPL]>>
+  CCIfType<[i32, f32], CCAssignToReg<[DPL]>>
 ]>;
 
 def CC_MCS251 : CallingConv<[
   CCIfType<[i8],  CCAssignToReg<[DPL]>>,
   CCIfType<[i16], CCAssignToReg<[DPTR]>>,
-  CCIfType<[i32], CCAssignToReg<[DPL]>>
+  CCIfType<[i32, f32], CCAssignToReg<[DPL]>>
 ]>;

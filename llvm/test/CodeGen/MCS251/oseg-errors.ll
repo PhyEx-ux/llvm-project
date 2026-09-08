@@ -5,7 +5,7 @@
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/aggregate-call.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/empty.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/i64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/float.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/f64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/indirect.ll -o - 2>&1 | FileCheck %s --check-prefix=INDIRECT
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/weak.ll -o - 2>&1 | FileCheck %s --check-prefix=LINKAGE
 ;
@@ -30,8 +30,8 @@
  define void @f({} %a) { ret void }
 ;--- i64.ll
  define void @f(i64 %a) { ret void }
-;--- float.ll
- define void @f(float %a) { ret void }
+;--- f64.ll
+ define void @f(double %a) { ret void }
 ;--- indirect.ll
  define void @f(ptr %p) { call void %p(i8 1, i16 2) ret void }
 ;--- weak.ll

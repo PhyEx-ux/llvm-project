@@ -17,6 +17,7 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/IR/RuntimeLibcalls.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Pass.h"
@@ -428,21 +429,86 @@ static Error checkConstantTree(const Constant *C,
   return Error::success();
 }
 
-// DF0 task 2: f32/f64/i64 arithmetic, comparison and conversion operations are
-// not yet implemented. Type legalization silently promotes i64 to two i32 ops
-// and softens float to generic libcalls that have no target impl, producing
-// wrong code or late cryptic errors. Catch them at the IR level instead.
-// Pure zext/trunc/ptrtoint/inttoptr/bitcast round-trips through i64 are
-// harmless (they fold to the narrow type) and are NOT rejected here; only
+// MCS251 exposes only RuntimeLibcalls.td's generated binary32 subset. Real
+// f64 IR is never an alias for that subset even though the frontend's target
+// double ABI width is 32: routing it to f32 helpers would silently lose
+// precision. Pure zext/trunc/ptrtoint/inttoptr/bitcast round-trips through i64
+// are harmless (they fold to the narrow type) and are NOT rejected here; only
 // operations that actually compute on the wide/float value are.
 // DT carries the dominance information used by the shared alloca
 // constant-propagation safety query (RC-7); it may be null, in which case
 // getProvenLoadConstant falls back to a conservative same-block check.
+static RTLIB::Libcall getMCS251F32BinaryLibcall(unsigned Opcode) {
+  switch (Opcode) {
+  case Instruction::FAdd:
+    return RTLIB::ADD_F32;
+  case Instruction::FSub:
+    return RTLIB::SUB_F32;
+  case Instruction::FMul:
+    return RTLIB::MUL_F32;
+  case Instruction::FDiv:
+    return RTLIB::DIV_F32;
+  default:
+    return RTLIB::UNKNOWN_LIBCALL;
+  }
+}
+
+static bool hasMCS251ConnectedF32Compare(CmpInst::Predicate Pred) {
+  auto Has = [](RTLIB::Libcall LC) {
+    return isMCS251ConnectedF32Libcall(LC);
+  };
+  switch (Pred) {
+  case CmpInst::FCMP_FALSE:
+  case CmpInst::FCMP_TRUE:
+    return true;
+  case CmpInst::FCMP_OEQ:
+    return Has(RTLIB::FCMP3_PRED_OEQ_F32);
+  case CmpInst::FCMP_UEQ:
+  case CmpInst::FCMP_ONE:
+    return Has(RTLIB::UO_F32) && Has(RTLIB::FCMP3_PRED_OEQ_F32);
+  case CmpInst::FCMP_UNE:
+    return Has(RTLIB::FCMP3_PRED_UNE_F32);
+  case CmpInst::FCMP_OGT:
+  case CmpInst::FCMP_ULE:
+    return Has(RTLIB::FCMP3_PRED_OGT_F32);
+  case CmpInst::FCMP_OGE:
+  case CmpInst::FCMP_ULT:
+    return Has(RTLIB::FCMP3_PRED_OGE_F32);
+  case CmpInst::FCMP_OLT:
+  case CmpInst::FCMP_UGE:
+    return Has(RTLIB::FCMP3_PRED_OLT_F32);
+  case CmpInst::FCMP_OLE:
+  case CmpInst::FCMP_UGT:
+    return Has(RTLIB::FCMP3_PRED_OLE_F32);
+  case CmpInst::FCMP_ORD:
+  case CmpInst::FCMP_UNO:
+    return Has(RTLIB::UO_F32);
+  default:
+    return false;
+  }
+}
+
 static Error checkUnsupportedArithmetic(const Instruction &I,
                                         const DominatorTree *DT) {
   auto IsWideOrFloat = [](Type *Ty) {
     return Ty->isFloatTy() || Ty->isDoubleTy() || Ty->isIntegerTy(64);
   };
+  auto IsDoubleOrDoubleVector = [](Type *Ty) {
+    if (auto *VecTy = dyn_cast<VectorType>(Ty))
+      Ty = VecTy->getElementType();
+    return Ty->isDoubleTy();
+  };
+
+  // Do this before the fold/dead-code exemptions below. A genuine f64 IR node
+  // is never permitted to reach any MCS251 lowering path, even if a local
+  // constant folder could erase this particular instance.
+  if (IsDoubleOrDoubleVector(I.getType()))
+    return reject("f64 IR is not supported; MCS251 only connects an explicit "
+                  "f32 libcall subset");
+  for (const Use &Op : I.operands())
+    if (IsDoubleOrDoubleVector(Op->getType()))
+      return reject("f64 IR is not supported; MCS251 only connects an explicit "
+                    "f32 libcall subset");
 
   // RC-6: Skip operations that will never reach the backend:
   //  1. All-constant operations are folded by the SelectionDAG constant
@@ -521,9 +587,20 @@ static Error checkUnsupportedArithmetic(const Instruction &I,
     return Ty->isFloatTy() || Ty->isDoubleTy() || Ty->isIntegerTy(64);
   };
 
-  // FP-specific binary/unary ops.
+  // FP-specific binary/unary ops. f32 is admitted only when its generated
+  // RuntimeLibcalls.td classification names a connected helper. Real f64 is
+  // always rejected, regardless of TargetInfo's frontend double ABI width.
   if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
     Type *Ty = BO->getType();
+    if (Ty->isDoubleTy())
+      return reject("f64 arithmetic is not supported; MCS251 only connects an "
+                    "explicit f32 libcall subset");
+    if (Ty->isFloatTy()) {
+      RTLIB::Libcall LC = getMCS251F32BinaryLibcall(BO->getOpcode());
+      if (LC != RTLIB::UNKNOWN_LIBCALL && isMCS251ConnectedF32Libcall(LC))
+        return Error::success();
+      return reject("f32 operation is not in the connected libcall subset");
+    }
     if (IsWideOrFloat(Ty) || ElementTypeIsWideOrFloat(Ty)) {
       switch (BO->getOpcode()) {
       default:
@@ -554,15 +631,16 @@ static Error checkUnsupportedArithmetic(const Instruction &I,
     }
   }
 
-  // RC-5: fneg is a UnaryOperator. Float softening silently turns it into an
-  // integer XOR, bypassing the DAG-level Custom lowering. Reject at the IR
-  // level so the failure is loud.
   if (auto *UO = dyn_cast<UnaryOperator>(&I)) {
     Type *Ty = UO->getType();
-    if ((IsWideOrFloat(Ty) || ElementTypeIsWideOrFloat(Ty)) &&
-        UO->getOpcode() == Instruction::FNeg)
-      return reject("f32/f64 fneg is not yet implemented; "
-                    "soft-float runtime is not connected");
+    if (UO->getOpcode() == Instruction::FNeg) {
+      if (Ty->isFloatTy() && isMCS251ConnectedF32Libcall(RTLIB::NEG_F32))
+        return Error::success();
+      if (Ty->isDoubleTy())
+        return reject("f64 fneg is not supported; MCS251 only connects an "
+                      "explicit f32 libcall subset");
+      return reject("f32 fneg is not in the connected libcall subset");
+    }
   }
 
   // RC-5: Intrinsic float math (fabs, sqrt, ceil, floor, etc.) is lowered
@@ -613,28 +691,40 @@ static Error checkUnsupportedArithmetic(const Instruction &I,
     }
   }
 
-  // Float comparisons.
+  // Float comparisons stay on TargetLowering::softenSetCCOperands. The
+  // generic routine composes ordered/unordered predicates from the seven
+  // predicate helpers below; no target-specific SETCC libcall selection exists.
   if (auto *Cmp = dyn_cast<CmpInst>(&I)) {
     if (Cmp->getPredicate() >= CmpInst::FCMP_FALSE &&
-        Cmp->getPredicate() <= CmpInst::FCMP_TRUE)
-      return reject("f32/f64 comparison is not yet implemented; "
-                    "soft-float runtime is not connected");
+        Cmp->getPredicate() <= CmpInst::FCMP_TRUE) {
+      if (Cmp->getOperand(0)->getType()->isFloatTy() &&
+          hasMCS251ConnectedF32Compare(Cmp->getPredicate()))
+        return Error::success();
+      return reject("f32 comparison is not in the connected libcall subset");
+    }
     if (IsWideOrFloat(Cmp->getOperand(0)->getType()) ||
         ElementTypeIsWideOrFloat(Cmp->getOperand(0)->getType()))
       return reject("i64 comparison is not yet implemented; "
                     "wide-integer runtime is not connected");
   }
 
-  // Conversions involving float or i64 results.
+  // The only conversion helpers are signed i32 <-> f32. Narrow and unsigned
+  // forms deliberately remain absent: no __floatunsisf/__fixunssfsi exists.
   if (auto *CI = dyn_cast<CastInst>(&I)) {
     Type *SrcTy = CI->getSrcTy();
     Type *DstTy = CI->getDestTy();
+    if (CI->getOpcode() == Instruction::SIToFP && SrcTy->isIntegerTy(32) &&
+        DstTy->isFloatTy() &&
+        isMCS251ConnectedF32Libcall(RTLIB::SINTTOFP_I32_F32))
+      return Error::success();
+    if (CI->getOpcode() == Instruction::FPToSI && SrcTy->isFloatTy() &&
+        DstTy->isIntegerTy(32) &&
+        isMCS251ConnectedF32Libcall(RTLIB::FPTOSINT_F32_I32))
+      return Error::success();
     bool SrcFloat = SrcTy->isFloatTy() || SrcTy->isDoubleTy();
     bool DstFloat = DstTy->isFloatTy() || DstTy->isDoubleTy();
-    // FPToInt / IntToFP / FPExt / FPTrunc are all unsupported.
     if ((SrcFloat || DstFloat) && CI->getOpcode() != Instruction::BitCast)
-      return reject("float conversion is not yet implemented; "
-                    "soft-float runtime is not connected");
+      return reject("f32 conversion is not in the connected libcall subset");
     // i64 results from zext/sext are fine if they only feed trunc/ptrtoint
     // round-trips; the arithmetic check above catches real i64 use.
   }

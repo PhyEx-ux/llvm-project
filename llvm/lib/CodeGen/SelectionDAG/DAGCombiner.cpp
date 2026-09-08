@@ -18323,7 +18323,14 @@ SDValue DAGCombiner::visitBITCAST(SDNode *N) {
   //     flipbit = (and (extract_element (bitcast x), 0), signbit)
   //     (xor (bitcast x) (build_pair flipbit, flipbit))
   // This often reduces constant pool loads.
-  if (((N0.getOpcode() == ISD::FNEG && !TLI.isFNegFree(N0.getValueType())) ||
+  // A target that provides an explicit NEG_F32 helper needs this FNEG to
+  // survive until float softening emits its ABI call. Do not canonicalize it
+  // into an integer XOR merely because a sole bitcast user exposes the bits.
+  const bool HasExplicitF32Neg =
+      N0.getOpcode() == ISD::FNEG && N0.getValueType() == MVT::f32 &&
+      DAG.getLibcalls().getLibcallImpl(RTLIB::NEG_F32) != RTLIB::Unsupported;
+  if (((N0.getOpcode() == ISD::FNEG && !TLI.isFNegFree(N0.getValueType()) &&
+        !HasExplicitF32Neg) ||
        (N0.getOpcode() == ISD::FABS && !TLI.isFAbsFree(N0.getValueType()))) &&
       N0->hasOneUse() && VT.isInteger() && !VT.isVector() &&
       !N0.getValueType().isVector()) {
@@ -31145,8 +31152,12 @@ SDValue DAGCombiner::foldSignChangeInBitcast(SDNode *N) {
   EVT VT = N->getValueType(0);
   bool IsFabs = N->getOpcode() == ISD::FABS;
   bool IsFree = IsFabs ? TLI.isFAbsFree(VT) : TLI.isFNegFree(VT);
+  const bool HasExplicitF32Neg =
+      !IsFabs && VT == MVT::f32 &&
+      DAG.getLibcalls().getLibcallImpl(RTLIB::NEG_F32) != RTLIB::Unsupported;
 
-  if (IsFree || N0.getOpcode() != ISD::BITCAST || !N0.hasOneUse())
+  if (IsFree || HasExplicitF32Neg || N0.getOpcode() != ISD::BITCAST ||
+      !N0.hasOneUse())
     return SDValue();
 
   SDValue Int = N0.getOperand(0);

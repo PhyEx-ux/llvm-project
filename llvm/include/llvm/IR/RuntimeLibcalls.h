@@ -38,6 +38,10 @@
 
 namespace llvm {
 
+#define GET_MCS251_CONNECTED_F32_LIBCALL_CLASSIFIER
+#include "llvm/IR/RuntimeLibcalls.inc"
+
+
 template <> struct enum_iteration_traits<RTLIB::Libcall> {
   static constexpr bool is_iterable = true;
 };

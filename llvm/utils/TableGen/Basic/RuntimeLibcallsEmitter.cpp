@@ -82,6 +82,7 @@ private:
   RuntimeLibcalls Libcalls;
 
   void emitGetRuntimeLibcallEnum(raw_ostream &OS) const;
+  void emitMCS251ConnectedF32LibcallClassifier(raw_ostream &OS) const;
 
   void emitNameMatchHashTable(raw_ostream &OS,
                               StringToOffsetTable &OffsetTable) const;
@@ -159,6 +160,44 @@ void RuntimeLibcallEmitter::emitGetRuntimeLibcallEnum(raw_ostream &OS) const {
      << ";\n"
         "} // End namespace RTLIB\n"
         "} // End namespace llvm\n";
+}
+
+void RuntimeLibcallEmitter::emitMCS251ConnectedF32LibcallClassifier(
+    raw_ostream &OS) const {
+  // defset creates an extra global list, not a named Record.  Read and
+  // evaluate that list so the classifier is generated directly from the same
+  // source list consumed by MCS251SystemLibrary below.
+  const Init *Set = Records.getGlobal("MCS251ConnectedF32Libcalls");
+  // Standalone runtime-libcall inputs need not define the MCS251 subset.
+  if (!Set)
+    return;
+
+  IfDefEmitter IfDef(OS, "GET_MCS251_CONNECTED_F32_LIBCALL_CLASSIFIER");
+  SetTheory Sets;
+  SetTheory::RecSet Elements;
+  Sets.evaluate(Set, Elements, {});
+  OS << "static inline RTLIB::LibcallImpl "
+        "getMCS251ConnectedF32LibcallImpl(RTLIB::Libcall LC) {\n"
+        "  switch (LC) {\n";
+  for (const Record *Element : Elements) {
+    const RuntimeLibcallImpl *Impl = Libcalls.getRuntimeLibcallImpl(Element);
+    if (!Impl || !Impl->getProvides())
+      PrintFatalError(Element->getLoc(),
+                      "MCS251ConnectedF32Libcalls entry is not a runtime "
+                      "libcall implementation");
+    OS << "  case ";
+    Impl->getProvides()->emitEnumEntry(OS);
+    OS << ":\n    return ";
+    Impl->emitEnumEntry(OS);
+    OS << ";\n";
+  }
+  OS << "  default:\n"
+        "    return RTLIB::Unsupported;\n"
+        "  }\n"
+        "}\n\n"
+        "static inline bool isMCS251ConnectedF32Libcall(RTLIB::Libcall LC) {\n"
+        "  return getMCS251ConnectedF32LibcallImpl(LC) != RTLIB::Unsupported;\n"
+        "}\n";
 }
 
 // StringMap uses xxh3_64bits, truncated to uint32_t.
@@ -898,6 +937,7 @@ void RuntimeLibcallEmitter::emitGetLibcallForIntrinsic(
 void RuntimeLibcallEmitter::run(raw_ostream &OS) {
   emitSourceFileHeader("Runtime LibCalls Source Fragment", OS, Records);
   emitGetRuntimeLibcallEnum(OS);
+  emitMCS251ConnectedF32LibcallClassifier(OS);
 
   emitGetInitRuntimeLibcallNames(OS);
 

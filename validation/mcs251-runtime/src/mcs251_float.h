@@ -7,17 +7,13 @@
 /*
  * MCS251 软浮点运行时 —— IEEE-754 单精度 (binary32) 软实现。
  *
- * ABI 约定（本链 MCS251 后端实测）：
- *   - 后端不支持 float/double 类型的参数传递与返回值（LowerFormalArguments
- *     拒绝浮点类型；CallingConv 只描述 i8/i16/i32 标量）。
- *   - 后端只支持单首参进寄存器（DPL/DPTR/DPL:DPH:B:A），第二及以后参数走
- *     __<fn>_PARM_n 静态槽（大端存储）；指针类型的静态槽参数被拒绝。
- *   - 因此所有软浮点 helper 用 uint32_t 传递/返回 float 位模式：调用方
- *     把 float bit-cast 为 uint32_t 传入，被调方返回 uint32_t 位模式。
- *   - 函数名前缀 '_' 经目标约定成为链接符号 '__'（如 _addsf3 -> __addsf3）。
+ * ABI 约定：f32 helper 的 binary32 payload 复用 i32 ABI 的
+ * DPL:DPH:B:A（DPL 为低字节）；第二及以后参数走 __<fn>_PARM_n 的
+ * 四字节静态槽（大端存储）。函数名前缀 '_' 经目标约定成为链接符号 '__'
+ * （如 _addsf3 -> __addsf3）。
  *
- * double = float 裁定（用户 2026-09-08）：本链 double 即 32 位浮点，
- * 故 __extendsfdf2 / __truncdfsf2 为恒等函数（仍需存在以满足链接器）。
+ * 本运行时仅实现 binary32 的已连接子集。不得添加 f64/double helper、
+ * unsigned conversion helper、DI helper 或 math helper。
  *
  * 独立实现声明：依据 IEEE-754 标准与公开算法描述（移位-加法对齐、
  * 恢复余数尾数除法、标准舍入到偶数）独立写出；未逐行参照 SDCC、
@@ -90,23 +86,20 @@ _Static_assert(sizeof(void*) == 4, "MCS251 float runtime: target pointer must be
 #define F32_IS_SUBNORM(v) ((F32_EXP(v) == 0u) && (F32_MANT(v) != 0u))
 
 /*
- * === 软浮点运算（9 个）===
+ * === 软浮点运算（7 个）===
  * 签名约定：uint32_t _<name>(uint32_t a, uint32_t b)
  * 第二参数走 __<name>_PARM_2 静态槽（4 字节，大端）。
  *
- * __floatdisf / __fixsfdi 刻意不提供：DI 是 64 位整数，本链当前无
- * i64 支持，不能用 int32 别名占用 compiler-rt 标准名。
- * double 宽度待编译器侧裁定后 revisiting（见 mcs251_float_arith.c）。
+ * __floatdisf / __fixsfdi、unsigned conversion 和 f64 conversion helpers
+ * 刻意不提供：本链不把任何未实现 family 用 payload 位宽伪装成已支持 ABI。
  */
 uint32_t _addsf3(uint32_t a, uint32_t b);   /* a + b */
 uint32_t _subsf3(uint32_t a, uint32_t b);   /* a - b (= a + (-b)) */
 uint32_t _mulsf3(uint32_t a, uint32_t b);   /* a * b */
 uint32_t _divsf3(uint32_t a, uint32_t b);   /* a / b */
-uint32_t _negsf2(uint32_t a);               /* -a (单参) */
-uint32_t _floatsisf(int32_t a);             /* int32 -> float (单参) */
-uint32_t _fixsfsi(uint32_t a);              /* float -> int32 (单参) */
-uint32_t _extendsfdf2(uint32_t a);          /* f32 -> f64 恒等 (单参) */
-uint32_t _truncdfsf2(uint32_t a);           /* f64 -> f32 恒等 (单参) */
+uint32_t _negsf2(uint32_t a);               /* -a (single argument) */
+uint32_t _floatsisf(int32_t a);             /* signed i32 -> f32 */
+uint32_t _fixsfsi(uint32_t a);              /* f32 -> signed i32 */
 
 /*
  * === 软浮点比较（7 个）===

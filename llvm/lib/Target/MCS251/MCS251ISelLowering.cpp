@@ -12,6 +12,7 @@
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Mangler.h"
+#include "llvm/IR/RuntimeLibcalls.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
@@ -85,6 +86,17 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setLibcallImpl(RTLIB::SREM_I32, RTLIB::impl_mcs251_modslong);
   setLibcallImpl(RTLIB::UREM_I16, RTLIB::impl_mcs251_moduint);
   setLibcallImpl(RTLIB::UREM_I32, RTLIB::impl_mcs251_modulong);
+
+  // RuntimeLibcalls.td generates both the membership predicate and the exact
+  // implementation mapping. Thus TableGen, ISel and the contract verifier
+  // cannot drift into three hand-maintained descriptions of the f32 subset.
+  // The helper ABI is ordinary softened i32: DPL:DPH:B:A for operand/result and
+  // _PARM_2 for operand two.
+  for (RTLIB::Libcall Call : RTLIB::libcalls())
+    if (RTLIB::LibcallImpl Impl = getMCS251ConnectedF32LibcallImpl(Call);
+        Impl != RTLIB::Unsupported)
+      setLibcallImpl(Call, Impl);
+
   for (MVT VT : {MVT::i8, MVT::i16, MVT::i32}) {
     setOperationAction(ISD::UDIVREM, VT, Expand);
     setOperationAction(ISD::SDIVREM, VT, Expand);
@@ -177,17 +189,10 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::ATOMIC_STORE, VT, Custom);
   }
 
-  // Float (f32/f64) and wide-integer (i64) arithmetic is not implemented.
-  // Division/remainder already routes to a libcall that fails loudly; the
-  // remaining add/sub/mul/cmp/conversion ops would otherwise be silently
-  // mis-lowered (i64 add collapses to a 32-bit add; fadd hits a generic
-  // "no libcall" error only at selection time, not a clear target diagnostic).
-  // Route them to a custom lowering that report_fatal_errors with a clear
-  // message.  When mcs251-runtime soft-float is wired up, replace these with
-  // LibCall actions (cf. the SDIV/SREM/UDIV/UREM block above).
-  // TODO(mcs251-runtime): switch f32/f64 ops to LibCall once the soft-float
-  // runtime is available; switch i64 ops to LibCall or a native widening path.
-  for (MVT VT : {MVT::f32, MVT::f64, MVT::i64}) {
+  // i64 and true f64 IR remain unsupported. In particular, double=32 in
+  // TargetInfo is a frontend ABI choice, not permission to route f64 DAG nodes
+  // through binary32 helpers.
+  for (MVT VT : {MVT::f64, MVT::i64}) {
     setOperationAction(ISD::ADD, VT, Custom);
     setOperationAction(ISD::SUB, VT, Custom);
     setOperationAction(ISD::MUL, VT, Custom);
@@ -198,15 +203,23 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::SETCC, VT, Custom);
     setOperationAction(ISD::SELECT_CC, VT, Custom);
   }
-  // Float-only conversions and operations.
+
+  // The connected f32 subset is deliberately all LibCall except SETCC: generic
+  // softening selects the predicate-specific FCMP3/UO helper through
+  // softenSetCCOperands, preserving its complete ordered/unordered semantics.
+  for (unsigned Opc : {ISD::FADD, ISD::FSUB, ISD::FMUL, ISD::FDIV, ISD::FNEG})
+    setOperationAction(Opc, MVT::f32, LibCall);
+  setOperationAction(ISD::SETCC, MVT::f32, Expand);
+  setOperationAction(ISD::SELECT_CC, MVT::f32, Expand);
+  setOperationAction(ISD::SINT_TO_FP, MVT::f32, LibCall);
+  setOperationAction(ISD::FP_TO_SINT, MVT::i32, LibCall);
+
+  // All remaining f32 math and conversion families, and every f64 operation,
+  // stay Custom so they fail with a target diagnostic rather than silently
+  // acquiring an unrelated generic helper.
   for (MVT VT : {MVT::f32, MVT::f64}) {
-    setOperationAction(ISD::FADD, VT, Custom);
-    setOperationAction(ISD::FSUB, VT, Custom);
-    setOperationAction(ISD::FMUL, VT, Custom);
-    setOperationAction(ISD::FDIV, VT, Custom);
     setOperationAction(ISD::FREM, VT, Custom);
     setOperationAction(ISD::FCOPYSIGN, VT, Custom);
-    setOperationAction(ISD::FNEG, VT, Custom);
     setOperationAction(ISD::FABS, VT, Custom);
     setOperationAction(ISD::FCEIL, VT, Custom);
     setOperationAction(ISD::FFLOOR, VT, Custom);
@@ -226,15 +239,16 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::FP_EXTEND, VT, Custom);
     setOperationAction(ISD::FP_ROUND, VT, Custom);
   }
-  // Integer-float conversions: cover all direction/type combinations that
-  // could surface. These are keyed by result type.
-  setOperationAction(ISD::SINT_TO_FP, MVT::f32, Custom);
+  setOperationAction(ISD::FADD, MVT::f64, Custom);
+  setOperationAction(ISD::FSUB, MVT::f64, Custom);
+  setOperationAction(ISD::FMUL, MVT::f64, Custom);
+  setOperationAction(ISD::FDIV, MVT::f64, Custom);
+  setOperationAction(ISD::FNEG, MVT::f64, Custom);
   setOperationAction(ISD::SINT_TO_FP, MVT::f64, Custom);
   setOperationAction(ISD::UINT_TO_FP, MVT::f32, Custom);
   setOperationAction(ISD::UINT_TO_FP, MVT::f64, Custom);
   setOperationAction(ISD::FP_TO_SINT, MVT::i8, Custom);
   setOperationAction(ISD::FP_TO_SINT, MVT::i16, Custom);
-  setOperationAction(ISD::FP_TO_SINT, MVT::i32, Custom);
   setOperationAction(ISD::FP_TO_UINT, MVT::i8, Custom);
   setOperationAction(ISD::FP_TO_UINT, MVT::i16, Custom);
   setOperationAction(ISD::FP_TO_UINT, MVT::i32, Custom);
@@ -729,6 +743,22 @@ SDValue MCS251TargetLowering::LowerMul32(SDValue Op,
 // the i32 formal/call/return lowering below.
 static const MCPhysReg I32ABIRegs[] = {MCS251::DPL, MCS251::DPH, MCS251::B,
                                        MCS251::A};
+
+// f32 has no native register class. Before type legalization it can still
+// appear at a direct C ABI boundary; its binary32 payload always occupies the
+// same four lanes as i32. After generic softening it is already i32, so this
+// helper is intentionally idempotent for the libcall path.
+static bool usesI32ABI(EVT VT) { return VT == MVT::i32 || VT == MVT::f32; }
+
+static SDValue asI32ABIValue(SDValue Value, const SDLoc &DL, SelectionDAG &DAG) {
+  return Value.getValueType() == MVT::f32 ? DAG.getBitcast(MVT::i32, Value)
+                                           : Value;
+}
+
+static SDValue fromI32ABIValue(SDValue Value, EVT VT, const SDLoc &DL,
+                               SelectionDAG &DAG) {
+  return VT == MVT::f32 ? DAG.getBitcast(MVT::f32, Value) : Value;
+}
 
 static void splitI32ToBytes(SDValue Value, const SDLoc &DL, SelectionDAG &DAG,
                             SmallVectorImpl<SDValue> &Parts) {
@@ -2205,17 +2235,24 @@ static void checkParameterType(Type *Ty, unsigned Index,
                          "by the compatibility ABI");
     return;
   }
-  if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) && !Ty->isIntegerTy(32))
+  // Float softening presents f32 as its IEEE-754 i32 bit pattern at this ABI
+  // boundary. True f64 is rejected by the MCS251 contract verifier before
+  // lowering and must never arrive here.
+  if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) && !Ty->isIntegerTy(32) &&
+      !Ty->isFloatTy())
     report_fatal_error("MCS251: arguments must be unsplit i8/i16/i32 scalars");
 }
 
 template <typename ArgT>
 static void checkParameter(const ArgT &Arg, unsigned Index,
                            bool AllowStaticPointers) {
+  // f32 libcalls are softened to i32 but retain f32 as ArgVT for ABI metadata.
+  // It is the sole non-identical ArgVT/VT pair accepted by this backend.
+  const bool IsSoftenedF32 = Arg.ArgVT == MVT::f32 && Arg.VT == MVT::i32;
   if ((Arg.VT != MVT::i8 && Arg.VT != MVT::i16 && Arg.VT != MVT::i32) ||
-      Arg.ArgVT != Arg.VT || Arg.PartOffset || Arg.Flags.isSplit() ||
-      Arg.Flags.isByVal() || Arg.Flags.isByRef() || Arg.Flags.isSRet() ||
-      Arg.Flags.isInAlloca() || Arg.Flags.isNest())
+      (!IsSoftenedF32 && Arg.ArgVT != Arg.VT) || Arg.PartOffset ||
+      Arg.Flags.isSplit() || Arg.Flags.isByVal() || Arg.Flags.isByRef() ||
+      Arg.Flags.isSRet() || Arg.Flags.isInAlloca() || Arg.Flags.isNest())
     report_fatal_error("MCS251: arguments must be unsplit i8/i16/i32 scalars");
   if (Index && Arg.Flags.isPointer() && !AllowStaticPointers)
     report_fatal_error("MCS251: static pointer parameters are not supported "
@@ -2275,7 +2312,7 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
   // so it survives register allocation and ExpandPostRAPseudos lowers it via
   // copyPhysReg (TargetInstrInfo::lowerCopy). A/B follow exactly the same path
   // as DPL/DPH.
-  if (Ins[0].VT == MVT::i32) {
+  if (usesI32ABI(Ins[0].VT)) {
     SmallVector<SDValue, 4> Parts;
     for (MCPhysReg Reg : I32ABIRegs) {
       // SDCC pointers occupy B:DPH:DPL; A is unspecified, not an address
@@ -2289,7 +2326,8 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
       Parts.push_back(Part);
       Chain = Part.getValue(1);
     }
-    InVals.push_back(combineI32FromBytes(Parts, DL, DAG));
+    InVals.push_back(fromI32ABIValue(combineI32FromBytes(Parts, DL, DAG),
+                                     Ins[0].VT, DL, DAG));
   } else {
     bool Byte = Ins[0].VT == MVT::i8;
     Register VReg = MF.addLiveIn(Byte ? MCS251::DPL : MCS251::DPTR,
@@ -2459,9 +2497,9 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // can be scheduled between the copies and the call.
   SmallVector<std::pair<unsigned, SDValue>, 4> RegsToPass;
   SDValue InGlue;
-  if (!Outs.empty() && Outs[0].VT == MVT::i32) {
+  if (!Outs.empty() && usesI32ABI(Outs[0].VT)) {
     SmallVector<SDValue, 4> Parts;
-    splitI32ToBytes(OutVals[0], DL, DAG, Parts);
+    splitI32ToBytes(asI32ABIValue(OutVals[0], DL, DAG), DL, DAG, Parts);
     if (Outs[0].Flags.isPointer())
       Parts[3] = buildMOV8ri(0, DL, DAG);
     for (unsigned I = 0; I < 4; ++I)
@@ -2528,11 +2566,11 @@ SDValue MCS251TargetLowering::LowerCallResult(
   // inside the generic CC machinery).
   if (Ins.size() > 1 ||
       (!Ins.empty() && Ins[0].VT != MVT::i8 && Ins[0].VT != MVT::i16 &&
-       Ins[0].VT != MVT::i32))
+       Ins[0].VT != MVT::i32 && Ins[0].VT != MVT::f32))
     report_fatal_error(
-        "minimal MCS251 backend only supports i8/i16/i32/void return values");
+        "minimal MCS251 backend only supports i8/i16/i32/f32/void return values");
 
-  if (!Ins.empty() && Ins[0].VT == MVT::i32) {
+  if (!Ins.empty() && usesI32ABI(Ins[0].VT)) {
     SmallVector<SDValue, 4> Parts;
     for (MCPhysReg Reg : I32ABIRegs) {
       if (Ins[0].Flags.isPointer() && Reg == MCS251::A) {
@@ -2544,7 +2582,8 @@ SDValue MCS251TargetLowering::LowerCallResult(
       Chain = Val.getValue(1);
       InGlue = Val.getValue(2);
     }
-    InVals.push_back(combineI32FromBytes(Parts, DL, DAG));
+    InVals.push_back(fromI32ABIValue(combineI32FromBytes(Parts, DL, DAG),
+                                     Ins[0].VT, DL, DAG));
     return Chain;
   }
 
@@ -2587,7 +2626,7 @@ bool MCS251TargetLowering::CanLowerReturn(
   CCState CCInfo(CallConv, IsVarArg, MF, RVLocs, Context);
   if (!CCInfo.CheckReturn(Outs, RetCC_MCS251))
     report_fatal_error(
-        "minimal MCS251 backend only supports i8/i16/i32/void return values");
+        "minimal MCS251 backend only supports i8/i16/i32/f32/void return values");
   return true;
 }
 
@@ -2616,10 +2655,10 @@ SDValue MCS251TargetLowering::LowerReturn(
 
   SDValue Glue;
   SmallVector<SDValue, 8> RetOps(1, Chain);
-  if (!Outs.empty() && Outs[0].VT == MVT::i32) {
+  if (!Outs.empty() && usesI32ABI(Outs[0].VT)) {
     assert(Outs.size() == 1 && "MCS251 supports only one return value");
     SmallVector<SDValue, 4> Parts;
-    splitI32ToBytes(ReturnValue(0), DL, DAG, Parts);
+    splitI32ToBytes(asI32ABIValue(ReturnValue(0), DL, DAG), DL, DAG, Parts);
     if (Outs[0].Flags.isPointer())
       Parts[3] = buildMOV8ri(0, DL, DAG);
     for (unsigned I = 0; I < 4; ++I) {

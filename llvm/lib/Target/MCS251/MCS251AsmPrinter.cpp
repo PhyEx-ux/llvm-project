@@ -408,9 +408,11 @@ public:
           report_fatal_error("MCS251: pointer parameter address space has no "
                              "ordinary static-slot ABI");
       } else if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) &&
-                 !Ty->isIntegerTy(32)) {
-        report_fatal_error("MCS251: static parameters require i8/i16/i32 or "
-                           "an ordinary data/CODE pointer");
+                 !Ty->isIntegerTy(32) && !Ty->isFloatTy()) {
+        // f32 binary32 payloads use the i32 static-slot layout, matching the
+        // DPL:DPH:B:A first-argument/return ABI.
+        report_fatal_error("MCS251: static parameters require i8/i16/i32/f32 "
+                           "or an ordinary data/CODE pointer");
       }
       uint64_t SlotSize = F.getDataLayout().getTypeStoreSize(Ty).getFixedValue();
       MCSymbol *Slot = OutContext.getOrCreateSymbol(

@@ -543,10 +543,17 @@ SDValue DAGTypeLegalizer::SoftenFloatRes_FNEARBYINT(SDNode *N) {
 }
 
 SDValue DAGTypeLegalizer::SoftenFloatRes_FNEG(SDNode *N) {
+  // Most soft-float targets use the exact XOR bit identity below. A target
+  // which explicitly exposes NEG_F32 instead retains its required ABI call.
+  if (N->getValueType(0) == MVT::f32 &&
+      DAG.getLibcalls().getLibcallImpl(RTLIB::NEG_F32) !=
+          RTLIB::Unsupported)
+    return SoftenFloatRes_Unary(N, RTLIB::NEG_F32);
+
   EVT NVT = TLI.getTypeToTransformTo(*DAG.getContext(), N->getValueType(0));
   SDLoc dl(N);
 
-  // Expand Y = FNEG(X) -> Y = X ^ sign mask
+  // Expand Y = FNEG(X) -> Y = X ^ sign mask.
   APInt SignMask = APInt::getSignMask(NVT.getSizeInBits());
   return DAG.getNode(ISD::XOR, dl, NVT, GetSoftenedFloat(N->getOperand(0)),
                      DAG.getConstant(SignMask, dl, NVT));
