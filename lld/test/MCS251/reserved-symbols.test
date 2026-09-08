@@ -1,0 +1,543 @@
+#
+# P1-3: User-defined reserved boundary symbols must be rejected.
+# P2-7: Boundary symbols s_<AREA>/l_<AREA> must be available for all areas.
+# E3-R1: All synthesised boundary symbol names are reserved.
+# E3-R4: l_ISEG = sum of slice sizes; zero-length ISEG still gets symbols.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+
+# --- P1-3: user defines ABS l_XINIT=0, references it; must fail ---
+# RUN: yaml2obj reserved-def.yaml -o reserved-def.o
+# RUN: yaml2obj reserved-ref.yaml -o reserved-ref.o
+# RUN: not mcs251-lld reserved-def.o reserved-ref.o \
+# RUN:   --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 \
+# RUN:   --map=%t/rb.map -o %t/rb.elf 2>&1 | FileCheck %s --check-prefix=RESERVED
+# RUN: test ! -e %t/rb.elf
+# RESERVED: user definition of reserved symbol l_XINIT
+
+# --- P1-3: user defines s_DSEG; must fail ---
+# RUN: yaml2obj reserved-sdseg.yaml -o reserved-sdseg.o
+# RUN: not mcs251-lld reserved-sdseg.o \
+# RUN:   --area-start=CSEG=0xff0200 \
+# RUN:   --map=%t/sd.map -o %t/sd.elf 2>&1 | FileCheck %s --check-prefix=RS
+# RS: user definition of reserved symbol s_DSEG
+
+# --- E3-R1: user defines s_BSEG_BYTES; must fail ---
+# RUN: yaml2obj def-s-bseg.yaml -o def-s-bseg.o
+# RUN: not mcs251-lld def-s-bseg.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/dsb.elf 2>&1 | FileCheck %s --check-prefix=DSB
+# DSB: user definition of reserved symbol s_BSEG_BYTES
+
+# --- E3-R1: user defines l_BSEG_BYTES; must fail ---
+# RUN: yaml2obj def-l-bseg.yaml -o def-l-bseg.o
+# RUN: not mcs251-lld def-l-bseg.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/dlb.elf 2>&1 | FileCheck %s --check-prefix=DLB
+# DLB: user definition of reserved symbol l_BSEG_BYTES
+
+# --- E3-R1: user defines s_BIT_BANK; must fail ---
+# RUN: yaml2obj def-s-bitbank.yaml -o def-s-bitbank.o
+# RUN: not mcs251-lld def-s-bitbank.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/dsbb.elf 2>&1 | FileCheck %s --check-prefix=DSBB
+# DSBB: user definition of reserved symbol s_BIT_BANK
+
+# --- E3-R1: user defines l_REG_BANK_0; must fail ---
+# RUN: yaml2obj def-l-regbank0.yaml -o def-l-regbank0.o
+# RUN: not mcs251-lld def-l-regbank0.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/dlrb.elf 2>&1 | FileCheck %s --check-prefix=DLRB
+# DLRB: user definition of reserved symbol l_REG_BANK_0
+
+# --- E3-R1: user defines s_XSEG; must fail ---
+# RUN: yaml2obj def-s-xseg.yaml -o def-s-xseg.o
+# RUN: not mcs251-lld def-s-xseg.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/dsx.elf 2>&1 | FileCheck %s --check-prefix=DSX
+# DSX: user definition of reserved symbol s_XSEG
+
+# --- E3-R1: undefined reference to s_BSEG_BYTES resolved by synth ---
+# RUN: yaml2obj ref-bseg.yaml -o ref-bseg.o
+# RUN: mcs251-lld ref-bseg.o --area-start=CSEG=0xff0200 \
+# RUN:   --map=%t/refbseg.map -o %t/refbseg.elf && test -f %t/refbseg.elf
+# RUN: grep 's_BSEG_BYTES' %t/refbseg.map
+
+# --- E3-R1: undefined reference to l_XSEG resolved by synth ---
+# RUN: yaml2obj ref-xseg.yaml -o ref-xseg.o
+# RUN: mcs251-lld ref-xseg.o --area-start=CSEG=0xff0200 --area-start=XSEG=0xfd0000 \
+# RUN:   --map=%t/refxseg.map -o %t/refxseg.elf && test -f %t/refxseg.elf
+# RUN: grep 'l_XSEG' %t/refxseg.map
+
+# --- P2-7: l_SSEG is defined when SSEG is present ---
+# RUN: yaml2obj sseg-boundary.yaml -o sseg-boundary.o
+# RUN: mcs251-lld sseg-boundary.o --area-start=CSEG=0xff0200 \
+# RUN:   --map=%t/sseg.map -o %t/sseg.elf && test -f %t/sseg.elf
+# RUN: grep 'l_SSEG' %t/sseg.map
+
+# --- P2-7: l_ISEG is defined when ISEG is present ---
+# RUN: yaml2obj iseg-boundary.yaml -o iseg-boundary.o
+# RUN: mcs251-lld iseg-boundary.o --area-start=CSEG=0xff0200 \
+# RUN:   --map=%t/iseg.map -o %t/iseg.elf && test -f %t/iseg.elf
+# RUN: grep 'l_ISEG' %t/iseg.map
+
+# --- E3-R4: l_ISEG = sum of slice sizes, not physical span ---
+# Two ISEG slices size 8 and 4; l_ISEG should be 12 (0x00000c)
+# RUN: yaml2obj iseg-multi.yaml -o iseg-multi.o
+# RUN: mcs251-lld iseg-multi.o --area-start=CSEG=0xff0200 \
+# RUN:   --map=%t/im.map -o %t/im.elf && test -f %t/im.elf
+# RUN: grep 'l_ISEG = 0x000c' %t/im.map
+
+# --- E3-R4: zero-length ISEG still generates l_ISEG=0 ---
+# RUN: yaml2obj iseg-empty.yaml -o iseg-empty.o
+# RUN: mcs251-lld iseg-empty.o --area-start=CSEG=0xff0200 \
+# RUN:   --map=%t/ie.map -o %t/ie.elf && test -f %t/ie.elf
+# RUN: grep 'l_ISEG = 0x0000' %t/ie.map
+
+#--- reserved-def.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: l_XINIT
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 0
+    Index: SHN_ABS
+
+#--- reserved-ref.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '000000010000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: l_XINIT
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: l_XINIT
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- reserved-sdseg.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: s_DSEG
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 0
+    Index: SHN_ABS
+
+#--- def-s-bseg.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: s_BSEG_BYTES
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 4660
+    Index: SHN_ABS
+
+#--- def-l-bseg.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: l_BSEG_BYTES
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 4660
+    Index: SHN_ABS
+
+#--- def-s-bitbank.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: s_BIT_BANK
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 4660
+    Index: SHN_ABS
+
+#--- def-l-regbank0.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: l_REG_BANK_0
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 4660
+    Index: SHN_ABS
+
+#--- def-s-xseg.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: s_XSEG
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 4660
+    Index: SHN_ABS
+
+#--- ref-bseg.yaml
+# Undefined reference to s_BSEG_BYTES resolved by synthesised symbol.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.BSEG_BYTES
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: s_BSEG_BYTES
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: s_BSEG_BYTES
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 0
+
+#--- ref-xseg.yaml
+# Undefined reference to l_XSEG resolved by synthesised symbol.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: l_XSEG
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: l_XSEG
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 0
+
+#--- sseg-boundary.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.SSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- iseg-boundary.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.ISEG.0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- iseg-multi.yaml
+# Two ISEG slices: size 8 at 0 and size 4 at 0x10.
+# l_ISEG should be 12 (sum of sizes), not 20 (physical span).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.ISEG.a
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.ISEG.b
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- iseg-empty.yaml
+# Zero-length ISEG section referencing l_ISEG; symbol must be defined as 0.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.ISEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: l_ISEG
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: l_ISEG
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 0

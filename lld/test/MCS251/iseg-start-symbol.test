@@ -1,0 +1,257 @@
+#
+# E3-R5 (Alice third review): s_ISEG is the address of the first non-empty
+#       (size != 0) ISEG slice in input order, matching the legacy linker
+#       mcs251_ld.py lnkarea2: ap.addr starts at areaxs[0].addr and is then
+#       replaced by the first areax with size != 0.  An empty slice carries
+#       the area cursor address; when every slice is empty the boundary
+#       symbol is still generated with that empty-area address.
+#       l_ISEG stays the sum of slice sizes (E3-R4).
+#       Every case asserts the actual R_MCS251_16 bytes in the output ELF,
+#       not just the map pretty-printing.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+
+# --- A: sizes 8,0 with --reserve-data=0,16 -> slices at 0x10,0; s_ISEG=0x10 ---
+# The empty last slice must not drag s_ISEG down to 0.
+# RUN: yaml2obj iseg-a8.yaml -o iseg-a8.o
+# RUN: yaml2obj iseg-b0.yaml -o iseg-b0.o
+# RUN: mcs251-lld iseg-a8.o iseg-b0.o --area-start=CSEG=0xff0200 \
+# RUN:   --reserve-data=0,16 --map=%t/a.map -o %t/a.elf
+# RUN: grep 's_ISEG = 0x0010' %t/a.map
+# RUN: grep 'l_ISEG = 0x0008' %t/a.map
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/a.elf 0xff0200 2 | FileCheck %s --check-prefix=A-BYTES
+# A-BYTES: 00 10
+
+# --- B: sizes 0,8 with --reserve-data=0,16 -> slices at 0,0x10; s_ISEG=0x10 ---
+# The empty first slice carries the area cursor 0; the first non-empty slice
+# (the second input) supplies s_ISEG.
+# RUN: yaml2obj iseg-a0.yaml -o iseg-a0.o
+# RUN: yaml2obj iseg-b8.yaml -o iseg-b8.o
+# RUN: mcs251-lld iseg-a0.o iseg-b8.o --area-start=CSEG=0xff0200 \
+# RUN:   --reserve-data=0,16 --map=%t/b.map -o %t/b.elf
+# RUN: grep 's_ISEG = 0x0010' %t/b.map
+# RUN: grep 'l_ISEG = 0x0008' %t/b.map
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/b.elf 0xff0200 2 | FileCheck %s --check-prefix=B-BYTES
+# B-BYTES: 00 10
+
+# --- C: sizes 8,4 with --reserve-data=4,4 -> slices at 8,0 (backfill hole) ---
+# The second slice backfills the hole below the first; s_ISEG must stay at
+# the first non-empty slice in input order (8), not the lowest address (0).
+# RUN: yaml2obj iseg-b4.yaml -o iseg-b4.o
+# RUN: mcs251-lld iseg-a8.o iseg-b4.o --area-start=CSEG=0xff0200 \
+# RUN:   --reserve-data=4,4 --map=%t/c.map -o %t/c.elf
+# RUN: grep 's_ISEG = 0x0008' %t/c.map
+# RUN: grep 'l_ISEG = 0x000c' %t/c.map
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/c.elf 0xff0200 2 | FileCheck %s --check-prefix=C-BYTES
+# C-BYTES: 00 08
+
+# --- D: all slices empty -> boundary symbol keeps the empty-area address ---
+# Zero-length slices still synthesise s_ISEG/l_ISEG; with --area-start=ISEG
+# the empty-area address is the area cursor 0x30.
+# RUN: yaml2obj iseg-z0b.yaml -o iseg-z0b.o
+# RUN: mcs251-lld iseg-a0.o iseg-z0b.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=ISEG=0x30 --map=%t/d.map -o %t/d.elf
+# RUN: grep 's_ISEG = 0x0030' %t/d.map
+# RUN: grep 'l_ISEG = 0x0000' %t/d.map
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/d.elf 0xff0200 2 | FileCheck %s --check-prefix=D-BYTES
+# D-BYTES: 00 30
+
+#--- iseg-a8.yaml
+# ISEG slice of 8 bytes plus the s_ISEG reference relocation.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.ISEG.a8
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: s_ISEG
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: s_ISEG
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 0
+
+#--- iseg-a0.yaml
+# Empty first ISEG slice plus the s_ISEG reference relocation.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.ISEG.a0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: s_ISEG
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: s_ISEG
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 0
+
+#--- iseg-b0.yaml
+# Empty last ISEG slice.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.ISEG.b0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- iseg-b8.yaml
+# Non-empty second ISEG slice (first input slice is empty).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.ISEG.b8
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- iseg-b4.yaml
+# 4-byte ISEG slice that backfills the hole below the 8-byte slice.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.ISEG.b4
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- iseg-z0b.yaml
+# Second empty ISEG slice for the all-empty case.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.ISEG.z0b
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []

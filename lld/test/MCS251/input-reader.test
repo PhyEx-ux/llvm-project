@@ -1,0 +1,87 @@
+#
+# Build a strict ELF32/MSB/ET_REL/RELA MCS251 input independently of llc, then
+# exercise the flavor's M1 inspection path. The driver must consume sh_info and
+# sh_link, not infer the target from the relocation section name.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj valid.yaml -o valid.o
+# RUN: yaml2obj bad-rel.yaml -o bad-rel.o
+# RUN: cp valid.o v2.o
+# RUN: %python -c "p='v2.o'; b=bytearray(open(p,'rb').read()); b[36:40]=bytes.fromhex('00000102'); open(p,'wb').write(b)"
+# RUN: mcs251-lld --print-input valid.o 2>&1 | FileCheck %s --check-prefix=INPUT
+# RUN: not mcs251-lld --print-input bad-rel.o 2>&1 | FileCheck %s --check-prefix=REL
+# RUN: not mcs251-lld --print-input v2.o 2>&1 | FileCheck %s --check-prefix=ABI-V2
+# RUN: not mcs251-lld valid.o v2.o -o mixed.elf 2>&1 | FileCheck %s --check-prefix=ABI-V2
+# RUN: test ! -e mixed.elf
+#
+# INPUT: file valid.o
+# INPUT: section[1] .text type=1 flags=0x6 size=4
+# INPUT: rela offset=0x0 type=1 sym=1 addend=0
+# INPUT: section[2] .note.mcs251.abi type=7 flags=0x0 size=52
+# INPUT: symbol[1] _target section=1 value=0x3 size=0 bind=1 type=0
+#
+# REL: mcs251 linker: error: SHT_REL is unsupported; MCS251 requires SHT_RELA
+# ABI-V2: mcs251 linker: error: v2.o: invalid MCS251 ELF header
+
+#--- valid.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .rela.renamed
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: _target
+        Addend: 0
+Symbols:
+  - Name: _target
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 3
+
+#--- bad-rel.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .rel.text
+    Type: SHT_REL
+    Link: .symtab
+    Info: .text
+Symbols: []

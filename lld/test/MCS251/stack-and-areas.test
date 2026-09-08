@@ -1,0 +1,203 @@
+#
+# P1-4: --no-stack-gate is rejected; stack gate is always enforced.
+# P2-1: Area name validation and duplicate rejection.
+# P2-6: --stack-size and SSEG auto-size.
+# E3-R2: SSEG window enforcement and hole-based auto-size.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj base.yaml -o base.o
+# RUN: yaml2obj stack.yaml -o stack.o
+# RUN: yaml2obj sseg-auto.yaml -o sseg-auto.o
+# RUN: yaml2obj sseg-hole.yaml -o sseg-hole.o
+
+# --- P1-4: --no-stack-gate must be rejected ---
+# RUN: not mcs251-lld stack.o --area-start=CSEG=0xff0200 \
+# RUN:   --reserve-data=0xbf0,1 --no-stack-gate \
+# RUN:   -o %t/gate.elf 2>&1 | FileCheck %s --check-prefix=NOGATE
+# NOGATE: --no-stack-gate is not supported
+
+# --- P1-4: stack gate fires when capacity < 1024 ---
+# RUN: not mcs251-lld stack.o --area-start=CSEG=0xff0200 \
+# RUN:   --reserve-data=0xbf0,1 \
+# RUN:   -o %t/gate2.elf 2>&1 | FileCheck %s --check-prefix=GATEFAIL
+# GATEFAIL: stack capacity is less than 1024 bytes
+
+# --- P1-4: stack gate passes at exactly 1024 ---
+# RUN: mcs251-lld stack.o --area-start=CSEG=0xff0200 \
+# RUN:   --reserve-data=0xbef,1 \
+# RUN:   -o %t/gate-ok.elf && test -f %t/gate-ok.elf
+
+# --- P2-1: duplicate area-start must fail ---
+# RUN: not mcs251-lld base.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=CSEG=0xff0400 \
+# RUN:   -o %t/dup.elf 2>&1 | FileCheck %s --check-prefix=DUP
+# DUP: duplicate --area-start for CSEG
+
+# --- P2-1: unknown area name must fail ---
+# RUN: not mcs251-lld base.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=TYPO=0xffffffff \
+# RUN:   -o %t/typo.elf 2>&1 | FileCheck %s --check-prefix=TYPO
+# TYPO: unknown area name
+
+# --- P2-1: CODE area address > 24-bit must fail ---
+# RUN: not mcs251-lld base.o --area-start=CSEG=0x1000000 \
+# RUN:   -o %t/oor.elf 2>&1 | FileCheck %s --check-prefix=OOR
+# OOR: out of 24-bit CODE/XDATA range
+
+# --- P2-6: --stack-size is accepted ---
+# RUN: mcs251-lld sseg-auto.o --area-start=CSEG=0xff0200 \
+# RUN:   --stack-size=16 \
+# RUN:   --map=%t/ss.map -o %t/ss.elf && test -f %t/ss.elf
+
+# --- P2-6: SSEG auto-size picks largest free region ---
+# RUN: mcs251-lld sseg-auto.o --area-start=CSEG=0xff0200 \
+# RUN:   --map=%t/auto.map -o %t/auto.elf && test -f %t/auto.elf
+# RUN: grep 'l_SSEG' %t/auto.map
+
+# --- E3-R2: --stack-size=129 must fail (default IRAM window is [0,128)) ---
+# RUN: not mcs251-lld sseg-auto.o --area-start=CSEG=0xff0200 \
+# RUN:   --stack-size=129 \
+# RUN:   -o %t/win.elf 2>&1 | FileCheck %s --check-prefix=WINDOW
+# WINDOW: cannot allocate SSEG (stack) in ISEG window
+
+# --- E3-R2: --stack-size=257 --iram-size=256 must fail (window [0,256)) ---
+# RUN: not mcs251-lld sseg-auto.o --area-start=CSEG=0xff0200 \
+# RUN:   --stack-size=257 --iram-size=256 \
+# RUN:   -o %t/win2.elf 2>&1 | FileCheck %s --check-prefix=WINDOW
+
+# --- E3-R2: --stack-size=128 fits exactly in default window [0,128) ---
+# RUN: mcs251-lld sseg-auto.o --area-start=CSEG=0xff0200 \
+# RUN:   --stack-size=128 \
+# RUN:   --map=%t/exact.map -o %t/exact.elf && test -f %t/exact.elf
+# RUN: grep 'l_SSEG = 0x0080' %t/exact.map
+
+# --- E3-R2: auto-size with reserve-data hole picks the rear region ---
+# reserve-data=0x10,0x10 creates hole [0x10,0x20); default window [0,0x80)
+# free regions: [0,0x10)=16 bytes, [0x20,0x80)=96 bytes -> auto-size=96
+# RUN: mcs251-lld sseg-hole.o --area-start=CSEG=0xff0200 \
+# RUN:   --reserve-data=0x10,0x10 \
+# RUN:   --map=%t/hole.map -o %t/hole.elf && test -f %t/hole.elf
+# RUN: grep 'l_SSEG = 0x0060' %t/hole.map
+# RUN: grep 's_SSEG = 0x0020' %t/hole.map
+
+# --- E3-R2: explicit stack-size with reserve-data hole ---
+# RUN: mcs251-lld sseg-hole.o --area-start=CSEG=0xff0200 \
+# RUN:   --reserve-data=0x10,0x10 --stack-size=32 \
+# RUN:   --map=%t/hole32.map -o %t/hole32.elf && test -f %t/hole32.elf
+# RUN: grep 'l_SSEG = 0x0020' %t/hole32.map
+
+#--- base.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- stack.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: __mcs251_stack_base
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: __mcs251_stack_base
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- sseg-auto.yaml
+# SSEG size=1, no explicit stack-size; auto-size should find largest free region.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.SSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- sseg-hole.yaml
+# SSEG size=1, used with --reserve-data to create a hole for auto-size testing.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.SSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []

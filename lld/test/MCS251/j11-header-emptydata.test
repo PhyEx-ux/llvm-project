@@ -1,0 +1,345 @@
+#
+# P2-2: J11 must wrap next-PC to 24 bits before page comparison.
+# P2-4: Strict ELF header validation for ET_REL inputs.
+# P2-5: Empty PROGBITS .data with defined symbols or relocs must fail.
+# E3-R5: Empty RELA table (zero entries) is not "has relocations".
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj j11-wrap.yaml -o j11-wrap.o
+# RUN: yaml2obj j11-wrong-page.yaml -o j11-wrong-page.o
+# RUN: yaml2obj j11-nonzero-wrap.yaml -o j11-nonzero-wrap.o
+# RUN: yaml2obj base.yaml -o base.o
+# RUN: yaml2obj empty-data-sym.yaml -o empty-data-sym.o
+# RUN: yaml2obj empty-data-reloc.yaml -o empty-data-reloc.o
+# RUN: yaml2obj empty-data-empty-rela.yaml -o empty-data-empty-rela.o
+
+# --- P2-2: J11 at P=0xfffffe wraps to page 0; target=0 is same page ---
+# RUN: mcs251-lld j11-wrap.o --area-start=CSEG=0xfffffe \
+# RUN:   --area-start=HOME=0 \
+# RUN:   --map=%t/j11w.map -o %t/j11w.elf && test -f %t/j11w.elf
+
+# --- P2-2: J11 wrong page still fails ---
+# RUN: not mcs251-lld j11-wrong-page.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=HOME=0 \
+# RUN:   --map=%t/j11f.map -o %t/j11f.elf 2>&1 | FileCheck %s --check-prefix=J11FAIL
+# J11FAIL: J11 page overflow
+
+# --- E3-R5: J11 at P=0xfffffe wraps to page 0; target at non-zero addr in page 0 ---
+# HOME at 0 with 2 bytes, target at offset 1 (addr 0x001).  .text at 0xfffffe.
+# P+2 = 0x1000000 wrapped to 0x000000.  Page of 0 == page of target 0x001.
+# RUN: mcs251-lld j11-nonzero-wrap.o --area-start=CSEG=0xfffffe \
+# RUN:   --area-start=HOME=0 \
+# RUN:   --map=%t/j11nz.map -o %t/j11nz.elf && test -f %t/j11nz.elf
+
+# --- P2-4: tampered OSABI must fail ---
+# RUN: cp base.o %t/bad-osabi.o
+# RUN: %python -c "b=bytearray(open('%t/bad-osabi.o','rb').read()); b[7]=3; open('%t/bad-osabi.o','wb').write(b)"
+# RUN: not mcs251-lld %t/bad-osabi.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/h1.elf 2>&1 | FileCheck %s --check-prefix=HERR
+# HERR: invalid MCS251 ELF identity
+
+# --- P2-4: tampered EI_VERSION must fail ---
+# RUN: cp base.o %t/bad-eiv.o
+# RUN: %python -c "b=bytearray(open('%t/bad-eiv.o','rb').read()); b[6]=0; open('%t/bad-eiv.o','wb').write(b)"
+# RUN: not mcs251-lld %t/bad-eiv.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/h2.elf 2>&1 | FileCheck %s --check-prefix=HERR
+
+# --- P2-4: tampered e_entry must fail ---
+# RUN: cp base.o %t/bad-entry.o
+# RUN: %python -c "import struct; b=bytearray(open('%t/bad-entry.o','rb').read()); struct.pack_into('>I',b,24,1); open('%t/bad-entry.o','wb').write(b)"
+# RUN: not mcs251-lld %t/bad-entry.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/h3.elf 2>&1 | FileCheck %s --check-prefix=HDR
+# HDR: invalid MCS251 ET_REL header fields
+
+# --- P2-4: tampered e_ehsize must fail ---
+# RUN: cp base.o %t/bad-ehsize.o
+# RUN: %python -c "import struct; b=bytearray(open('%t/bad-ehsize.o','rb').read()); struct.pack_into('>H',b,40,1); open('%t/bad-ehsize.o','wb').write(b)"
+# RUN: not mcs251-lld %t/bad-ehsize.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/h4.elf 2>&1 | FileCheck %s --check-prefix=HDR
+
+# --- P2-4: tampered e_phnum must fail ---
+# RUN: cp base.o %t/bad-phnum.o
+# RUN: %python -c "import struct; b=bytearray(open('%t/bad-phnum.o','rb').read()); struct.pack_into('>H',b,44,1); open('%t/bad-phnum.o','wb').write(b)"
+# RUN: not mcs251-lld %t/bad-phnum.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/h5.elf 2>&1 | FileCheck %s --check-prefix=HDR
+
+# --- P2-5: empty PROGBITS .data with a defined symbol must fail ---
+# RUN: not mcs251-lld empty-data-sym.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/eds.elf 2>&1 | FileCheck %s --check-prefix=EDS
+# EDS: empty PROGBITS .data with defined symbol
+
+# --- P2-5: empty PROGBITS .data with relocs must fail ---
+# RUN: not mcs251-lld empty-data-reloc.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=DSEG=0x40 \
+# RUN:   -o %t/edr.elf 2>&1 | FileCheck %s --check-prefix=EDR
+# EDR: empty PROGBITS .data with relocations
+
+# --- E3-R5: empty PROGBITS .data with empty RELA table is allowed ---
+# RUN: mcs251-lld empty-data-empty-rela.o --area-start=CSEG=0xff0200 \
+# RUN:   --map=%t/eder.map -o %t/eder.elf && test -f %t/eder.elf
+
+#--- base.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- j11-wrap.yaml
+# HOME at 0 (1 byte), .text at 0xfffffe with ACALL target=0.
+# P+2 = 0x1000000, wrapped to 0x000000.  Page of 0 == page of target 0.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcs251.HOME
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0100'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_J11
+        Symbol: target
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: target
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 0
+    Section: .mcs251.HOME
+
+#--- j11-nonzero-wrap.yaml
+# HOME at 0 with 2 bytes, target at offset 1 (addr 0x001).
+# .text at 0xfffffe.  P+2 = 0x1000000 wrapped to 0x000000.
+# Page of 0x000000 == page of target 0x001 (both in 2K page 0).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcs251.HOME
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0100'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_J11
+        Symbol: target
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: target
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 1
+    Section: .mcs251.HOME
+
+#--- j11-wrong-page.yaml
+# HOME at 0, .text at 0xff0200.  P+2=0xff0202, page != page of target 0.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcs251.HOME
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0100'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_J11
+        Symbol: target
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: target
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 0
+    Section: .mcs251.HOME
+
+#--- empty-data-sym.yaml
+# Empty PROGBITS .data with a defined symbol -> must fail
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .data
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Content: ''
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: slot
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Value: 0
+    Section: .data
+
+#--- empty-data-reloc.yaml
+# Empty PROGBITS .data with a relocation targeting it -> must fail
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .data
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Content: ''
+  - Name: .rela.data
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .data
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: slot
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: slot
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Value: 0
+    Section: .text
+
+#--- empty-data-empty-rela.yaml
+# Empty PROGBITS .data with an empty RELA table (zero entries) -> allowed.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .data
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Content: ''
+  - Name: .rela.data
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .data
+    Relocations: []
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []

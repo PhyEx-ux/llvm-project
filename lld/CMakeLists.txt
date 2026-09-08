@@ -196,6 +196,7 @@ include_directories(BEFORE
   )
 
 add_subdirectory(Common)
+add_subdirectory(MCS251)
 add_subdirectory(tools/lld)
 
 if (LLVM_INCLUDE_TESTS)

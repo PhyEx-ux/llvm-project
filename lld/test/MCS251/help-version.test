@@ -1,0 +1,14 @@
+#
+# --help and --version must write to stdout and return exit code 0.
+#
+# RUN: mcs251-lld --version 2>/dev/null | FileCheck %s --check-prefix=VERSION
+# RUN: mcs251-lld --help 2>/dev/null | FileCheck %s --check-prefix=HELP
+
+# E3-R6: In normal CLI mode (LLD_IN_TEST unset), --help/--version output
+# must still be flushed to stdout.  lit sets LLD_IN_TEST; emulate a real
+# CLI invocation with env -u LLD_IN_TEST.
+# RUN: env -u LLD_IN_TEST mcs251-lld --version 2>/dev/null | FileCheck %s --check-prefix=VERSION
+# RUN: env -u LLD_IN_TEST mcs251-lld --help 2>/dev/null | FileCheck %s --check-prefix=HELP
+#
+# VERSION: mcs251-lld (LLVM MCS251)
+# HELP: mcs251-lld

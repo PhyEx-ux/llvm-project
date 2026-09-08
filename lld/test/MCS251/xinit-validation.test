@@ -1,0 +1,208 @@
+#
+# P1-1: XINIT slice underflow check.  A destination beyond the DSEG slice
+#        must be rejected, not silently accepted via unsigned wraparound.
+# P1-2: XINIT total length across sections must not exceed 65535 bytes.
+# E3-R:  Exact 65535 (pass) and 65536 (fail) boundary.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj xinit-ok.yaml -o xinit-ok.o
+# RUN: yaml2obj xinit-beyond.yaml -o xinit-beyond.o
+# RUN: yaml2obj xinit-fill-exact.yaml -o xinit-fill-exact.o
+# RUN: yaml2obj xinit-zero-len.yaml -o xinit-zero-len.o
+
+# --- P1-1 positive: destination at slice start fits exactly ---
+# RUN: mcs251-lld xinit-fill-exact.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=DSEG=0x40 \
+# RUN:   --map=%t/fill.map -o %t/fill.elf && test -f %t/fill.elf
+
+# --- P1-1 negative: destination 0x4000 with 1B DSEG@0x40 must fail ---
+# RUN: not mcs251-lld xinit-beyond.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=DSEG=0x40 \
+# RUN:   --map=%t/beyond.map -o %t/beyond.elf 2>&1 | FileCheck %s --check-prefix=BEYOND
+# RUN: test ! -e %t/beyond.elf
+# BEYOND: not within one DSEG slice
+
+# --- P1-1 negative: zero-length slice, destination 0 ---
+# RUN: not mcs251-lld xinit-zero-len.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=DSEG=0x40 \
+# RUN:   --map=%t/zl.map -o %t/zl.elf 2>&1 | FileCheck %s --check-prefix=ZL
+# ZL: not within one DSEG slice
+
+# --- P1-2 negative: total XINIT > 65535 across two sections ---
+# RUN: %python %S/Inputs/gen-xinit-total.py %t/xinit-total.yaml
+# RUN: yaml2obj %t/xinit-total.yaml -o %t/xinit-total.o
+# RUN: not mcs251-lld %t/xinit-total.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xfd0000 --area-start=DSEG=0x40 \
+# RUN:   --map=%t/total.map -o %t/total.elf 2>&1 | FileCheck %s --check-prefix=TOTAL
+# TOTAL: total length exceeds 65535
+
+# --- E3-R: exact boundary 65535 bytes must pass ---
+# RUN: %python %S/Inputs/gen-xinit-boundary.py %t/xinit-65535.yaml 65535
+# RUN: yaml2obj %t/xinit-65535.yaml -o %t/xinit-65535.o
+# RUN: mcs251-lld %t/xinit-65535.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xfd0000 --area-start=DSEG=0x40 \
+# RUN:   --map=%t/b65535.map -o %t/b65535.elf && test -f %t/b65535.elf
+
+# --- E3-R: exact boundary 65536 bytes must fail ---
+# RUN: %python %S/Inputs/gen-xinit-boundary.py %t/xinit-65536.yaml 65536
+# RUN: yaml2obj %t/xinit-65536.yaml -o %t/xinit-65536.o
+# RUN: not mcs251-lld %t/xinit-65536.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xfd0000 --area-start=DSEG=0x40 \
+# RUN:   --map=%t/b65536.map -o %t/b65536.elf 2>&1 | FileCheck %s --check-prefix=TOTAL
+
+# --- P1-1 positive: valid XINIT within DSEG slice ---
+# RUN: mcs251-lld xinit-ok.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=DSEG=0x40 \
+# RUN:   --map=%t/ok.map -o %t/ok.elf && test -f %t/ok.elf
+
+#--- xinit-ok.yaml
+# DSEG slice of 4 bytes at 0x40; XINIT destination=0x40 object_size=4 payload=4
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.DSEG.slot
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '004000040004AABBCCDD'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: __mcs251_globals_init
+    Binding: STB_GLOBAL
+    Type: STT_FUNC
+    Section: .text
+
+#--- xinit-beyond.yaml
+# 1-byte DSEG at 0x40; XINIT destination=0x4000 (way beyond slice)
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.DSEG.slot
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '400000010000aa'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: __mcs251_globals_init
+    Binding: STB_GLOBAL
+    Type: STT_FUNC
+    Section: .text
+
+#--- xinit-fill-exact.yaml
+# DSEG 4 bytes at 0x40; XINIT fills exactly 4 bytes starting at 0x40
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.DSEG.slot
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '00400004000411223344'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: __mcs251_globals_init
+    Binding: STB_GLOBAL
+    Type: STT_FUNC
+    Section: .text
+
+#--- xinit-zero-len.yaml
+# DSEG slice of 0 bytes at 0x40; XINIT destination=0 object_size=1 must fail
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.DSEG.slot
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '000000010000aa'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: __mcs251_globals_init
+    Binding: STB_GLOBAL
+    Type: STT_FUNC
+    Section: .text
