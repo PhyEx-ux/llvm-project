@@ -10,10 +10,12 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/MCS251ISR.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -38,12 +40,28 @@ static constexpr uint32_t EF_ABI_MASK = 0xff;
 
 struct InputSection;
 struct InputFile;
+struct InputSymbol;
 
 struct Relocation {
   uint32_t Offset = 0;
   uint32_t Type = 0;
   uint32_t Sym = 0;
   int32_t Addend = 0;
+};
+
+// One parsed 24-byte record of a `.mcs251.isr` metadata section (A3.2/A3.3).
+// The zero-width type9 association is resolved to the exact InputSymbol* only
+// after resolveSymbols() (T07 step 5).
+struct IsrRecord {
+  uint32_t Kind = 0;
+  uint32_t EntryKind = 0;
+  uint32_t HW = 0;
+  uint32_t Save = 0;
+  uint32_t Slot = 0;
+  uint32_t Asset = 0;
+  uint32_t Offset = 0;   // Record base inside the metadata section.
+  uint32_t SymIndex = 0; // Symbol table index of the type9 association.
+  InputSymbol *Ref = nullptr; // Exact referenced definition.
 };
 
 struct InputSymbol {
@@ -88,6 +106,10 @@ struct InputFile {
   std::vector<std::unique_ptr<InputSection>> Sections;
   std::vector<InputSymbol> Symbols;
   bool NoteSeen = false;
+  // A3: at most one `.mcs251.isr` per object; presence triggers IRQ mode.
+  bool HasIsrMeta = false;
+  InputSection *MetaSection = nullptr;
+  std::vector<IsrRecord> IsrRecords;
 };
 
 static bool fail(raw_ostream &Err, const Twine &Msg) {
@@ -102,6 +124,18 @@ static uint32_t read32BE(ArrayRef<uint8_t> B, size_t O) {
 static uint16_t read16BE(ArrayRef<uint8_t> B, size_t O) {
   return support::endian::read16be(B.data() + O);
 }
+
+static uint32_t relocWidth(uint32_t Type) {
+  return Type == ELF::R_MCS251_16 || Type == ELF::R_MCS251_J16 ||
+                 Type == ELF::R_MCS251_J11 ? 2
+                 : Type == ELF::R_MCS251_24 ? 3
+                 : Type == ELF::R_MCS251_NONE ? 0
+                                              : 1;
+}
+
+// A5: each legal vector slot starts with the EJMP opcode byte 0x8A followed
+// by the 3-byte absolute target (R_MCS251_24 field).
+static constexpr uint8_t EJMP_OPCODE = 0x8A;
 
 static bool rangeFits(uint64_t Start, uint64_t Size, uint64_t Limit = 0x1000000) {
   return Start <= Limit && Size <= Limit - Start;
@@ -243,6 +277,12 @@ static bool validateMetaSection(const InputSection &S, raw_ostream &Err) {
   if (N == ".note.mcs251.abi")
     return S.Type == ELF::SHT_NOTE && S.Flags == 0 && S.Align == 4 ||
            fail(Err, "malformed .note.mcs251.abi");
+  // A3.2: the ISR metadata section is whitelisted by its exact name only; no
+  // `.mcs251.*` wildcard exists anywhere in the non-ALLOC whitelist.
+  if (N == MCS251ISR::MetaSectionName)
+    return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 &&
+               S.Align == MCS251ISR::MetaSectionAlignment ||
+           fail(Err, "malformed " + MCS251ISR::MetaSectionName);
   if (N == ".symtab")
     return S.Type == ELF::SHT_SYMTAB && S.Flags == 0 ||
            fail(Err, "malformed .symtab");
@@ -339,6 +379,21 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
       return fail(Err, Path + ": ET_REL section has non-zero sh_addr: " + S->Name);
     if (!classifySection(*S, Err) || !validateMetaSection(*S, Err))
       return false;
+    if (S->Name == MCS251ISR::MetaSectionName) {
+      // A3.2 frozen structure: no entry size, records only, no padding. An
+      // empty metadata section is an incomplete registration, not a legal
+      // input (R1).
+      if (S->Size == 0)
+        return fail(Err, Path + ": MCS251 ISR: empty .mcs251.isr section");
+      if (H.sh_entsize != 0)
+        return fail(Err, Path + ": MCS251 ISR: .mcs251.isr must have sh_entsize 0");
+      if (S->Size % MCS251ISR::RecordSize != 0)
+        return fail(Err, Path + ": MCS251 ISR: .mcs251.isr size must be a "
+                             "multiple of 24 with no trailing padding");
+      if (F.MetaSection)
+        return fail(Err, Path + ": MCS251 ISR: at most one .mcs251.isr per object");
+      F.MetaSection = S.get();
+    }
     if (S->IsAlloc && S->Align != 1)
       return fail(Err, Path + ": ALLOC section alignment must be 1: " + S->Name);
     if (!S->IsNobits) {
@@ -412,6 +467,86 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
     F.Symbols.push_back(std::move(IS));
   }
 
+  // A3.2: parse the exact ISR metadata records. Field-level structure is
+  // validated here (input structure validation, so `--print-input` exercises
+  // it); cross-record pairing and dedup need resolved symbols and run later.
+  if (F.MetaSection) {
+    F.HasIsrMeta = true;
+    const InputSection &M = *F.MetaSection;
+    const ArrayRef<uint8_t> B(M.Data);
+    // Subtraction-style loop bound: the size is already known to be a
+    // multiple of 24, so the last record ends exactly at the section end and
+    // no offset+size addition can overflow.
+    for (uint32_t Off = 0; M.Size != 0 && Off <= M.Size - MCS251ISR::RecordSize;
+         Off += MCS251ISR::RecordSize) {
+      IsrRecord R;
+      R.Offset = Off;
+      if (read16BE(B, Off + MCS251ISR::RecordOffset::ProtocolVersion) !=
+          MCS251ISR::ProtocolVersion)
+        return fail(Err, Path + ": MCS251 ISR: unsupported metadata version");
+      if (read16BE(B, Off + MCS251ISR::RecordOffset::RecordSizeField) !=
+          MCS251ISR::RecordSize)
+        return fail(Err, Path + ": MCS251 ISR: invalid metadata record size");
+      R.Kind = B[Off + MCS251ISR::RecordOffset::RecordKind];
+      R.EntryKind = B[Off + MCS251ISR::RecordOffset::EntryKind];
+      R.HW = B[Off + MCS251ISR::RecordOffset::HardwareProfile];
+      R.Save = B[Off + MCS251ISR::RecordOffset::SaveProfile];
+      R.Slot = read16BE(B, Off + MCS251ISR::RecordOffset::VectorSlot);
+      R.Asset = read32BE(B, Off + MCS251ISR::RecordOffset::AssetProfile);
+      if (read16BE(B, Off + MCS251ISR::RecordOffset::RequiredCaps) !=
+          MCS251ISR::RequiredCaps)
+        return fail(Err, Path + ": MCS251 ISR: unsupported required caps");
+      if (read32BE(B, Off + MCS251ISR::RecordOffset::SymbolReference) != 0)
+        return fail(Err, Path + ": MCS251 ISR: symbol_reference must be zero; "
+                             "the association is carried by the type9 RELA");
+      if (read32BE(B, Off + MCS251ISR::RecordOffset::Reserved) != 0)
+        return fail(Err, Path + ": MCS251 ISR: reserved field must be zero");
+      // A3.3 frozen per-kind profile: (entry_kind, hardware, save, asset).
+      uint32_t ExpectedEntry, ExpectedHW, ExpectedSave, ExpectedAsset;
+      switch (R.Kind) {
+      case MCS251ISR::RK_ISR_ENTRY:
+      case MCS251ISR::RK_ISR_REGISTER:
+        ExpectedEntry = MCS251ISR::EK_IRQ_RETI;
+        ExpectedHW = MCS251ISR::HardwareProfileIRQ4;
+        ExpectedSave = MCS251ISR::SaveProfileINT37;
+        ExpectedAsset = MCS251ISR::AssetProfileCompiled;
+        break;
+      case MCS251ISR::RK_IRQ_DEFAULT:
+        ExpectedEntry = MCS251ISR::EK_IRQ_STOP;
+        ExpectedHW = MCS251ISR::HardwareProfileIRQ4;
+        ExpectedSave = 0;
+        ExpectedAsset = MCS251ISR::AssetProfileCRT;
+        break;
+      case MCS251ISR::RK_IRQ_RESET:
+        ExpectedEntry = MCS251ISR::EK_RESET;
+        ExpectedHW = 0;
+        ExpectedSave = 0;
+        ExpectedAsset = MCS251ISR::AssetProfileCRT;
+        break;
+      default:
+        return fail(Err, Path + ": MCS251 ISR: unknown metadata record kind");
+      }
+      if (R.Kind == MCS251ISR::RK_ISR_ENTRY ||
+          R.Kind == MCS251ISR::RK_ISR_REGISTER) {
+        // A4: only the 39 legal slots are user-assignable; reserved, system
+        // and out-of-profile numbers (including FFFF) are rejected.
+        if (R.Slot == MCS251ISR::NoSlot || !MCS251ISR::isLegalISRSlot(R.Slot))
+          return fail(Err, Path + ": MCS251 ISR: vector is not a legal slot "
+                             "in profile 0-51");
+      } else if (R.Slot != MCS251ISR::NoSlot) {
+        return fail(Err, Path + ": MCS251 ISR: default/reset record must not "
+                             "claim a slot");
+      }
+      if (R.EntryKind != ExpectedEntry || R.HW != ExpectedHW ||
+          R.Save != ExpectedSave || R.Asset != ExpectedAsset)
+        return fail(Err, Path + ": MCS251 ISR: record kind " + Twine(R.Kind) +
+                             " does not match the frozen "
+                             "entry/hardware/save/asset profile");
+      F.IsrRecords.push_back(R);
+    }
+  }
+
+  unsigned MetaRelaCount = 0;
   for (uint32_t I = 0; I != RawSections->size(); ++I) {
     const ELF32BE::Shdr &Rela = (*RawSections)[I];
     if (Rela.sh_type != ELF::SHT_RELA)
@@ -420,13 +555,78 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
         Rela.sh_link != SymtabIndex || Rela.sh_entsize != sizeof(ELF32BE::Rela))
       return fail(Err, Path + ": malformed SHT_RELA section");
     InputSection *TS = F.Sections[Rela.sh_info].get();
-    if (!TS->IsAlloc || TS->Type == ELF::SHT_NOBITS)
-      return fail(Err, Path + ": RELA targets non-loadable section " + TS->Name);
     Expected<ELF32BE::RelaRange> Relocs = ELF.relas(Rela);
     if (!Relocs) {
       consumeError(Relocs.takeError());
       return fail(Err, Path + ": malformed SHT_RELA section");
     }
+    if (TS == F.MetaSection) {
+      // A3.4/R1: exactly one association RELA per metadata section, under the
+      // frozen name (ordinary RELAs keep free naming; this one does not).
+      ++MetaRelaCount;
+      if (F.Sections[I]->Name !=
+          (Twine(".rela") + MCS251ISR::MetaSectionName).str())
+        return fail(Err, Path + ": MCS251 ISR: metadata RELA must be named "
+                             ".rela.mcs251.isr");
+      // A3.4: the zero-width type9 association has its own structural
+      // validation, deliberately separate from the ordinary relocation path.
+      // These relocations are consumed here; they are never stored for
+      // applyRelocations() and never write bytes.
+      if (Relocs->size() != F.IsrRecords.size())
+        return fail(Err, Path + ": MCS251 ISR: metadata needs exactly one "
+                             "type9 relocation per record");
+      std::vector<bool> Covered(F.IsrRecords.size(), false);
+      for (const ELF32BE::Rela &RelaEntry : *Relocs) {
+        Relocation R{static_cast<uint32_t>(RelaEntry.r_offset),
+                     RelaEntry.getType(false), RelaEntry.getSymbol(false),
+                     static_cast<int32_t>(RelaEntry.r_addend)};
+        if (R.Type != ELF::R_MCS251_ISR_REF)
+          return fail(Err, Path + ": MCS251 ISR: only R_MCS251_ISR_REF is "
+                             "allowed in the ISR metadata RELA");
+        if (R.Addend != 0)
+          return fail(Err, Path + ": MCS251 ISR: type9 addend must be zero");
+        if (R.Sym >= F.Symbols.size())
+          return fail(Err, Path + ": relocation symbol index out of range");
+        // Subtraction-style bound: Offset >= 12 first so no unsigned
+        // wraparound can manufacture a valid record index.
+        if (R.Offset < 12)
+          return fail(Err, Path + ": MCS251 ISR: type9 offset must be record "
+                             "base + 12");
+        const uint32_t Into = R.Offset - 12;
+        if (Into % MCS251ISR::RecordSize != 0 ||
+            Into / MCS251ISR::RecordSize >= F.IsrRecords.size())
+          return fail(Err, Path + ": MCS251 ISR: type9 offset must be record "
+                             "base + 12");
+        const uint32_t Rec = Into / MCS251ISR::RecordSize;
+        if (Covered[Rec])
+          return fail(Err, Path + ": MCS251 ISR: each metadata record carries "
+                             "exactly one type9 relocation");
+        Covered[Rec] = true;
+        const InputSymbol &Sym = F.Symbols[R.Sym];
+        if (Sym.Name.empty() || Sym.Type != ELF::STT_FUNC)
+          return fail(Err, Path + ": MCS251 ISR: type9 must name an STT_FUNC "
+                             "symbol (never a section+addend fold)");
+        if (Sym.Section == ELF::SHN_ABS)
+          return fail(Err, Path + ": MCS251 ISR: type9 must not reference "
+                             "SHN_ABS");
+        if (!Sym.Defined)
+          return fail(Err, Path + ": MCS251 ISR: ISR identity must reference "
+                             "a definition in the same object");
+        if (!Sym.Sec || !Sym.Sec->IsAlloc || !Sym.Sec->IsCode ||
+            Sym.Sec->Type != ELF::SHT_PROGBITS)
+          return fail(Err, Path + ": MCS251 ISR: ISR target must live in an "
+                             "executable PROGBITS section");
+        F.IsrRecords[Rec].SymIndex = R.Sym;
+        TS->RelocIndex = I;
+      }
+      for (size_t Rec = 0; Rec != Covered.size(); ++Rec)
+        if (!Covered[Rec])
+          return fail(Err, Path + ": MCS251 ISR: metadata record " + Twine(Rec) +
+                             " has no type9 association");
+      continue;
+    }
+    if (!TS->IsAlloc || TS->Type == ELF::SHT_NOBITS)
+      return fail(Err, Path + ": RELA targets non-loadable section " + TS->Name);
     // SPEC §4.1: an empty PROGBITS .data section with a non-empty RELA is
     // not supported.  An empty RELA table (zero entries) is harmless and
     // does not disqualify the section from being ignored.
@@ -439,17 +639,27 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
                    static_cast<int32_t>(RelaEntry.r_addend)};
       if (R.Sym >= F.Symbols.size())
         return fail(Err, Path + ": relocation symbol index out of range");
-      uint32_t Width = R.Type == ELF::R_MCS251_16 ||
-                               R.Type == ELF::R_MCS251_J16 ||
-                               R.Type == ELF::R_MCS251_J11 ? 2
-                         : R.Type == ELF::R_MCS251_24 ? 3
-                         : R.Type == ELF::R_MCS251_NONE ? 0 : 1;
+      if (R.Type == ELF::R_MCS251_ISR_REF)
+        return fail(Err, Path + ": MCS251 ISR: R_MCS251_ISR_REF is only "
+                           "allowed in the ISR metadata RELA");
+      uint32_t Width = relocWidth(R.Type);
       if (R.Type > ELF::R_MCS251_J11 || R.Offset > TS->Size ||
           Width > TS->Size - R.Offset)
         return fail(Err, Path + ": relocation offset/type out of range");
       TS->RelocIndex = I;
       TS->Relocs.push_back(R);
     }
+  }
+  // R1: object-level association completeness, enforced at input-structure
+  // validation time (--print-input rejects it too), never deferred to the
+  // vector stage.
+  if (F.MetaSection) {
+    if (MetaRelaCount == 0)
+      return fail(Err, Path + ": MCS251 ISR: metadata records have no "
+                         ".rela.mcs251.isr association section");
+    if (MetaRelaCount > 1)
+      return fail(Err, Path + ": MCS251 ISR: more than one RELA targets "
+                         ".mcs251.isr");
   }
   // SPEC §4.1: a size=0 PROGBITS .data section is only ignorable when it has
   // no defined symbols and no relocations.  Relocations are already rejected
@@ -489,19 +699,37 @@ private:
 
   uint32_t areaStart(StringRef Name, uint32_t Default) const;
   bool hasAreaStart(StringRef Name) const;
+  bool rejectInputVecs();
   bool resolveSymbols();
+  bool validateISRIdentitiesAndRegistrations();
+  bool synthesizeIRQVectors();
   bool layout();
   bool checkFlashGate();
+  bool validateIRQReservedRangesAndCRT();
   bool layoutCode();
   bool layoutData();
   bool allocate(InputSection &S, uint32_t Lo, uint32_t Hi);
   bool reserve(uint32_t Start, uint32_t Size, StringRef What);
   bool applyRelocations();
+  bool applyVectorJumps();
+  bool validateIRQFinalAssets();
   bool validateXInit();
   void buildMap(raw_ostream &Out) const;
   void printInputs(raw_ostream &Out) const;
   InputSymbol *findSymbol(InputFile &F, uint32_t Index);
   bool errorUndefined();
+
+  // IRQ mode (A3.6): triggered by any input carrying `.mcs251.isr`.
+  bool IrqMode = false;
+  InputFile *CrtFile = nullptr;
+  InputSymbol *DefaultSym = nullptr;
+  InputSymbol *ResetSym = nullptr;
+  std::set<InputSymbol *> IsrSymbols;    // Exact registered ISR identities.
+  InputSymbol *SlotSym[52] = {};         // Registered handler per legal slot.
+  std::vector<std::unique_ptr<InputSection>> OwnedSynth;
+  std::vector<InputSection *> SynthSections;
+  std::vector<std::pair<InputSection *, uint32_t>> SynthExpect;
+  std::vector<std::pair<InputSection *, InputSymbol *>> VectorJumps;
 };
 
 uint32_t Linker::areaStart(StringRef Name, uint32_t Default) const {
@@ -571,6 +799,173 @@ bool Linker::resolveSymbols() {
         if (It != Globals.end())
           S.Address = It->second->Address;
       }
+  return true;
+}
+
+// T07 step 7: the synthesized table is the only VECS in IRQ mode. Any input
+// VECS section is rejected, including a zero-size one: an old asset must not
+// masquerade as the companion CRT.
+bool Linker::rejectInputVecs() {
+  for (const auto &F : Files)
+    for (const auto &S : F->Sections)
+      if (S->Region == "VECS")
+        return fail(Err, F->Path + ": MCS251 ISR: input VECS section " +
+                             S->Name + " is forbidden; the linker synthesizes "
+                             "the only vector table (zero-size included)");
+  return true;
+}
+
+// A3.3 pairing and dedup on the exact InputSymbol* identity table, built
+// after resolveSymbols() (T07 step 5).
+bool Linker::validateISRIdentitiesAndRegistrations() {
+  // Records may only reference same-object definitions (enforced at load),
+  // so the per-file InputSymbol pointer is the precise function identity.
+  for (auto &F : Files)
+    for (IsrRecord &R : F->IsrRecords)
+      R.Ref = &F->Symbols[R.SymIndex];
+
+  // Collect every symbol a kind3 IRQ_DEFAULT record references, so the
+  // "no user registration on the default entry" rule can fire regardless of
+  // input order or which object carries the default record.
+  std::set<InputSymbol *> DefaultRefs;
+  for (const auto &F : Files)
+    for (const IsrRecord &R : F->IsrRecords)
+      if (R.Kind == MCS251ISR::RK_IRQ_DEFAULT)
+        DefaultRefs.insert(R.Ref);
+
+  // Per-object ENTRY/REGISTER pairing, in-object duplicate detection, and
+  // the one-definition-one-slot rule across all objects.
+  std::set<uint32_t> SlotOwner;
+  for (auto &F : Files) {
+    std::map<uint32_t, const IsrRecord *> EntryBySlot;
+    std::map<uint32_t, const IsrRecord *> RegBySlot;
+    // Function-level duplicate first: two REGISTERs for one precise symbol.
+    std::map<InputSymbol *, unsigned> RegCount;
+    for (const IsrRecord &R : F->IsrRecords)
+      if (R.Kind == MCS251ISR::RK_ISR_REGISTER)
+        ++RegCount[R.Ref];
+    for (const auto &C2 : RegCount)
+      if (C2.second > 1)
+        return fail(Err, F->Path + ": MCS251 ISR: duplicate registration of "
+                             "the same function " + C2.first->Name);
+    for (const IsrRecord &R : F->IsrRecords) {
+      if (R.Kind == MCS251ISR::RK_ISR_ENTRY) {
+        if (!EntryBySlot.emplace(R.Slot, &R).second)
+          return fail(Err, F->Path + ": MCS251 ISR: two ENTRY records for "
+                             "slot " + Twine(R.Slot));
+      } else if (R.Kind == MCS251ISR::RK_ISR_REGISTER) {
+        if (!RegBySlot.emplace(R.Slot, &R).second)
+          return fail(Err, F->Path + ": MCS251 ISR: two REGISTER records for "
+                             "slot " + Twine(R.Slot));
+      }
+    }
+    for (const auto &P : EntryBySlot) {
+      auto It = RegBySlot.find(P.first);
+      if (It == RegBySlot.end())
+        return fail(Err, F->Path + ": MCS251 ISR: ENTRY without REGISTER for "
+                           "slot " + Twine(P.first));
+      if (It->second->Ref != P.second->Ref)
+        return fail(Err, F->Path + ": MCS251 ISR: ENTRY and REGISTER must "
+                           "reference the same exact function for slot " +
+                           Twine(P.first));
+      if (!SlotOwner.insert(P.first).second)
+        return fail(Err, F->Path + ": MCS251 ISR: duplicate registration of "
+                           "slot " + Twine(P.first));
+      SlotSym[P.first] = P.second->Ref;
+      IsrSymbols.insert(P.second->Ref);
+    }
+    for (const auto &P : RegBySlot)
+      if (!EntryBySlot.count(P.first))
+        return fail(Err, F->Path + ": MCS251 ISR: REGISTER without ENTRY for "
+                           "slot " + Twine(P.first));
+  }
+
+  // A3.3: a user registration may never hang off the default entry.
+  for (const auto &F : Files)
+    for (const IsrRecord &R : F->IsrRecords)
+      if ((R.Kind == MCS251ISR::RK_ISR_ENTRY ||
+           R.Kind == MCS251ISR::RK_ISR_REGISTER) &&
+          DefaultRefs.count(R.Ref))
+        return fail(Err, F->Path + ": MCS251 ISR: user registration must not "
+                           "reference the default entry");
+
+  // A3.3: exactly one IRQ_DEFAULT and one IRQ_RESET, both from the same CRT
+  // object with asset profile 1 (asset value itself is checked at load).
+  InputFile *DefaultFile = nullptr;
+  InputFile *ResetFile = nullptr;
+  for (auto &F : Files) {
+    for (const IsrRecord &R : F->IsrRecords) {
+      if (R.Kind == MCS251ISR::RK_IRQ_DEFAULT) {
+        if (DefaultSym)
+          return fail(Err, F->Path + ": MCS251 ISR: more than one IRQ_DEFAULT "
+                             "record");
+        DefaultSym = R.Ref;
+        DefaultFile = F.get();
+      } else if (R.Kind == MCS251ISR::RK_IRQ_RESET) {
+        if (ResetSym)
+          return fail(Err, F->Path + ": MCS251 ISR: more than one IRQ_RESET "
+                             "record");
+        ResetSym = R.Ref;
+        ResetFile = F.get();
+      }
+    }
+  }
+  if (!DefaultSym || !ResetSym)
+    return fail(Err, "MCS251 ISR: IRQ mode requires exactly one IRQ_DEFAULT "
+                     "and one IRQ_RESET from the frozen CRT");
+  if (DefaultFile != ResetFile)
+    return fail(Err, "MCS251 ISR: IRQ_DEFAULT and IRQ_RESET must come from "
+                     "the same CRT object");
+  CrtFile = DefaultFile;
+  return true;
+}
+
+// T07 step 6: synthesize the only vector table as real input-section objects
+// that participate in layout, overlap and the ROM gate like any other CODE.
+// Legal slot: 4B PROGBITS (EJMP opcode + R_MCS251_24 field) + 4B NOBITS tail.
+// Reserved/system slots: one 8B NOBITS range, no EJMP. The synthesized EJMP
+// relocations use the ordinary R_MCS251_24 against the vetted entry; type9 is
+// never copied into synthesized machine code.
+bool Linker::synthesizeIRQVectors() {
+  for (unsigned Slot = 0; Slot < MCS251ISR::ISRVectorCount; ++Slot) {
+    const uint32_t Base =
+        MCS251ISR::ISRVectorBase + MCS251ISR::ISRVectorStride * Slot;
+    auto New = [&](const std::string &Name, uint32_t Type, uint64_t Flags,
+                   uint64_t Size, uint32_t Expected) {
+      auto S = std::make_unique<InputSection>();
+      S->Name = Name;
+      S->Type = Type;
+      S->Flags = Flags;
+      S->Size = Size;
+      S->Align = 1;
+      S->Region = "VECS";
+      S->IsAlloc = true;
+      S->IsCode = (Flags & ELF::SHF_EXECINSTR) != 0;
+      S->IsNobits = Type == ELF::SHT_NOBITS;
+      S->IsLoadable = S->IsAlloc && !S->IsNobits && S->Size != 0;
+      SynthExpect.push_back({S.get(), Expected});
+      SynthSections.push_back(S.get());
+      AllSections.push_back(S.get());
+      OwnedSynth.push_back(std::move(S));
+      return OwnedSynth.back().get();
+    };
+    std::string NN = Slot < 10 ? "0" + std::to_string(Slot)
+                               : std::to_string(Slot);
+    if (MCS251ISR::isLegalISRSlot(Slot)) {
+      InputSection *J =
+          New(".mcs251.VECS." + NN, ELF::SHT_PROGBITS,
+              ELF::SHF_ALLOC | ELF::SHF_EXECINSTR, 4, Base);
+      J->Data = {EJMP_OPCODE, 0, 0, 0};
+      J->Relocs.push_back(
+          {1, ELF::R_MCS251_24, 0, 0});
+      VectorJumps.push_back({J, SlotSym[Slot] ? SlotSym[Slot] : DefaultSym});
+      New(".mcs251.VECS." + NN + ".pad", ELF::SHT_NOBITS,
+          ELF::SHF_ALLOC | ELF::SHF_EXECINSTR, 4, Base + 4);
+    } else {
+      New(".mcs251.VECS." + NN + ".rsv", ELF::SHT_NOBITS,
+          ELF::SHF_ALLOC | ELF::SHF_EXECINSTR, 8, Base);
+    }
+  }
   return true;
 }
 
@@ -1007,6 +1402,87 @@ bool Linker::layoutData() {
 
 bool Linker::layout() { return layoutCode() && layoutData(); }
 
+// A3.6 layout stage: reserved vector range and CRT shape validation. Runs
+// after layout so every synthesized slot has its final address, and before
+// checkFlashGate so a rejected image never produces output.
+bool Linker::validateIRQReservedRangesAndCRT() {
+  // T07 step 8: the vector area is pinned to the frozen formula base; it
+  // cannot be moved through --area-start=VECS.
+  if (hasAreaStart("VECS") && areaStart("VECS", 0) != MCS251ISR::ISRVectorBase)
+    return fail(Err, "MCS251 ISR: --area-start=VECS must be 0xff0003; the "
+                     "vector area cannot be moved");
+  // The synthesized slots must have landed exactly on the frozen formula.
+  for (const auto &P : SynthExpect) {
+    if (P.first->Address != P.second)
+      return fail(Err, "MCS251 ISR: synthesized vector " + P.first->Name +
+                           " did not land on the frozen formula address 0x" +
+                           Twine::utohexstr(P.second));
+  }
+  // T07 step 9: check the whole reserved range against every non-synthetic
+  // CODE range, independent of any image bytes.
+  for (const Range &U : CodeUsed) {
+    bool Owned = llvm::any_of(SynthSections, [&](const InputSection *S) {
+      return S->Address == U.Start && S->Address + S->Size == U.End;
+    });
+    if (!Owned && U.Start < MCS251ISR::ISRVectorEnd &&
+        MCS251ISR::ISRVectorBase < U.End)
+      return fail(Err, "MCS251 ISR: CODE range [0x" +
+                           Twine::utohexstr(U.Start) + ",0x" +
+                           Twine::utohexstr(U.End) +
+                           ") overlaps the reserved vector area "
+                           "[0xff0003,0xff01a3)");
+  }
+  // T07 step 10 / R2: HOME must sit exactly at 0xff0000 so the reset abuts
+  // the vector base, and must be exactly a 3-byte ljmp, never a 4-byte EJMP.
+  InputSection *Home = ResetSym->Sec;
+  if (!Home || Home->Region != "HOME" || Home->Size != 3 || ResetSym->Size != 3)
+    return fail(Err, "MCS251 ISR: reset must be a 3-byte HOME trampoline, "
+                     "never a 4-byte EJMP");
+  if (Home->Address != 0xFF0000)
+    return fail(Err, "MCS251 ISR: HOME must sit at 0xff0000 abutting the "
+                     "vector base, got 0x" +
+                         Twine::utohexstr(Home->Address));
+  if (Home->Data.size() != 3 || Home->Data[0] != 0x02)
+    return fail(Err, "MCS251 ISR: HOME must begin with the ljmp opcode 0x02");
+  if (Home->Relocs.size() != 1 || Home->Relocs[0].Type != ELF::R_MCS251_J16 ||
+      Home->Relocs[0].Offset != 1)
+    return fail(Err, "MCS251 ISR: HOME must carry exactly one J16 field at "
+                     "offset 1 into the paired BOOT");
+  {
+    const Relocation &R = Home->Relocs[0];
+    // R2: verify the final landing address (symbol address + addend), not
+    // just the symbol's section. The J16 must hit the paired BOOT entry
+    // itself: zero addend, entry at the start of its BOOT section.
+    if (R.Addend != 0)
+      return fail(Err, "MCS251 ISR: reset J16 must carry a zero addend, got " +
+                           Twine(R.Addend));
+    InputSymbol *IS = findSymbol(*CrtFile, R.Sym);
+    if (!IS)
+      return fail(Err, "invalid relocation symbol");
+    InputSymbol *Def =
+        IS->Defined ? IS
+                    : (Globals.count(IS->Name) ? Globals[IS->Name] : nullptr);
+    if (!Def || !Def->Defined || !Def->Sec || Def->File != CrtFile ||
+        Def->Sec->Region != "BOOT")
+      return fail(Err, "MCS251 ISR: reset J16 must target the paired BOOT of "
+                       "the same CRT object");
+    if (Def->Address + static_cast<uint32_t>(R.Addend) != Def->Sec->Address)
+      return fail(Err, "MCS251 ISR: reset J16 must land on the paired BOOT "
+                       "entry itself, not at 0x" +
+                           Twine::utohexstr(Def->Address +
+                                            static_cast<uint32_t>(R.Addend)));
+  }
+  // T07 step 11: the CRT BOOT must start at or above 0xff0210 (the T08 asset
+  // default); FF0100-era BOOTs are a legacy-layout conflict in IRQ mode.
+  for (InputSection *S : AllSections)
+    if (S->File == CrtFile && S->Region == "BOOT" && S->Size &&
+        S->Address < 0xFF0210)
+      return fail(Err, "MCS251 ISR: CRT BOOT must start at or above 0xff0210, "
+                       "got 0x" +
+                           Twine::utohexstr(S->Address));
+  return true;
+}
+
 // E3/M4: Code ROM gate.  The build layer supplies the on-board flash window
 // as two plain numbers (--flash-base/--flash-size); the linker never knows a
 // board model.  Every occupied CODE-class section (HOME/VECS/BOOT/CSEG/XINIT)
@@ -1076,6 +1552,39 @@ bool Linker::applyRelocations() {
           if (It != Globals.end())
             Target = It->second;
         }
+        // T07 step 15 / R3: an ordinary ALLOC relocation may never use a
+        // known registered ISR or the default entry as a plain address/call
+        // target. The synthesized vector jumps are the single sanctioned
+        // exception and are applied separately below.
+        if (IrqMode) {
+          const bool IsDefault = Target == DefaultSym;
+          if (Target->Defined &&
+              (IsrSymbols.count(Target) || IsDefault))
+            return fail(Err, IsDefault
+                                 ? "MCS251 ISR: ordinary relocation in " +
+                                       S->Name + " uses the default entry " +
+                                       Target->Name + " as a plain address"
+                                 : "MCS251 ISR: ordinary relocation in " +
+                                       S->Name + " uses registered ISR " +
+                                       Target->Name + " as a plain address");
+          if (IS->Type == ELF::STT_SECTION) {
+            const int64_t Cand =
+                static_cast<int64_t>(IS->Address) + R.Addend;
+            auto Inside = [&](InputSymbol *P) {
+              const int64_t Lo = static_cast<int64_t>(P->Address);
+              const int64_t Hi = Lo + std::max<uint32_t>(P->Size, 1);
+              return Cand >= Lo && Cand < Hi;
+            };
+            for (InputSymbol *ISR : IsrSymbols)
+              if (Inside(ISR))
+                return fail(Err, "MCS251 ISR: section+addend relocation in " +
+                                     S->Name + " lands inside registered ISR " +
+                                     ISR->Name);
+            if (DefaultSym && Inside(DefaultSym))
+              return fail(Err, "MCS251 ISR: section+addend relocation in " +
+                                   S->Name + " lands inside the default entry");
+          }
+        }
         uint32_t V = IS->Defined ? IS->Address
                      : Globals.count(IS->Name) ? Globals[IS->Name]->Address
                      : Synth.count(IS->Name) ? Synth[IS->Name]
@@ -1139,6 +1648,75 @@ bool Linker::applyRelocations() {
         default: return fail(Err, "unknown MCS251 relocation");
         }
       }
+  // T07 step 6: the synthesized EJMP table is applied after layout, when the
+  // vetted targets have final addresses. Metadata type9 relocations are never
+  // seen here: they are consumed during loadFile() (T07 step 14).
+  if (IrqMode && !applyVectorJumps())
+    return false;
+  if (IrqMode && !validateIRQFinalAssets())
+    return false;
+  return true;
+}
+
+// Apply the 52 synthesized vector slots: R_MCS251_24 semantics against the
+// exact vetted entry symbol of the slot (registered handler or the CRT
+// default fail-stop entry for unregistered legal slots).
+bool Linker::applyVectorJumps() {
+  for (const auto &VJ : VectorJumps) {
+    InputSection *S = VJ.first;
+    const Relocation &R = S->Relocs[0];
+    InputSymbol *T = VJ.second;
+    if (!T || !T->Defined)
+      return fail(Err, "MCS251 ISR: vector target for " + S->Name +
+                           " is not resolved");
+    const int64_t Value = static_cast<int64_t>(T->Address) + R.Addend;
+    if (Value < 0 || Value > 0xffffff)
+      return fail(Err, "MCS251 ISR: vector target out of 24-bit range for " +
+                           S->Name);
+    if (!T->Sec || !T->Sec->IsCode)
+      return fail(Err, "MCS251 ISR: vector target for " + S->Name +
+                           " is not a CODE address");
+    S->Data[R.Offset] = (Value >> 16) & 0xff;
+    S->Data[R.Offset + 1] = (Value >> 8) & 0xff;
+    S->Data[R.Offset + 2] = Value & 0xff;
+    Image[S->Address + R.Offset] = S->Data[R.Offset];
+    Image[S->Address + R.Offset + 1] = S->Data[R.Offset + 1];
+    Image[S->Address + R.Offset + 2] = S->Data[R.Offset + 2];
+  }
+  return true;
+}
+
+// A3.6/applyRelocations stage: final IRQ target and asset validation that
+// needs post-layout addresses.
+bool Linker::validateIRQFinalAssets() {
+  // A5: no relocation of any width may exist inside the default entry range.
+  // Zero-width relocations count too: the frozen rule is about the range,
+  // not about written bytes, so a zero-width record inside [Value, Value+4)
+  // is rejected by its offset (R3).
+  {
+    const int64_t Lo = static_cast<int64_t>(DefaultSym->Value);
+    const int64_t Hi = Lo + 4;
+    for (const Relocation &R : DefaultSym->Sec->Relocs) {
+      const int64_t RL = static_cast<int64_t>(R.Offset);
+      const uint32_t W = relocWidth(R.Type);
+      const bool Inside = W == 0 ? (RL >= Lo && RL < Hi)
+                                 : (RL < Hi && Lo < RL + static_cast<int64_t>(W));
+      if (Inside)
+        return fail(Err, "MCS251 ISR: relocation inside the default entry "
+                         "range");
+    }
+  }
+  // A5: the default entry is byte-exactly the frozen fail-stop word.
+  if (DefaultSym->Size != 4)
+    return fail(Err, "MCS251 ISR: default entry must be a 4-byte STT_FUNC");
+  InputSection *S = DefaultSym->Sec;
+  if (!S || DefaultSym->Value > S->Data.size() ||
+      4 > S->Data.size() - DefaultSym->Value)
+    return fail(Err, "MCS251 ISR: default entry range is out of its section");
+  for (unsigned I = 0; I != 4; ++I)
+    if (S->Data[DefaultSym->Value + I] != MCS251ISR::IRQDefaultBytes[I])
+      return fail(Err, "MCS251 ISR: default entry machine bytes are not the "
+                       "frozen C2AF80FE fail-stop word");
   return true;
 }
 
@@ -1178,8 +1756,14 @@ bool Linker::validateXInit() {
         return fail(Err, "XINIT destination overflows DATA in " + S->Name);
       bool WithinOneSlice = false;
       for (InputSection *D : AllSections)
-        if ((D->Region == "DSEG" || D->Region == "DATA_ABS") &&
-            Destination >= D->Address &&
+        // T08/T07 step 20: explicit initial values may also target an
+        // allocated BSEG_BYTES slice (the CRT-owned bit-addressable byte
+        // window). No new bit allocator and no v2 capability is introduced:
+        // only slices that were actually allocated by the existing BSEG_BYTES
+        // rule (allocated slices carry a real Address) qualify.
+        if ((D->Region == "DSEG" || D->Region == "DATA_ABS" ||
+             D->Region == "BSEG_BYTES") &&
+            D->Size != 0 && Destination >= D->Address &&
             rangeFits(uint64_t(Destination) - D->Address, ObjectSize,
                       D->Size)) {
           WithinOneSlice = true;
@@ -1228,6 +1812,33 @@ void Linker::buildMap(raw_ostream &Out) const {
     Out << "stack H=" << format_hex(StackH, 4, false) << " SPX="
         << format_hex(SPX, 4, false) << " capacity=" << Capacity
         << " edata_end=" << format_hex(Config.EdataEnd, 4, false) << '\n';
+  // T07 steps 17-19: in IRQ mode the map carries exactly the 52 synthesized
+  // vector rows (slot as two decimal digits, address as 6 lowercase hex
+  // digits). No ISR-safe, stack or priority fields exist anywhere.
+  if (IrqMode) {
+    for (unsigned Slot = 0; Slot < MCS251ISR::ISRVectorCount; ++Slot) {
+      const uint32_t Base =
+          MCS251ISR::ISRVectorBase + MCS251ISR::ISRVectorStride * Slot;
+      Out << "IRQ ";
+      if (Slot < 10)
+        Out << '0';
+      Out << Slot << " " << format_hex(Base, 8, false);
+      switch (MCS251ISR::ISRSlots[Slot].Kind) {
+      case MCS251ISR::ISRSlotKind::Reserved:
+        Out << " RESERVED\n";
+        break;
+      case MCS251ISR::ISRSlotKind::System:
+        Out << " SYSTEM\n";
+        break;
+      default:
+        if (InputSymbol *Sym = SlotSym[Slot])
+          Out << " ISR " << Sym->Name << '\n';
+        else
+          Out << " DEFAULT " << DefaultSym->Name << '\n';
+        break;
+      }
+    }
+  }
 }
 
 bool Linker::run(LinkerResult &Result) {
@@ -1242,12 +1853,32 @@ bool Linker::run(LinkerResult &Result) {
   }
   if (Files.empty())
     return fail(Err, "no input files");
+  // A3.6: any input containing `.mcs251.isr` triggers IRQ mode; there is no
+  // command-line profile string and no board-name policy.
+  IrqMode = llvm::any_of(Files,
+                         [](const std::unique_ptr<InputFile> &F) {
+                           return F->HasIsrMeta;
+                         });
+  if (IrqMode && !rejectInputVecs())
+    return false;
+  // T07 step 8: the vector area sits at the frozen base whether or not the
+  // command line passes --area-start=VECS; a non-FF0003 value is rejected in
+  // validateIRQReservedRangesAndCRT().
+  if (IrqMode && !hasAreaStart("VECS"))
+    Config.AreaStarts.emplace_back("VECS", MCS251ISR::ISRVectorBase);
   raw_string_ostream InputOS(Result.InputReport);
   printInputs(InputOS);
   InputOS.flush();
   if (Config.PrintInput)
     return true;
-  if (!resolveSymbols() || !layout())
+  if (!resolveSymbols())
+    return false;
+  if (IrqMode && (!validateISRIdentitiesAndRegistrations() ||
+                  !synthesizeIRQVectors()))
+    return false;
+  if (!layout())
+    return false;
+  if (IrqMode && !validateIRQReservedRangesAndCRT())
     return false;
   // The ROM gate runs after layout and before any output is produced, so a
   // rejected image never reaches a firmware file or a map.

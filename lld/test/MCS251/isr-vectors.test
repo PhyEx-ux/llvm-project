@@ -1,0 +1,991 @@
+# T07: lld IRQ-mode vector synthesis, ISR identity/registration checks,
+# reserved-range and CRT validation, and the frozen acceptance matrix
+# (ISR-TASK-BREAKDOWN.md A3/A4/A5, T07 card; rework R1-R5).
+#
+# The fixture generator (isr-fixture.py) and the image checker
+# (isr-check-image.py) are independent of the product reader: the checker
+# parses PT_LOAD itself, hardcodes the 13 non-legal slots and the frozen
+# A5 constants, takes the fixture .text load base from the map, and treats
+# the map only as a secondary witness.
+#
+# Frozen acceptance block (task card, verbatim):
+# RUN: rm -rf %t-seed && split-file %s %t-seed
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.good.yaml --slots 0,6,8,24,36,49,50,51
+# RUN: yaml2obj %t.good.yaml -o %t.good.o
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o %t.crt.o
+# RUN: mcs251-lld %t.crt.o %t.good.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.map -o %t.elf
+# RUN: FileCheck %s --check-prefix=MAP < %t.map
+# RUN: %python %S/Inputs/isr-check-image.py %t.elf %t.map --registered 0,6,8,24,36,49,50,51
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.bad.yaml --slots 7 --allow-invalid-slot
+# RUN: yaml2obj %t.bad.yaml -o %t.bad.o
+# RUN: not mcs251-lld %t.crt.o %t.bad.o -o %t.bad.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.v2.yaml --slots 1 --mutation version
+# RUN: yaml2obj %t.v2.yaml -o %t.v2.o
+# RUN: not mcs251-lld --print-input %t.v2.o 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=VERSION
+
+# MAP: IRQ 00 0xff0003 ISR
+# MAP: IRQ 01 0xff000b DEFAULT
+# MAP: IRQ 06 0xff0033 ISR
+# MAP: IRQ 07 0xff003b RESERVED
+# MAP: IRQ 13 0xff006b RESERVED
+# MAP: IRQ 14 0xff0073 SYSTEM
+# MAP: IRQ 15 0xff007b SYSTEM
+# MAP: IRQ 51 0xff019b ISR
+# SLOT: MCS251 ISR: vector is not a legal slot in profile 0-51
+# VERSION: MCS251 ISR: unsupported metadata version
+
+# -------------------------------------------------------------------------
+# Matrix: each of the 39 legal slots individually as a positive case.
+# -------------------------------------------------------------------------
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p00.yaml --slots 0
+# RUN: yaml2obj %t.p00.yaml -o %t.p00.o
+# RUN: mcs251-lld %t.crt.o %t.p00.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p00.map -o %t.p00.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p00.elf %t.p00.map --registered 0
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p01.yaml --slots 1
+# RUN: yaml2obj %t.p01.yaml -o %t.p01.o
+# RUN: mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p01.map -o %t.p01.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p01.elf %t.p01.map --registered 1
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p02.yaml --slots 2
+# RUN: yaml2obj %t.p02.yaml -o %t.p02.o
+# RUN: mcs251-lld %t.crt.o %t.p02.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p02.map -o %t.p02.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p02.elf %t.p02.map --registered 2
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p03.yaml --slots 3
+# RUN: yaml2obj %t.p03.yaml -o %t.p03.o
+# RUN: mcs251-lld %t.crt.o %t.p03.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p03.map -o %t.p03.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p03.elf %t.p03.map --registered 3
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p04.yaml --slots 4
+# RUN: yaml2obj %t.p04.yaml -o %t.p04.o
+# RUN: mcs251-lld %t.crt.o %t.p04.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p04.map -o %t.p04.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p04.elf %t.p04.map --registered 4
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p05.yaml --slots 5
+# RUN: yaml2obj %t.p05.yaml -o %t.p05.o
+# RUN: mcs251-lld %t.crt.o %t.p05.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p05.map -o %t.p05.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p05.elf %t.p05.map --registered 5
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p06.yaml --slots 6
+# RUN: yaml2obj %t.p06.yaml -o %t.p06.o
+# RUN: mcs251-lld %t.crt.o %t.p06.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p06.map -o %t.p06.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p06.elf %t.p06.map --registered 6
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p08.yaml --slots 8
+# RUN: yaml2obj %t.p08.yaml -o %t.p08.o
+# RUN: mcs251-lld %t.crt.o %t.p08.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p08.map -o %t.p08.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p08.elf %t.p08.map --registered 8
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p09.yaml --slots 9
+# RUN: yaml2obj %t.p09.yaml -o %t.p09.o
+# RUN: mcs251-lld %t.crt.o %t.p09.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p09.map -o %t.p09.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p09.elf %t.p09.map --registered 9
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p10.yaml --slots 10
+# RUN: yaml2obj %t.p10.yaml -o %t.p10.o
+# RUN: mcs251-lld %t.crt.o %t.p10.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p10.map -o %t.p10.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p10.elf %t.p10.map --registered 10
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p11.yaml --slots 11
+# RUN: yaml2obj %t.p11.yaml -o %t.p11.o
+# RUN: mcs251-lld %t.crt.o %t.p11.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p11.map -o %t.p11.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p11.elf %t.p11.map --registered 11
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p12.yaml --slots 12
+# RUN: yaml2obj %t.p12.yaml -o %t.p12.o
+# RUN: mcs251-lld %t.crt.o %t.p12.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p12.map -o %t.p12.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p12.elf %t.p12.map --registered 12
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p16.yaml --slots 16
+# RUN: yaml2obj %t.p16.yaml -o %t.p16.o
+# RUN: mcs251-lld %t.crt.o %t.p16.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p16.map -o %t.p16.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p16.elf %t.p16.map --registered 16
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p17.yaml --slots 17
+# RUN: yaml2obj %t.p17.yaml -o %t.p17.o
+# RUN: mcs251-lld %t.crt.o %t.p17.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p17.map -o %t.p17.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p17.elf %t.p17.map --registered 17
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p18.yaml --slots 18
+# RUN: yaml2obj %t.p18.yaml -o %t.p18.o
+# RUN: mcs251-lld %t.crt.o %t.p18.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p18.map -o %t.p18.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p18.elf %t.p18.map --registered 18
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p19.yaml --slots 19
+# RUN: yaml2obj %t.p19.yaml -o %t.p19.o
+# RUN: mcs251-lld %t.crt.o %t.p19.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p19.map -o %t.p19.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p19.elf %t.p19.map --registered 19
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p20.yaml --slots 20
+# RUN: yaml2obj %t.p20.yaml -o %t.p20.o
+# RUN: mcs251-lld %t.crt.o %t.p20.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p20.map -o %t.p20.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p20.elf %t.p20.map --registered 20
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p21.yaml --slots 21
+# RUN: yaml2obj %t.p21.yaml -o %t.p21.o
+# RUN: mcs251-lld %t.crt.o %t.p21.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p21.map -o %t.p21.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p21.elf %t.p21.map --registered 21
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p24.yaml --slots 24
+# RUN: yaml2obj %t.p24.yaml -o %t.p24.o
+# RUN: mcs251-lld %t.crt.o %t.p24.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p24.map -o %t.p24.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p24.elf %t.p24.map --registered 24
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p25.yaml --slots 25
+# RUN: yaml2obj %t.p25.yaml -o %t.p25.o
+# RUN: mcs251-lld %t.crt.o %t.p25.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p25.map -o %t.p25.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p25.elf %t.p25.map --registered 25
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p26.yaml --slots 26
+# RUN: yaml2obj %t.p26.yaml -o %t.p26.o
+# RUN: mcs251-lld %t.crt.o %t.p26.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p26.map -o %t.p26.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p26.elf %t.p26.map --registered 26
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p27.yaml --slots 27
+# RUN: yaml2obj %t.p27.yaml -o %t.p27.o
+# RUN: mcs251-lld %t.crt.o %t.p27.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p27.map -o %t.p27.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p27.elf %t.p27.map --registered 27
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p28.yaml --slots 28
+# RUN: yaml2obj %t.p28.yaml -o %t.p28.o
+# RUN: mcs251-lld %t.crt.o %t.p28.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p28.map -o %t.p28.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p28.elf %t.p28.map --registered 28
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p29.yaml --slots 29
+# RUN: yaml2obj %t.p29.yaml -o %t.p29.o
+# RUN: mcs251-lld %t.crt.o %t.p29.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p29.map -o %t.p29.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p29.elf %t.p29.map --registered 29
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p30.yaml --slots 30
+# RUN: yaml2obj %t.p30.yaml -o %t.p30.o
+# RUN: mcs251-lld %t.crt.o %t.p30.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p30.map -o %t.p30.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p30.elf %t.p30.map --registered 30
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p36.yaml --slots 36
+# RUN: yaml2obj %t.p36.yaml -o %t.p36.o
+# RUN: mcs251-lld %t.crt.o %t.p36.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p36.map -o %t.p36.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p36.elf %t.p36.map --registered 36
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p37.yaml --slots 37
+# RUN: yaml2obj %t.p37.yaml -o %t.p37.o
+# RUN: mcs251-lld %t.crt.o %t.p37.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p37.map -o %t.p37.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p37.elf %t.p37.map --registered 37
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p38.yaml --slots 38
+# RUN: yaml2obj %t.p38.yaml -o %t.p38.o
+# RUN: mcs251-lld %t.crt.o %t.p38.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p38.map -o %t.p38.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p38.elf %t.p38.map --registered 38
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p39.yaml --slots 39
+# RUN: yaml2obj %t.p39.yaml -o %t.p39.o
+# RUN: mcs251-lld %t.crt.o %t.p39.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p39.map -o %t.p39.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p39.elf %t.p39.map --registered 39
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p40.yaml --slots 40
+# RUN: yaml2obj %t.p40.yaml -o %t.p40.o
+# RUN: mcs251-lld %t.crt.o %t.p40.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p40.map -o %t.p40.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p40.elf %t.p40.map --registered 40
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p41.yaml --slots 41
+# RUN: yaml2obj %t.p41.yaml -o %t.p41.o
+# RUN: mcs251-lld %t.crt.o %t.p41.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p41.map -o %t.p41.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p41.elf %t.p41.map --registered 41
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p42.yaml --slots 42
+# RUN: yaml2obj %t.p42.yaml -o %t.p42.o
+# RUN: mcs251-lld %t.crt.o %t.p42.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p42.map -o %t.p42.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p42.elf %t.p42.map --registered 42
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p43.yaml --slots 43
+# RUN: yaml2obj %t.p43.yaml -o %t.p43.o
+# RUN: mcs251-lld %t.crt.o %t.p43.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p43.map -o %t.p43.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p43.elf %t.p43.map --registered 43
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p44.yaml --slots 44
+# RUN: yaml2obj %t.p44.yaml -o %t.p44.o
+# RUN: mcs251-lld %t.crt.o %t.p44.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p44.map -o %t.p44.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p44.elf %t.p44.map --registered 44
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p47.yaml --slots 47
+# RUN: yaml2obj %t.p47.yaml -o %t.p47.o
+# RUN: mcs251-lld %t.crt.o %t.p47.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p47.map -o %t.p47.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p47.elf %t.p47.map --registered 47
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p48.yaml --slots 48
+# RUN: yaml2obj %t.p48.yaml -o %t.p48.o
+# RUN: mcs251-lld %t.crt.o %t.p48.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p48.map -o %t.p48.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p48.elf %t.p48.map --registered 48
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p49.yaml --slots 49
+# RUN: yaml2obj %t.p49.yaml -o %t.p49.o
+# RUN: mcs251-lld %t.crt.o %t.p49.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p49.map -o %t.p49.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p49.elf %t.p49.map --registered 49
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p50.yaml --slots 50
+# RUN: yaml2obj %t.p50.yaml -o %t.p50.o
+# RUN: mcs251-lld %t.crt.o %t.p50.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p50.map -o %t.p50.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p50.elf %t.p50.map --registered 50
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.p51.yaml --slots 51
+# RUN: yaml2obj %t.p51.yaml -o %t.p51.o
+# RUN: mcs251-lld %t.crt.o %t.p51.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.p51.map -o %t.p51.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.p51.elf %t.p51.map --registered 51
+
+# -------------------------------------------------------------------------
+# Matrix: each of the 13 non-legal slots individually, plus 52/64/65535.
+# -------------------------------------------------------------------------
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n7.yaml --slots 7 --allow-invalid-slot
+# RUN: yaml2obj %t.n7.yaml -o %t.n7.o
+# RUN: not mcs251-lld %t.crt.o %t.n7.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n7.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n13.yaml --slots 13 --allow-invalid-slot
+# RUN: yaml2obj %t.n13.yaml -o %t.n13.o
+# RUN: not mcs251-lld %t.crt.o %t.n13.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n13.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n14.yaml --slots 14 --allow-invalid-slot
+# RUN: yaml2obj %t.n14.yaml -o %t.n14.o
+# RUN: not mcs251-lld %t.crt.o %t.n14.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n14.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n15.yaml --slots 15 --allow-invalid-slot
+# RUN: yaml2obj %t.n15.yaml -o %t.n15.o
+# RUN: not mcs251-lld %t.crt.o %t.n15.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n15.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n22.yaml --slots 22 --allow-invalid-slot
+# RUN: yaml2obj %t.n22.yaml -o %t.n22.o
+# RUN: not mcs251-lld %t.crt.o %t.n22.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n22.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n23.yaml --slots 23 --allow-invalid-slot
+# RUN: yaml2obj %t.n23.yaml -o %t.n23.o
+# RUN: not mcs251-lld %t.crt.o %t.n23.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n23.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n31.yaml --slots 31 --allow-invalid-slot
+# RUN: yaml2obj %t.n31.yaml -o %t.n31.o
+# RUN: not mcs251-lld %t.crt.o %t.n31.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n31.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n32.yaml --slots 32 --allow-invalid-slot
+# RUN: yaml2obj %t.n32.yaml -o %t.n32.o
+# RUN: not mcs251-lld %t.crt.o %t.n32.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n32.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n33.yaml --slots 33 --allow-invalid-slot
+# RUN: yaml2obj %t.n33.yaml -o %t.n33.o
+# RUN: not mcs251-lld %t.crt.o %t.n33.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n33.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n34.yaml --slots 34 --allow-invalid-slot
+# RUN: yaml2obj %t.n34.yaml -o %t.n34.o
+# RUN: not mcs251-lld %t.crt.o %t.n34.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n34.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n35.yaml --slots 35 --allow-invalid-slot
+# RUN: yaml2obj %t.n35.yaml -o %t.n35.o
+# RUN: not mcs251-lld %t.crt.o %t.n35.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n35.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n45.yaml --slots 45 --allow-invalid-slot
+# RUN: yaml2obj %t.n45.yaml -o %t.n45.o
+# RUN: not mcs251-lld %t.crt.o %t.n45.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n45.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n46.yaml --slots 46 --allow-invalid-slot
+# RUN: yaml2obj %t.n46.yaml -o %t.n46.o
+# RUN: not mcs251-lld %t.crt.o %t.n46.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n46.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n52.yaml --slots 52 --allow-invalid-slot
+# RUN: yaml2obj %t.n52.yaml -o %t.n52.o
+# RUN: not mcs251-lld %t.crt.o %t.n52.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n52.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n64.yaml --slots 64 --allow-invalid-slot
+# RUN: yaml2obj %t.n64.yaml -o %t.n64.o
+# RUN: not mcs251-lld %t.crt.o %t.n64.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n64.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.n65535.yaml --slots 65535 --allow-invalid-slot
+# RUN: yaml2obj %t.n65535.yaml -o %t.n65535.o
+# RUN: not mcs251-lld %t.crt.o %t.n65535.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.n65535.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SLOT
+
+# -------------------------------------------------------------------------
+# Matrix: the full frozen mutation set (one factor each, rest valid).
+# -------------------------------------------------------------------------
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-version.yaml --slots 1 --mutation version
+# RUN: yaml2obj %t.m-version.yaml -o %t.m-version.o
+# RUN: not mcs251-lld %t.crt.o %t.m-version.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-version.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MVERSION
+# MVERSION: MCS251 ISR: unsupported metadata version
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-record-size.yaml --slots 1 --mutation record-size
+# RUN: yaml2obj %t.m-record-size.yaml -o %t.m-record-size.o
+# RUN: not mcs251-lld %t.crt.o %t.m-record-size.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-record-size.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MRECSIZE
+# MRECSIZE: MCS251 ISR: invalid metadata record size
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-caps.yaml --slots 1 --mutation caps
+# RUN: yaml2obj %t.m-caps.yaml -o %t.m-caps.o
+# RUN: not mcs251-lld %t.crt.o %t.m-caps.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-caps.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MCAPS
+# MCAPS: MCS251 ISR: unsupported required caps
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-reserved-field.yaml --slots 1 --mutation reserved-field
+# RUN: yaml2obj %t.m-reserved-field.yaml -o %t.m-reserved-field.o
+# RUN: not mcs251-lld %t.crt.o %t.m-reserved-field.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-reserved-field.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MRESERVED
+# MRESERVED: MCS251 ISR: reserved field must be zero
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-missing-ref.yaml --slots 1 --mutation missing-ref
+# RUN: yaml2obj %t.m-missing-ref.yaml -o %t.m-missing-ref.o
+# RUN: not mcs251-lld %t.crt.o %t.m-missing-ref.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-missing-ref.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MNOREF
+# MNOREF: MCS251 ISR: metadata needs exactly one type9 relocation per record
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-duplicate-ref.yaml --slots 1 --mutation duplicate-ref
+# RUN: yaml2obj %t.m-duplicate-ref.yaml -o %t.m-duplicate-ref.o
+# RUN: not mcs251-lld %t.crt.o %t.m-duplicate-ref.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-duplicate-ref.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MDUPREF
+# MDUPREF: MCS251 ISR: each metadata record carries exactly one type9 relocation
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-ref-addend.yaml --slots 1 --mutation ref-addend
+# RUN: yaml2obj %t.m-ref-addend.yaml -o %t.m-ref-addend.o
+# RUN: not mcs251-lld %t.crt.o %t.m-ref-addend.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-ref-addend.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MADDEND
+# MADDEND: MCS251 ISR: type9 addend must be zero
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-ref-section-symbol.yaml --slots 1 --mutation ref-section-symbol
+# RUN: yaml2obj %t.m-ref-section-symbol.yaml -o %t.m-ref-section-symbol.o
+# RUN: not mcs251-lld %t.crt.o %t.m-ref-section-symbol.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-ref-section-symbol.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MSECSYM
+# MSECSYM: MCS251 ISR: type9 must name an STT_FUNC
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-ref-in-alloc.yaml --slots 1 --mutation ref-in-alloc
+# RUN: yaml2obj %t.m-ref-in-alloc.yaml -o %t.m-ref-in-alloc.o
+# RUN: not mcs251-lld %t.crt.o %t.m-ref-in-alloc.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-ref-in-alloc.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MALLOCREF
+# MALLOCREF: MCS251 ISR: R_MCS251_ISR_REF is only allowed in the ISR metadata RELA
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-wrong-entry-kind.yaml --slots 1 --mutation wrong-entry-kind
+# RUN: yaml2obj %t.m-wrong-entry-kind.yaml -o %t.m-wrong-entry-kind.o
+# RUN: not mcs251-lld %t.crt.o %t.m-wrong-entry-kind.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-wrong-entry-kind.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MEKIND
+# MEKIND: MCS251 ISR: record kind 1 does not match the frozen
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-wrong-save-profile.yaml --slots 1 --mutation wrong-save-profile
+# RUN: yaml2obj %t.m-wrong-save-profile.yaml -o %t.m-wrong-save-profile.o
+# RUN: not mcs251-lld %t.crt.o %t.m-wrong-save-profile.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-wrong-save-profile.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MSAVE
+# MSAVE: MCS251 ISR: record kind 2 does not match the frozen
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-registration-without-entry.yaml --slots 1 --mutation registration-without-entry
+# RUN: yaml2obj %t.m-registration-without-entry.yaml -o %t.m-registration-without-entry.o
+# RUN: not mcs251-lld %t.crt.o %t.m-registration-without-entry.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-registration-without-entry.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MREGONLY
+# MREGONLY: MCS251 ISR: REGISTER without ENTRY
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-entry-without-registration.yaml --slots 1 --mutation entry-without-registration
+# RUN: yaml2obj %t.m-entry-without-registration.yaml -o %t.m-entry-without-registration.o
+# RUN: not mcs251-lld %t.crt.o %t.m-entry-without-registration.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-entry-without-registration.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MENTONLY
+# MENTONLY: MCS251 ISR: ENTRY without REGISTER
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-default-as-user-isr.yaml --slots 1 --mutation default-as-user-isr
+# RUN: yaml2obj %t.m-default-as-user-isr.yaml -o %t.m-default-as-user-isr.o
+# RUN: not mcs251-lld %t.crt.o %t.m-default-as-user-isr.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-default-as-user-isr.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MDEFAULTREF
+# MDEFAULTREF: MCS251 ISR: user registration must not reference the default entry
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.m-undefined-entry.yaml --slots 1 --mutation undefined-entry
+# RUN: yaml2obj %t.m-undefined-entry.yaml -o %t.m-undefined-entry.o
+# RUN: not mcs251-lld %t.crt.o %t.m-undefined-entry.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.m-undefined-entry.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MUNDEF
+# MUNDEF: MCS251 ISR: ISR identity must reference a definition in the same object
+
+# Structural record mutations are also rejected at the --print-input stage.
+# RUN: not mcs251-lld --print-input %t.m-version.o 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MVERSION
+# RUN: not mcs251-lld --print-input %t.m-record-size.o 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MRECSIZE
+# RUN: not mcs251-lld --print-input %t.m-caps.o 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MCAPS
+# RUN: not mcs251-lld --print-input %t.m-reserved-field.o 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=MRESERVED
+
+# -------------------------------------------------------------------------
+# Matrix: duplicate slot across two objects; same function registered twice
+# (--slots 1,1 adds exactly one REGISTER, the ENTRY stays unique).
+# -------------------------------------------------------------------------
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.dupA.yaml --slots 1
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.dupB.yaml --slots 1
+# RUN: %python -c "import pathlib; p='%t.dupB.yaml'; s=pathlib.Path(p).read_text().replace(' Name: _main\n', ' Name: _mainB\n'); pathlib.Path(p).write_text(s)"
+# RUN: yaml2obj %t.dupA.yaml -o %t.dupA.o
+# RUN: yaml2obj %t.dupB.yaml -o %t.dupB.o
+# RUN: not mcs251-lld %t.crt.o %t.dupA.o %t.dupB.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.dup.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=DUPSLOT
+# DUPSLOT: MCS251 ISR: duplicate registration of slot 1
+
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.dreg.yaml --slots 1,1
+# RUN: yaml2obj %t.dreg.yaml -o %t.dreg.o
+# RUN: not mcs251-lld %t.crt.o %t.dreg.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.dreg.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=DUPREG
+# DUPREG: MCS251 ISR: duplicate registration of the same function _irq1
+
+# -------------------------------------------------------------------------
+# R1: object-level metadata/RELA completeness, rejected already at the
+# input-structure stage (--print-input).
+# -------------------------------------------------------------------------
+# RUN: yaml2obj %t-seed/isr-no-rela.yaml -o %t.norela.o
+# RUN: not mcs251-lld --print-input %t.norela.o 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=NORELA
+# NORELA: metadata records have no .rela.mcs251.isr association section
+
+# RUN: yaml2obj %t-seed/isr-empty-meta.yaml -o %t.emeta.o
+# RUN: not mcs251-lld --print-input %t.emeta.o 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=EMPTYMETA
+# EMPTYMETA: MCS251 ISR: empty .mcs251.isr section
+
+# RUN: yaml2obj %t-seed/isr-renamed-rela.yaml -o %t.rnrela.o
+# RUN: not mcs251-lld --print-input %t.rnrela.o 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=RENAMEDRELA
+# RENAMEDRELA: metadata RELA must be named .rela.mcs251.isr
+
+# A duplicated RELA section header (both under the frozen name, both
+# targeting the metadata section) is rejected by the object-level count.
+# The fixture layout is deterministic: .rela.mcs251.isr is section 3.
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.drbase.yaml --slots 1
+# RUN: yaml2obj %t.drbase.yaml -o %t.dr.o
+# RUN: %python -c "import struct; p='%t.dr.o'; b=bytearray(open(p,'rb').read()); old=struct.unpack_from('>I',b,32)[0]; n=struct.unpack_from('>H',b,48)[0]; tbl=b[old:old+n*40]+b[old+3*40:old+4*40]; new=len(b); b+=tbl; struct.pack_into('>I',b,32,new); struct.pack_into('>H',b,48,n+1); open(p,'wb').write(b)"
+# RUN: not mcs251-lld --print-input %t.dr.o 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=DUPRELA
+# DUPRELA: more than one RELA targets .mcs251.isr
+
+# -------------------------------------------------------------------------
+# R2: the reset is validated by final landing address and HOME placement,
+# not only by symbol section. Three variants, all rejected.
+# -------------------------------------------------------------------------
+# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='__mcs251_selfstart_boot\n        Addend: 0'; assert s.count(old)==1; pathlib.Path('%t.rstadd.yaml').write_text(s.replace(old,'__mcs251_selfstart_boot\n        Addend: -256'))"
+# RUN: yaml2obj %t.rstadd.yaml -o %t.rstadd.o
+# RUN: not mcs251-lld %t.rstadd.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.rstadd.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=RSTADD
+# RSTADD: reset J16 must carry a zero addend, got -256
+
+# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='__mcs251_selfstart_boot\n        Addend: 0'; assert s.count(old)==1; pathlib.Path('%t.rstins.yaml').write_text(s.replace(old,'__mcs251_selfstart_boot\n        Addend: 1'))"
+# RUN: yaml2obj %t.rstins.yaml -o %t.rstins.o
+# RUN: not mcs251-lld %t.rstins.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.rstins.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=RSTINS
+# RSTINS: reset J16 must carry a zero addend, got 1
+
+# RUN: not mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff01a3 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.homeaddr.elf 2>&1 | FileCheck %s --check-prefix=HOMEADDR
+# HOMEADDR: HOME must sit at 0xff0000 abutting the vector base
+
+# -------------------------------------------------------------------------
+# R3: the default entry is protected against ordinary references, and
+# zero-width relocations inside its range violate the frozen rule.
+# -------------------------------------------------------------------------
+# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='        Symbol: _main\n        Addend: 0'; assert s.count(old)==1; pathlib.Path('%t.dftcall.yaml').write_text(s.replace(old,'        Symbol: __mcs251_isr_unhandled\n        Addend: 0'))"
+# RUN: yaml2obj %t.dftcall.yaml -o %t.dftcall.o
+# RUN: not mcs251-lld %t.dftcall.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.dftcall.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=DFTCALL
+# DFTCALL: uses the default entry __mcs251_isr_unhandled as a plain address
+
+# A section symbol plus addend must not bypass DEFAULT reference protection.
+# Keep the ECALL field outside the default body so this tests the target rule.
+# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='        Symbol: _main\n        Addend: 0'; assert s.count(old)==1; extra='  - Name: boot_section\n    Type: STT_SECTION\n    Binding: STB_LOCAL\n    Section: .mcs251.BOOT\n    Value: 0\n'; pathlib.Path('%t.dftsection.yaml').write_text(s.replace(old,'        Symbol: boot_section\n        Addend: 156')+extra)"
+# RUN: yaml2obj %t.dftsection.yaml -o %t.dftsection.o
+# RUN: not mcs251-lld %t.dftsection.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.dftsection.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=DFTSECTION
+# DFTSECTION: section+addend relocation in .mcs251.BOOT lands inside the default entry
+
+# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); assert s.count(old)==1; add='      - Offset: 0x9C'+chr(10)+'        Type: R_MCS251_NONE'+chr(10)+'        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); pathlib.Path('%t.dftnone.yaml').write_text(s.replace(old, old+add))"
+# RUN: yaml2obj %t.dftnone.yaml -o %t.dftnone.o
+# RUN: not mcs251-lld %t.dftnone.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.dftnone.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=DFTNONE
+# DFTNONE: relocation inside the default entry range
+
+# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); assert s.count(old)==1; add='      - Offset: 0x9F'+chr(10)+'        Type: R_MCS251_LO8'+chr(10)+'        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); pathlib.Path('%t.dftend.yaml').write_text(s.replace(old, old+add))"
+# RUN: yaml2obj %t.dftend.yaml -o %t.dftend.o
+# RUN: not mcs251-lld %t.dftend.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.dftend.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=DFTEND
+# DFTEND: relocation inside the default entry range
+
+# -------------------------------------------------------------------------
+# R4: the checker proves registered EJMP targets against the handler
+# entries (map .text base + fixture 41B convention), and accepts a fully
+# registered 39-slot table as the legal final state.
+# -------------------------------------------------------------------------
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.all39.yaml --slots 0,1,2,3,4,5,6,8,9,10,11,12,16,17,18,19,20,21,24,25,26,27,28,29,30,36,37,38,39,40,41,42,43,44,47,48,49,50,51
+# RUN: yaml2obj %t.all39.yaml -o %t.all39.o
+# RUN: mcs251-lld %t.crt.o %t.all39.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.all39.map -o %t.all39.elf
+# RUN: %python %S/Inputs/isr-check-image.py %t.all39.elf %t.all39.map --registered 0,1,2,3,4,5,6,8,9,10,11,12,16,17,18,19,20,21,24,25,26,27,28,29,30,36,37,38,39,40,41,42,43,44,47,48,49,50,51
+
+# RUN: cp %t.p01.elf %t.wt.elf
+# RUN: %python -c "import struct; p='%t.wt.elf'; b=bytearray(open(p,'rb').read()); ph=struct.unpack_from('>I',b,28)[0]; es=struct.unpack_from('>H',b,42)[0]; n=struct.unpack_from('>H',b,44)[0]; h=next(ph+i*es for i in range(n) if struct.unpack_from('>I',b,ph+i*es+8)[0]<=0xff000c<struct.unpack_from('>I',b,ph+i*es+8)[0]+struct.unpack_from('>I',b,ph+i*es+16)[0]); o=struct.unpack_from('>I',b,h+4)[0]+0xff000c-struct.unpack_from('>I',b,h+8)[0]; b[o:o+3]=bytes.fromhex('ff0429'); open(p,'wb').write(b)"
+# RUN: not %python %S/Inputs/isr-check-image.py %t.wt.elf %t.p01.map --registered 1 2>&1 | FileCheck %s --check-prefix=WTCHK
+# WTCHK: registered slot 1 EJMP target 0xff0429 is not its handler entry
+
+# -------------------------------------------------------------------------
+# R5: isolated reserved-range probes. A 2-byte CSEG dropped entirely into
+# the slot-31 hole, and one dropped entirely into the slot-0 tail, must
+# each be rejected with no other payload present.
+# -------------------------------------------------------------------------
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.small.yaml --slots 1
+# RUN: %python -c "import pathlib; p='%t.small.yaml'; s=pathlib.Path(p).read_text(); k=s.index('Content:'); q1=s.index(chr(39),k); q2=s.index(chr(39),q1+1); s=s[:q1+1]+'80FE'+s[q2:]; s=s.replace('Size: 41','Size: 2'); s=s.replace('Value: 0x29','Value: 0x0'); pathlib.Path(p).write_text(s)"
+# RUN: yaml2obj %t.small.yaml -o %t.small.o
+# RUN: not mcs251-lld %t.crt.o %t.small.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff00fb --area-start=XINIT=0xff8000 -o %t.hole31.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=HOLE31
+# HOLE31: CODE overlap for .mcs251.VECS
+
+# RUN: not mcs251-lld %t.crt.o %t.small.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0007 --area-start=XINIT=0xff8000 -o %t.holetail.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=HOLETAIL
+# HOLETAIL: CODE overlap for .mcs251.VECS
+
+# -------------------------------------------------------------------------
+# Matrix: forged default name; default machine code replaced by ERET.
+# -------------------------------------------------------------------------
+# RUN: yaml2obj %t-seed/forged.yaml -o %t.forged.o
+# RUN: not mcs251-lld %t.crt.o %t.forged.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.forged.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=FORGED
+# FORGED: duplicate definition of __mcs251_isr_unhandled
+
+# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); assert s.count('C2AF80FE')==1; pathlib.Path('%t.crt-eret.yaml').write_text(s.replace('C2AF80FE','C2AFAAAA'))"
+# RUN: yaml2obj %t.crt-eret.yaml -o %t.crt-eret.o
+# RUN: not mcs251-lld %t.crt-eret.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.eret.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=ERETDEF
+# ERETDEF: default entry machine bytes are not the frozen C2AF80FE
+
+# -------------------------------------------------------------------------
+# Matrix: legacy CRT in the same link; zero-size legacy VECS input.
+# -------------------------------------------------------------------------
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-selfstart.yaml -o %t.oldcrt.o
+# RUN: not mcs251-lld %t.crt.o %t.oldcrt.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.old.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=OLDVECS
+# OLDVECS: MCS251 ISR: input VECS section
+
+# RUN: yaml2obj %t-seed/vecs-zero.yaml -o %t.zv.o
+# RUN: not mcs251-lld %t.crt.o %t.zv.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.zv.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=OLDVECS
+
+# -------------------------------------------------------------------------
+# Matrix: BOOT conflicts. FF0100 collides with the reserved holes; a
+# non-colliding floor violation (FF01B0) hits the explicit BOOT check.
+# -------------------------------------------------------------------------
+# RUN: not mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0400 \
+# RUN:   -o %t.bootold.elf 2>&1 | FileCheck %s --check-prefix=BOOTOLD
+# BOOTOLD: CODE overlap for .mcs251.VECS
+
+# RUN: not mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff01b0 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.bootfloor.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=BOOTFLOOR
+# BOOTFLOOR: MCS251 ISR: CRT BOOT must start at or above 0xff0210
+
+# -------------------------------------------------------------------------
+# Matrix: ordinary CSEG spanning reserved payload and holes; the whole
+# reserved range conflicts, not just already-written image bytes.
+# -------------------------------------------------------------------------
+# RUN: not mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=XINIT=0xff8000 \
+# RUN:   --area-start=CSEG=0xff00f0 -o %t.hole.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=HOLE
+# HOLE: CODE overlap for .mcs251.VECS
+
+# -------------------------------------------------------------------------
+# Matrix: ROM window boundary, exact pass and one byte short.
+# -------------------------------------------------------------------------
+# RUN: not mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --flash-base=0xff0000 --flash-size=0x42a -o %t.rom1.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=ROM1
+# ROM1: CODE ROM overflow
+
+# RUN: mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --flash-base=0xff0000 --flash-size=0x42b -o %t.romok.elf
+# RUN: test -f %t.romok.elf
+
+# -------------------------------------------------------------------------
+# Matrix: GC/LTO options keep being rejected; no CRT is a hard error; the
+# vector area cannot be moved; v2 objects keep being rejected.
+# -------------------------------------------------------------------------
+# RUN: not mcs251-lld --gc-sections %t.crt.o %t.p01.o -o %t.gc.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=GCOPT
+# GCOPT: unknown option --gc-sections
+
+# RUN: not mcs251-lld --lto-O2 %t.crt.o %t.p01.o -o %t.lto.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=LTOOPT
+# LTOOPT: unknown option --lto-O2
+
+# RUN: not mcs251-lld %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.nocrt.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=NOCRT
+# NOCRT: IRQ mode requires exactly one IRQ_DEFAULT
+
+# RUN: not mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --area-start=VECS=0xff0004 \
+# RUN:   -o %t.pin.elf 2>&1 | FileCheck %s --check-prefix=VECSPIN
+# VECSPIN: --area-start=VECS must be 0xff0003
+
+# RUN: cp %t.p01.o %t.v2reg.o
+# RUN: %python -c "p='%t.v2reg.o'; b=bytearray(open(p,'rb').read()); b[36:40]=bytes.fromhex('00000102'); open(p,'wb').write(b)"
+# RUN: not mcs251-lld --print-input %t.v2reg.o 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=V2REG
+# V2REG: invalid MCS251 ELF header
+
+# -------------------------------------------------------------------------
+# T07 step 20: explicit initial values may target the allocated CRT
+# BSEG_BYTES slice (16 bytes at 0x20); anything beyond the slice end still
+# fails the existing slice containment check. No new bit allocator.
+# -------------------------------------------------------------------------
+# RUN: yaml2obj %t-seed/xinit-bseg.yaml -o %t.xb.o
+# RUN: mcs251-lld %t.crt.o %t.xb.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.xb.elf && test -f %t.xb.elf
+# RUN: yaml2obj %t-seed/xinit-beyond-bseg.yaml -o %t.xbb.o
+# RUN: not mcs251-lld %t.crt.o %t.xbb.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.xbb.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=XBBAD
+# XBBAD: XINIT destination is not within one DSEG slice
+
+#--- forged.yaml
+# A plain CSEG function carrying the CRT default's name. The ordinary
+# duplicate-definition rule rejects it; no name-based authentication of the
+# default entry exists.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: __mcs251_isr_unhandled
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 2
+
+#--- vecs-zero.yaml
+# A zero-size legacy VECS section next to ISR metadata: IRQ mode must reject
+# the input VECS even at size zero (it must not pass as a companion CRT).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.VECS
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq0
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq0
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq0
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 2
+
+#--- xinit-bseg.yaml
+# One 16-byte explicit-initial-value record whose destination is exactly the
+# CRT-owned allocated BSEG_BYTES slice [0x20,0x30).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '002000100010AABBCCDDEEFF00112233445566778899'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 2
+
+#--- xinit-beyond-bseg.yaml
+# Destination 0x2F with 2 bytes crosses past the end of the 16-byte
+# BSEG_BYTES slice at [0x20,0x30): still rejected.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '002F00020002AABB'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 2
+
+#--- isr-no-rela.yaml
+# R1: metadata records without any association RELA section must be rejected
+# at the input-structure stage, never deferred to the vector stage.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 2
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 2
+
+#--- isr-empty-meta.yaml
+# R1: an empty .mcs251.isr section (with an equally empty RELA) is an
+# incomplete registration, not a legal input.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Size: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.isr
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 2
+
+#--- isr-renamed-rela.yaml
+# R1: the metadata association RELA carries a frozen name; renaming it must
+# be rejected even though sh_info/sh_link are perfectly formed.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.other
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 2
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 2
+
