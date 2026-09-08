@@ -692,9 +692,11 @@ wsl.exe -d Debian -e bash -c '
 set -eu
 pgrep -a ninja || true
 ninja -C TREE -j8 clang llc opt llvm-as llvm-dis llvm-readobj \
-  llvm-objcopy yaml2obj FileCheck not split-file
+  llvm-objcopy yaml2obj FileCheck not count split-file
 '
 ```
+
+> **T08 实测补充(2026-09-09)**:standalone lld 链接前,isr-link 需预建 `llvm-config LLVMDTLTO LLVMLibDriver LLVMWindowsDriver LLVMWindowsManifest LLVMMCS251CodeGen LLVMMCS251Desc LLVMMCS251Info`(lit 基建另要求 `count`)。后续卡首次建树直接带上,避免窗口内撞缺目标。
 
 LLVM lit:
 
