@@ -68,6 +68,14 @@ public:
 
   uint64_t getMaxPointerWidth() const override { return 32; }
 
+  // _BitInt(N) maps onto the backend's integer registers: widths up to 32
+  // bits legalize through the existing promotion paths (iN -> i8/i16/i32),
+  // while the backend has no storage or arithmetic beyond the 32-bit DR
+  // registers, so wider extents are rejected loudly. This override also
+  // caps -fexperimental-max-bitint-width, which otherwise defaults to 128.
+  bool hasBitIntType() const override { return true; }
+  size_t getMaxBitIntWidth() const override { return 32; }
+
   uint64_t getPointerWidthV(LangAS AS) const override {
     unsigned TargetAS = getTargetAddressSpace(AS);
     if (auto Desc = llvm::MCS251::getLayoutDesc(
