@@ -239,7 +239,7 @@ class SfrConvertLexical(unittest.TestCase):
     def test_xfr_with_trailing_comment_is_not_lost(self):
         source = (
             "#define DMA (*(unsigned char volatile far *)0x7EF000) /* cap */\n"
-            "#define USB (*(unsigned char xdata volatile *)0xFE00) // cap\n"
+            "#define USB (*(unsigned char xdata volatile *)0x7EFE00) // cap\n"
         )
         result = sfr_convert.classify(source)
         self.assertEqual(names(result, "xfr"), {"DMA", "USB"})
@@ -283,14 +283,26 @@ class SfrConvertLexical(unittest.TestCase):
             "#define X1 (*(unsigned char volatile far *)0x7EF000)\n"
             "#define X2 (*(unsigned char volatile far *)0x7EFFFF)\n"
             "#define X3 (*(unsigned char volatile far *)0x7F0000)\n"
-            "#define X4 (*(unsigned char volatile far *)0xFDFF)\n"
-            "#define X5 (*(unsigned char volatile far *)0xFF00)\n"
+            "#define X4 (*(unsigned char volatile far *)0x7DFFFF)\n"
+            "#define X5 (*(unsigned char volatile far *)0xFE00)\n"
         )
         result = sfr_convert.classify(source)
         self.assertEqual(names(result, "direct_sfr"), {"OK1", "OK2"})
-        self.assertEqual(names(result, "xfr"), {"X1", "X2", "X5"})
+        self.assertEqual(names(result, "xfr"), {"X1", "X2"})
         ignored_names = {entry.name for entry in result.ignored}
-        self.assertEqual(ignored_names, {"LOW", "HIGH", "WIDE", "sfr16", "X3", "X4"})
+        self.assertEqual(ignored_names, {"LOW", "HIGH", "WIDE", "sfr16", "X3", "X4", "X5"})
+
+    def test_xfr_outside_range_has_structured_rejection_record(self):
+        source_text = "#define BAD (*(unsigned char volatile far *)0x7F0000)\n"
+        classification = sfr_convert.classify(source_text)
+        with tempfile.TemporaryDirectory(prefix="mcs251-xfr-domain-") as tmp:
+            source = Path(tmp) / "device.h"
+            source.write_text(source_text, encoding="utf-8")
+            report = sfr_convert.report_object(source, Path(tmp) / "out.h", classification)
+        self.assertEqual(
+            report["xfr_address_domain"]["rejected_records"],
+            [{"line": 1, "name": "BAD", "address": 0x7F0000, "in_range": False}],
+        )
 
     def test_unparsed_declaration_excerpt_is_comment_safe(self):
         result = sfr_convert.classify("sfr BAD = NOPE; /* boom */ ;\n")
@@ -371,6 +383,82 @@ class SfrConvertAddressSpace(unittest.TestCase):
         self.assertEqual(sbit0, sbit6)
         self.assertTrue(xfr6 and xfr6[0].endswith("not defined in v1. */"), xfr6)
         self.assertTrue(sbit6 and sbit6[0].endswith("not defined in v1. */"), sbit6)
+
+    def test_xfr_macros_are_as0_shaped_in_both_header_flavors(self):
+        source = (
+            "sfr P0 = 0x80;\n"
+            "#define I2CCFG (*(unsigned char volatile far *)0x7EFE80)\n"
+        )
+        classification = sfr_convert.classify(source)
+        as0 = sfr_convert.render_header(
+            Path("stc.h"), Path("device-v1.h"), classification, 0, xfr_macros=True
+        )
+        as6 = sfr_convert.render_header(
+            Path("stc.h"), Path("device-as6.h"), classification, 6, xfr_macros=True
+        )
+        expected = "#define I2CCFG           (*(volatile unsigned char *)0x7EFE80)"
+        self.assertIn(expected, as0)
+        self.assertIn(expected, as6)
+        self.assertNotIn("address_space(6))) *)0x7EFE80", as6)
+        self.assertNotIn("/* XFR I2CCFG", as0)
+        with tempfile.TemporaryDirectory(prefix="mcs251-xfr-report-") as tmp:
+            path = Path(tmp) / "device.h"
+            path.write_text(source, encoding="utf-8")
+            report = sfr_convert.report_object(path, Path(tmp) / "device-as6.h", classification, 6, True)
+        self.assertTrue(report["xfr_macros"])
+        self.assertEqual(report["xfr_generated_count"], 1)
+        self.assertEqual(
+            report["xfr_address_domain"],
+            {
+                "min": 0x7E0000,
+                "max": 0x7EFFFF,
+                "segment": 0x7E,
+                "validated": True,
+                "records": [{"name": "I2CCFG", "address": 0x7EFE80, "in_range": True}],
+                "rejected_records": [],
+            },
+        )
+
+    def test_xfr_macro_cli_opt_in_and_no_xfr_legacy_switch(self):
+        source_text = (
+            "sfr P0 = 0x80;\n"
+            "#define I2CCFG (*(unsigned char volatile far *)0x7EFE80)\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="mcs251-xfr-cli-") as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "device.h"
+            source.write_text(source_text, encoding="utf-8")
+            outputs = {}
+            for option, stem in (([], "default"), (["--no-xfr"], "no-xfr"), (["--xfr-macros"], "macros")):
+                # Same output basename keeps the include guard equal, so this
+                # is a real byte-for-byte legacy rendering comparison.
+                header = tmp_path / "generated.h"
+                report = tmp_path / f"{stem}.json"
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "tools" / "sfr-convert.py"),
+                        str(source),
+                        "-o",
+                        str(header),
+                        "--report",
+                        str(report),
+                        *option,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    encoding="utf-8",
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                outputs[stem] = (header.read_bytes(), json.loads(report.read_text(encoding="utf-8")))
+            # The explicit legacy switch and omitted option must be byte-identical.
+            self.assertEqual(outputs["default"][0], outputs["no-xfr"][0])
+            self.assertFalse(outputs["default"][1]["xfr_macros"])
+            self.assertEqual(outputs["default"][1]["xfr_generated_count"], 0)
+            self.assertTrue(outputs["macros"][1]["xfr_macros"])
+            self.assertEqual(outputs["macros"][1]["xfr_generated_count"], 1)
+            self.assertIn(b"#define I2CCFG", outputs["macros"][0])
 
     def test_mode_switch_preserves_address_and_name_payload(self):
         # Only the pointer flavor differs: names and addresses must be the
@@ -928,17 +1016,17 @@ class VerifySfrArtifacts(unittest.TestCase):
         self.check = self.tmp / "selfcheck.c"
         self.regenerate()
 
-    def regenerate(self, address_space: int = 0) -> None:
+    def regenerate(self, address_space: int = 0, xfr_macros: bool = False) -> None:
         self.header.write_text(
             sfr_convert.render_header(
-                self.source, self.header, self.classification, address_space
+                self.source, self.header, self.classification, address_space, xfr_macros
             ),
             encoding="utf-8",
         )
         self.report_path.write_text(
             json.dumps(
                 sfr_convert.report_object(
-                    self.source, self.header, self.classification, address_space
+                    self.source, self.header, self.classification, address_space, xfr_macros
                 ),
                 indent=2,
             )
@@ -963,6 +1051,115 @@ class VerifySfrArtifacts(unittest.TestCase):
             encoding="utf-8",
         )
         with self.assertRaises(verify_sfr.VerificationError):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_sbit_comment_payload_tamper_is_rejected_in_both_xfr_flavors(self):
+        # Regression for the restored rendered_sbit/report comparison: merely
+        # changing P00's normalized byte^bit payload must not pass under either
+        # the legacy XFR-comment or new XFR-macro header flavor.
+        for xfr_macros in (False, True):
+            with self.subTest(xfr_macros=xfr_macros):
+                self.regenerate(xfr_macros=xfr_macros)
+                text = self.header.read_text(encoding="utf-8")
+                self.header.write_text(
+                    text.replace("/* sbit P00 = P0^0;", "/* sbit P00 = P0^1;", 1),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    verify_sfr.VerificationError, "sbit comment mapping differs"
+                ):
+                    verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_xfr_macro_artifacts_pass_in_as0_and_as6(self):
+        # XFR uses a plain 32-bit pointer in both flavors; AS6 is only for the
+        # 8-bit direct window. The report nevertheless binds the XFR flavor.
+        for address_space in (0, 6):
+            with self.subTest(address_space=address_space):
+                self.regenerate(address_space=address_space, xfr_macros=True)
+                result = verify_sfr.verify_one(self.report_path, self.header, self.check)
+                self.assertTrue(result["xfr_macros"])
+                self.assertEqual(result["rendered_xfr_macros"], 1)
+                self.assertEqual(result["rendered_xfr_comments"], 0)
+                self.assertIn(
+                    "#define DMA              (*(volatile unsigned char *)0x7EF000)",
+                    self.header.read_text(encoding="utf-8"),
+                )
+
+    def test_xfr_macro_address_tamper_is_rejected(self):
+        self.regenerate(xfr_macros=True)
+        text = self.header.read_text(encoding="utf-8")
+        self.header.write_text(text.replace("0x7EF000", "0x7F0000", 1), encoding="utf-8")
+        with self.assertRaisesRegex(verify_sfr.VerificationError, "XFR macro mapping differs"):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_xfr_overwrite_define_is_rejected_even_when_not_exact_form(self):
+        # A trailing comment intentionally prevents XFR_DEFINE_RE from matching
+        # this malicious redefinition. DEFINE_RE must still see the second DMA
+        # definition and reject it before it can overwrite the valid macro.
+        self.regenerate(xfr_macros=True)
+        text = self.header.read_text(encoding="utf-8")
+        overwrite = "#define DMA (*(volatile unsigned char *)0x7F0000) /* overwrite */\n"
+        self.header.write_text(text.replace("#endif", overwrite + "#endif"), encoding="utf-8")
+        with self.assertRaisesRegex(verify_sfr.VerificationError, "duplicate #define names"):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_xfr_macro_report_domain_tamper_is_rejected(self):
+        self.regenerate(xfr_macros=True)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        report["xfr_address_domain"]["records"] = []
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaisesRegex(verify_sfr.VerificationError, "address-domain records differ"):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_xfr_macro_missing_domain_metadata_is_rejected(self):
+        self.regenerate(xfr_macros=True)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        del report["xfr_address_domain"]
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaisesRegex(
+            verify_sfr.VerificationError, "XFR macro flavor requires xfr_address_domain"
+        ):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_xfr_comment_flavor_allows_absent_domain_metadata(self):
+        # Pre-XFR-macro reports were comment-only and have no domain object;
+        # retain that compatibility while making it mandatory for macro output.
+        self.regenerate(xfr_macros=False)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        del report["xfr_address_domain"]
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        result = verify_sfr.verify_one(self.report_path, self.header, self.check)
+        self.assertFalse(result["xfr_macros"])
+
+    def test_xfr_macro_flavor_tamper_is_rejected(self):
+        self.regenerate(xfr_macros=True)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        report["xfr_macros"] = False
+        report["xfr_generated_count"] = 0
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaisesRegex(verify_sfr.VerificationError, "XFR macros present"):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_xfr_outside_0x7e_report_address_is_rejected(self):
+        self.regenerate(xfr_macros=True)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        report["xfr"][0]["address"] = 0x7F0000
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaisesRegex(verify_sfr.VerificationError, "XFR outside 0x7E0000..0x7EFFFF"):
+            verify_sfr.verify_one(self.report_path, self.header, self.check)
+
+    def test_xfr_registration_missing_from_report_is_rejected(self):
+        # The macro/header cannot stand alone: deleting the corresponding
+        # effective XFR registration (and consistently changing its report
+        # metadata) must still fail the bidirectional header/report binding.
+        self.regenerate(xfr_macros=True)
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        report["xfr"] = []
+        report["counts"]["xfr"] = 0
+        report["xfr_generated_count"] = 0
+        report["xfr_address_domain"]["records"] = []
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaisesRegex(verify_sfr.VerificationError, "unrecognized #define names"):
             verify_sfr.verify_one(self.report_path, self.header, self.check)
 
     def test_duplicated_direct_macro_is_rejected(self):

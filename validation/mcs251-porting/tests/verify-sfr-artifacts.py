@@ -43,6 +43,23 @@ XFR_COMMENT_RE = re.compile(
     r"\((?P<qualifier>xdata|far)\); not defined in v1\. \*/$",
     re.MULTILINE,
 )
+XFR_DEFINE_RE = re.compile(
+    r"^#define\s+(?P<name>[A-Za-z_]\w*)\s+"
+    r"\(\*\(volatile unsigned char \*\)0x(?P<address>[0-9A-F]{6})\)$",
+    re.MULTILINE,
+)
+# Parse every macro definition before applying flavor-specific exact forms.
+# Exact XFR matching alone is unsafe: a second, malformed redefinition can
+# evade XFR_DEFINE_RE and overwrite an otherwise valid macro in C preprocessing.
+DEFINE_RE = re.compile(
+    r"^[ \t]*#[ \t]*define[ \t]+(?P<name>[A-Za-z_]\w*)(?P<body>[^\r\n]*)$",
+    re.MULTILINE,
+)
+HEADER_GUARD_RE = re.compile(
+    r"^[ \t]*#[ \t]*ifndef[ \t]+(?P<name>[A-Za-z_]\w*)[ \t]*\r?$\r?\n"
+    r"^[ \t]*#[ \t]*define[ \t]+(?P=name)[ \t]*\r?$",
+    re.MULTILINE,
+)
 SBIT_COMMENT_RE = re.compile(
     r"^/\* sbit (?P<name>[A-Za-z_]\w*) = (?P<byte>[A-Za-z_]\w*)\^(?P<bit>[0-7]); "
     r"not defined in v1\. \*/$",
@@ -159,23 +176,74 @@ def verify_one(report_path: Path, header_path: Path, check_path: Path) -> dict[s
             else ""
         )
         raise VerificationError(f"{report_path}: direct SFR outside {window}{detail}")
-    if not all(
-        0xFE00 <= int(entry["address"]) <= 0xFFFF
-        or 0x7EF000 <= int(entry["address"]) <= 0x7EFFFF
-        for entry in xfr
-    ):
-        raise VerificationError(f"{report_path}: XFR outside documented physical ranges")
+    xfr_min = 0x7E0000
+    xfr_max = 0x7EFFFF
+    if not all(xfr_min <= int(entry["address"]) <= xfr_max for entry in xfr):
+        raise VerificationError(f"{report_path}: XFR outside 0x7E0000..0x7EFFFF")
+    # XFR metadata is an auditable, bidirectional binding: every effective
+    # registration has exactly one domain record, and every record names the
+    # same address. Older v1 reports may omit the metadata and are treated as
+    # comment-only artifacts for backwards compatibility.
+    xfr_macros_value = report.get("xfr_macros", False)
+    if type(xfr_macros_value) is not bool:
+        raise VerificationError(f"{report_path}: xfr_macros must be boolean")
+    xfr_macros = xfr_macros_value
+    generated_count = report.get("xfr_generated_count", 0)
+    if type(generated_count) is not int or generated_count != (len(xfr) if xfr_macros else 0):
+        raise VerificationError(f"{report_path}: xfr_generated_count does not match XFR flavor")
+    domain = report.get("xfr_address_domain")
+    # Legacy comment-only reports can predate this metadata, but an XFR-macro
+    # report cannot: without it, deleting the full address-domain audit would
+    # leave the macro flavor under-bound.
+    if xfr_macros and domain is None:
+        raise VerificationError(f"{report_path}: XFR macro flavor requires xfr_address_domain")
+    if domain is not None:
+        if not isinstance(domain, dict):
+            raise VerificationError(f"{report_path}: xfr_address_domain is not an object")
+        if domain.get("min") != xfr_min or domain.get("max") != xfr_max or domain.get("segment") != 0x7E:
+            raise VerificationError(f"{report_path}: invalid XFR address-domain bounds")
+        records = domain.get("records")
+        if domain.get("validated") is not True or not isinstance(records, list):
+            raise VerificationError(f"{report_path}: incomplete XFR address-domain validation")
+        expected_records = [
+            {"name": str(entry["name"]), "address": int(entry["address"]), "in_range": True}
+            for entry in xfr
+        ]
+        if records != expected_records:
+            raise VerificationError(f"{report_path}: XFR address-domain records differ from registration")
+        rejected_records = domain.get("rejected_records")
+        if not isinstance(rejected_records, list):
+            raise VerificationError(f"{report_path}: XFR rejected address-domain records are missing")
+        expected_rejected_records = [
+            {
+                "line": int(entry["line"]),
+                "name": str(entry["name"]),
+                "address": int(entry["address"]),
+                "in_range": False,
+            }
+            for entry in ignored
+            if entry.get("reason") == "XFR physical address outside documented ranges"
+        ]
+        if rejected_records != expected_rejected_records:
+            raise VerificationError(
+                f"{report_path}: XFR rejected address-domain records differ from ignored audit"
+            )
     if not all(0 <= int(entry["bit"]) <= 7 and entry["byte"] for entry in sbit):
         raise VerificationError(f"{report_path}: malformed sbit normalization")
 
     header = header_path.read_text(encoding="utf-8")
     direct_matches = list(direct_define_re.finditer(header))
-    xfr_matches = list(XFR_COMMENT_RE.finditer(header))
+    xfr_comment_matches = list(XFR_COMMENT_RE.finditer(header))
+    xfr_define_matches = list(XFR_DEFINE_RE.finditer(header))
     sbit_matches = list(SBIT_COMMENT_RE.finditer(header))
     rendered = {match.group("name"): int(match.group("address"), 16) for match in direct_matches}
-    rendered_xfr = {
+    rendered_xfr_comments = {
         match.group("name"): (int(match.group("address"), 16), match.group("qualifier"))
-        for match in xfr_matches
+        for match in xfr_comment_matches
+    }
+    rendered_xfr_defines = {
+        match.group("name"): int(match.group("address"), 16)
+        for match in xfr_define_matches
     }
     rendered_sbit = {
         match.group("name"): (match.group("byte"), int(match.group("bit")))
@@ -183,20 +251,52 @@ def verify_one(report_path: Path, header_path: Path, check_path: Path) -> dict[s
     }
     reported = as_direct_mapping(direct)
     reported_xfr = as_xfr_mapping(xfr)
+    reported_xfr_addresses = {name: address for name, (address, _qualifier) in reported_xfr.items()}
     reported_sbit = as_sbit_mapping(sbit)
+
+    # Do not limit XFR validation to exact-form matches. First bind every
+    # preprocessor define in the header to the guard or one effective report
+    # mapping, then reject repeated names before any dictionary can fold them.
+    # This catches an appended e.g. ``#define DMA ... /* overwrite */`` even
+    # though the trailing comment deliberately makes it fail XFR_DEFINE_RE.
+    all_define_matches = list(DEFINE_RE.finditer(header))
+    all_define_names = [match.group("name") for match in all_define_matches]
+    duplicate_define_names = sorted(
+        name for name, count in Counter(all_define_names).items() if count > 1
+    )
+    if duplicate_define_names:
+        raise VerificationError(f"{header_path}: duplicate #define names: {duplicate_define_names}")
+    guard_names = set(HEADER_GUARD_RE.findall(header))
+    recognized_define_names = guard_names | set(reported) | set(reported_xfr_addresses)
+    unrecognized_define_names = sorted(set(all_define_names) - recognized_define_names)
+    if unrecognized_define_names:
+        raise VerificationError(
+            f"{header_path}: unrecognized #define names: {unrecognized_define_names}"
+        )
+
     # Compare list count and mapping: dictionaries alone would fold duplicates.
     if len(direct_matches) != len(rendered) or len(direct_matches) != len(reported):
         raise VerificationError(f"{header_path}: duplicate or missing direct SFR macro")
-    if len(xfr_matches) != len(rendered_xfr) or len(xfr_matches) != len(reported_xfr):
-        raise VerificationError(f"{header_path}: duplicate or missing XFR comment")
     if len(sbit_matches) != len(rendered_sbit) or len(sbit_matches) != len(reported_sbit):
         raise VerificationError(f"{header_path}: duplicate or missing sbit comment")
     if rendered != reported:
         raise VerificationError(f"{header_path}: direct macro mapping differs from report")
-    if rendered_xfr != reported_xfr:
-        raise VerificationError(f"{header_path}: XFR comment mapping differs from report")
     if rendered_sbit != reported_sbit:
         raise VerificationError(f"{header_path}: sbit comment mapping differs from report")
+    if xfr_macros:
+        if xfr_comment_matches or len(xfr_define_matches) != len(rendered_xfr_defines):
+            raise VerificationError(f"{header_path}: XFR comment or duplicate macro in XFR flavor")
+        if rendered_xfr_defines != reported_xfr_addresses:
+            raise VerificationError(f"{header_path}: XFR macro mapping differs from report")
+    else:
+        if xfr_define_matches:
+            raise VerificationError(f"{header_path}: XFR macros present without xfr_macros report flag")
+        if len(xfr_comment_matches) != len(rendered_xfr_comments) or len(xfr_comment_matches) != len(reported_xfr):
+            raise VerificationError(f"{header_path}: duplicate or missing XFR comment")
+        if rendered_xfr_comments != reported_xfr:
+            raise VerificationError(f"{header_path}: XFR comment mapping differs from report")
+    # XFR flavor is part of the report/header contract. A missing field is the
+    # legacy comment-only flavor; explicit true requires generated macros.
 
     # AS6 0xFF demotion cross-check: the header's "not representable in AS6"
     # registration comments and the report's ignored audit records must agree
@@ -266,7 +366,9 @@ def verify_one(report_path: Path, header_path: Path, check_path: Path) -> dict[s
         "counts": report["counts"],
         "raw_declaration_counts": report.get("raw_declaration_counts", {}),
         "rendered_direct_macros": len(direct_matches),
-        "rendered_xfr_comments": len(xfr_matches),
+        "rendered_xfr_comments": len(xfr_comment_matches),
+        "rendered_xfr_macros": len(xfr_define_matches),
+        "xfr_macros": xfr_macros,
         "rendered_sbit_comments": len(sbit_matches),
         "rendered_as6_demoted_comments": len(demoted_matches),
         "selfcheck_direct_uses": len(check_uses),
