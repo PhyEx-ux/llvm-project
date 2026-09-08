@@ -1625,3 +1625,17 @@ if (XCODE)
     set_target_properties(${target} PROPERTIES XCODE_GENERATE_SCHEME ON)
   endforeach()
 endif()
+
+# mcs251rt —— MCS251 division/modulo runtime objects (eight audited helpers).
+#
+# Wired here (after `add_subdirectory(tools)` above) so that the in-tree clang
+# and llc targets are already declared when the runtime CMakeLists runs; this is
+# R1 form A from llvm/lib/Target/MCS251/Runtime/CMakeLists.txt. The runtime
+# stays an explicit, standalone target: it is not part of ALL, and nothing in
+# the LLVM library/tool link graph depends on it. Two-stage ordering is
+# expressed purely through build dependencies on clang/llc.
+option(LLVM_MCS251_ENABLE_RUNTIME
+  "Build the mcs251rt division and modulo runtime objects" OFF)
+if(LLVM_MCS251_ENABLE_RUNTIME)
+  add_subdirectory(lib/Target/MCS251/Runtime)
+endif()
