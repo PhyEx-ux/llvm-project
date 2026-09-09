@@ -109,6 +109,11 @@ unsigned CodeGenTypes::ClangCallConvToLLVMCallConv(CallingConv CC) {
     return llvm::CallingConv::M68k_RTD;
   case CC_PreserveNone:
     return llvm::CallingConv::PreserveNone;
+  case CC_MCS251_INTR:
+    // Explicit mapping: the Clang enumerator deliberately does not carry the
+    // LLVM number; MCS-251 ISR functions lower to MCS251_INTR (128) so the
+    // frozen textual IR name is mcs251_intrcc.
+    return llvm::CallingConv::MCS251_INTR;
     // clang-format off
   case CC_RISCVVectorCall: return llvm::CallingConv::RISCV_VectorCall;
     // clang-format on

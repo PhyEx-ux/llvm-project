@@ -12378,6 +12378,211 @@ static void CheckConstPureAttributesUsage(Sema &S, FunctionDecl *NewFD) {
   }
 }
 
+// Returns the first attribute on \p NewFD that cannot be combined with a
+// kept-alive MCS251 ISR entry, or null. Constructor/destructor are included:
+// automatic-invocation registration is a non-registration use of an ISR.
+static const Attr *findMCS251ISRBannedAttr(FunctionDecl *NewFD) {
+  if (auto *A = NewFD->getAttr<NakedAttr>())
+    return A;
+  if (auto *A = NewFD->getAttr<AlwaysInlineAttr>())
+    return A;
+  if (auto *A = NewFD->getAttr<WeakAttr>())
+    return A;
+  if (auto *A = NewFD->getAttr<AliasAttr>())
+    return A;
+  if (auto *A = NewFD->getAttr<IFuncAttr>())
+    return A;
+  if (auto *A = NewFD->getAttr<SelectAnyAttr>())
+    return A;
+  if (auto *A = NewFD->getAttr<ConstructorAttr>())
+    return A;
+  if (auto *A = NewFD->getAttr<DestructorAttr>())
+    return A;
+  return nullptr;
+}
+
+// 'inline' without 'static' (C99 external inline, including 'extern inline'
+// and gnu_inline variants) never produces the always-emitted real definition
+// an ISR entry requires. Checked on the declaration itself: every external
+// inline declaration of the chain reaches this hook for itself and is
+// rejected there, so no O(chain) walk is needed per declaration.
+static bool hasMCS251ISRExternalInline(const FunctionDecl *FD) {
+  return FD->isInlineSpecified() && FD->getStorageClass() != SC_Static;
+}
+
+// MCS-251 ISR identity check. The interrupt identity is established by the
+// attribute on the true first declaration. Redeclarations without the
+// attribute inherit it through the ordinary attribute merge; an explicit
+// repeat must name the same slot; adding the attribute after a plain first
+// declaration is an error.
+//
+// This runs at the END of CheckFunctionDeclaration, after the redeclaration
+// merge: only then is the real redeclaration target (including a hidden
+// block-scope extern that the initial lookup cannot see) linked into the
+// chain, so an illegal ISR can never be silently degraded to an ordinary
+// function by the generic merge. All three paths - establishing
+// declaration, inherited redeclaration and explicit repeat - run the same
+// compatibility checks, and every error path leaves the declaration invalid
+// so that no second conflicting diagnostic follows.
+static void checkMCS251ISRDeclaration(Sema &S, FunctionDecl *NewFD) {
+  if (NewFD->isInvalidDecl())
+    return;
+
+  FunctionDecl *First = NewFD->getFirstDecl();
+  auto *IA = NewFD->getAttr<MCS251InterruptAttr>();
+  const auto *Identity = First->getAttr<MCS251InterruptAttr>();
+
+  if (NewFD == First) {
+    if (!IA)
+      return;
+    if (const Attr *Banned = findMCS251ISRBannedAttr(NewFD)) {
+      S.Diag(Banned->getLocation(), diag::err_mcs251_isr_incompatible_attr)
+          << Banned->getSpelling();
+      NewFD->dropAttr<MCS251InterruptAttr>();
+      NewFD->setInvalidDecl();
+      return;
+    }
+    // An explicitly spelled calling convention is never silently replaced
+    // by the ISR convention.
+    if (S.getCallingConvAttributedType(NewFD->getType())) {
+      S.Diag(NewFD->getLocation(), diag::err_mcs251_isr_cc_conflict);
+      NewFD->dropAttr<MCS251InterruptAttr>();
+      NewFD->setInvalidDecl();
+      return;
+    }
+    if (hasMCS251ISRExternalInline(NewFD)) {
+      S.Diag(NewFD->getLocation(), diag::err_mcs251_isr_external_inline);
+      NewFD->dropAttr<MCS251InterruptAttr>();
+      NewFD->setInvalidDecl();
+      return;
+    }
+    // Establish the identity and put the ISR calling convention on the
+    // function type, preserving all other ExtInfo bits.
+    const auto *Proto = NewFD->getType()->castAs<FunctionProtoType>();
+    FunctionProtoType::ExtProtoInfo EPI = Proto->getExtProtoInfo();
+    EPI.ExtInfo = EPI.ExtInfo.withCallingConv(CC_MCS251_INTR);
+    NewFD->setType(S.Context.getFunctionType(Proto->getReturnType(),
+                                             Proto->getParamTypes(), EPI));
+    return;
+  }
+
+  // Redeclaration.
+  if (!IA && !Identity)
+    return;
+
+  if (IA) {
+    if (Identity) {
+      // An explicit repeat must name the same slot; the established
+      // identity always wins and merging never overrides it.
+      if (Identity->getVector() != IA->getVector()) {
+        S.Diag(IA->getLocation(), diag::err_mcs251_isr_vector_conflict);
+        NewFD->dropAttr<MCS251InterruptAttr>();
+        NewFD->setInvalidDecl();
+        return;
+      }
+      // Same slot: the explicit spelling folds into the chain identity.
+      NewFD->dropAttr<MCS251InterruptAttr>();
+    } else {
+      // The identity was not established on the (true) first declaration.
+      S.Diag(IA->getLocation(), diag::err_mcs251_isr_identity_not_first);
+      NewFD->dropAttr<MCS251InterruptAttr>();
+      NewFD->setInvalidDecl();
+      return;
+    }
+  }
+
+  // Identity present (inherited or accepted explicit repeat): common
+  // compatibility checks for every path.
+  if (const Attr *Banned = findMCS251ISRBannedAttr(NewFD)) {
+    S.Diag(Banned->getLocation(), diag::err_mcs251_isr_incompatible_attr)
+        << Banned->getSpelling();
+    NewFD->dropAttr<MCS251InterruptAttr>();
+    NewFD->setInvalidDecl();
+    return;
+  }
+  if (hasMCS251ISRExternalInline(NewFD)) {
+    S.Diag(NewFD->getLocation(), diag::err_mcs251_isr_external_inline);
+    NewFD->setInvalidDecl();
+  }
+}
+
+// MCS-251 ISR slot registration. The registry is instance state of Sema
+// (the MCS251ISRSlotRegistry member in Sema.h, R5-C): nothing is shared
+// between compiler instances and no process-lifetime static is involved.
+//
+// Registration happens only when a real function definition completes
+// (checkMCS251ISRDefinition, called from ActOnFinishFunctionBody with an
+// attached body). Definitions deserialized from a PCH or module never
+// complete a body through Sema, so the first registration bootstraps the
+// table: a single walk over the TU-level declarations seeds every
+// definition that already exists. Each walk deduplicates by canonical
+// declaration BEFORE consulting getDefinition(), so a redeclaration chain
+// of any length is walked exactly once per scan and getDefinition() runs at
+// most once per chain, including chains that have no definition at all
+// (R5-A).
+//
+// Modules can deserialize further TU-level definitions AFTER the first
+// bootstrap: ASTReader handles a TU_UPDATE_LEXICAL record by re-setting the
+// translation unit's external lexical storage flag. The bootstrap therefore
+// re-runs its seeding walk whenever that flag is set again - an O(1) check
+// per registration and one O(M) seeding walk per genuine external-storage
+// update, never a rescan per check (R5-B). No ISR definition can hide
+// outside the TU: C has no nested function definitions, and a block-scope
+// 'extern' declaration is only another declaration of the same file-scope
+// entity.
+
+static void bootstrapMCS251ISRRegistry(Sema &S) {
+  auto &Registry = S.getMCS251ISRSlotRegistry();
+  ASTContext &Ctx = S.Context;
+  // Fast path: already seeded and no new external lexical storage arrived.
+  if (Registry.Bootstrapped &&
+      !Ctx.getTranslationUnitDecl()->hasExternalLexicalStorage())
+    return;
+  llvm::SmallPtrSet<const FunctionDecl *, 32> SeenChains;
+  for (Decl *D : Ctx.getTranslationUnitDecl()->decls()) {
+    auto *FD = dyn_cast<FunctionDecl>(D);
+    if (!FD)
+      continue;
+    // R5-A: one lookup per redeclaration chain, including chains that turn
+    // out to have no definition.
+    if (!SeenChains.insert(FD->getCanonicalDecl()).second)
+      continue;
+    const auto *A = FD->getCanonicalDecl()->getAttr<MCS251InterruptAttr>();
+    if (!A)
+      continue;
+    if (const FunctionDecl *Def = FD->getDefinition())
+      Registry.SlotOwners.insert({A->getVector(), Def->getCanonicalDecl()});
+  }
+  Registry.Bootstrapped = true;
+}
+
+// One definition per vector slot per translation unit. Registration happens
+// only here, when a real function definition completes (the caller checks
+// the body), keyed by the canonical declaration: pure declarations never
+// register, and repeated body/AST visits of the same canonical function are
+// idempotent (same canonical -> no re-register, no repeat diagnostic).
+static void checkMCS251ISRDefinition(Sema &S, FunctionDecl *FD) {
+  const auto *IA = FD->getCanonicalDecl()->getAttr<MCS251InterruptAttr>();
+  if (!IA)
+    return;
+
+  bootstrapMCS251ISRRegistry(S);
+
+  unsigned Slot = IA->getVector();
+  const FunctionDecl *Canon = FD->getCanonicalDecl();
+  auto &SlotOwners = S.getMCS251ISRSlotRegistry().SlotOwners;
+  auto I = SlotOwners.find(Slot);
+  if (I != SlotOwners.end()) {
+    if (I->second != Canon) {
+      // No note is attached: the frozen diagnostics for this error carry
+      // the error only.
+      S.Diag(FD->getLocation(), diag::err_mcs251_isr_duplicate_vector);
+    }
+    return;
+  }
+  SlotOwners[Slot] = Canon;
+}
+
 bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
                                     LookupResult &Previous,
                                     bool IsMemberSpecialization,
@@ -12761,6 +12966,14 @@ bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
 
   if (DeclIsDefn && Context.getTargetInfo().getTriple().isAArch64())
     ARM().CheckSMEFunctionDefAttributes(NewFD);
+
+  // MCS-251 ISR identity handling runs after the redeclaration merge: only
+  // now is the real redeclaration target (including a hidden block-scope
+  // extern) linked into the chain, so the identity can never be silently
+  // degraded to an ordinary function by the generic merge. Merge failures
+  // above returned early, keeping exactly one diagnostic for those cases.
+  if (Context.getTargetInfo().getTriple().getArch() == llvm::Triple::mcs251)
+    checkMCS251ISRDeclaration(*this, NewFD);
 
   return Redeclaration;
 }
@@ -16828,6 +17041,13 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body, bool IsInstantiation,
                                     bool RetainFunctionScopeInfo) {
   FunctionScopeInfo *FSI = getCurFunction();
   FunctionDecl *FD = dcl ? dcl->getAsFunction() : nullptr;
+
+  // MCS-251 ISR definitions register their vector slot exactly once per
+  // translation unit; a second definition for the same slot is rejected.
+  // Only real bodies register (Body is null for skipped/instantiated bodies).
+  if (FD && Body && Context.getTargetInfo().getTriple().getArch() ==
+                        llvm::Triple::mcs251)
+    checkMCS251ISRDefinition(*this, FD);
 
   if (FSI->UsesFPIntrin && FD && !FD->hasAttr<StrictFPAttr>())
     FD->addAttr(StrictFPAttr::CreateImplicit(Context));
@@ -21389,6 +21609,13 @@ void Sema::ActOnPragmaWeakID(IdentifierInfo* Name,
   Decl *PrevDecl = LookupSingleName(TUScope, Name, NameLoc, LookupOrdinaryName);
 
   if (PrevDecl) {
+    // MCS251: reject a pragma-sneaked weak identity onto an ISR entry.
+    if (auto *TFD = dyn_cast<FunctionDecl>(PrevDecl);
+        TFD && TFD->getCanonicalDecl()->getAttr<MCS251InterruptAttr>()) {
+      Diag(PragmaLoc, diag::err_mcs251_isr_incompatible_attr) << "weak";
+      TFD->setInvalidDecl();
+      return;
+    }
     PrevDecl->addAttr(WeakAttr::CreateImplicit(Context, PragmaLoc));
   } else {
     (void)WeakUndeclaredIdentifiers[Name].insert(WeakInfo(nullptr, NameLoc));

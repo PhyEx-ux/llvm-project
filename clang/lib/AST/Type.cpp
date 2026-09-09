@@ -3781,6 +3781,9 @@ StringRef FunctionType::getNameForCallConv(CallingConv CC) {
     return "m68k_rtd";
   case CC_PreserveNone:
     return "preserve_none";
+  case CC_MCS251_INTR:
+    // Matches the frozen LLVM textual name for the MCS-251 ISR convention.
+    return "mcs251_intrcc";
     // clang-format off
   case CC_RISCVVectorCall: return "riscv_vector_cc";
 #define CC_VLS_CASE(ABI_VLEN) \

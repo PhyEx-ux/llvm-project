@@ -3593,6 +3593,9 @@ StringRef CXXNameMangler::getCallingConvQualifierName(CallingConv CC) {
     CC_VLS_CASE(32768)
     CC_VLS_CASE(65536)
 #undef CC_VLS_CASE
+  case CC_MCS251_INTR:
+    // Target-specific convention; not mangled in the Itanium scheme (C-only
+    // target in practice).
     // FIXME: we should be mangling all of the above.
     return "";
 

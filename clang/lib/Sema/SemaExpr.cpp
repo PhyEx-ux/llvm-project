@@ -270,6 +270,14 @@ bool Sema::DiagnoseUseOfDecl(NamedDecl *D, ArrayRef<SourceLocation> Locs,
   }
 
   if (FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+    // MCS-251 interrupt entries cannot be used as ordinary function values:
+    // calls, address-of and function-pointer decay are all rejected. Pure
+    // declarations, attribute processing and the CodeGen keep-alive root do
+    // not route through here.
+    if (FD->getCanonicalDecl()->getAttr<MCS251InterruptAttr>()) {
+      Diag(Loc, diag::err_mcs251_isr_ordinary_use);
+      return true;
+    }
     // See if this is a deleted function.
     if (FD->isDeleted()) {
       auto *Ctor = dyn_cast<CXXConstructorDecl>(FD);

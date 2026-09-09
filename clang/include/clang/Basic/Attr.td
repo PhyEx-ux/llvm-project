@@ -1088,16 +1088,22 @@ def AVRInterrupt : InheritableAttr, TargetSpecificAttr<TargetAVR> {
   let Documentation = [AVRInterruptDocs];
 }
 
-// MI0: MCS-251 interrupt attribute is recognized (so it is not silently
-// ignored as an unknown attribute) but hard-rejected in handleInterruptAttr
-// until ISR lowering (MI1-MI3) is implemented.  Uses the same ParseKind as
-// the other target-specific interrupt attributes so the shared dispatch in
-// SemaDeclAttr routes it to the mcs251 branch.
+// MCS-251 interrupt service routine attribute. Marks the function as the
+// handler for an interrupt slot (0-51) and switches the function to the
+// MCS251_INTR calling convention. Handled by handleMCS251InterruptAttr via
+// the shared AT_Interrupt dispatch (ParseKind "Interrupt"). Custom parsing
+// so the single integer argument is evaluated by the handler with a full
+// APSInt (negative check, then range, then conversion).
 def MCS251Interrupt : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
   let Spellings = [GCC<"interrupt">];
   let Subjects = SubjectList<[Function]>;
+  let Args = [UnsignedArgument<"Vector">];
   let ParseKind = "Interrupt";
-  let Documentation = [Undocumented];
+  let HasCustomParsing = 1;
+  // Merging deliberately does not use "last declaration wins": the identity
+  // is established by the first declaration; later declarations without the
+  // attribute inherit it, and an explicit repeat must name the same slot.
+  let Documentation = [MCS251InterruptDocs];
 }
 
 def AVRSignal : InheritableAttr, TargetSpecificAttr<TargetAVR> {

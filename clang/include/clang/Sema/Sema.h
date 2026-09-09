@@ -4089,6 +4089,22 @@ public:
                                 LookupResult &Previous,
                                 bool IsMemberSpecialization, bool DeclIsDefn);
 
+  /// MCS-251 ISR slot registry: vector slot -> canonical declaration of the
+  /// ISR definition owning it. Instance state of this Sema (R5-C): never
+  /// shared between compiler instances. See checkMCS251ISRDefinition in
+  /// SemaDecl.cpp for the registration and bootstrap rules.
+  struct MCS251ISRSlotRegistry {
+    /// Set after the one-time seed of already-existing ISR definitions
+    /// (deserialized from a PCH/module); re-seeded when ASTReader re-sets
+    /// the TU's external lexical storage (TU_UPDATE_LEXICAL).
+    bool Bootstrapped = false;
+    llvm::DenseMap<unsigned, const FunctionDecl *> SlotOwners;
+  };
+  MCS251ISRSlotRegistry MCS251ISRSlotReg;
+
+  /// Returns the MCS-251 ISR slot registry owned by this Sema instance.
+  MCS251ISRSlotRegistry &getMCS251ISRSlotRegistry() { return MCS251ISRSlotReg; }
+
   /// Checks if the new declaration declared in dependent context must be
   /// put in the same redeclaration chain as the specified declaration.
   ///

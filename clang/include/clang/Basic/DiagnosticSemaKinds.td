@@ -12702,6 +12702,28 @@ def err_target_unsupported_type
 def err_mcs251_interrupt_not_implemented
     : Error<"MCS251 interrupt support not yet implemented; "
             "ISR code generation is not available">;
+def err_mcs251_isr_vector_not_legal
+    : Error<"MCS251 interrupt vector must be a legal slot in 0-51">;
+def err_mcs251_isr_wrong_type
+    : Error<"MCS251 interrupt function must have type void(void)">;
+def err_mcs251_isr_identity_not_first
+    : Error<"MCS251 interrupt identity must be established on the first declaration">;
+def err_mcs251_isr_vector_conflict
+    : Error<"conflicting MCS251 interrupt vector">;
+def err_mcs251_isr_duplicate_vector
+    : Error<"duplicate MCS251 interrupt vector">;
+def err_mcs251_isr_incompatible_attr
+    : Error<"%0 is incompatible with MCS251 interrupt attribute">;
+def err_mcs251_isr_ordinary_use
+    : Error<"MCS251 interrupt entry cannot be used as an ordinary function">;
+def err_mcs251_isr_cc_conflict
+    : Error<"explicit calling convention conflicts with MCS251 interrupt function">;
+def err_mcs251_isr_external_inline
+    : Error<"MCS251 interrupt function may not use external 'inline'; use 'static inline'">;
+def err_mcs251_isr_alias_target
+    : Error<"MCS251 interrupt entry cannot be an alias or weakref target">;
+def err_mcs251_ifunc_unsupported
+    : Error<"'ifunc' attribute is not supported for MCS251 targets">;
 def err_omp_lambda_capture_in_declare_target_not_to : Error<
   "variable captured in declare target region must appear in a to clause">;
 def err_omp_device_type_mismatch : Error<

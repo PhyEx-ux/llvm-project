@@ -2971,6 +2971,36 @@ purpose floating point registers will be saved.
   }];
 }
 
+def MCS251InterruptDocs : Documentation {
+  let Category = DocCatFunction;
+  let Heading = "interrupt (MCS-251)";
+  let Content = [{
+Clang supports the GNU style `__attribute__((interrupt(N)))` attribute on
+MCS-251 targets. The attribute marks the function as an interrupt service
+routine for interrupt slot ``N`` and instructs the compiler to use the
+dedicated MCS-251 interrupt calling convention, the fixed integer state
+save/restore sequence with a ``RETI`` return, and to register the function
+in the vector table for slot ``N``.
+
+The parameter ``N`` must be an integer constant expression naming a legal
+interrupt slot in the range 0-51; reserved and system slots are rejected.
+The attributed function must have type ``void(void)``.
+
+The interrupt identity is established by the first declaration of the
+function. Later declarations that omit the attribute inherit the identity;
+an explicit repeat of the attribute must name the same slot, and adding the
+attribute after a plain first declaration is an error. Merging never lets a
+later declaration override the slot of an earlier one.
+
+Interrupt entries cannot be called or used as ordinary function values
+(call, address-of, or function-pointer decay are all rejected), and the
+attribute cannot be combined with ``naked``, ``always_inline``, ``weak``,
+``alias``, ``ifunc`` or COMDAT-style attributes. Definitions are emitted
+``noinline`` and placed in ``llvm.used`` so that unreferenced (including
+internal) interrupt entries are kept and registered.
+  }];
+}
+
 def BPFPreserveAccessIndexDocs : Documentation {
   let Category = DocCatFunction;
   let Content = [{

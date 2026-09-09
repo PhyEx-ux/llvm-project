@@ -1219,6 +1219,12 @@ void TypePrinter::printFunctionAfter(const FunctionType::ExtInfo &Info,
       CC_VLS_CASE(32768)
       CC_VLS_CASE(65536)
 #undef CC_VLS_CASE
+    case CC_MCS251_INTR:
+      // The MCS-251 ISR convention is an artifact of the MCS251Interrupt
+      // attribute on the declaration, which prints itself as
+      // __attribute__((interrupt(N))). Keep the type spelling plain so that
+      // -ast-print output round-trips.
+      break;
     }
   }
 

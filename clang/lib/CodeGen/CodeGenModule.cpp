@@ -3338,8 +3338,19 @@ void CodeGenModule::SetCommonAttributes(GlobalDecl GD, llvm::GlobalValue *GV) {
   else
     GV->setVisibility(llvm::GlobalValue::DefaultVisibility);
 
-  if (D && D->hasAttr<UsedAttr>())
-    addUsedOrCompilerUsedGlobal(GV);
+  if (D && D->hasAttr<UsedAttr>()) {
+    // MCS251 ISR entries: every keep-alive root is normalized into llvm.used
+    // (never llvm.compiler.used) exactly once, including an explicitly
+    // spelled __attribute__((used)). T01's registration-use rules are not
+    // relaxed by this; the ISR still has exactly the one legal root kind.
+    const auto *UFD = dyn_cast<FunctionDecl>(D);
+    if (UFD && UFD->getCanonicalDecl()->hasAttr<MCS251InterruptAttr>()) {
+      if (!llvm::is_contained(LLVMUsed, llvm::WeakTrackingVH(GV)))
+        addUsedGlobal(GV);
+    } else {
+      addUsedOrCompilerUsedGlobal(GV);
+    }
+  }
 
   if (const auto *VD = dyn_cast_if_present<VarDecl>(D);
       VD &&
@@ -3691,6 +3702,13 @@ void CodeGenModule::SetFunctionAttributes(GlobalDecl GD, llvm::Function *F,
   if (!IsIncompleteFunction)
     SetLLVMFunctionAttributes(GD, getTypes().arrangeGlobalDeclaration(GD), F,
                               IsThunk);
+
+  // MCS251 ISR: declarations and definitions both carry the frozen vector
+  // slot string attribute; the calling convention arrives via the function
+  // type (mcs251_intrcc). This must run after SetLLVMFunctionAttributes,
+  // which replaces the whole attribute set.
+  if (const auto *IA = FD->getCanonicalDecl()->getAttr<MCS251InterruptAttr>())
+    F->addFnAttr("mcs251-isr-vector", llvm::utostr(IA->getVector()));
 
   // Add the Returned attribute for "this", except for iOS 5 and earlier
   // where substantial code, including the libstdc++ dylib, was compiled with
@@ -4436,6 +4454,14 @@ bool CodeGenModule::MustBeEmitted(const ValueDecl *Global) {
   // Never defer when EmitAllDecls is specified.
   if (LangOpts.EmitAllDecls)
     return true;
+
+  // MCS251 ISR definitions must always be emitted: they carry the vector
+  // table registration contract and must keep their llvm.used root, even
+  // when internal and unreferenced. The keep-alive entry is added explicitly
+  // with addUsedGlobal (llvm.used, not llvm.compiler.used).
+  if (const auto *FD = dyn_cast<FunctionDecl>(Global))
+    if (FD->getCanonicalDecl()->hasAttr<MCS251InterruptAttr>())
+      return true;
 
   const auto *VD = dyn_cast<VarDecl>(Global);
   if (VD &&
@@ -7121,6 +7147,16 @@ void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD,
   }
 
   SetLLVMFunctionAttributesForDefinition(D, Fn);
+
+  // MCS251 ISR definition: force noinline and register the keep-alive root
+  // in llvm.used (never merely llvm.compiler.used), so the definition and
+  // its vector table registration survive unreferenced.
+  if (D->getCanonicalDecl()->hasAttr<MCS251InterruptAttr>()) {
+    if (!Fn->hasFnAttribute(llvm::Attribute::NoInline))
+      Fn->addFnAttr(llvm::Attribute::NoInline);
+    if (!llvm::is_contained(LLVMUsed, llvm::WeakTrackingVH(Fn)))
+      addUsedGlobal(Fn);
+  }
 
   // EGPR (R16-R31) requires V3 unwind info on Windows x64 because V1/V2 cannot
   // encode extended register numbers. Check per-function so that `target`

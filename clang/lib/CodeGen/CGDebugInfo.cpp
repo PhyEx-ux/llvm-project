@@ -1854,6 +1854,10 @@ static unsigned getDwarfCC(CallingConv CC, const llvm::Triple &T) {
     CC_VLS_CASE(65536)
 #undef CC_VLS_CASE
     return llvm::dwarf::DW_CC_LLVM_RISCVVLSCall;
+  case CC_MCS251_INTR:
+    // No target-specific DWARF CC code yet. As for CC_C, return zero to
+    // omit DW_AT_calling_convention; DW_CC_normal itself has value 1.
+    return 0;
   }
   return 0;
 }

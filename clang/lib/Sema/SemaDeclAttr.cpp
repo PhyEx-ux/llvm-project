@@ -65,6 +65,7 @@
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/BinaryFormat/MCS251ISR.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/MC/MCSectionMachO.h"
@@ -1678,6 +1679,11 @@ static void handleOwnershipAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
                  OwnershipAttr(S.Context, AL, Module, Start, Size));
 }
 
+// Same MCS251 ISR rejection for weakref: the target string is a symbol
+// reference to the interrupt entry even though weakref does not mark it.
+static bool checkMCS251ISRAliasee(Sema &S, const ParsedAttr &AL,
+                                  StringRef Str);
+
 static void handleWeakRefAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   // Check the attribute arguments.
   if (AL.getNumArgs() > 1) {
@@ -1728,10 +1734,17 @@ static void handleWeakRefAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   // of transforming it into an AliasAttr.  The WeakRefAttr never uses the
   // StringRef parameter it was given anyway.
   StringRef Str;
-  if (AL.getNumArgs() && S.checkStringLiteralArgumentAttr(AL, 0, Str))
-    // GCC will accept anything as the argument of weakref. Should we
-    // check for an existing decl?
+  if (AL.getNumArgs() && S.checkStringLiteralArgumentAttr(AL, 0, Str)) {
+    // GCC will accept anything as the argument of weakref. A weakref string
+    // is still a symbol reference, so a MCS251 ISR entry is rejected here
+    // even though weakref does not mark its target used.
+    if (!checkMCS251ISRAliasee(S, AL, Str)) {
+      if (auto *FD = dyn_cast<FunctionDecl>(D))
+        FD->setInvalidDecl();
+      return;
+    }
     D->addAttr(::new (S.Context) AliasAttr(S.Context, AL, Str));
+  }
 
   D->addAttr(::new (S.Context) WeakRefAttr(S.Context, AL));
 }
@@ -1740,8 +1753,20 @@ static void handleWeakRefAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
 // demangled name ignoring parameters (not supported by microsoftDemangle
 // https://github.com/llvm/llvm-project/issues/88825). This should handle the
 // majority of use cases while leaving namespace scope names unmarked.
-static void markUsedForAliasOrIfunc(Sema &S, Decl *D, const ParsedAttr &AL,
+//
+// Returns false when \p Str names a MCS251 ISR entry: an alias or ifunc
+// resolver string would be a non-registration use of an interrupt entry.
+static bool markUsedForAliasOrIfunc(Sema &S, Decl *D, const ParsedAttr &AL,
                                     StringRef Str) {
+  // R6: an alias or ifunc resolver string may not reference a MCS251 ISR
+  // entry. Checked against the raw string: the demangling below can mangle
+  // plain C names into something else entirely and the used-marking lookup
+  // would not resolve them.
+  if (!checkMCS251ISRAliasee(S, AL, Str)) {
+    if (auto *AFD = dyn_cast<FunctionDecl>(D))
+      AFD->setInvalidDecl();
+    return false;
+  }
   std::unique_ptr<char, llvm::FreeDeleter> Demangled;
   if (S.getASTContext().getCXXABIKind() != TargetCXXABI::Microsoft)
     Demangled.reset(llvm::itaniumDemangle(Str, /*ParseParams=*/false));
@@ -1766,6 +1791,30 @@ static void markUsedForAliasOrIfunc(Sema &S, Decl *D, const ParsedAttr &AL,
         ND->markUsed(S.Context);
     }
   }
+  return true;
+}
+
+// Same MCS251 ISR rejection for weakref: the target string is a symbol
+// reference to the interrupt entry even though weakref does not mark it.
+static bool checkMCS251ISRAliasee(Sema &S, const ParsedAttr &AL,
+                                  StringRef Str) {
+  if (S.Context.getTargetInfo().getTriple().getArch() != llvm::Triple::mcs251)
+    return true;
+  LookupResult LR(S, DeclarationNameInfo(&S.Context.Idents.get(Str),
+                                         AL.getLoc()),
+                  Sema::LookupOrdinaryName);
+  if (S.LookupName(LR, S.TUScope)) {
+    for (NamedDecl *ND : LR) {
+      auto *TFD = dyn_cast<FunctionDecl>(ND);
+      if (TFD && TFD->getCanonicalDecl()->getAttr<MCS251InterruptAttr>()) {
+        S.Diag(AL.getLoc(), diag::err_mcs251_isr_alias_target);
+        if (!TFD->isInvalidDecl())
+          TFD->setInvalidDecl();
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 static void handleIFuncAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
@@ -1774,13 +1823,16 @@ static void handleIFuncAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
     return;
 
   // Aliases should be on declarations, not definitions.
-  const auto *FD = cast<FunctionDecl>(D);
+  auto *FD = cast<FunctionDecl>(D);
   if (FD->isThisDeclarationADefinition()) {
     S.Diag(AL.getLoc(), diag::err_alias_is_definition) << FD << 1;
     return;
   }
 
-  markUsedForAliasOrIfunc(S, D, AL, Str);
+  if (!markUsedForAliasOrIfunc(S, D, AL, Str)) {
+    FD->setInvalidDecl();
+    return;
+  }
   D->addAttr(::new (S.Context) IFuncAttr(S.Context, AL, Str));
 }
 
@@ -1815,7 +1867,11 @@ static void handleAliasAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
     }
   }
 
-  markUsedForAliasOrIfunc(S, D, AL, Str);
+  if (!markUsedForAliasOrIfunc(S, D, AL, Str)) {
+    if (auto *FD = dyn_cast<FunctionDecl>(D))
+      FD->setInvalidDecl();
+    return;
+  }
   D->addAttr(::new (S.Context) AliasAttr(S.Context, AL, Str));
 }
 
@@ -6663,6 +6719,81 @@ BTFDeclTagAttr *Sema::mergeBTFDeclTagAttr(Decl *D, const BTFDeclTagAttr &AL) {
   return ::new (Context) BTFDeclTagAttr(Context, AL, AL.getBTFDeclTag());
 }
 
+static void handleMCS251InterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  // GNU 'interrupt' on the MCS-251 target marks an interrupt service routine
+  // for a frozen vector slot. The redeclaration chain is not linked yet at
+  // this point; identity/conflict checks that need previous declarations are
+  // completed at the end of Sema::CheckFunctionDeclaration (see
+  // SemaDecl.cpp). Every error path leaves the declaration invalid so that
+  // the later hook does not produce a second conflicting diagnostic.
+  auto *FD = dyn_cast<FunctionDecl>(D);
+  if (!FD) {
+    // Unsupported assembly form: keep the MI0 hard rejection rather than
+    // falling back to ARM interrupt semantics.
+    S.Diag(AL.getLoc(), diag::err_mcs251_interrupt_not_implemented);
+    return;
+  }
+
+  // The attribute takes exactly one argument.
+  if (!AL.checkExactlyNumArgs(S, 1)) {
+    FD->setInvalidDecl();
+    return;
+  }
+
+  // Must be a prototyped non-variadic void(void) function.
+  const auto *Proto = FD->getType()->getAs<FunctionProtoType>();
+  if (!Proto || !Proto->getReturnType()->isVoidType() ||
+      Proto->getNumParams() != 0 || Proto->isVariadic()) {
+    S.Diag(FD->getLocation(), diag::err_mcs251_isr_wrong_type);
+    FD->setInvalidDecl();
+    return;
+  }
+
+  // Evaluate the slot with the full APSInt: reject negative values first,
+  // then range-check without truncation, and only then convert.
+  Expr *VectorExpr = AL.getArgAsExpr(0);
+  std::optional<llvm::APSInt> Vector =
+      VectorExpr->getIntegerConstantExpr(S.Context);
+  if (!Vector) {
+    S.Diag(AL.getLoc(), diag::err_expr_not_ice)
+        << /*IsInteger=*/false << VectorExpr->getSourceRange();
+    FD->setInvalidDecl();
+    return;
+  }
+  if (Vector->isNegative() || Vector->ugt(51) ||
+      !llvm::MCS251ISR::isLegalISRSlot(Vector->getZExtValue())) {
+    S.Diag(AL.getLoc(), diag::err_mcs251_isr_vector_not_legal);
+    FD->setInvalidDecl();
+    return;
+  }
+
+  // An explicit repeat on the same declaration must name the same slot.
+  if (const auto *Existing = FD->getAttr<MCS251InterruptAttr>()) {
+    if (Existing->getVector() != Vector->getZExtValue()) {
+      S.Diag(AL.getLoc(), diag::err_mcs251_isr_vector_conflict);
+      FD->setInvalidDecl();
+    }
+    return;
+  }
+
+  // Combinations that conflict with a kept-alive ISR entry on the same
+  // declaration are rejected; the other spelling order is caught by the
+  // CheckFunctionDeclaration hook. Constructor/destructor are included:
+  // automatic-invocation registration is a non-registration use of an ISR.
+  if (FD->getAttr<NakedAttr>() || FD->getAttr<AlwaysInlineAttr>() ||
+      FD->getAttr<WeakAttr>() || FD->getAttr<AliasAttr>() ||
+      FD->getAttr<IFuncAttr>() || FD->getAttr<SelectAnyAttr>() ||
+      FD->getAttr<ConstructorAttr>() || FD->getAttr<DestructorAttr>()) {
+    S.Diag(AL.getLoc(), diag::err_mcs251_isr_incompatible_attr)
+        << AL.getAttrName()->getName();
+    FD->setInvalidDecl();
+    return;
+  }
+
+  unsigned Slot = Vector->getZExtValue();
+  FD->addAttr(::new (S.Context) MCS251InterruptAttr(S.Context, AL, Slot));
+}
+
 static void handleInterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   // Dispatch the interrupt attribute based on the current target.
   switch (S.Context.getTargetInfo().getTriple().getArch()) {
@@ -6690,15 +6821,11 @@ static void handleInterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
     S.RISCV().handleInterruptAttr(D, AL);
     break;
   case llvm::Triple::mcs251:
-    // MI0 (MINIMAL-ISR-SLICE §2.1): MCS-251 interrupt support is not yet
-    // implemented. The ARM default dispatch below would silently accept the
-    // attribute with ARM semantics (false acceptance). Hard-reject here so
-    // users get a clear diagnostic instead of miscompiled ISR code.
-    // TODO(MI1-MI3): once the MCS251_INTR calling convention, vector table
-    // registration and RETI lowering are implemented, replace this with a
-    // dedicated MCS251 handleInterruptAttr (validate vector slot, ISR
-    // signature, register the slot, etc.).
-    S.Diag(AL.getLoc(), diag::err_mcs251_interrupt_not_implemented);
+    // MI2: the supported GNU form is handled by handleMCS251InterruptAttr.
+    // The MI0 hard rejection (err_mcs251_interrupt_not_implemented) stays in
+    // that handler for unsupported assembly forms; never fall back to the
+    // ARM default dispatch below.
+    handleMCS251InterruptAttr(S, D, AL);
     break;
   default:
     S.ARM().handleInterruptAttr(D, AL);
@@ -8720,6 +8847,14 @@ void Sema::checkUnusedDeclAttributes(Declarator &D) {
 }
 
 void Sema::DiagnoseUnknownAttribute(const ParsedAttr &AL) {
+  // MCS251: 'ifunc' is target-gated out (Target.supportsIFunc() is false),
+  // so it would be silently ignored as an unknown attribute. Reject it with
+  // a target-limited error instead of opening ordinary ifunc support.
+  if (Context.getTargetInfo().getTriple().getArch() == llvm::Triple::mcs251 &&
+      AL.getAttrName()->getName() == "ifunc") {
+    Diag(AL.getRange().getBegin(), diag::err_mcs251_ifunc_unsupported);
+    return;
+  }
   SourceRange NR = AL.getNormalizedRange();
   StringRef ScopeName = AL.getNormalizedScopeName();
   std::optional<StringRef> CorrectedScopeName =
@@ -8805,6 +8940,16 @@ NamedDecl *Sema::DeclClonePragmaWeak(NamedDecl *ND, const IdentifierInfo *II,
 }
 
 void Sema::DeclApplyPragmaWeak(Scope *S, NamedDecl *ND, const WeakInfo &W) {
+  // MCS251: a pragma can be used to sneak a weak identity onto an ISR after
+  // attribute processing is done; reject it explicitly.
+  if (Context.getTargetInfo().getTriple().getArch() == llvm::Triple::mcs251) {
+    if (auto *TFD = dyn_cast<FunctionDecl>(ND);
+        TFD && TFD->getCanonicalDecl()->getAttr<MCS251InterruptAttr>()) {
+      Diag(W.getLocation(), diag::err_mcs251_isr_incompatible_attr) << "weak";
+      TFD->setInvalidDecl();
+      return;
+    }
+  }
   if (W.getAlias()) { // clone decl, impersonate __attribute(weak,alias(...))
     IdentifierInfo *NDId = ND->getIdentifier();
     NamedDecl *NewD = DeclClonePragmaWeak(ND, W.getAlias(), W.getLocation());

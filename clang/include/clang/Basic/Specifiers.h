@@ -312,6 +312,11 @@ namespace clang {
     CC_RISCVVLSCall_16384, // __attribute__((riscv_vls_cc(16384)))
     CC_RISCVVLSCall_32768, // __attribute__((riscv_vls_cc(32768)))
     CC_RISCVVLSCall_65536, // __attribute__((riscv_vls_cc(65536)))
+    // MCS-251 interrupt service routine calling convention. This is the
+    // Clang-side enumerator only: its value deliberately is NOT the LLVM
+    // calling-convention number. CGCall maps it explicitly onto
+    // llvm::CallingConv::MCS251_INTR (128).
+    CC_MCS251_INTR, // __attribute__((interrupt(N))) on MCS-251
   };
 
   /// Checks whether the given calling convention supports variadic
