@@ -43,6 +43,15 @@ public:
   void emitSPAdjust(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
                     const DebugLoc &DL, uint64_t Amount, bool IsDec,
                     MachineInstr::MIFlag Flag) const;
+
+  // ISR campaign T05: functions with CallingConv::MCS251_INTR prepend the
+  // A6 fixed 37B save (push psw, dr0..dr28, dpx) to any SPAdjust in the
+  // prologue and append the exact inverse restore (ending pop psw) to every
+  // returning block's epilogue, which then exits with RETI. The 37B save
+  // area never enters MachineFrameInfo::StackSize and the fixed frame never
+  // uses PUSHFP/POPFP or the dr16 anchor; dynamic allocas and
+  // llvm.stackrestore in an ISR body are capability-rejected at lowering.
+  // The interrupted context registers are added as honest entry live-ins.
 };
 } // namespace llvm
 

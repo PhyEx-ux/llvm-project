@@ -262,6 +262,8 @@ const char *MCS251TargetLowering::getTargetNodeName(unsigned Opcode) const {
   switch (Opcode) {
   case MCS251ISD::ERET:
     return "MCS251ISD::ERET";
+  case MCS251ISD::RETI:
+    return "MCS251ISD::RETI";
   case MCS251ISD::CALL:
     return "MCS251ISD::CALL";
   default:
@@ -2133,6 +2135,15 @@ SDValue MCS251TargetLowering::LowerSTACKRESTORE(SDValue Op,
   SDLoc DL(Op);
   SDValue Chain = Op.getOperand(0);
   SDValue SavedSPX = Op.getOperand(1);
+
+  // ISR campaign T05 step 11: a stackrestore would rewind SPX across the 37B
+  // save area and the fixed local frame, so RETI (or the inverse restore)
+  // would pop object bytes as the interrupt frame. Capability rejection.
+  if (DAG.getMachineFunction().getFunction().getCallingConv() ==
+      CallingConv::MCS251_INTR)
+    report_fatal_error("MCS251 ISR: llvm.stackrestore is not supported in an "
+                       "interrupt entry");
+
   if (SavedSPX.getValueType() == MVT::i32)
     SavedSPX = extractLane(SavedSPX, MCS251::sub_lo16, DL, DAG);
   else
@@ -2160,6 +2171,15 @@ SDValue MCS251TargetLowering::LowerDynamicStackAlloc(SDValue Op,
   SDValue Chain = Op.getOperand(0);
   SDValue Size = Op.getOperand(1);
   SDLoc DL(Op);
+
+  // ISR campaign T05 step 11: the ISR body only implements the A6 fixed
+  // frame. A dynamic alloca would move SPX between the 37B save area and
+  // the epilogue's inverse restore, which that frame cannot express. This
+  // is a backend capability rejection, not a restored A/B safety check.
+  if (DAG.getMachineFunction().getFunction().getCallingConv() ==
+      CallingConv::MCS251_INTR)
+    report_fatal_error("MCS251 ISR: dynamic stack allocation is not supported "
+                       "in an interrupt entry");
 
   // SPX arithmetic remains 16-bit. Objects must fit the physical stack;
   // allocation amounts above 65535 are outside this target's stack model.
@@ -2272,6 +2292,13 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
     // the C physical ABI for Fast too: ABI registers plus named scalar
     // parameter slots. Call sites and definitions must still agree on CC.
     break;
+  case CallingConv::MCS251_INTR:
+    // ISR campaign T05 (Alice ruling 5): the interrupt entry is lowered
+    // here, but it is zero-argument only and never enters the ordinary
+    // parameter distribution below. The asynchronous context (PSW, DR0-28,
+    // DPX and their alias SFRs) is real entry state; the frame saving of
+    // that context lives in emitPrologue, not in an argument location.
+    break;
   }
 
   if (IsVarArg)
@@ -2290,6 +2317,13 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
                        "space (" +
                        Twine(ProgAS) + "); address space " + Twine(FnAS) +
                        " is not a valid function placement");
+
+  if (CallConv == CallingConv::MCS251_INTR) {
+    if (!Ins.empty())
+      report_fatal_error("MCS251 ISR: interrupt entry must take no arguments");
+    return Chain;
+  }
+
   bool AllowStaticPointers = DAG.getDataLayout().getProgramAddressSpace() == 4;
   for (const Argument &Arg : MF.getFunction().args())
     checkParameterType(Arg.getType(), Arg.getArgNo(), AllowStaticPointers);
@@ -2400,6 +2434,14 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     // the C physical ABI for Fast too: ABI registers plus named scalar
     // parameter slots. Call sites and definitions must still agree on CC.
     break;
+  case CallingConv::MCS251_INTR:
+    // ISR campaign T05: an interrupt entry has no call ABI (no argument or
+    // return transfer, no ERET-compatible frame), so no call site may carry
+    // its calling convention -- including a call written inside an ISR
+    // itself. The Verifier rejects this at IR level; this is the backend
+    // boundary.
+    report_fatal_error("MCS251 ISR: interrupt entry may not be called",
+                       /*gen_crash_diag=*/false);
   }
 
   if (IsVarArg)
@@ -2410,6 +2452,8 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     report_fatal_error("MCS251: musttail calls are not supported",
                        /*gen_crash_diag=*/false);
   // Ordinary tail hints, including calls without an IR CallBase, are optional.
+  // From an ISR this is mandatory: a tail call would place the helper's ERET
+  // where the fixed frame needs RETI (T05 step 6).
   IsTailCall = false;
 
   const unsigned ProgramAS = DAG.getDataLayout().getProgramAddressSpace();
@@ -2430,6 +2474,12 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
       report_fatal_error(
           "MCS251: direct call target is not in the configured CODE "
           "address space");
+    // A call with an ordinary CC aimed at a known interrupt entry in this
+    // module is rejected here as well (T05 step 5); an unrecognized target
+    // stays the domain of the Verifier and the linker.
+    if (cast<Function>(GV)->getCallingConv() == CallingConv::MCS251_INTR)
+      report_fatal_error("MCS251 ISR: interrupt entry may not be called",
+                         /*gen_crash_diag=*/false);
   }
   const bool IsDirect = isa<GlobalAddressSDNode>(Callee) ||
                         isa<ExternalSymbolSDNode>(Callee);
@@ -2610,6 +2660,16 @@ bool MCS251TargetLowering::CanLowerReturn(
     CallingConv::ID CallConv, MachineFunction &MF, bool IsVarArg,
     const SmallVectorImpl<ISD::OutputArg> &Outs, LLVMContext &Context,
     const Type *RetTy) const {
+  if (CallConv == CallingConv::MCS251_INTR) {
+    // ISR campaign T05: an interrupt entry returns nothing and returns via
+    // RETI, never through the ordinary RetCC_MCS251 assignment machinery.
+    if (IsVarArg)
+      report_fatal_error("minimal MCS251 backend does not support variadic "
+                         "functions");
+    if (!Outs.empty() || !RetTy->isVoidTy())
+      report_fatal_error("MCS251 ISR: interrupt entry must return void");
+    return true;
+  }
   if (IsVarArg)
     // The first rejection point for variadic functions: CanLowerReturn runs
     // (from FunctionLoweringInfo) before LowerFormalArguments, so name the
@@ -2635,6 +2695,19 @@ SDValue MCS251TargetLowering::LowerReturn(
     const SmallVectorImpl<ISD::OutputArg> &Outs,
     const SmallVectorImpl<SDValue> &OutVals, const SDLoc &DL,
     SelectionDAG &DAG) const {
+  if (CallConv == CallingConv::MCS251_INTR) {
+    // ISR campaign T05: the ISR exit is RETI (T04 opcode 0x32), which pops
+    // the hardware interrupt frame and the controller in-service state --
+    // ERET must never appear at an ISR exit. The frame's 37B software save
+    // area is undone by the epilogue (MCS251FrameLowering), not here.
+    // Defense in depth: CanLowerReturn already rejected non-void returns;
+    // re-validate so a bypass of that hook cannot silently emit a value
+    // return against a CC that has no ABI location for one.
+    if (IsVarArg || !Outs.empty() ||
+        !DAG.getMachineFunction().getFunction().getReturnType()->isVoidTy())
+      report_fatal_error("MCS251 ISR: interrupt entry must return void");
+    return DAG.getNode(MCS251ISD::RETI, DL, MVT::Other, Chain);
+  }
   // Assign the return values to the ABI locations: dpl for i8, dpl:dph for
   // i16, and dpl/dph/b/a for i32. The i32 value is split explicitly because
   // the CC assignment records are one logical value while the ABI has four

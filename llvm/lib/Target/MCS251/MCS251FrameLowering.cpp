@@ -30,8 +30,39 @@
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/IR/CallingConv.h"
 
 using namespace llvm;
+
+// ISR campaign T05: the A6 fixed save/restore program. Each entry is the
+// T04 fixed opcode pair member in A6 order; the pop list is the EXACT
+// inverse of the push list, ending with pop psw so that it lands directly
+// before the RETI terminator (PSW restored last).
+static const unsigned ISRPushSequence[] = {
+    MCS251::ISR_PUSH_PSW, MCS251::ISR_PUSH_DR0,  MCS251::ISR_PUSH_DR4,
+    MCS251::ISR_PUSH_DR8, MCS251::ISR_PUSH_DR12, MCS251::ISR_PUSH_DR16,
+    MCS251::ISR_PUSH_DR20, MCS251::ISR_PUSH_DR24, MCS251::ISR_PUSH_DR28,
+    MCS251::ISR_PUSH_DPX};
+static const unsigned ISRPopSequence[] = {
+    MCS251::ISR_POP_DPX,  MCS251::ISR_POP_DR28, MCS251::ISR_POP_DR24,
+    MCS251::ISR_POP_DR20, MCS251::ISR_POP_DR16, MCS251::ISR_POP_DR12,
+    MCS251::ISR_POP_DR8,  MCS251::ISR_POP_DR4,  MCS251::ISR_POP_DR0,
+    MCS251::ISR_POP_PSW};
+
+// The asynchronous interrupted context is REAL entry state: every push reads
+// the register it saves (T04 Uses; never marked undef, never pseudo-defined),
+// so the entry block must honestly carry these as live-ins. A and B are
+// separately modelled SFRs (no register-file alias to DR8), and DPL/DPH/DPTR
+// are separately modelled aliases of the DPX overlay -- each is read by the
+// corresponding push and therefore listed itself.
+static const MCPhysReg ISRAsyncLiveIns[] = {
+    MCS251::PSW,  MCS251::DR0,  MCS251::DR4,  MCS251::DR8,  MCS251::DR12,
+    MCS251::DR16, MCS251::DR20, MCS251::DR24, MCS251::DR28, MCS251::DR56,
+    MCS251::A,    MCS251::B,    MCS251::DPL,  MCS251::DPH,  MCS251::DPTR};
+
+static bool isISRFunction(const MachineFunction &MF) {
+  return MF.getFunction().getCallingConv() == CallingConv::MCS251_INTR;
+}
 
 MCS251FrameLowering::MCS251FrameLowering()
     // StackGrowsUp: THE platform direction (upstream templates like
@@ -84,6 +115,38 @@ void MCS251FrameLowering::emitPrologue(MachineFunction &MF,
   DebugLoc DL = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();
   uint64_t StackSize = MFI.getStackSize();
   bool FramePtr = hasFP(MF);
+  bool IsISR = isISRFunction(MF);
+
+  if (IsISR) {
+    // ISR fixed frame (A6): the 37B software save is emitted BEFORE any
+    // SPAdjust or FP action, so PSW is saved before the inc-spx steps can
+    // clobber the virtual flags register. The fixed frame never uses the
+    // PUSHFP/POPFP anchor pair and never enters MFI StackSize: the 37B live
+    // BELOW the local frame, whose layout (ObjectOffset - StackSize from the
+    // post-prologue SPX) is untouched by them.
+    assert(!FramePtr &&
+           "ISR fixed frame has no variable-sized objects (dynamic allocas "
+           "are rejected at lowering)");
+    if (FramePtr)
+      report_fatal_error("MCS251 ISR: variable-sized objects are not "
+                         "supported in an interrupt entry");
+
+    for (unsigned Opc : ISRPushSequence)
+      BuildMI(MBB, MBBI, DL, TII.get(Opc))
+          .setMIFlag(MachineInstr::FrameSetup);
+
+    // The interrupted context is genuinely live at entry (the pushes read
+    // it); establish the live-ins truthfully instead of pseudo-defining or
+    // undef-ing the asynchronous inputs.
+    for (MCPhysReg Reg : ISRAsyncLiveIns)
+      if (!MBB.isLiveIn(Reg))
+        MBB.addLiveIn(Reg);
+
+    if (StackSize)
+      emitSPAdjust(MBB, MBBI, DL, StackSize, /*IsDec=*/false,
+                   MachineInstr::FrameSetup);
+    return;
+  }
 
   if (FramePtr) {
     // Private anchor convention: LLVM reserves DR16; the supported SDCC
@@ -114,11 +177,29 @@ void MCS251FrameLowering::emitEpilogue(MachineFunction &MF,
       MF.getSubtarget().getInstrInfo());
 
   MachineBasicBlock::iterator MBBI = MBB.getLastNonDebugInstr();
-  assert(MBBI->getOpcode() == MCS251::ERET &&
-         "Can only insert epilogue into returning blocks");
+  bool IsISR = isISRFunction(MF);
+  assert(((IsISR && MBBI->getOpcode() == MCS251::RETI) ||
+          (!IsISR && MBBI->getOpcode() == MCS251::ERET)) &&
+         "ISR exits must end in RETI, ordinary exits in ERET");
   DebugLoc DL = MBBI->getDebugLoc();
   uint64_t StackSize = MFI.getStackSize();
   bool FramePtr = hasFP(MF);
+
+  if (IsISR) {
+    // ISR fixed frame exit (A6): first undo the local frame, then restore
+    // in strict inverse order, with pop psw last so it sits directly before
+    // the RETI terminator. No PUSHFP/POPFP: the fixed frame has no anchor.
+    // PEI drives this hook once per returning block, so every ISR exit --
+    // early returns included -- gets the complete restore (T05 step 10).
+    assert(!FramePtr && "ISR fixed frame has no frame anchor");
+    if (StackSize)
+      emitSPAdjust(MBB, MBBI, DL, StackSize, /*IsDec=*/true,
+                   MachineInstr::FrameDestroy);
+    for (unsigned Opc : ISRPopSequence)
+      BuildMI(MBB, MBBI, DL, TII.get(Opc))
+          .setMIFlag(MachineInstr::FrameDestroy);
+    return;
+  }
 
   if (FramePtr) {
     // Restore SPX from the anchor in one step (this also discards any
