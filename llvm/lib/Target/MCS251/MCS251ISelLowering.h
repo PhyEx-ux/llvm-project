@@ -12,7 +12,14 @@ namespace MCS251ISD {
 enum NodeType : unsigned {
   FIRST_NUMBER = ISD::BUILTIN_OP_END,
   ERET,
-  CALL
+  CALL,
+  // Independent interrupt return (ISR campaign T04). Built only by
+  // LowerReturn for CallingConv::MCS251_INTR (T05); ordinary returns keep
+  // ERET. Chain-only node, selected by the RETI machine instruction
+  // (MCS251InstrInfo.td). Never substitute ERET for it or vice versa: RETI
+  // restores the saved status register (PSW1) and pops the interrupt
+  // controller in-service state, which ERET must not do.
+  RETI
 };
 } // namespace MCS251ISD
 

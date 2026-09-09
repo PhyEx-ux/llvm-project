@@ -1,0 +1,48 @@
+# RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -start-after=prolog-epilog -verify-machineinstrs -filetype=obj -mcs251-object-format=elf %s -o %t.o
+# RUN: llvm-objcopy --dump-section=.text=%t.bin %t.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == 'c0d0ca0bca1bca2bca3bca4bca5bca6bca7bcaebdaebda7bda6bda5bda4bda3bda2bda1bda0bd0d032', b.hex()" %t.bin
+
+# ISR campaign T04: fixed save/restore opcodes + RETI, encoded byte-exactly.
+# The 41-byte .text string is the A6 fixed frame: push PSW, DR0..DR28, DPX,
+# inverse restore, RETI (CA/DA (code<<4)|0B, C0/D0 D0, 32).
+#
+# MIR note: implicit operands required by the instruction descriptors are
+# spelled explicitly (MIR parser rule); the used root uses the A2.2 standard
+# address-space cast form for AS4 functions. The obj emission of this test is
+# sequenced behind T06 step 8 (exact v2 used-root exemption in the AsmPrinter
+# v1 gate); until then the stage-acceptance run below carries the evidence:
+#   llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -start-after=prolog-epilog -stop-before=mcs251-asm-printer -verify-machineinstrs %s -o %t.pre-asm.mir
+
+--- |
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define mcs251_intrcc void @irq() addrspace(4) #0 { ret void }
+  attributes #0 = { noinline "mcs251-isr-vector"="1" }
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+...

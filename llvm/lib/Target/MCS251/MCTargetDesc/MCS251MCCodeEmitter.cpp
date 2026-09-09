@@ -442,6 +442,10 @@ void MCS251MCCodeEmitter::encodeInstruction(
   case MCS251::ECALLr:
     B(0x199); put8((R(MI, 0) << 4) | 8, CB); break;
   case MCS251::ERET: B(0x1aa); break;
+  // Interrupt return (ISR T04). Bare 0x32 -- low nibble 2 < 6, so putOpcode
+  // adds no A5 escape. Deliberately NOT the ERET byte AA: only ISR exits may
+  // emit RETI (T05/T06 enforce the split).
+  case MCS251::RETI: B(0x032); break;
 
   // Stack/frame forms.
   case MCS251::INCSPX1: B(0x10b); put8(0xfc, CB); break;
@@ -454,6 +458,48 @@ void MCS251MCCodeEmitter::encodeInstruction(
   case MCS251::RESTORESP: B(0x17f); put8(0xf4, CB); break;
   case MCS251::PUSHFP: B(0x1ca); put8(0x4b, CB); break;
   case MCS251::POPFP: B(0x1da); put8(0x4b, CB); break;
+  // ISR fixed save/restore opcodes (ISR T04, A6 freeze). PSW (SFR 0xD0) uses
+  // the classic direct push/pop pair (opcode C0/D0 + direct address D0; low
+  // nibble 0 < 6, so no A5 escape). The DR slots use the same opcode family
+  // as PUSHFP/POPFP: native 0x1CA (push dr) / 0x1DA (pop dr) plus the
+  // specifier byte (regCode<<4)|0x0B. The regCode rule above gives
+  // drN -> N/4 and dr56 (DPX) -> 14; the codes are taken from regCode()
+  // itself so they cannot drift from the table. DO NOT "simplify" 0x1CA /
+  // 0x1DA to the bare 0xCA/0xDA opcode values: without the native bit,
+  // putOpcode's source-mode rule ((op & 0x0f) >= 6) would A5-escape them and
+  // emit the wrong bytes.
+  case MCS251::ISR_PUSH_PSW: B(0x0c0); put8(0xd0, CB); break;
+  case MCS251::ISR_POP_PSW:  B(0x0d0); put8(0xd0, CB); break;
+#define MCS251_ISR_PUSH_DR(Name, Reg)                                        \
+  case MCS251::Name:                                                         \
+    B(0x1ca);                                                                \
+    put8((regCode(MCS251::Reg) << 4) | 0x0b, CB);                            \
+    break;
+  MCS251_ISR_PUSH_DR(ISR_PUSH_DR0, DR0)
+  MCS251_ISR_PUSH_DR(ISR_PUSH_DR4, DR4)
+  MCS251_ISR_PUSH_DR(ISR_PUSH_DR8, DR8)
+  MCS251_ISR_PUSH_DR(ISR_PUSH_DR12, DR12)
+  MCS251_ISR_PUSH_DR(ISR_PUSH_DR16, DR16)
+  MCS251_ISR_PUSH_DR(ISR_PUSH_DR20, DR20)
+  MCS251_ISR_PUSH_DR(ISR_PUSH_DR24, DR24)
+  MCS251_ISR_PUSH_DR(ISR_PUSH_DR28, DR28)
+  MCS251_ISR_PUSH_DR(ISR_PUSH_DPX, DR56)
+#undef MCS251_ISR_PUSH_DR
+#define MCS251_ISR_POP_DR(Name, Reg)                                         \
+  case MCS251::Name:                                                         \
+    B(0x1da);                                                                \
+    put8((regCode(MCS251::Reg) << 4) | 0x0b, CB);                            \
+    break;
+  MCS251_ISR_POP_DR(ISR_POP_DR0, DR0)
+  MCS251_ISR_POP_DR(ISR_POP_DR4, DR4)
+  MCS251_ISR_POP_DR(ISR_POP_DR8, DR8)
+  MCS251_ISR_POP_DR(ISR_POP_DR12, DR12)
+  MCS251_ISR_POP_DR(ISR_POP_DR16, DR16)
+  MCS251_ISR_POP_DR(ISR_POP_DR20, DR20)
+  MCS251_ISR_POP_DR(ISR_POP_DR24, DR24)
+  MCS251_ISR_POP_DR(ISR_POP_DR28, DR28)
+  MCS251_ISR_POP_DR(ISR_POP_DPX, DR56)
+#undef MCS251_ISR_POP_DR
   // Frame-relative accesses (@dr60+dis16 / @dr56+dis16).  A zero displacement
   // has a three-byte short form WITHOUT the disp16 field -- the assembly path
   // never prints "+0x0000" (MCS251InstPrinter::printStackAddr omits a zero

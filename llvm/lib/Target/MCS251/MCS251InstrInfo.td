@@ -9,6 +9,14 @@
 def MCS251eret : SDNode<"MCS251ISD::ERET", SDTNone,
                         [SDNPHasChain, SDNPOptInGlue, SDNPVariadic]>;
 
+// Independent interrupt return (ISR campaign T04). Unlike ERET this node is
+// built chain-only (no glue, no value operands: an ISR returns nothing), and
+// selecting it emits RETI instead of ERET -- RETI additionally restores the
+// status register saved in the hardware interrupt frame and pops the
+// interrupt controller in-service state. LowerReturn (T05) creates it only
+// for CallingConv::MCS251_INTR.
+def MCS251reti : SDNode<"MCS251ISD::RETI", SDTNone, [SDNPHasChain]>;
+
 // Call node (Phase 7), same shape as upstream MSP430's MSP430call: variadic,
 // with operand 0 the callee (a TargetGlobalAddress / TargetExternalSymbol
 // after LowerCall wrapped it) and the remaining operands the physical
@@ -600,6 +608,135 @@ def : Pat<(MCS251call (i32 texternalsym:$dst)), (ECALL texternalsym:$dst)>;
 
 let isReturn = 1, isTerminator = 1, isBarrier = 1 in
 def ERET : MCS251Inst<(outs), (ins), "eret", [(MCS251eret)]>;
+
+//===----------------------------------------------------------------------===//
+//  ISR fixed save/restore and interrupt return (ISR campaign T04)
+//===----------------------------------------------------------------------===//
+//
+// Fixed, operand-less opcodes for the per-interrupt-level 37-byte save and
+// inverse restore (A6 freeze): PSW + DR0/4/8/12/16/20/24/28 + DR56/DPX. The
+// save set is frozen -- nothing is omitted, nothing is elided on demand (no
+// shrink-wrapping, no callee-save re-save, no merged-save pass), and no
+// temporary register is involved. SPX itself is never pushed or popped (A6
+// ban) and no DR32..DR52 opcode exists.
+
+// Stack model (see the Stack frame instructions section below): the stack
+// grows UP and SPX points at the top-most used byte, so push pre-increments
+// SPX and then stores, pop loads and then decrements SPX. Hence:
+//
+//   * every push: READS the register it saves -- the asynchronous
+//     interrupted-context value, a pure dataflow input: a push never defines
+//     the register it saves and the input must not be marked undef -- plus
+//     reads SPX, writes SPX (Defs [DR60]) and writes the stack (mayStore);
+//   * every pop: reads the stack (mayLoad), reads/writes SPX (Uses/Defs
+//     [DR60]) and defines the restored register.
+//
+// Alias side effects are modelled explicitly on the fixed registers the
+// saved/restored slots pass through -- "reserved, non-allocatable" does not
+// mean "effect-free":
+//
+//   * DR8 lanes r10/r11 are the B/A SFRs: push dr8 reads DR8 plus the A/B
+//     aliases, pop dr8 defines DR8 and A/B;
+//   * DPTR (dpl:dph) aliases the low word of DR56/DPX: push dpx reads DR56
+//     plus the DPTR overlay, pop dpx defines DR56 and DPL/DPH/DPTR;
+//   * pop psw defines the virtual PSW flags register (the pushed one).
+//
+// Each push/pop encodes as two bytes (opcode byte + direct address or
+// specifier), hence Size = 2; RETI below stays Size = 1.
+//
+// Ordering of the whole sequence (PSW first, PSW + RETI last) is T05's
+// emission contract (FrameSetup/FrameDestroy, strict inverse order); these
+// definitions only pin the per-instruction register effects.
+
+// Fixed pushes. ISR_PUSH_DR16 coexists with PUSHFP above on purpose: PUSHFP
+// is the ordinary-function frame-anchor pair member (documented anchor
+// semantics), ISR_PUSH_* are the ISR fixed-frame opcodes.
+let hasSideEffects = 1, mayStore = 1, Size = 2, Defs = [DR60] in {
+  def ISR_PUSH_PSW  : MCS251Inst<(outs), (ins), "push psw", []> {
+    let Uses = [PSW, DR60];
+  }
+  def ISR_PUSH_DR0  : MCS251Inst<(outs), (ins), "push dr0", []> {
+    let Uses = [DR0, DR60];
+  }
+  def ISR_PUSH_DR4  : MCS251Inst<(outs), (ins), "push dr4", []> {
+    let Uses = [DR4, DR60];
+  }
+  def ISR_PUSH_DR8  : MCS251Inst<(outs), (ins), "push dr8", []> {
+    let Uses = [DR8, A, B, DR60];
+  }
+  def ISR_PUSH_DR12 : MCS251Inst<(outs), (ins), "push dr12", []> {
+    let Uses = [DR12, DR60];
+  }
+  def ISR_PUSH_DR16 : MCS251Inst<(outs), (ins), "push dr16", []> {
+    let Uses = [DR16, DR60];
+  }
+  def ISR_PUSH_DR20 : MCS251Inst<(outs), (ins), "push dr20", []> {
+    let Uses = [DR20, DR60];
+  }
+  def ISR_PUSH_DR24 : MCS251Inst<(outs), (ins), "push dr24", []> {
+    let Uses = [DR24, DR60];
+  }
+  def ISR_PUSH_DR28 : MCS251Inst<(outs), (ins), "push dr28", []> {
+    let Uses = [DR28, DR60];
+  }
+  def ISR_PUSH_DPX  : MCS251Inst<(outs), (ins), "push dpx", []> {
+    let Uses = [DR56, DPL, DPH, DPTR, DR60];
+  }
+}
+
+// Fixed pops: read the stack, rewind SPX, define the restored register
+// (with the same alias sets as the matching push).
+let hasSideEffects = 1, mayLoad = 1, Size = 2, Uses = [DR60] in {
+  def ISR_POP_PSW  : MCS251Inst<(outs), (ins), "pop psw", []> {
+    let Defs = [PSW, DR60];
+  }
+  def ISR_POP_DR0  : MCS251Inst<(outs), (ins), "pop dr0", []> {
+    let Defs = [DR0, DR60];
+  }
+  def ISR_POP_DR4  : MCS251Inst<(outs), (ins), "pop dr4", []> {
+    let Defs = [DR4, DR60];
+  }
+  def ISR_POP_DR8  : MCS251Inst<(outs), (ins), "pop dr8", []> {
+    let Defs = [DR8, A, B, DR60];
+  }
+  def ISR_POP_DR12 : MCS251Inst<(outs), (ins), "pop dr12", []> {
+    let Defs = [DR12, DR60];
+  }
+  def ISR_POP_DR16 : MCS251Inst<(outs), (ins), "pop dr16", []> {
+    let Defs = [DR16, DR60];
+  }
+  def ISR_POP_DR20 : MCS251Inst<(outs), (ins), "pop dr20", []> {
+    let Defs = [DR20, DR60];
+  }
+  def ISR_POP_DR24 : MCS251Inst<(outs), (ins), "pop dr24", []> {
+    let Defs = [DR24, DR60];
+  }
+  def ISR_POP_DR28 : MCS251Inst<(outs), (ins), "pop dr28", []> {
+    let Defs = [DR28, DR60];
+  }
+  def ISR_POP_DPX  : MCS251Inst<(outs), (ins), "pop dpx", []> {
+    let Defs = [DR56, DPL, DPH, DPTR, DR60];
+  }
+}
+
+// Interrupt return (RETI, opcode 0x32; ISR campaign T04, A6). Pops the 4-byte
+// hardware interrupt frame (profile 1, A6: PSW1, PC[23:16], PC[7:0],
+// PC[15:8]) through SPX -- hence mayLoad, Uses [DR60] and Defs [DR60] for the
+// rewind. Defs [PSW] models the restored status register on the single
+// virtual flags register this backend keeps. Two further side effects are
+// deliberately UNMODELLED registers and are captured only by hasSideEffects
+// and this comment (do not remove):
+//   * the status register restored by the hardware is PSW1 (SFR 0xD1, which
+//     carries N/Z) -- folded here into the virtual PSW def;
+//   * RETI pops the interrupt controller in-service state for this priority
+//     level, re-enabling same/lower priority interrupts.
+// RETI is NOT ERET: ordinary functions keep ERET; only ISR exits may emit
+// RETI (T05 LowerReturn/epilogue, T06 final-machine boundary enforce this).
+// The AsmStrings are distinct ("reti" / "eret") so neither prints as the
+// other, and the encodings differ (0x32 vs 0xAA).
+let isReturn = 1, isTerminator = 1, isBarrier = 1, hasSideEffects = 1,
+    mayLoad = 1, Uses = [DR60], Defs = [DR60, PSW] in
+def RETI : MCS251Inst<(outs), (ins), "reti", [(MCS251reti)]>;
 
 //===----------------------------------------------------------------------===//
 // Stack frame instructions (Phase 9)
