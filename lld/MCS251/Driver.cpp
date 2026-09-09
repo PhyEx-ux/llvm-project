@@ -11,6 +11,7 @@
 #include "lld/Common/Driver.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
@@ -79,13 +80,71 @@ std::vector<Segment> makeSegments(const LinkerResult &Result) {
   return Segments;
 }
 
-bool writeExecutable(const LinkerResult &Result, StringRef Path,
-                     raw_ostream &Err) {
+bool writeExecutable(const LinkerResult &Result, bool KeepSymbols,
+                     StringRef Path, raw_ostream &Err) {
   std::vector<Segment> Segments = makeSegments(Result);
   if (Segments.empty())
     return fail(Err, "no loadable bytes");
   if (Segments.size() > 0xfffd)
     return fail(Err, "too many sparse PT_LOAD segments");
+
+  // E5: the optional final symbol table.  Everything it adds (two names in
+  // .shstrtab, a .strtab, a .symtab, two section rows) is appended strictly
+  // after the layout that exists without it, so a default link keeps the
+  // exact bytes the frozen release artifacts are hashed against.
+  struct OutSym {
+    uint32_t Name, Value, Size;
+    uint8_t Info;
+    uint16_t Shndx;
+  };
+  std::vector<OutSym> Syms; // [0] = null symbol, then locals, then globals.
+  std::vector<uint8_t> Strtab = {0};
+  uint32_t FirstGlobal = 0; // .symtab sh_info: index of the first global.
+  uint32_t StrtabName = 0, SymtabName = 0;
+  const bool EmitSyms = KeepSymbols && !Result.Symbols.empty();
+  if (EmitSyms) {
+    auto AddName = [&](StringRef N) {
+      uint32_t Off = Strtab.size();
+      Strtab.insert(Strtab.end(), N.begin(), N.end());
+      Strtab.push_back(0);
+      return Off;
+    };
+    auto FindShndx = [&](uint32_t Addr) -> uint16_t {
+      for (size_t I = 0; I != Segments.size(); ++I) {
+        const Segment &S = Segments[I];
+        if (S.Address <= Addr && Addr < S.Address + S.Bytes.size())
+          return static_cast<uint16_t>(I + 1);
+      }
+      // NOBITS (DSEG/ISEG/XSEG...) reservations and synthesised boundary
+      // symbols belong to no loadable output section: report them ABS.
+      return ELF::SHN_ABS;
+    };
+    // ELF requires entry 0 of every .symtab to be the all-zero null symbol
+    // (STN_UNDEF): st_name/st_value/st_size/st_info/st_other/st_shndx all
+    // zero.  It is itself STB_LOCAL, so every real symbol sits at index >= 1.
+    Syms.push_back(OutSym{});
+    for (const OutputSymbol &S : Result.Symbols) {
+      OutSym O;
+      O.Name = AddName(S.Name);
+      O.Value = S.Address;
+      O.Size = S.Size;
+      O.Info = static_cast<uint8_t>((S.Bind << 4) | (S.Type & 0xf));
+      O.Shndx = S.Synth ? static_cast<uint16_t>(ELF::SHN_ABS)
+                        : FindShndx(S.Address);
+      Syms.push_back(O);
+    }
+    // collectSymbols() orders locals before globals; sh_info must be the
+    // index of the first global, i.e. the null symbol plus every local.
+    // Derive it from the serialized rows so the section header, the entry
+    // order and the actual indices can never drift apart.  An all-local
+    // table uses the entry count (one past the last local).
+    FirstGlobal = static_cast<uint32_t>(Syms.size());
+    for (size_t I = 0; I != Syms.size(); ++I)
+      if ((Syms[I].Info >> 4) != ELF::STB_LOCAL) {
+        FirstGlobal = static_cast<uint32_t>(I);
+        break;
+      }
+  }
 
   constexpr uint32_t EhdrSize = 52;
   constexpr uint32_t PhdrSize = 32;
@@ -114,13 +173,33 @@ bool writeExecutable(const LinkerResult &Result, StringRef Path,
   StringRef Shstr = ".shstrtab";
   Names.insert(Names.end(), Shstr.bytes_begin(), Shstr.bytes_end());
   Names.push_back(0);
+  if (EmitSyms) {
+    StrtabName = Names.size();
+    StringRef S1 = ".strtab";
+    Names.insert(Names.end(), S1.bytes_begin(), S1.bytes_end());
+    Names.push_back(0);
+    SymtabName = Names.size();
+    StringRef S2 = ".symtab";
+    Names.insert(Names.end(), S2.bytes_begin(), S2.bytes_end());
+    Names.push_back(0);
+  }
   if (DataOffset + Names.size() > 0xffffffff)
     return fail(Err, "ET_EXEC output is too large");
   uint32_t ShstrOffset = static_cast<uint32_t>(DataOffset);
   DataOffset += Names.size();
   DataOffset = (DataOffset + 3) & ~uint64_t(3);
+  uint32_t StrtabOffset = static_cast<uint32_t>(DataOffset);
+  uint32_t SymtabOffset = 0;
+  if (EmitSyms) {
+    DataOffset += Strtab.size();
+    DataOffset = (DataOffset + 3) & ~uint64_t(3);
+    SymtabOffset = static_cast<uint32_t>(DataOffset);
+    DataOffset += uint64_t(Syms.size()) * 16;
+    DataOffset = (DataOffset + 3) & ~uint64_t(3);
+  }
   uint64_t Shoff = DataOffset;
-  uint64_t Shnum = Segments.size() + 2; // null + sparse load sections + names
+  // null + sparse load sections + names (+ .strtab + .symtab)
+  uint64_t Shnum = Segments.size() + 2 + (EmitSyms ? 2u : 0);
   if (Shoff + Shnum * ShdrSize > 0xffffffff)
     return fail(Err, "section header table is too large");
 
@@ -155,6 +234,19 @@ bool writeExecutable(const LinkerResult &Result, StringRef Path,
   for (const Segment &S : Segments)
     ELF.insert(ELF.end(), S.Bytes.begin(), S.Bytes.end());
   ELF.insert(ELF.end(), Names.begin(), Names.end());
+  if (EmitSyms) {
+    ELF.resize(StrtabOffset, 0);
+    ELF.insert(ELF.end(), Strtab.begin(), Strtab.end());
+    ELF.resize(SymtabOffset, 0);
+    for (const OutSym &S : Syms) {
+      append32be(ELF, S.Name);
+      append32be(ELF, S.Value);
+      append32be(ELF, S.Size);
+      ELF.push_back(S.Info);                    // st_info
+      ELF.push_back(0);                         // st_other
+      append16be(ELF, S.Shndx);
+    }
+  }
   ELF.resize(Shoff, 0);
   append32be(ELF, 0); append32be(ELF, 0); append32be(ELF, 0);
   append32be(ELF, 0); append32be(ELF, 0); append32be(ELF, 0);
@@ -176,6 +268,28 @@ bool writeExecutable(const LinkerResult &Result, StringRef Path,
   append32be(ELF, ShstrOffset); append32be(ELF, Names.size());
   append32be(ELF, 0); append32be(ELF, 0);
   append32be(ELF, 1); append32be(ELF, 0);
+  if (EmitSyms) {
+    // .strtab: section index Segments.size()+2.
+    append32be(ELF, StrtabName);
+    append32be(ELF, 3);                       // SHT_STRTAB
+    append32be(ELF, 0); append32be(ELF, 0);   // sh_flags, sh_addr
+    append32be(ELF, StrtabOffset);
+    append32be(ELF, Strtab.size());
+    append32be(ELF, 0);                       // sh_link
+    append32be(ELF, 0);                       // sh_info
+    append32be(ELF, 1);                       // sh_addralign
+    append32be(ELF, 0);                       // sh_entsize
+    // .symtab: section index Segments.size()+3; links to .strtab.
+    append32be(ELF, SymtabName);
+    append32be(ELF, 2);                       // SHT_SYMTAB
+    append32be(ELF, 0); append32be(ELF, 0);
+    append32be(ELF, SymtabOffset);
+    append32be(ELF, Syms.size() * 16);        // sh_size: null symbol included
+    append32be(ELF, Segments.size() + 2);     // sh_link -> .strtab
+    append32be(ELF, FirstGlobal);             // sh_info -> first global
+    append32be(ELF, 4);                       // sh_addralign
+    append32be(ELF, 16);                      // sh_entsize
+  }
 
   std::string Temp = (Path + ".tmp").str();
   std::error_code EC;
@@ -248,6 +362,12 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
       O.Core.EnableStackGate = true;
     } else if (A == "--no-stack-gate") {
       return fail(Err, "--no-stack-gate is not supported; SPEC mandates the stack gate");
+    } else if (A == "--keep-symbols") {
+      // E5: keep a final symbol table in the ELF and function-level rows in
+      // the map.  Off by default: the frozen release artifacts (manifest.json
+      // SHA256 of the linked ELF and the map) pin the exact output bytes, so
+      // traceability output must be an explicit opt-in.
+      O.Core.KeepSymbols = true;
     } else if (auto V = take("-o")) {
       O.Output = V->str();
     } else if (auto V = take("--map")) {
@@ -338,7 +458,7 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
     } else if (A == "--oformat=ihex" || A == "--oformat") {
       return fail(Err, "Intel HEX is produced by llvm-objcopy -O ihex");
     } else if (A == "--help") {
-      Out << "mcs251-lld [--stack-gate] [options] file...\n";
+      Out << "mcs251-lld [--stack-gate] [--keep-symbols] [options] file...\n";
       O.HelpOrVersion = true;
       return true;
     } else if (A == "--version") {
@@ -388,6 +508,8 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
     return true;
   }
   const bool PrintInput = Options.Core.PrintInput;
+  // E5: Options.Core is moved into the core below; capture the flag first.
+  const bool KeepSymbols = Options.Core.KeepSymbols;
   LinkerResult Result;
   if (!linkCore(std::move(Options.Core), Result, Err))
     return false;
@@ -400,7 +522,7 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
   }
   if (!Options.Map.empty() && !writeText(Options.Map, Result.Map, "map", Err))
     return false;
-  return writeExecutable(Result, Options.Output, Err);
+  return writeExecutable(Result, KeepSymbols, Options.Output, Err);
 }
 
 } // namespace lld::mcs251

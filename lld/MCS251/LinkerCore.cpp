@@ -723,6 +723,7 @@ private:
   bool validateIRQFinalAssets();
   bool validateXInit();
   void buildMap(raw_ostream &Out) const;
+  void collectSymbols(std::vector<OutputSymbol> &Out) const;
   void printInputs(raw_ostream &Out) const;
   InputSymbol *findSymbol(InputFile &F, uint32_t Index);
   bool errorUndefined();
@@ -1962,6 +1963,18 @@ void Linker::buildMap(raw_ostream &Out) const {
         Out << F->Path << ":" << S->Name << " "
             << format_hex(S->Address, 6, false) << " +"
             << format_hex(S->Size, 0, false) << "\n";
+  // E5: function-level rows (address + size straight from the input symbol
+  // tables, final layout addresses).  Gated behind KeepSymbols because the
+  // frozen release artifacts hash the exact map bytes; without the flag the
+  // map is byte-identical to the pre-E5 format.
+  if (Config.KeepSymbols) {
+    std::vector<OutputSymbol> Funcs;
+    collectSymbols(Funcs);
+    for (const OutputSymbol &Sym : Funcs)
+      if (Sym.Type == ELF::STT_FUNC && Sym.Size)
+        Out << "FUNC " << format_hex(Sym.Address, 6, false) << " +"
+            << format_hex(Sym.Size, 0, false) << " " << Sym.Name << '\n';
+  }
   if (StackRequested)
     Out << "stack H=" << format_hex(StackH, 4, false) << " SPX="
         << format_hex(SPX, 4, false) << " capacity=" << Capacity
@@ -1993,6 +2006,26 @@ void Linker::buildMap(raw_ostream &Out) const {
       }
     }
   }
+}
+
+// E5: snapshot every named definition with its final layout address.  Input
+// symbols come first (locals, then globals, in input order), followed by the
+// synthesised boundary/stack symbols.  STT_SECTION and anonymous symbols
+// carry no audit value and are skipped; duplicate names across objects are
+// kept because each names a distinct definition in its own object.
+void Linker::collectSymbols(std::vector<OutputSymbol> &Out) const {
+  auto Emit = [&](uint8_t Bind) {
+    for (const auto &F : Files)
+      for (const InputSymbol &S : F->Symbols)
+        if (S.Defined && !S.Name.empty() && S.Type != ELF::STT_SECTION &&
+            S.Bind == Bind)
+          Out.push_back({S.Name, S.Address, S.Size, S.Bind, S.Type, false});
+  };
+  Emit(ELF::STB_LOCAL);
+  Emit(ELF::STB_GLOBAL);
+  for (const auto &P : Synth)
+    Out.push_back({P.first, P.second, 0, ELF::STB_GLOBAL, ELF::STT_NOTYPE,
+                   true});
 }
 
 bool Linker::run(LinkerResult &Result) {
@@ -2043,6 +2076,9 @@ bool Linker::run(LinkerResult &Result) {
   Result.Entry = llvm::any_of(AllSections,
                               [](const InputSection *S) { return S->Region == "HOME"; })
                      ? areaStart("HOME", 0) : 0;
+  // E5: final symbol snapshot with post-layout addresses; the flavor shell
+  // decides whether to serialize it into the output ELF.
+  collectSymbols(Result.Symbols);
   Result.Image = std::move(Image);
   raw_string_ostream MapOS(Result.Map);
   buildMap(MapOS);

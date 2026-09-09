@@ -1,0 +1,156 @@
+#
+# E5: final-product traceability.  Without a switch, the linked ELF carries no
+# symbol table and the map has no function rows (the frozen release artifacts
+# pin the exact default output bytes).  --keep-symbols opt-in adds:
+#   - a final .symtab/.strtab in the ELF with post-layout addresses, so
+#     llvm-readobj --symbols can locate ISR and helper entries directly, and
+#   - function-level address/size rows (STT_FUNC from the input symbol
+#     tables) in the map.
+# Symbol values and ranges must agree with the synthesized vectors: the
+# independent image checker proves each registered EJMP target equals its
+# handler entry, and the readobj checks prove the symbol value equals that
+# same address.  The table itself must be ELF-legal: entry 0 is the all-zero
+# STN_UNDEF symbol and sh_info is the index of the first global (asserted
+# against the raw bytes, not just readobj's tolerant printer).
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o %t.crt.o
+# RUN: %python %S/Inputs/isr-fixture.py --out %t.isr.yaml --slots 1
+# RUN: yaml2obj %t.isr.yaml -o %t.isr.o
+
+# --- Default behavior is unchanged: no FUNC rows, no ELF symbols ---
+# RUN: mcs251-lld %t.crt.o %t.isr.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 --map=%t.def.map -o %t.def.elf
+# RUN: not grep -q 'FUNC' %t.def.map
+# RUN: llvm-readobj --symbols %t.def.elf > %t.def.syms
+# RUN: not grep -q '_irq1' %t.def.syms
+
+# --- --keep-symbols: the final ELF carries the traceability symbols ---
+# RUN: mcs251-lld %t.crt.o %t.isr.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 --keep-symbols --map=%t.ks.map -o %t.ks.elf
+
+# The registered handler symbol sits exactly at the fixture .text base
+# (CSEG=0xff0400), with its full input range.  The image checker below
+# independently proves the slot-1 EJMP lands on that same address, so the
+# symbol value/range agrees with the vector.
+# RUN: llvm-readobj --symbols %t.ks.elf | FileCheck %s --check-prefix=SYM
+# SYM: Name: _irq1
+# SYM-NEXT: Value: 0xFF0400
+# SYM-NEXT: Size: 41
+# SYM-NEXT: Binding: Local (0x0)
+# SYM-NEXT: Type: Function (0x2)
+# SYM: Name: __mcs251_reset
+# SYM-NEXT: Value: 0xFF0000
+# SYM-NEXT: Size: 3
+# SYM-NEXT: Binding: Global (0x1)
+# SYM-NEXT: Type: Function (0x2)
+# SYM: Name: __mcs251_isr_unhandled
+# SYM-NEXT: Value: 0xFF02AC
+# SYM-NEXT: Size: 4
+# SYM-NEXT: Binding: Global (0x1)
+# SYM-NEXT: Type: Function (0x2)
+# SYM: Name: _main
+# SYM-NEXT: Value: 0xFF0429
+# SYM-NEXT: Size: 2
+# SYM-NEXT: Binding: Global (0x1)
+# SYM-NEXT: Type: Function (0x2)
+
+# Vector consistency of the keep-symbols link (EJMP targets vs handler
+# entries, reserved ranges, reset shape) via the independent checker.
+# RUN: %python %S/Inputs/isr-check-image.py %t.ks.elf %t.ks.map --registered 1
+
+# --- Map function rows: address + size for every sized STT_FUNC ---
+# Row order: locals first (input order), then globals (input order).
+# RUN: FileCheck %s --check-prefix=MAP < %t.ks.map
+# MAP: FUNC 0xff0400 +0x29 _irq1
+# MAP: FUNC 0xff0000 +0x3 __mcs251_reset
+# MAP: FUNC 0xff02ac +0x4 __mcs251_isr_unhandled
+# MAP: FUNC 0xff0429 +0x2 _main
+
+# --- NOBITS (direct-addr RAM) symbols have no loadable section: ABS ---
+# RUN: yaml2obj %t/abs.yaml -o %t.abs.o
+# RUN: mcs251-lld %t.abs.o --area-start=CSEG=0xff0200 --keep-symbols \
+# RUN:   -o %t.abs.elf
+# RUN: llvm-readobj --symbols %t.abs.elf | FileCheck %s --check-prefix=ABS
+# ABS: Name: _var
+# ABS-NEXT: Value: 0x0
+# ABS-NEXT: Size: 4
+# ABS-NEXT: Binding: Global (0x1)
+# ABS-NEXT: Type: Object (0x1)
+# ABS-NEXT: Other: 0
+# ABS-NEXT: Section: Absolute (0xFFF1)
+
+# --- ELF structure: STN_UNDEF entry 0 and the local/global boundary ---
+# llvm-readobj prints symbols across structurally illegal tables, so the
+# raw bytes and section headers are checked too (symtab-structure.py):
+#   - entry 0 of .symtab is the all-zero null symbol (STN_UNDEF, st_shndx 0);
+#   - sh_info equals the index of the first non-STB_LOCAL entry;
+#   - sh_size/16 equals the number of symbol rows llvm-readobj prints.
+# Both links here reproduce the pre-fix defect (entry 0 was a real symbol,
+# the boundary off by one) and fail these checks.
+# The abs link has no locals: boundary = 1 (null symbol only).  The
+# keep-symbols link has six locals: boundary = 7.
+# RUN: %python %S/Inputs/symtab-structure.py %t.abs.elf
+# RUN: %python %S/Inputs/symtab-structure.py %t.ks.elf
+# RUN: llvm-readobj --syms %t.abs.elf > %t.abs.readobj
+# RUN: llvm-readobj --syms %t.ks.elf > %t.ks.readobj
+# RUN: %python %S/Inputs/symtab-structure.py --against %t.abs.readobj %t.abs.elf
+# RUN: %python %S/Inputs/symtab-structure.py --against %t.ks.readobj %t.ks.elf
+# Raw entry 0 of each .symtab: 16 zero bytes.
+# RUN: %python %S/Inputs/symtab-structure.py \
+# RUN:   --entry0 00000000000000000000000000000000 %t.abs.elf
+# RUN: %python %S/Inputs/symtab-structure.py \
+# RUN:   --entry0 00000000000000000000000000000000 %t.ks.elf
+
+# readobj agrees with the structure: the table starts with the STN_UNDEF row
+# (pre-fix, the first printed row was _var / __mcs251_halt, a real symbol).
+# RUN: llvm-readobj --syms %t.abs.elf | FileCheck %s --check-prefix=NULL0
+# NULL0: Symbols [
+# NULL0-NEXT: Symbol {
+# NULL0-NEXT: Name:  (0)
+# NULL0-NEXT: Value: 0x0
+# NULL0-NEXT: Size: 0
+# NULL0-NEXT: Binding: Local (0x0)
+# NULL0-NEXT: Type: None (0x0)
+# NULL0-NEXT: Other: 0
+# NULL0-NEXT: Section: Undefined (0x0)
+# And sh_info names the first global: 1 for the all-global abs link.
+# RUN: llvm-readobj --sections %t.abs.elf | FileCheck %s --check-prefix=SEC
+# SEC: Name: .symtab
+# SEC: Info: 1
+
+#--- abs.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.DSEG.var
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _var
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.DSEG.var
+    Value: 0x0
+    Size: 4

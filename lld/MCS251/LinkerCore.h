@@ -46,6 +46,23 @@ struct LinkerConfig {
   std::vector<std::string> Inputs;
   bool PrintInput = false;
   bool EnableStackGate = false;
+  // E5 traceability switch.  Off by default: the frozen release artifacts pin
+  // the exact output bytes (realhw-demo/release/manifest.json hashes the
+  // linked ELF and the map), so emitting a final symbol table and map
+  // function rows must be an explicit opt-in, never a silent default.
+  bool KeepSymbols = false;
+};
+
+// E5: one final-ELF symbol collected after layout.  Synth marks the
+// synthesised boundary/stack symbols; they resolve to SHN_ABS in the output
+// because they belong to no loadable output section.
+struct OutputSymbol {
+  std::string Name;
+  uint32_t Address = 0;
+  uint32_t Size = 0;
+  uint8_t Bind = 0; // ELF::STB_LOCAL / ELF::STB_GLOBAL
+  uint8_t Type = 0; // ELF::STT_NOTYPE / ELF::STT_OBJECT / ELF::STT_FUNC
+  bool Synth = false;
 };
 
 struct LinkerResult {
@@ -53,6 +70,9 @@ struct LinkerResult {
   std::map<uint32_t, uint8_t> Image;
   std::string Map;
   std::string InputReport;
+  // E5: final symbols with post-layout addresses, always collected so the
+  // flavor shell can decide whether to serialize them.
+  std::vector<OutputSymbol> Symbols;
 };
 
 bool linkCore(LinkerConfig Config, LinkerResult &Result,
