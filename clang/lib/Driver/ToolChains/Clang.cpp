@@ -7595,6 +7595,18 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                    TC.getArch() == llvm::Triple::hexagon || Triple.isOSzOS()))
     CmdArgs.push_back("-fshort-enums");
 
+  // MCS251 Keil dialect: forward -fmcs251-keil to cc1 and hard-error on any
+  // non-MCS251 target.
+  if (const Arg *A = Args.getLastArg(options::OPT_fmcs251_keil,
+                                     options::OPT_fno_mcs251_keil)) {
+    if (Triple.getArch() != llvm::Triple::mcs251) {
+      D.Diag(diag::err_drv_unsupported_opt_for_target)
+          << A->getSpelling() << TripleStr;
+    } else if (A->getOption().matches(options::OPT_fmcs251_keil)) {
+      CmdArgs.push_back("-fmcs251-keil");
+    }
+  }
+
   RenderCharacterOptions(Args, AuxTriple ? *AuxTriple : RawTriple, CmdArgs);
 
   // -fuse-cxa-atexit is default.

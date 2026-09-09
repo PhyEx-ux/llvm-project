@@ -4534,6 +4534,12 @@ defm short_enums : BoolFOption<"short-enums",
           "Allocate to an enum type only as many bytes as it"
            " needs for the declared range of possible values">,
   NegFlag<SetFalse>>;
+defm mcs251_keil : BoolFOption<"mcs251-keil",
+  LangOpts<"MCS251Keil">, DefaultFalse,
+  PosFlag<SetTrue, [], [ClangOption, CC1Option],
+          "Enable the MCS251 Keil C51 'interrupt N' function-declarator"
+           " suffix syntax">,
+  NegFlag<SetFalse>>;
 defm char8__t : BoolFOption<"char8_t",
   LangOpts<"Char8">, Default<cpp20.KeyPath>,
   PosFlag<SetTrue, [], [ClangOption], "Enable">,

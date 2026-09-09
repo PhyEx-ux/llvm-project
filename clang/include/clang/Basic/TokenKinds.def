@@ -685,6 +685,14 @@ KEYWORD(__builtin_sycl_unique_stable_name, KEYSYCL)
 // Clang-specific keywords enabled only in testing.
 TESTING_KEYWORD(__unknown_anytype , KEYALL)
 
+// MCS251 Keil dialect suffix keyword (LangOptions.MCS251Keil). The token name
+// is frozen as kw___mcs251_interrupt while the registered spelling is the
+// controlled name "interrupt"; it is registered conditionally by
+// IdentifierTable::AddKeywords, so it stays an ordinary identifier unless
+// -fmcs251-keil is in effect. TESTING_KEYWORD keeps the generic keyword loop
+// from registering it unconditionally.
+TESTING_KEYWORD(__mcs251_interrupt , KEYALL)
+
 
 //===----------------------------------------------------------------------===//
 // Objective-C @-preceded keywords.

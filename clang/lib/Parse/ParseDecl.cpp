@@ -6664,6 +6664,136 @@ static SourceLocation getMissingDeclaratorIdLoc(Declarator &D,
   return Loc;
 }
 
+void Parser::SkipMCS251InterruptOperand(bool DiagnoseMissingRParen) {
+  assert(Tok.is(tok::l_paren) && "Operand does not start with '('");
+  SourceLocation LParenLoc = ConsumeParen();
+  unsigned Depth = 1;
+  while (true) {
+    if (Tok.is(tok::l_paren)) {
+      ++Depth;
+      ConsumeParen();
+    } else if (Tok.is(tok::r_paren)) {
+      ConsumeParen();
+      if (--Depth == 0)
+        return;
+    } else if (Tok.is(tok::semi) || Tok.is(tok::l_brace) ||
+               Tok.is(tok::r_brace) || Tok.is(tok::eof)) {
+      // Synchronization points: never consume them, so the enclosing
+      // declaration (and any following function definition) is parsed
+      // independently instead of being swallowed by recovery.
+      if (DiagnoseMissingRParen) {
+        Diag(Tok, diag::err_expected) << tok::r_paren;
+        Diag(LParenLoc, diag::note_matching) << "'('";
+      }
+      return;
+    } else {
+      ConsumeToken();
+    }
+  }
+}
+
+void Parser::ParseMCS251KeilInterruptSuffix(Declarator &D) {
+  assert(Tok.is(tok::kw___mcs251_interrupt) &&
+         "Not an MCS251 Keil 'interrupt' suffix");
+  assert(getLangOpts().MCS251Keil &&
+         "'interrupt' suffix parsed without -fmcs251-keil");
+
+  // The controlled spelling "interrupt" is the attribute name, matching the
+  // GNU spelling registered by MCS251Interrupt in Attr.td (ParseKind
+  // "Interrupt"); reducing to it keeps Sema handling shared. Capture the
+  // IdentifierInfo before consuming the token.
+  IdentifierInfo *AttrName = Tok.getIdentifierInfo();
+  SourceLocation KwLoc = ConsumeToken();
+
+  // A2.3: the suffix is only valid on a plain function declarator; variables
+  // and function-pointer variables may not take it. A valid ISR declarator
+  // carries exactly one function chunk (e.g. `void f(void)` or a K&R
+  // `void f(x)`); parentheses or pointers around the name are rejected here.
+  if (D.getNumTypeObjects() != 1 ||
+      D.getTypeObject(0).Kind != DeclaratorChunk::Function) {
+    Diag(KwLoc, diag::err_mcs251_keil_interrupt_requires_function);
+    // Consume only the suffix argument so error recovery cannot swallow the
+    // following declaration or function definition.
+    if (Tok.is(tok::numeric_constant))
+      ConsumeToken();
+    else if (Tok.is(tok::l_paren))
+      SkipMCS251InterruptOperand(/*DiagnoseMissingRParen=*/false);
+    return;
+  }
+
+  // The argument is either a single numeric token (`interrupt 2`, including a
+  // fully expanded numeric macro) or a parenthesized constant expression
+  // (`interrupt (48 + 1)`); complex expressions must be parenthesized.
+  ArgsVector ArgExprs;
+  SourceLocation EndLoc = KwLoc;
+  bool ArgInvalid = false;
+  {
+    EnterExpressionEvaluationContext ConstantEvaluated(
+        Actions, Sema::ExpressionEvaluationContext::ConstantEvaluated, nullptr,
+        Sema::ExpressionEvaluationContextRecord::EK_AttrArgument);
+    if (Tok.is(tok::numeric_constant)) {
+      // The non-parenthesized form consumes exactly one numeric token.
+      ExprResult ArgExpr =
+          Actions.ActOnNumericConstant(Tok, /*UDLScope=*/getCurScope());
+      EndLoc = Tok.getLocation();
+      ConsumeToken();
+      if (ArgExpr.isUsable())
+        ArgExprs.push_back(ArgExpr.get());
+      else
+        ArgInvalid = true;
+    } else if (Tok.is(tok::l_paren)) {
+      BalancedDelimiterTracker T(*this, tok::l_paren);
+      T.consumeOpen();
+      ExprResult ArgExpr = ParseConstantExpression();
+      if (ArgExpr.isUsable())
+        ArgExprs.push_back(ArgExpr.get());
+      else
+        ArgInvalid = true;
+      if (T.consumeClose()) {
+        // Missing ')' already diagnosed; stop without eating further tokens.
+        return;
+      }
+      EndLoc = T.getCloseLocation();
+    } else {
+      Diag(Tok.getLocation(), diag::err_expected_expression);
+      ArgInvalid = true;
+    }
+  }
+  if (ArgInvalid)
+    return;
+
+  // Same ParseKind ("Interrupt") ParsedAttr as the GNU spelling; no source
+  // string rewriting is involved. It is recorded on the DeclSpec (leading
+  // declaration) attribute list, not the trailing declarator list: the Keil
+  // suffix is the dialect's canonical position on definitions, and recording
+  // it as a trailing GNU attribute would wrongly trigger the GCC-compat
+  // "attribute in this position on a function definition" warning in
+  // Parser::ParseFunctionDefinition. Sema processes DeclSpec attributes
+  // through the same ProcessDeclAttributeList dispatch.
+  D.getMutableDeclSpec().getAttributes().addNew(
+      AttrName, SourceRange(KwLoc, EndLoc), AttributeScopeInfo(),
+      ArgExprs.data(), ArgExprs.size(), ParsedAttr::Form::GNU());
+
+  // The bare `()` parameter list was already normalized to a zero-parameter
+  // prototype by the `(void)` token synthesis in ParseDirectDeclarator; K&R
+  // parameter lists keep their no-prototype form and are rejected by Sema's
+  // void(void) check.
+
+  // `using`/`__using` are not deleted and not macro-eliminated: they take the
+  // explicit error path. Consume the offending operand so parsing continues
+  // at the function body or next declaration.
+  while (Tok.is(tok::identifier) &&
+         (Tok.getIdentifierInfo()->isStr("using") ||
+          Tok.getIdentifierInfo()->isStr("__using"))) {
+    Diag(Tok.getLocation(), diag::err_mcs251_keil_using_unsupported);
+    ConsumeToken();
+    if (Tok.is(tok::numeric_constant))
+      ConsumeToken();
+    else if (Tok.is(tok::l_paren))
+      SkipMCS251InterruptOperand(/*DiagnoseMissingRParen=*/true);
+  }
+}
+
 void Parser::ParseDirectDeclarator(Declarator &D) {
   DeclaratorScopeObj DeclScopeObj(*this, D.getCXXScopeSpec());
 
@@ -7001,6 +7131,11 @@ void Parser::ParseDirectDeclarator(Declarator &D) {
       PrototypeScope.Exit();
     } else if (Tok.is(tok::l_square)) {
       ParseBracketDeclarator(D);
+    } else if (Tok.is(tok::kw___mcs251_interrupt)) {
+      // MCS251 Keil dialect: `interrupt N` after the function suffix. Only
+      // reachable with -fmcs251-keil, since the keyword is registered
+      // conditionally (IdentifierTable::AddKeywords).
+      ParseMCS251KeilInterruptSuffix(D);
     } else if (Tok.isRegularKeywordAttribute()) {
       // For consistency with attribute parsing.
       Diag(Tok, diag::err_keyword_not_allowed) << Tok.getIdentifierInfo();
@@ -7358,6 +7493,31 @@ void Parser::ParseFunctionDeclarator(Declarator &D,
     RParenLoc = Tracker.getCloseLocation();
     LocalEndLoc = RParenLoc;
     EndLoc = RParenLoc;
+
+    // MCS251 Keil dialect (A2.3): a suffix ISR's bare `()` parameter list is
+    // normalized to a zero-parameter prototype. When the parameter list was
+    // empty and the next token is the `interrupt` suffix, synthesize the same
+    // unnamed `void` parameter that `(void)` would have produced, so Sema
+    // builds a real FunctionProtoType for the ISR; an ordinary C `void f()`
+    // is untouched. The parameter is introduced inside the still-open
+    // function prototype scope, exactly as ParseParameterDeclarationClause
+    // would do for `(void)`.
+    if (getLangOpts().MCS251Keil && !getLangOpts().CPlusPlus && !HasProto &&
+        Tok.is(tok::kw___mcs251_interrupt)) {
+      DeclSpec VoidDS(AttrFactory);
+      ParsedAttributes VoidParmAttrs(AttrFactory);
+      const char *PrevSpec = nullptr;
+      unsigned DiagID = 0;
+      VoidDS.SetTypeSpecType(DeclSpec::TST_void, RParenLoc, PrevSpec, DiagID,
+                             Actions.getPrintingPolicy());
+      Declarator VoidParm(VoidDS, VoidParmAttrs, DeclaratorContext::Prototype);
+      if (Decl *VoidParam =
+              Actions.ActOnParamDeclarator(getCurScope(), VoidParm)) {
+        ParamInfo.push_back(
+            DeclaratorChunk::ParamInfo(nullptr, RParenLoc, VoidParam));
+        HasProto = true;
+      }
+    }
 
     if (getLangOpts().CPlusPlus) {
       // FIXME: Accept these components in any order, and produce fixits to

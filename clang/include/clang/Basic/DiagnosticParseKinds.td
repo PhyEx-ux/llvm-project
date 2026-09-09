@@ -1933,4 +1933,11 @@ def err_hlsl_number_literal_underflow : Error<
   "float literal has a magnitude that is too small to be represented as a float type">;
 def err_hlsl_rootsig_non_zero_flag : Error<"flag value is neither a literal 0 nor a named value">;
 
+// MCS251 Keil dialect (T03). Texts are frozen by the ISR campaign task
+// breakdown; the parser emits these for the `interrupt` suffix.
+def err_mcs251_keil_interrupt_requires_function : Error<
+  "interrupt suffix requires a function declarator">;
+def err_mcs251_keil_using_unsupported : Error<
+  "using is not supported for MCS251 interrupt functions">;
+
 } // end of Parser diagnostics

@@ -298,6 +298,15 @@ void IdentifierTable::AddKeywords(const LangOptions &LangOpts) {
   if (LangOpts.IEEE128)
     AddKeyword("__ieee128", tok::kw___float128, KEYALL, LangOpts, *this);
 
+  // MCS251 Keil dialect: contextually enable the controlled spelling
+  // "interrupt" for the frozen token kw___mcs251_interrupt. Only registered
+  // when the -fmcs251-keil switch is on; with the switch off, `interrupt`
+  // remains an ordinary identifier. See TESTING_KEYWORD(__mcs251_interrupt)
+  // in TokenKinds.def for why the generic keyword loop does not add it.
+  if (LangOpts.MCS251Keil)
+    AddKeyword("interrupt", tok::kw___mcs251_interrupt, KEYALL, LangOpts,
+               *this);
+
   // Add the 'import' and 'module' contextual keywords.
   get("import").setKeywordImport(true);
   get("module").setModuleKeyword(true);

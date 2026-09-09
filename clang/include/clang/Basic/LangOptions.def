@@ -307,6 +307,7 @@ ENUM_LANGOPT(GlobalAllocationFunctionVisibility, VisibilityForcedKinds, 3, Visib
              "How to apply visibility to global operator new and delete declarations")
 LANGOPT(NewInfallible , 1, 0, NotCompatible, "Treats throwing global C++ operator new as always returning valid memory (annotates with __attribute__((returns_nonnull)) and throw()). This is detectable in source.")
 LANGOPT(ParseUnknownAnytype, 1, 0, Benign, "__unknown_anytype")
+LANGOPT(MCS251Keil , 1, 0, Benign, "MCS251 Keil C51 dialect: 'interrupt N' function-declarator suffix")
 LANGOPT(DebuggerSupport , 1, 0, Benign, "debugger support")
 LANGOPT(DebuggerCastResultToId, 1, 0, Benign, "for 'po' in the debugger, cast the result to id if it is of unknown type")
 LANGOPT(DebuggerObjCLiteral , 1, 0, Benign, "debugger Objective-C literals and subscripting support")

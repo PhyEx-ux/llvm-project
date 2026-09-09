@@ -2258,6 +2258,24 @@ private:
                                LateParsedAttrList *LateAttrs = nullptr,
                                Declarator *D = nullptr);
 
+  /// ParseMCS251KeilInterruptSuffix - Consume the MCS251 Keil dialect
+  /// function-declarator suffix `interrupt N` / `interrupt (N)` (enabled by
+  /// -fmcs251-keil, see LangOptions::MCS251Keil) and reduce it to the same
+  /// ParsedAttr (ParseKind "Interrupt") that the GNU
+  /// `__attribute__((interrupt(N)))` spelling produces. The declarator must
+  /// be exactly a function declarator; `using`/`__using` take the explicit
+  /// error path, and a suffix ISR's bare `()` parameter list is normalized to
+  /// a zero-parameter prototype.
+  void ParseMCS251KeilInterruptSuffix(Declarator &D);
+
+  /// SkipMCS251InterruptOperand - Bounded recovery for a malformed MCS251
+  /// Keil suffix operand: nested parentheses are balanced, the scan stops
+  /// (without consuming) at ';', '{', '}', or end-of-file, and a ')' that
+  /// closes the operand is consumed. With \p DiagnoseMissingRParen, the
+  /// missing-')' diagnostic (plus a note at the '(') is emitted at the
+  /// stopping token, so the following declaration is parsed independently.
+  void SkipMCS251InterruptOperand(bool DiagnoseMissingRParen);
+
   /// ParseGNUAttributes - Parse a non-empty attributes list.
   ///
   /// \verbatim

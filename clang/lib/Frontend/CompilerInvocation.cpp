@@ -4736,6 +4736,15 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
     }
   }
 
+  // -fmcs251-keil is only valid for the MCS251 C dialect; hard error on any
+  // other target (mirrors the -mcs251-memory-contract check in
+  // ParseTargetArgs).
+  if (Opts.MCS251Keil && T.getArch() != llvm::Triple::mcs251) {
+    Opts.MCS251Keil = 0;
+    Diags.Report(diag::err_drv_unsupported_opt_for_target)
+        << "-fmcs251-keil" << T.str();
+  }
+
   return Diags.getNumErrors() == NumErrorsBefore;
 }
 
