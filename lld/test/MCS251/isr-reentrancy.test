@@ -1,0 +1,961 @@
+# E2 (COMPILER-ASSESSMENT-20260910.md section 5): static parameter-slot ABI
+# reentrancy diagnosis.  The C ABI passes arguments in static per-object
+# parameter slots (.mcs251.DSEG.* / .mcs251.OSEG.*); a function invoked from
+# both foreground code and an ISR, or from two ISRs that can preempt each
+# other, can have its not-yet-consumed arguments overwritten.  The linker
+# diagnosis warns (never errors) on such functions and names the call sources
+# and the parameter-slot sections of the defining object.
+#
+# Covered here (direct control-flow relocations only):
+#   (a) ISR + foreground share a helper                -> warning
+#   (b) ISR-only helper                                -> no warning
+#   (c) two registered ISRs share a helper             -> warning
+#       (the linker has no priority semantics; any two distinct ISR roots
+#       warn, which covers the low->high preemption case conservatively)
+#   (d) --no-isr-reentrancy                            -> no warning
+#   (e) indirect call boundary: the helper's address is taken through a data
+#       relocation (R_MCS251_16); a call through such a pointer is a
+#       documented non-coverage and produces no warning
+#   (f) cross-TU mixed callers                         -> warning
+#   (g) same-address alias: a local STT_NOTYPE label at _irq1's entry is
+#       normalized to the entry function; it must not steal the ISR's
+#       call-site attribution (review round 2: this shape used to silence
+#       the warning completely)
+#   (h) interior labels: a label inside the ISR body at/after the call site
+#       (and one inside _main) must not sever function attribution
+#   (i) same-address STT_FUNC alias: a local STT_FUNC with the same Value
+#       AND st_size as the registered _irq1 entry canonicalizes to ONE
+#       owner - the registered ISR; the alias must form no second graph
+#       node, steal no attribution, and appear nowhere in the warning
+#       (review round 3: this shape silenced the warning completely even
+#       after the STT_NOTYPE variant of (g) was fixed)
+#
+# Documented non-coverages (asserted by the "coverage boundary" warning line
+# and by case (e)): indirect calls, call sites without relocation records,
+# prebuilt runtime objects with no relocation source, unresolved cross-object
+# targets, and per-function slot ownership (slot attribution is per defining
+# object only).  A passing check here therefore never proves a whole call
+# chain ISR-safe.
+#
+# RUN: rm -rf %t-seed && split-file %s %t-seed
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o %t.crt.o
+
+# --- (a) ISR and foreground both ecall the same helper.
+# RUN: yaml2obj %t-seed/shared.yaml -o %t.shared.o
+# RUN: mcs251-lld %t.crt.o %t.shared.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.shared.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=SHARED
+# SHARED: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from both ISR and foreground code
+# SHARED: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}})
+# SHARED: warning: ISR reentrancy:   direct foreground callers of 'helper': _main ({{.*}})
+# SHARED: warning: ISR reentrancy:   parameter slots of {{.*}}shared.o (per defining object): .mcs251.DSEG.7 0x0000 +0x4
+# SHARED: warning: ISR reentrancy:   coverage boundary: only direct control-flow relocations are analyzed
+
+# --- (b) ISR-only helper: no warning.
+# RUN: yaml2obj %t-seed/isr-only.yaml -o %t.only.o
+# RUN: mcs251-lld %t.crt.o %t.only.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 --map=%t.only.map -o %t.only.elf \
+# RUN:   2> %t.only.err
+# RUN: FileCheck %s --check-prefix=ONLY-ERR --allow-empty < %t.only.err
+# RUN: FileCheck %s --check-prefix=ONLY-MAP < %t.only.map
+# ONLY-ERR-NOT: ISR reentrancy
+# ONLY-MAP: IRQ 01 0xff000b ISR _irq1
+
+# --- (c) two registered ISRs share the helper.
+# RUN: yaml2obj %t-seed/two-isrs.yaml -o %t.two.o
+# RUN: mcs251-lld %t.crt.o %t.two.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.two.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=TWOISR
+# TWOISR: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from multiple registered ISRs
+# TWOISR-NOT: is called from both ISR and foreground code
+# TWOISR: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}}) _irq2 ({{.*}})
+# TWOISR-NOT: direct foreground callers
+# TWOISR: warning: ISR reentrancy:   parameter slots of {{.*}}two.o (per defining object): none found
+# TWOISR: warning: ISR reentrancy:   coverage boundary: only direct control-flow relocations are analyzed
+
+# --- (d) the diagnosis can be turned off.
+# RUN: mcs251-lld %t.crt.o %t.shared.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 --no-isr-reentrancy -o %t.off.elf \
+# RUN:   2> %t.off.err
+# RUN: FileCheck %s --check-prefix=OFF --allow-empty < %t.off.err
+# OFF-NOT: ISR reentrancy
+
+# --- (e) boundary: the only non-ISR "caller" is an indirect call (helper's
+# --- address taken through the data relocation R_MCS251_16).  That edge is
+# --- invisible by design, so the ISR-only helper stays silent.
+# RUN: yaml2obj %t-seed/indirect.yaml -o %t.ind.o
+# RUN: mcs251-lld %t.crt.o %t.ind.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.ind.elf 2> %t.ind.err
+# RUN: FileCheck %s --check-prefix=INDIRECT --allow-empty < %t.ind.err
+# INDIRECT-NOT: ISR reentrancy
+
+# --- (f) cross-TU mix: ISR in one object, foreground caller in another, the
+# --- helper (and its parameter slot) in a third.
+# RUN: yaml2obj %t-seed/xtu-isr.yaml -o %t.xisr.o
+# RUN: yaml2obj %t-seed/xtu-main.yaml -o %t.xmain.o
+# RUN: yaml2obj %t-seed/xtu-helper.yaml -o %t.xhelp.o
+# RUN: mcs251-lld %t.crt.o %t.xisr.o %t.xmain.o %t.xhelp.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 \
+# RUN:   --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 \
+# RUN:   -o %t.xtu.elf 2>&1 | FileCheck %s --check-prefix=XTU
+# XTU: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from both ISR and foreground code
+# XTU: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}})
+# XTU: warning: ISR reentrancy:   direct foreground callers of 'helper': _main ({{.*}})
+# XTU: warning: ISR reentrancy:   parameter slots of {{.*}} (per defining object): .mcs251.DSEG.7 0x0000 +0x4
+
+# --- (g) same-address alias regression: z_irq_alias is a local STT_NOTYPE
+# --- label at _irq1's exact entry address.  Function attribution must
+# --- normalize it to the STT_FUNC entry: the ecall inside _irq1 stays an
+# --- ISR-context edge and the warning survives with _irq1 named as the
+# --- root.  (Before the fix this shape emptied stderr entirely.)
+# RUN: yaml2obj %t-seed/alias.yaml -o %t.alias.o
+# RUN: mcs251-lld %t.crt.o %t.alias.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.alias.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=ALIAS
+# ALIAS: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from both ISR and foreground code
+# ALIAS: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}})
+# ALIAS: warning: ISR reentrancy:   direct foreground callers of 'helper': _main ({{.*}})
+# ALIAS: warning: ISR reentrancy:   parameter slots of {{.*}}alias.o (per defining object): .mcs251.DSEG.7 0x0000 +0x4
+# ALIAS: warning: ISR reentrancy:   coverage boundary: only direct control-flow relocations are analyzed
+# ALIAS-NOT: z_irq_alias
+
+# --- (h) interior-label regression: zz_loop sits inside _irq1 at the ecall
+# --- call site (offset 0x3 >= label 0x2) and would have swallowed the
+# --- ISR's call-site attribution under last-symbol-wins lookup.  The edge
+# --- must stay attributed to _irq1; likewise the label-less _main caller.
+# RUN: yaml2obj %t-seed/inner-labels.yaml -o %t.inner.o
+# RUN: mcs251-lld %t.crt.o %t.inner.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.inner.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=INNER
+# INNER: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from both ISR and foreground code
+# INNER: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}})
+# INNER: warning: ISR reentrancy:   direct foreground callers of 'helper': _main ({{.*}})
+# INNER: warning: ISR reentrancy:   parameter slots of {{.*}}inner.o (per defining object): none found
+# INNER: warning: ISR reentrancy:   coverage boundary: only direct control-flow relocations are analyzed
+# INNER-NOT: zz_loop
+
+# --- (i) same-address STT_FUNC alias regression: A_irq_alias is a local
+# --- STT_FUNC at _irq1's exact entry address with the identical st_size 5.
+# --- Same-address FUNC aliases must canonicalize to a single owner - the
+# --- registered ISR entry - so the ecall inside _irq1 stays an ISR-context
+# --- edge attributed to _irq1 and the warning survives.  (Round 3: before
+# --- the fix every STT_FUNC became its own interval and graph node, the
+# --- name-ascending alias won Containing(), and stderr went empty.)
+# RUN: yaml2obj %t-seed/func-alias.yaml -o %t.funcalias.o
+# RUN: mcs251-lld %t.crt.o %t.funcalias.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.funcalias.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=FUNCALIAS
+# FUNCALIAS: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from both ISR and foreground code
+# FUNCALIAS: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}})
+# FUNCALIAS: warning: ISR reentrancy:   direct foreground callers of 'helper': _main ({{.*}})
+# FUNCALIAS: warning: ISR reentrancy:   parameter slots of {{.*}}funcalias.o (per defining object): .mcs251.DSEG.7 0x0000 +0x4
+# FUNCALIAS: warning: ISR reentrancy:   coverage boundary: only direct control-flow relocations are analyzed
+# FUNCALIAS-NOT: A_irq_alias
+
+#--- shared.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    # _irq1@0: ecall helper (9A + addr24); reti (32)
+    # helper@5: ret (22)
+    # _main@6: ecall helper (9A + addr24); ret (22)
+    Content: '9A00000032229A00000022'
+  - Name: .mcs251.DSEG.7
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 5
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x6
+    Size: 5
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+
+#--- isr-only.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    # _irq1@0: ecall helper; reti.  helper@5: ret.  _main@6: ret.
+    Content: '9A000000322222'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 5
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x6
+    Size: 1
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+
+#--- two-isrs.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    # _irq1@0: ecall helper; reti.  _irq2@5: ecall helper; reti.
+    # helper@10: ret.  _main@11: ret.
+    Content: '9A000000329A000000322222'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000000100180101010100020001000000000000000000000000000100180201010100020001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+      - Offset: 0x6
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x54
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 5
+  - Name: _irq2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 5
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xA
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0xB
+    Size: 1
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+
+#--- indirect.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    # _irq1@0: ecall helper; reti.  helper@5: ret.
+    # _main@6: mov dptr,#helper (function pointer, data relocation).
+    Content: '9A0000003222900000'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_16
+        Symbol: helper
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 5
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x6
+    Size: 3
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+
+#--- xtu-isr.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '9A00000032'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 5
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+
+#--- xtu-main.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '9A00000022'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 5
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+
+#--- xtu-helper.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '22'
+  - Name: .mcs251.DSEG.7
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 1
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+
+#--- alias.yaml
+# Case (g): shared.yaml plus a local STT_NOTYPE alias at _irq1's exact
+# entry address.  No code or relocation changes.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    # _irq1@0: ecall helper (9A + addr24); reti (32)
+    # helper@5: ret (22)
+    # _main@6: ecall helper (9A + addr24); ret (22)
+    Content: '9A00000032229A00000022'
+  - Name: .mcs251.DSEG.7
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 5
+  - Name: z_irq_alias
+    Type: STT_NOTYPE
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x6
+    Size: 5
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+
+#--- inner-labels.yaml
+# Case (h): zz_loop is an interior STT_NOTYPE label inside _irq1 placed
+# at/under the ecall call site (label 0x2, reloc 0x3).  Under
+# last-symbol-wins lookup this label used to own the call site and mute
+# the diagnosis entirely.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    # _irq1@0 (size 7): nop nop; zz_loop@2: ecall helper (reloc @0x3); reti@6
+    # helper@7: ret (22)
+    # _main@8 (size 5): ecall helper (reloc @0x9); ret@0xC
+    Content: '00009A00000032229A00000022'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x3
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 7
+  - Name: zz_loop
+    Type: STT_NOTYPE
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x2
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x7
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x8
+    Size: 5
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+
+#--- func-alias.yaml
+# Case (i): shared.yaml plus a local STT_FUNC alias at _irq1's exact entry
+# address with the identical st_size (Alice's round-3 repro shape; the alias
+# name sorts before _irq1 and is listed first, so a name-order implementation
+# would hand it the attribution).  No code or relocation changes.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    # _irq1@0: ecall helper (9A + addr24); reti (32)
+    # helper@5: ret (22)
+    # _main@6: ecall helper (9A + addr24); ret (22)
+    Content: '9A00000032229A00000022'
+  - Name: .mcs251.DSEG.7
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: A_irq_alias
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 5
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 5
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x6
+    Size: 5
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0

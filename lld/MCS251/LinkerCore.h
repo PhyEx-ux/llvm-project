@@ -46,6 +46,10 @@ struct LinkerConfig {
   std::vector<std::string> Inputs;
   bool PrintInput = false;
   bool EnableStackGate = false;
+  // E2: static parameter-slot ABI reentrancy diagnosis.  Default on; the
+  // flavor shell owns the --isr-reentrancy / --no-isr-reentrancy policy.  The
+  // diagnosis only warns, never fails the link.
+  bool IsrReentrancyDiag = true;
   // E5 traceability switch.  Off by default: the frozen release artifacts pin
   // the exact output bytes (realhw-demo/release/manifest.json hashes the
   // linked ELF and the map), so emitting a final symbol table and map
@@ -70,6 +74,10 @@ struct LinkerResult {
   std::map<uint32_t, uint8_t> Image;
   std::string Map;
   std::string InputReport;
+  // E2: complete, newline-terminated warning lines ("mcs251-lld: warning: "
+  // prefix included) produced by the ISR reentrancy diagnosis.  Empty unless
+  // the diagnosis found a hazard.
+  std::string Diagnostics;
   // E5: final symbols with post-layout addresses, always collected so the
   // flavor shell can decide whether to serialize them.
   std::vector<OutputSymbol> Symbols;

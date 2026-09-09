@@ -722,6 +722,7 @@ private:
   bool applyVectorJumps();
   bool validateIRQFinalAssets();
   bool validateXInit();
+  void diagnoseIsrReentrancy(LinkerResult &Result);
   void buildMap(raw_ostream &Out) const;
   void collectSymbols(std::vector<OutputSymbol> &Out) const;
   void printInputs(raw_ostream &Out) const;
@@ -1932,6 +1933,421 @@ bool Linker::validateXInit() {
   return true;
 }
 
+// E2: static parameter-slot ABI reentrancy diagnosis (COMPILER-ASSESSMENT
+// 20260910.md section 5).  The C ABI passes arguments in static per-object
+// parameter slots (.mcs251.DSEG.* / .mcs251.OSEG.*).  A function invoked both
+// from foreground code and from an ISR - or from two ISRs that can preempt
+// each other - can have its not-yet-consumed arguments overwritten by the
+// other execution context; full register save/restore cannot protect this
+// shared static storage.
+//
+// What is decidable at link time (used here):
+//   - ISR identity: the exact registered entry symbols collected in
+//     IsrSymbols by validateISRIdentitiesAndRegistrations().
+//   - Direct call edges: control-flow relocations (R_MCS251_24 / J16 / J11 /
+//     PC8) in ALLOC code sections, attributed to the enclosing function
+//     symbols of caller site and call target.
+// The diagnosis propagates ISR/foreground context to a fixpoint and warns on
+// every function reachable from BOTH contexts, or from two or more distinct
+// registered ISRs.  Warning only: the link result is unaffected.
+//
+// Explicit coverage boundaries (also printed with every warning):
+//   - Indirect calls (function addresses carried by data relocations such as
+//     R_MCS251_16/LO8/MID8/HI8) are NOT call edges here; a call through a
+//     pointer is invisible.
+//   - Call sites without a relocation record are invisible.
+//   - Prebuilt runtime-library objects that expose no relocation source for
+//     their internal calls cannot be attributed.
+//   - An edge whose target cannot be resolved to a function-containing
+//     address, or whose call site lies outside every known function symbol,
+//     is skipped.
+//   - A function defined without st_size has no exact end: its presumed
+//     interval stops at the next candidate symbol, so an interior label can
+//     truncate it and call sites at or after that label are attributed to
+//     the label or to nothing.
+//   - Static parameter slots are attributed per DEFINING OBJECT only: the
+//     linker sees no function-level slot ownership, so the warning lists the
+//     DSEG/OSEG parameter-slot sections of the object that defines the
+//     function.
+void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
+  // Function nodes: the CANONICAL OWNER symbols of per-section function
+  // intervals in ALLOC code sections.  Graph nodes, call-edge endpoints and
+  // context roots all use the same canonical identity.  Attribution rules:
+  //
+  //   0. Canonicalization of same-address groups: candidates in one section
+  //      are grouped by symbol value; a group sharing one address (STT_FUNC
+  //      aliases of an entry, entry labels of any other type) yields at most
+  //      ONE interval and ONE graph node - the group's canonical owner -
+  //      chosen by priority: (1) the registered ISR entry (exact IsrSymbols
+  //      identity, so the root set and the call edges agree), (2) the default
+  //      entry DefaultSym, (3) a defined STT_FUNC over any other type,
+  //      (4) name-ascending.  Steps 1-4 only pick WHICH name denotes the
+  //      group - every same-address alias denotes the identical code.  Without
+  //      this, a local STT_FUNC alias of an ISR entry (same Value, same
+  //      st_size) becomes a second node that steals the ISR's call-site
+  //      attribution in Containing(), the ISR context never enters the call
+  //      graph, and the diagnosis is silently muted (review round 3).
+  //   1. Interval extent: a defined STT_FUNC owns the real function interval
+  //      [Value, Value + Size) when its st_size is nonzero (the furthest
+  //      explicit end in the group wins if same-address aliases disagree).  A
+  //      zero-size STT_FUNC (hand-written asm without .size) owns the bounded
+  //      gap [Value, next candidate symbol start) - or the section end when
+  //      no candidate follows - so it can never silently claim the remainder
+  //      of the section.  Coverage limit: without st_size the true function
+  //      end is unrecoverable, so an interior label (any candidate symbol at
+  //      a label offset) truncates the presumed gap there; call sites at or
+  //      after that label inside a size-less function are attributed to the
+  //      label or to nothing.  This limit is also named in every warning's
+  //      coverage-boundary line.
+  //   2. Normalization: same-address aliases and interior labels (STT_NOTYPE
+  //      or any other type defined at or inside a STT_FUNC interval) own
+  //      nothing, so a call site or call target inside the function is never
+  //      attributed to the label.  Without this, a local assembler alias of
+  //      an ISR entry steals the ISR's call-site attribution, the ISR context
+  //      never enters the call graph, and the diagnosis is silently muted
+  //      (round 2).
+  //   3. Restricted NOTYPE fallback: an offset covered by no STT_FUNC
+  //      interval is attributed ONLY to a STT_NOTYPE, as the owner of the
+  //      bounded gap [Value, next candidate symbol start); symbols of any
+  //      other type own nothing at uncovered addresses (the fallback used to
+  //      apply to every non-FUNC type; narrowed in review round 3).  This
+  //      fallback exists for the frozen CRT, whose BOOT entry
+  //      (__mcs251_selfstart_boot), XINIT walker (__mcs251_globals_init) and
+  //      walker-local labels are plain NOTYPE symbols not enclosed by any
+  //      STT_FUNC.  The boundary is what keeps the fallback restricted: a
+  //      fallback label never owns past the next symbol of any kind, so it
+  //      can never swallow a call that lands inside a real function.
+  struct Interval {
+    uint64_t Lo = 0;
+    uint64_t Hi = 0;
+    InputSymbol *Sym = nullptr;
+  };
+  std::map<InputSection *, std::vector<InputSymbol *>> Candidates;
+  for (auto &F : Files)
+    for (auto &S : F->Symbols)
+      if (S.Defined && !S.Name.empty() && S.Type != ELF::STT_SECTION &&
+          S.Sec && S.Sec->IsAlloc && S.Sec->IsCode)
+        Candidates[S.Sec].push_back(&S);
+  std::map<InputSection *, std::vector<Interval>> Funcs;
+  std::vector<InputSymbol *> FuncNodes; // graph nodes == canonical owners
+  for (auto &P : Candidates) {
+    InputSection *Sec = P.first;
+    std::vector<InputSymbol *> &V = P.second;
+    std::sort(V.begin(), V.end(),
+              [](const InputSymbol *A, const InputSymbol *B) {
+                if (A->Value != B->Value)
+                  return A->Value < B->Value;
+                if ((A->Type == ELF::STT_FUNC) != (B->Type == ELF::STT_FUNC))
+                  return A->Type == ELF::STT_FUNC;
+                return A->Name < B->Name;
+              });
+    // Candidate starts (sorted, unique): the boundaries that cap zero-size
+    // functions and NOTYPE fallback gaps.
+    std::vector<uint64_t> Starts;
+    for (InputSymbol *S : V)
+      Starts.push_back(S->Value);
+    Starts.erase(std::unique(Starts.begin(), Starts.end()), Starts.end());
+    auto NextBound = [&](uint64_t Val) -> uint64_t {
+      auto It = std::upper_bound(Starts.begin(), Starts.end(), Val);
+      return It != Starts.end() ? *It : uint64_t(Sec->Size);
+    };
+    auto Rank = [&](InputSymbol *S) {
+      if (IsrSymbols.count(S))
+        return 0;
+      if (S == DefaultSym)
+        return 1;
+      return 2;
+    };
+    // Rule 0 tiebreak: does A make a better canonical owner than B?
+    auto OwnsOver = [&](InputSymbol *A, InputSymbol *B) {
+      if (Rank(A) != Rank(B))
+        return Rank(A) < Rank(B);
+      if ((A->Type == ELF::STT_FUNC) != (B->Type == ELF::STT_FUNC))
+        return A->Type == ELF::STT_FUNC;
+      return A->Name < B->Name;
+    };
+    std::vector<Interval> Ints;
+    // Rules 0-3: process same-address candidate groups in ascending address
+    // order; every group yields at most ONE interval and ONE node (rule 0),
+    // so an alias can never form a second graph node.
+    for (size_t I = 0; I < V.size();) {
+      size_t J = I;
+      while (J < V.size() && V[J]->Value == V[I]->Value)
+        ++J;
+      uint64_t Addr = V[I]->Value;
+      InputSymbol *Owner = V[I];
+      bool HasFunc = false;
+      uint64_t Hi = 0; // furthest explicit STT_FUNC end in the group
+      for (size_t K = I; K < J; ++K) {
+        InputSymbol *S = V[K];
+        if (OwnsOver(S, Owner))
+          Owner = S;
+        if (S->Type == ELF::STT_FUNC) {
+          HasFunc = true;
+          if (S->Size)
+            Hi = std::max(Hi, uint64_t(S->Value) + S->Size);
+        }
+      }
+      // Rule 2: the address lies inside an already-built function interval
+      // (interior label, or alias of a function starting earlier) - a
+      // non-FUNC group there owns nothing and creates no node; Containing()
+      // attributes such offsets to the enclosing function.
+      bool Covered = false;
+      for (const Interval &FI : Ints)
+        if (Addr >= FI.Lo && Addr < FI.Hi) {
+          Covered = true; // rule 2: alias/interior label of a real function
+          break;
+        }
+      // The group's node.  A group with any STT_FUNC keeps its interval even
+      // when nested inside another function (rule 1); otherwise rule 3's
+      // narrowing applies: only a STT_NOTYPE may own a fallback gap, any
+      // other type owns nothing at an uncovered address.
+      InputSymbol *Node = nullptr;
+      if (HasFunc) {
+        Node = Owner;
+      } else if (!Covered) {
+        for (size_t K = I; K < J; ++K)
+          if (V[K]->Type == ELF::STT_NOTYPE &&
+              (!Node || OwnsOver(V[K], Node)))
+            Node = V[K];
+      }
+      if (Node && (!Covered || HasFunc)) {
+        if (!Hi)
+          Hi = NextBound(Addr); // rule 1: size-less group owns the bounded gap
+        Ints.push_back({Addr, Hi, Node});
+        FuncNodes.push_back(Node);
+      }
+      I = J;
+    }
+    std::sort(Ints.begin(), Ints.end(),
+              [](const Interval &A, const Interval &B) {
+                if (A.Lo != B.Lo)
+                  return A.Lo < B.Lo;
+                if (A.Hi != B.Hi)
+                  return A.Hi < B.Hi;
+                return A.Sym->Name < B.Sym->Name;
+              });
+    Funcs[Sec] = std::move(Ints);
+  }
+  auto Containing = [&](InputSection *Sec, uint64_t Off) -> InputSymbol * {
+    auto It = Funcs.find(Sec);
+    if (It == Funcs.end())
+      return nullptr;
+    InputSymbol *Best = nullptr;
+    uint64_t BestLo = 0, BestHi = 0;
+    for (const Interval &I : It->second) {
+      if (I.Lo > Off)
+        break;
+      if (Off >= I.Hi)
+        continue;
+      // Innermost owner wins among (malformed) overlapping intervals:
+      // the closest start, then the shortest span, then the name.
+      if (!Best || I.Lo > BestLo ||
+          (I.Lo == BestLo &&
+           (I.Hi < BestHi || (I.Hi == BestHi && I.Sym->Name < Best->Name)))) {
+        Best = I.Sym;
+        BestLo = I.Lo;
+        BestHi = I.Hi;
+      }
+    }
+    return Best;
+  };
+  auto ShortFile = [](InputSymbol *S) {
+    StringRef P = S->File->Path;
+    return P.substr(P.rfind('/') + 1).str();
+  };
+
+  // Direct call edges from control-flow relocations.
+  auto IsControlType = [](uint32_t T) {
+    return T == ELF::R_MCS251_24 || T == ELF::R_MCS251_J16 ||
+           T == ELF::R_MCS251_J11 || T == ELF::R_MCS251_PC8;
+  };
+  std::set<std::pair<InputSymbol *, InputSymbol *>> EdgeSet;
+  std::vector<std::pair<InputSymbol *, InputSymbol *>> Edges;
+  for (auto &F : Files)
+    for (auto &S : F->Sections) {
+      if (!S->IsAlloc || !S->IsCode || S->IsNobits)
+        continue;
+      for (const Relocation &R : S->Relocs) {
+        if (!IsControlType(R.Type))
+          continue;
+        InputSymbol *IS = findSymbol(*F, R.Sym);
+        if (!IS)
+          continue;
+        InputSymbol *Target = IS;
+        if (!IS->Defined) {
+          auto It = Globals.find(IS->Name);
+          if (It == Globals.end())
+            continue; // unresolved cross-object: documented boundary
+          Target = It->second;
+        }
+        InputSymbol *To = nullptr;
+        if (IS->Type == ELF::STT_SECTION) {
+          if (R.Addend < 0 || !IS->Sec)
+            continue;
+          To = Containing(IS->Sec,
+                          uint64_t(IS->Value) + uint64_t(R.Addend));
+        } else if (Target->Defined && Target->Sec &&
+                   Target->Type != ELF::STT_SECTION) {
+          To = Containing(Target->Sec,
+                          uint64_t(Target->Value) + uint64_t(R.Addend));
+          if (!To)
+            To = Target; // target outside every known function interval
+        }
+        InputSymbol *From = Containing(S.get(), R.Offset);
+        if (!From || !To || From == To)
+          continue;
+        // A control edge into a registered ISR or the default entry is
+        // already a hard R3 error; such edges never survive to this stage.
+        if (To == DefaultSym || IsrSymbols.count(To))
+          continue;
+        if (EdgeSet.insert({From, To}).second)
+          Edges.push_back({From, To});
+      }
+    }
+
+  // Context fixpoint.  Bit0 = reachable in ISR context, bit1 = reachable in
+  // foreground context.  Roots[X] = the distinct registered ISR entries from
+  // which X is reachable along ISR-context paths.
+  //
+  // Foreground roots are the functions no collected call edge enters: module
+  // entry, reset-chain heads, uncalled functions.  Registered ISR entries and
+  // the default entry are entered by hardware, never foreground roots.
+  std::map<InputSymbol *, unsigned> Ctx;
+  std::map<InputSymbol *, std::set<InputSymbol *>> Roots;
+  {
+    std::set<InputSymbol *> Called;
+    for (const auto &E : Edges)
+      Called.insert(E.second);
+    for (InputSymbol *S : FuncNodes)
+      if (!Called.count(S) && !IsrSymbols.count(S) && S != DefaultSym)
+        Ctx[S] |= 2;
+  }
+  for (InputSymbol *ISR : IsrSymbols) {
+    Ctx[ISR] |= 1;
+    Roots[ISR].insert(ISR);
+  }
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    for (const auto &E : Edges) {
+      auto CI = Ctx.find(E.first);
+      if (CI == Ctx.end() || !CI->second)
+        continue;
+      const unsigned C = CI->second;
+      if (C & 1) {
+        if (!(Ctx[E.second] & 1)) {
+          Ctx[E.second] |= 1;
+          Changed = true;
+        }
+        for (InputSymbol *Root : Roots[E.first])
+          if (Roots[E.second].insert(Root).second)
+            Changed = true;
+      }
+      if ((C & 2) && !(Ctx[E.second] & 2)) {
+        Ctx[E.second] |= 2;
+        Changed = true;
+      }
+    }
+  }
+
+  // Warned functions: ISR+foreground mix, or two or more ISR roots.
+  std::vector<InputSymbol *> Warned;
+  for (const auto &P : Ctx) {
+    InputSymbol *X = P.first;
+    if (X == DefaultSym || IsrSymbols.count(X))
+      continue;
+    const bool Mixed = (P.second & 3) == 3;
+    const bool MultiISR = Roots[X].size() >= 2;
+    if (Mixed || MultiISR)
+      Warned.push_back(X);
+  }
+  if (Warned.empty())
+    return;
+  std::sort(Warned.begin(), Warned.end(),
+            [](const InputSymbol *A, const InputSymbol *B) {
+              if (A->File->Path != B->File->Path)
+                return A->File->Path < B->File->Path;
+              return A->Name < B->Name;
+            });
+
+  std::string Out;
+  raw_string_ostream OS(Out);
+  for (InputSymbol *X : Warned) {
+    const bool Mixed = (Ctx[X] & 3) == 3;
+    const bool MultiISR = Roots[X].size() >= 2;
+    if (Mixed)
+      OS << "mcs251-lld: warning: ISR reentrancy: function '" << X->Name
+         << "' (" << ShortFile(X)
+         << ") is called from both ISR and foreground code\n";
+    if (MultiISR)
+      OS << "mcs251-lld: warning: ISR reentrancy: function '" << X->Name
+         << "' (" << ShortFile(X) << ") is called from multiple registered "
+         << "ISRs\n";
+    OS << "mcs251-lld: warning: ISR reentrancy:   ISR entries reaching '"
+       << X->Name << "':";
+    // Sort by rendered reference: the root set iterates in pointer order,
+    // which is not deterministic.
+    std::vector<std::string> RootRefs;
+    for (InputSymbol *R : Roots[X])
+      RootRefs.push_back(R->Name + " (" + ShortFile(R) + ")");
+    std::sort(RootRefs.begin(), RootRefs.end());
+    for (const std::string &Ref : RootRefs)
+      OS << " " << Ref;
+    OS << '\n';
+    // Direct foreground-context callers, deduplicated, stable order.
+    std::set<std::string> Seen;
+    std::vector<std::string> FG;
+    for (const auto &E : Edges)
+      if (E.second == X && (Ctx.count(E.first) && (Ctx[E.first] & 2))) {
+        std::string Ref = E.first->Name + " (" + ShortFile(E.first) + ")";
+        if (Seen.insert(Ref).second)
+          FG.push_back(Ref);
+      }
+    if (!FG.empty()) {
+      std::sort(FG.begin(), FG.end());
+      OS << "mcs251-lld: warning: ISR reentrancy:   direct foreground callers "
+         << "of '" << X->Name << "':";
+      for (const std::string &Ref : FG)
+        OS << " " << Ref;
+      OS << '\n';
+    }
+    // Static parameter slots of the defining object (per-object attribution).
+    OS << "mcs251-lld: warning: ISR reentrancy:   parameter slots of "
+       << ShortFile(X) << " (per defining object):";
+    bool AnySlot = false;
+    std::vector<InputSection *> Slots;
+    for (const auto &SP : X->File->Sections) {
+      InputSection *S = SP.get();
+      if (S->IsAlloc && (S->Region == "DSEG" || S->Region == "OSEG") &&
+          S->Size)
+        Slots.push_back(S);
+    }
+    std::sort(Slots.begin(), Slots.end(),
+              [](const InputSection *A, const InputSection *B) {
+                return A->Address < B->Address;
+              });
+    for (InputSection *S : Slots) {
+      AnySlot = true;
+      // Same hex conventions as the map rows: width 6 includes the "0x"
+      // prefix, sizes print minimal width with their own "0x".
+      OS << " " << S->Name << " " << format_hex(S->Address, 6, false)
+         << " +" << format_hex(S->Size, 0, false);
+    }
+    if (!AnySlot)
+      OS << " none found";
+    OS << '\n';
+  }
+  OS << "mcs251-lld: warning: ISR reentrancy:   coverage boundary: only "
+     << "direct control-flow relocations are analyzed; indirect calls, call "
+     << "sites without relocation records, prebuilt runtime objects, and "
+     << "unresolved cross-object targets are not covered; functions without "
+     << "st_size have no exact bounds, so an interior label can truncate "
+     << "their presumed interval\n";
+  OS.flush();
+  Result.Diagnostics = std::move(Out);
+}
+
 void Linker::printInputs(raw_ostream &Out) const {
   for (const auto &F : Files) {
     Out << "file " << F->Path << '\n';
@@ -2073,6 +2489,14 @@ bool Linker::run(LinkerResult &Result) {
     return false;
   if (!errorUndefined() || !applyRelocations() || !validateXInit())
     return false;
+  // E2: static parameter-slot reentrancy diagnosis (COMPILER-ASSESSMENT
+  // 2026-09-10 section 5).  Runs after layout and relocation application so
+  // every call-edge target has its final address and the R3 checks have
+  // already rejected every edge that targets a registered ISR or the default
+  // entry.  Warning-only: it never fails the link and never touches the
+  // image, the map or the symbol outputs.
+  if (IrqMode && Config.IsrReentrancyDiag)
+    diagnoseIsrReentrancy(Result);
   Result.Entry = llvm::any_of(AllSections,
                               [](const InputSection *S) { return S->Region == "HOME"; })
                      ? areaStart("HOME", 0) : 0;

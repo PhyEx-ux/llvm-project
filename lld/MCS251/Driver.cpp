@@ -362,6 +362,13 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
       O.Core.EnableStackGate = true;
     } else if (A == "--no-stack-gate") {
       return fail(Err, "--no-stack-gate is not supported; SPEC mandates the stack gate");
+    } else if (A == "--isr-reentrancy") {
+      // E2: static parameter-slot reentrancy diagnosis; on by default.
+      O.Core.IsrReentrancyDiag = true;
+    } else if (A == "--no-isr-reentrancy") {
+      // Opt out for builds whose ABI-safe call relationships are guaranteed
+      // by other means; the diagnosis is a warning, never an error.
+      O.Core.IsrReentrancyDiag = false;
     } else if (A == "--keep-symbols") {
       // E5: keep a final symbol table in the ELF and function-level rows in
       // the map.  Off by default: the frozen release artifacts (manifest.json
@@ -458,7 +465,8 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
     } else if (A == "--oformat=ihex" || A == "--oformat") {
       return fail(Err, "Intel HEX is produced by llvm-objcopy -O ihex");
     } else if (A == "--help") {
-      Out << "mcs251-lld [--stack-gate] [--keep-symbols] [options] file...\n";
+      Out << "mcs251-lld [--stack-gate] [--isr-reentrancy] [--keep-symbols] "
+             "[options] file...\n";
       O.HelpOrVersion = true;
       return true;
     } else if (A == "--version") {
@@ -513,6 +521,10 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
   LinkerResult Result;
   if (!linkCore(std::move(Options.Core), Result, Err))
     return false;
+  // E2: reentrancy warnings never fail the link; they go to stderr ahead of
+  // any output writing.
+  if (!Result.Diagnostics.empty())
+    Err << Result.Diagnostics;
   if (DisableOutput)
     return true;
   if (PrintInput) {
