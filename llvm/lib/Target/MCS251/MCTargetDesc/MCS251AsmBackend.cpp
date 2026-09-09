@@ -22,8 +22,10 @@
 //    the displacement byte's position, while the MCS-251 rel8 is measured
 //    from the byte AFTER the two-byte instruction, hence the extra -1.
 //    Range overflow (a rel8 that no longer reaches) is a hard error: the
-//    compiler's three-part long-branch expansion guarantees in-range skips,
-//    so a failure here is a backend bug, not user input to accommodate.
+//    compiler's long-branch expansion plus the post-layout BranchRelaxation
+//    pass (driven by the TargetInstrInfo branch hooks) guarantee that every
+//    rel8 branch fits, so a failure here is a backend bug, not user input to
+//    accommodate.
 //
 //  * createObjectTargetWriter supplies real ELF only for the opt-in format.
 //    Legacy assembly still uses the throw-away stub, and REL objects retain

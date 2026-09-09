@@ -7,8 +7,12 @@
 ;     ejmp    target    ; addr24, reaches anywhere
 ;   skip:
 ;
-; because the jcc family only reaches +/-128 bytes and this backend has no
-; branch relaxation infrastructure. The examples below are written so the
+; so the common case stays compact even though the jcc family only reaches
+; +/-128 bytes. The skip block's layout adjacency is an optimization, not a
+; correctness requirement: the post-layout MCS251BranchRelaxation pass
+; (llvm/test/CodeGen/MCS251/branch-relax-boundary.mir and
+; branch-relax-displaced.ll) rewrites any rel8 branch the final layout
+; pushed out of range. The examples below are written so the
 ; DAG combiner cannot fold the compares away; note that it does canonicalise
 ; conditions (e.g. `ult x,10` becomes the complementary `ugt x,9` with
 ; swapped branch destinations), which is why the checked jcc opcodes are

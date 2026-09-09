@@ -14,6 +14,7 @@ add_public_tablegen_target(MCS251CommonTableGen)
 
 add_llvm_target(MCS251CodeGen
   MCS251AsmPrinter.cpp
+  MCS251BranchRelaxation.cpp
   MCS251FrameLowering.cpp
   MCS251InstrInfo.cpp
   MCS251ISelDAGToDAG.cpp

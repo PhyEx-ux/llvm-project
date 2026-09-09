@@ -38,6 +38,27 @@ public:
                             int FrameIndex, const TargetRegisterClass *RC,
                             Register VReg, unsigned SubReg,
                             MachineInstr::MIFlag Flags) const override;
+
+  //===--------------------------------------------------------------------===//
+  // Branch encoding facts shared with the post-layout branch relaxation
+  // pass (MCS251BranchRelaxation, E1).  The jcc family and sjmp are 2-byte
+  // rel8 branches (+/-128 bytes around the instruction), while ejmp carries
+  // a 24-bit target and reaches anywhere.
+  //===--------------------------------------------------------------------===//
+
+  static bool isCondBranchOpcode(unsigned Opc);
+  static bool isUncondBranchOpcode(unsigned Opc);
+
+  // Exact encoded size of every target instruction, mirroring the MC code
+  // emitter byte-for-byte.  getInstSizeVerifyMode asks the AsmPrinter to
+  // check each declared size against the emitted byte count on object
+  // output -- via ExactSizeAlways, so the check also runs in release
+  // builds (plain ExactSize is +asserts-only upstream semantics) -- so any
+  // future drift between the two tables fails loudly instead of silently
+  // corrupting branch displacement computation.
+  unsigned getInstSizeInBytes(const MachineInstr &MI) const override;
+  InstSizeVerifyMode
+  getInstSizeVerifyMode(const MachineInstr &MI) const override;
 };
 } // namespace llvm
 

@@ -1,0 +1,1463 @@
+# RUN: split-file %s %t
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/all.mir -o %t/all.o
+# RUN: llvm-objcopy --dump-section=.text=%t/all.bin %t/all.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert len(b) == 1000, 'full-corpus .text = %d bytes, expected 1000' % len(b)" %t/all.bin
+#
+# E2 (size-table audit): every opcode shape in
+# MCS251InstrInfo::getInstSizeInBytes is emitted once here, so the AsmPrinter
+# exact-size verification (target opt-in through getInstSizeVerifyMode: the
+# MCS251 target returns ExactSizeAlways, the one mode that also runs in
+# release builds, where upstream's ExactSize is compiled out under NDEBUG)
+# cross-checks every declared size against the bytes the MC emitter actually
+# produces.  The total-length assertion above is the NDEBUG-independent coarse
+# net; the byte-exact pins below are the NDEBUG-independent fine net for the
+# shapes this round fixed:
+#
+#   ECALLr           1 -> 2  (0x199 + specifier byte)
+#   MOVAI            3 -> 2  (0x74 imm8; low nibble < 6, no A5 escape)
+#   OR8a             3 -> 2  (native 0x4c + specifier byte)
+#   MOV8a  r0-r7     1 -> 2  (classic form is A5-escaped: "mov a,r4" = A5 EC)
+#   MOV8ra r0-r7     1 -> 2  (classic form is A5-escaped: "mov r3,a" = A5 FB)
+#   MOV16mrS disp=0  4 -> 3  (short form; the size hook read the wrong
+#                             displacement operand -- it is operand 1)
+#
+# RETI is not in the corpus because PEI wraps ISR functions in the fixed A6
+# frame; its encoding is byte-pinned by isr-instructions.mir.
+#
+# The assertions run llc with -verify-machineinstrs; every scaffold register
+# is defined before use and every result is sunk by a CMP, so RA cannot
+# delete (rematerialize away) any instruction and shift the measurement.
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/mov8a_r4.mir -o %t/mov8a_r4.o
+# RUN: llvm-objcopy --dump-section=.text=%t/mov8a_r4.bin %t/mov8a_r4.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e405aa5eca5ffbe7001aa', b.hex()" %t/mov8a_r4.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/mov8ra_r3.mir -o %t/mov8ra_r3.o
+# RUN: llvm-objcopy --dump-section=.text=%t/mov8ra_r3.bin %t/mov8ra_r3.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7441a5fbbe3001aa', b.hex()" %t/mov8ra_r3.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/ecallr.mir -o %t/ecallr.o
+# RUN: llvm-objcopy --dump-section=.text=%t/ecallr.bin %t/ecallr.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e0812349908aa', b.hex()" %t/ecallr.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/movai.mir -o %t/movai.o
+# RUN: llvm-objcopy --dump-section=.text=%t/movai.bin %t/movai.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7455a5ffbe7001aa', b.hex()" %t/movai.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/or8a.mir -o %t/or8a.o
+# RUN: llvm-objcopy --dump-section=.text=%t/or8a.bin %t/or8a.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e205a4c2bbe2001aa', b.hex()" %t/or8a.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/mov16mrs_disp0.mir -o %t/mov16mrs_disp0.o
+# RUN: llvm-objcopy --dump-section=.text=%t/mov16mrs_disp0.bin %t/mov16mrs_disp0.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e0412347e1412341bfa10bd10aa', b.hex()" %t/mov16mrs_disp0.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/mov16mrs_disp4.mir -o %t/mov16mrs_disp4.o
+# RUN: llvm-objcopy --dump-section=.text=%t/mov16mrs_disp4.bin %t/mov16mrs_disp4.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e0412347e141234791f0004bd10aa', b.hex()" %t/mov16mrs_disp4.bin
+
+#--- all.mir
+--- |
+  target triple = "mcs251"
+  declare void @f8a()
+  define void @f0() { ret void }
+  define void @f1() { ret void }
+  define void @f2() { ret void }
+  define void @f3() { ret void }
+  define void @f4() { ret void }
+  define void @f5() { ret void }
+  define void @f6() { ret void }
+  define void @f7() { ret void }
+  define void @f8() { ret void }
+  define void @f9() { ret void }
+  define void @f10() { ret void }
+  define void @f11() { ret void }
+  define void @f12() { ret void }
+  define void @f13() { ret void }
+  define void @f14() { ret void }
+  define void @f15() { ret void }
+  define void @f16() { ret void }
+  define void @f17() { ret void }
+  define void @f18() { ret void }
+  define void @f19() { ret void }
+  define void @f20() { ret void }
+  define void @f21() { ret void }
+  define void @f22() { ret void }
+  define void @f23() { ret void }
+  define void @f24() { ret void }
+  define void @f25() { ret void }
+  define void @f26() { ret void }
+  define void @f27() { ret void }
+  define void @f28() { ret void }
+  define void @f29() { ret void }
+  define void @f30() { ret void }
+  define void @f31() { ret void }
+  define void @f32() { ret void }
+  define void @f33() { ret void }
+  define void @f34() { ret void }
+  define void @f35() { ret void }
+  define void @f36() { ret void }
+  define void @f37() { ret void }
+  define void @f38() { ret void }
+  define void @f39() { ret void }
+  define void @f40() { ret void }
+  define void @f41() { ret void }
+  define void @f42() { ret void }
+  define void @f43() { ret void }
+  define void @f44() { ret void }
+  define void @f45() { ret void }
+  define void @f46() { ret void }
+  define void @f47() { ret void }
+  define void @f48() { ret void }
+  define void @f49() { ret void }
+  define void @f50() { ret void }
+  define void @f51() { ret void }
+  define void @f52() { ret void }
+  define void @f53() { ret void }
+  define void @f54() { ret void }
+  define void @f55() { ret void }
+  define void @f56() { ret void }
+  define void @f57() { ret void }
+  define void @f58() { ret void }
+  define void @f59() { ret void }
+  define void @f60() { ret void }
+  define void @f61() { ret void }
+  define void @f62() { ret void }
+  define void @f63() { ret void }
+  define void @f64() { ret void }
+  define void @f65() { ret void }
+  define void @f66() { ret void }
+  define void @f67() { ret void }
+  define void @f68() { ret void }
+  define void @f69() { ret void }
+  define void @f70() { ret void }
+  define void @f71() { ret void }
+  define void @f72() { ret void }
+  define void @f73() { ret void }
+  define void @f74() { ret void }
+  define void @f75() { ret void }
+  define void @f76() { ret void }
+  define void @f77() { ret void }
+  define void @f78() { ret void }
+  define void @f79() { ret void }
+  define void @f80() { ret void }
+  define void @f81() { ret void }
+  define void @f82() { ret void }
+  define void @f83() { ret void }
+  define void @f84() { ret void }
+  define void @f85() { ret void }
+  define void @f86() { ret void }
+  define void @f87() { ret void }
+  define void @f88() { ret void }
+  define void @f89() { ret void }
+  define void @f90() { ret void }
+  define void @f91() { ret void }
+  define void @f92() { ret void }
+  define void @f93() { ret void }
+  define void @f94() { ret void }
+  define void @f95() { ret void }
+  define void @f96() { ret void }
+  define void @f97() { ret void }
+  define void @f98() { ret void }
+  define void @f99() { ret void }
+  define void @f100() { ret void }
+  define void @f101() { ret void }
+  define void @f102() { ret void }
+  define void @f103() { ret void }
+  define void @f104() { ret void }
+...
+---
+name: f0
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    JE %bb.1, implicit $psw
+    EJMP %bb.2
+  bb.1:
+    ERET
+  bb.2:
+    ERET
+...
+---
+name: f1
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    JNE %bb.1, implicit $psw
+    EJMP %bb.2
+  bb.1:
+    ERET
+  bb.2:
+    ERET
+...
+---
+name: f2
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    JC %bb.1, implicit $psw
+    EJMP %bb.2
+  bb.1:
+    ERET
+  bb.2:
+    ERET
+...
+---
+name: f3
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    JNC %bb.1, implicit $psw
+    EJMP %bb.2
+  bb.1:
+    ERET
+  bb.2:
+    ERET
+...
+---
+name: f4
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    JG %bb.1, implicit $psw
+    EJMP %bb.2
+  bb.1:
+    ERET
+  bb.2:
+    ERET
+...
+---
+name: f5
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    JLE %bb.1, implicit $psw
+    EJMP %bb.2
+  bb.1:
+    ERET
+  bb.2:
+    ERET
+...
+---
+name: f6
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    JSL %bb.1, implicit $psw
+    EJMP %bb.2
+  bb.1:
+    ERET
+  bb.2:
+    ERET
+...
+---
+name: f7
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    JSGE %bb.1, implicit $psw
+    EJMP %bb.2
+  bb.1:
+    ERET
+  bb.2:
+    ERET
+...
+---
+name: f8
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    JSG %bb.1, implicit $psw
+    EJMP %bb.2
+  bb.1:
+    ERET
+  bb.2:
+    ERET
+...
+---
+name: f9
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1, %bb.2
+    JSLE %bb.1, implicit $psw
+    EJMP %bb.2
+  bb.1:
+    ERET
+  bb.2:
+    ERET
+...
+---
+name: f10
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1
+    SJMP %bb.1
+  bb.1:
+    ERET
+...
+---
+name: f11
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.1
+    EJMP %bb.1
+  bb.1:
+    ERET
+...
+---
+name: f12
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ECALL @f8a, csr_mcs251, implicit-def dead $psw, implicit-def $dpl
+    ERET
+...
+---
+name: f13
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr0 = MOVDRri 4660
+    ECALLr $dr0, csr_mcs251, implicit-def dead $psw
+    ERET
+...
+---
+name: f14
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ERET
+    ERET
+...
+---
+name: f15
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r4 = MOV8ri 90
+    MOV8a $r4, implicit-def $a
+    $r7 = MOV8ra implicit $a
+        CMP8ri $r7, 1, implicit-def $psw
+    ERET
+...
+---
+name: f16
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r9 = MOV8ri 90
+    MOV8a $r9, implicit-def $a
+    $r7 = MOV8ra implicit $a
+        CMP8ri $r7, 1, implicit-def $psw
+    ERET
+...
+---
+name: f17
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    MOVAI 65, implicit-def $a
+    $r3 = MOV8ra implicit $a
+    CMP8ri $r3, 1, implicit-def $psw
+    ERET
+...
+---
+name: f18
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    MOVAI 65, implicit-def $a
+    $r8 = MOV8ra implicit $a
+    CMP8ri $r8, 1, implicit-def $psw
+    ERET
+...
+---
+name: f19
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    MOVAI 85, implicit-def $a
+    $r7 = MOV8ra implicit $a
+        CMP8ri $r7, 1, implicit-def $psw
+    ERET
+...
+---
+name: f20
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r2 = OR8a $r2, implicit $a, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f21
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    MOV8b $r2, implicit-def $b
+    $r7 = MOV8rb implicit $b
+        CMP8ri $r7, 1, implicit-def $psw
+    ERET
+...
+---
+name: f22
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    MOV8b $r2, implicit-def $b
+    $r2 = MOV8rb implicit $b
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f23
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    MOV8dpl $r2, implicit-def $dpl
+    ERET
+...
+---
+name: f24
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    MOV8dph $r2, implicit-def $dph
+    ERET
+...
+---
+name: f25
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8rdpl implicit $dpl
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f26
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8rdph implicit $dph
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f27
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f28
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f29
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr0 = MOVDRri 4660
+    $dr4 = MOVDRri 4660
+    CMP32rr $dr4, $dr0, implicit-def $psw
+    ERET
+...
+---
+name: f30
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr0 = MOVDRri 4660
+    $dr0 = MOVHDRi $dr0, 22136
+    CMP32rr $dr0, $dr0, implicit-def $psw
+    ERET
+...
+---
+name: f31
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr0 = MOVDRri 4660
+    $dr4 = MOVADDR32 &"\01_addw_PARM_2"
+    CMP32rr $dr4, $dr0, implicit-def $psw
+    ERET
+...
+---
+name: f32
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $r1 = MOV8rm $wr0
+    CMP8ri $r1, 1, implicit-def $psw
+    ERET
+...
+---
+name: f33
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $r2 = MOV8ri 90
+    MOV8mr $wr0, $r2
+    ERET
+...
+---
+name: f34
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r7 = MOV8di 129
+    CMP8ri $r7, 1, implicit-def $psw
+    ERET
+...
+---
+name: f35
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    MOV8id 133, $r2
+    ERET
+...
+---
+name: f36
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $r1 = MOV8rmD $wr0, 4660
+    CMP8ri $r1, 1, implicit-def $psw
+    ERET
+...
+---
+name: f37
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $r1 = MOV8ri 90
+    MOV8mrD $wr0, 4660, $r1
+    ERET
+...
+---
+name: f38
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr4 = MOVDRri 4660
+    $r1 = MOV8rmP $dr4, 0
+    CMP8ri $r1, 1, implicit-def $psw
+    ERET
+...
+---
+name: f39
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr4 = MOVDRri 4660
+    $r1 = MOV8rmP $dr4, 5
+    CMP8ri $r1, 1, implicit-def $psw
+    ERET
+...
+---
+name: f40
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr4 = MOVDRri 4660
+    $r2 = MOV8ri 90
+    MOV8mrP $dr4, 0, $r2
+    ERET
+...
+---
+name: f41
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr4 = MOVDRri 4660
+    $r2 = MOV8ri 90
+    MOV8mrP $dr4, 5, $r2
+    ERET
+...
+---
+name: f42
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r1 = MOV8rmS $dr60, 0
+    CMP8ri $r1, 1, implicit-def $psw
+    ERET
+...
+---
+name: f43
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r1 = MOV8rmS $dr60, 4
+    CMP8ri $r1, 1, implicit-def $psw
+    ERET
+...
+---
+name: f44
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    MOV8mrS $dr60, 0, $r2
+    ERET
+...
+---
+name: f45
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    MOV8mrS $dr60, 4, $r2
+    ERET
+...
+---
+name: f46
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16rmS $dr60, 0
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f47
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16rmS $dr60, 4
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f48
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    MOV16mrS $dr60, 0, $wr2
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f49
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    MOV16mrS $dr60, 4, $wr2
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f50
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r1 = MOV8rr $r2
+    CMP8ri $r1, 1, implicit-def $psw
+    ERET
+...
+---
+name: f51
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr4 = MOV16ri 4660
+    $wr2 = MOV16rr $wr4
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f52
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr0 = MOVDRri 4660
+    $dr12 = MOVDRri 4660
+    $dr4 = MOV32rr $dr12
+    CMP32rr $dr4, $dr0, implicit-def $psw
+    ERET
+...
+---
+name: f53
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r4 = MOV8ri 90
+    $r2 = ADD8rr $r2, $r4, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f54
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r4 = MOV8ri 90
+    $r2 = SUB8rr $r2, $r4, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f55
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r4 = MOV8ri 90
+    $r2 = AND8rr $r2, $r4, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f56
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r4 = MOV8ri 90
+    $r2 = OR8rr $r2, $r4, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f57
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r4 = MOV8ri 90
+    $r2 = XOR8rr $r2, $r4, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f58
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr4 = MOV16ri 4660
+    $wr2 = ADD16rr $wr2, $wr4, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f59
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr4 = MOV16ri 4660
+    $wr2 = SUB16rr $wr2, $wr4, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f60
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr4 = MOV16ri 4660
+    $wr2 = AND16rr $wr2, $wr4, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f61
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr4 = MOV16ri 4660
+    $wr2 = OR16rr $wr2, $wr4, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f62
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr4 = MOV16ri 4660
+    $wr2 = XOR16rr $wr2, $wr4, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f63
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr0 = MOVDRri 4660
+    $dr4 = MOVDRri 4660
+    $dr12 = MOVDRri 4660
+    $dr4 = ADD32rr $dr4, $dr12, implicit-def $psw
+    CMP32rr $dr4, $dr0, implicit-def $psw
+    ERET
+...
+---
+name: f64
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr0 = MOVDRri 4660
+    $dr4 = MOVDRri 4660
+    $dr12 = MOVDRri 4660
+    $dr4 = SUB32rr $dr4, $dr12, implicit-def $psw
+    CMP32rr $dr4, $dr0, implicit-def $psw
+    ERET
+...
+---
+name: f65
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r2 = ADD8ri $r2, 17, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f66
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r2 = SUB8ri $r2, 17, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f67
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r2 = AND8ri $r2, 17, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f68
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r2 = OR8ri $r2, 17, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f69
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r2 = XOR8ri $r2, 17, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f70
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr2 = ADD16ri $wr2, 3, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f71
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr2 = SUB16ri $wr2, 3, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f72
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr2 = AND16ri $wr2, 3, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f73
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr2 = OR16ri $wr2, 3, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f74
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr2 = XOR16ri $wr2, 3, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f75
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f76
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr2 = MOV16ri 4660
+    CMP16ri $wr2, -1, implicit-def $psw
+    ERET
+...
+---
+name: f77
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r4 = MOV8ri 90
+    CMP8rr $r2, $r4, implicit-def $psw
+    ERET
+...
+---
+name: f78
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr2 = MOV16ri 4660
+    $wr4 = MOV16ri 4660
+    CMP16rr $wr2, $wr4, implicit-def $psw
+    ERET
+...
+---
+name: f79
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr4 = MOVDRri 4660
+    $dr12 = MOVDRri 4660
+    CMP32rr $dr4, $dr12, implicit-def $psw
+    ERET
+...
+---
+name: f80
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r2 = SLL8 $r2, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f81
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r2 = SRL8 $r2, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f82
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r2 = SRA8 $r2, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+---
+name: f83
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr2 = SLL16 $wr2, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f84
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr2 = SRL16 $wr2, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f85
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    $wr2 = SRA16 $wr2, implicit-def $psw
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+---
+name: f86
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    MOVAI 65, implicit-def $a
+    RRCA implicit-def $psw, implicit-def $a, implicit $psw, implicit $a
+    $r7 = MOV8ra implicit $a
+        CMP8ri $r7, 1, implicit-def $psw
+    ERET
+...
+---
+name: f87
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    MOVAI 65, implicit-def $a
+    RLCA implicit-def $psw, implicit-def $a, implicit $psw, implicit $a
+    $r7 = MOV8ra implicit $a
+        CMP8ri $r7, 1, implicit-def $psw
+    ERET
+...
+---
+name: f88
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    CLRC implicit-def $psw
+    ERET
+...
+---
+name: f89
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    MOVAI 65, implicit-def $a
+    $r2 = MOV8ri 90
+    MOV8b $r2, implicit-def $b
+    MULAB implicit-def $a, implicit-def $b, implicit-def $psw, implicit $a, implicit $b
+    ERET
+...
+---
+name: f90
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr12 = MOV16ri 4660
+    $wr8 = MOV16ri 4660
+    MULW implicit-def dead $dr12, implicit-def $psw, implicit $wr12, implicit $wr8, implicit-def $wr14
+    ERET
+...
+---
+name: f91
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    INCSPX1 implicit-def $dr60, implicit-def $psw, implicit $dr60
+    ERET
+...
+---
+name: f92
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    INCSPX2 implicit-def $dr60, implicit-def $psw, implicit $dr60
+    ERET
+...
+---
+name: f93
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    INCSPX4 implicit-def $dr60, implicit-def $psw, implicit $dr60
+    ERET
+...
+---
+name: f94
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    DECSPX1 implicit-def $dr60, implicit-def $psw, implicit $dr60
+    ERET
+...
+---
+name: f95
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    DECSPX2 implicit-def $dr60, implicit-def $psw, implicit $dr60
+    ERET
+...
+---
+name: f96
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    DECSPX4 implicit-def $dr60, implicit-def $psw, implicit $dr60
+    ERET
+...
+---
+name: f97
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SETFP implicit-def $dr16, implicit $dr60
+    ERET
+...
+---
+name: f98
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SETFP implicit-def $dr16, implicit $dr60
+    RESTORESP implicit-def $dr60, implicit $dr16
+    ERET
+...
+---
+name: f99
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SETFP implicit-def $dr16, implicit $dr60
+    PUSHFP implicit-def $dr60, implicit $dr16
+    ERET
+...
+---
+name: f100
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SETFP implicit-def $dr16, implicit $dr60
+    POPFP implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ERET
+...
+---
+name: f101
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    CLRC implicit-def $psw
+    ISR_PUSH_PSW implicit-def $dr60, implicit-def $psw, implicit $psw, implicit $dr60
+    ERET
+...
+---
+name: f102
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    ERET
+...
+---
+name: f103
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr0 = MOVDRri 4660
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ERET
+...
+---
+name: f104
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    CMP32rr $dr0, $dr0, implicit-def $psw
+    ERET
+...
+
+#--- mov8a_r4.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r4 = MOV8ri 90
+    MOV8a $r4, implicit-def $a
+    $r7 = MOV8ra implicit $a
+        CMP8ri $r7, 1, implicit-def $psw
+    ERET
+...
+
+#--- mov8ra_r3.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    MOVAI 65, implicit-def $a
+    $r3 = MOV8ra implicit $a
+    CMP8ri $r3, 1, implicit-def $psw
+    ERET
+...
+
+#--- ecallr.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr0 = MOVDRri 4660
+    ECALLr $dr0, csr_mcs251, implicit-def dead $psw
+    ERET
+...
+
+#--- movai.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    MOVAI 85, implicit-def $a
+    $r7 = MOV8ra implicit $a
+        CMP8ri $r7, 1, implicit-def $psw
+    ERET
+...
+
+#--- or8a.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r2 = MOV8ri 90
+    $r2 = OR8a $r2, implicit $a, implicit-def $psw
+    CMP8ri $r2, 1, implicit-def $psw
+    ERET
+...
+
+#--- mov16mrs_disp0.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    MOV16mrS $dr60, 0, $wr2
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...
+
+#--- mov16mrs_disp4.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri 4660
+    $wr2 = MOV16ri 4660
+    MOV16mrS $dr60, 4, $wr2
+    CMP16rr $wr2, $wr0, implicit-def $psw
+    ERET
+...

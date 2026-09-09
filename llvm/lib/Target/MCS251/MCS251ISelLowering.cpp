@@ -1339,22 +1339,17 @@ MachineBasicBlock *MCS251TargetLowering::expandLongConditionalBranch(
     unsigned SkipBranchOpcode) const {
   // Layout invariant: the jCCinv->skip displacement is a fixed 4 bytes only
   // while SkipMBB stays physically adjacent to BB (it is inserted directly
-  // behind it below), and nothing may ever be scheduled between them. This
-  // is currently guaranteed through MachineBlockPlacement because
-  //   * the CFG surgery below uses bare addSuccessor, so BB's successor
-  //     probabilities are uniform -- the IR edge probabilities are dropped;
-  //   * selectBestSuccessor only displaces the fall-through candidate when
-  //     a successor is *strictly* more probable, and with uniform
-  //     probabilities none is, so MBP keeps BB and SkipMBB adjacent;
-  //   * SkipMBB has the single predecessor BB and is on the chain before
-  //     MBP runs, so it is already BB's layout successor when BB is placed.
-  // MCS251PassConfig disables tail merging to protect this invariant too.
-  // If IR !prof probabilities are ever preserved across this surgery, or
-  // analyzeBranch is implemented (letting MBP or the branch folder reason
-  // about and invert the jCCinv/ejmp pair), this guarantee breaks and the
-  // expansion must move to a post-layout pass or a real branch relaxer.
-  // The failure mode is loud, not silent: sdas251 rejects the out-of-range
-  // rel8 at assembly time.
+  // behind it below), and nothing may ever be scheduled between them.  This
+  // keeps the expansion compact in the overwhelmingly common case, but it is
+  // NOT a correctness invariant: MachineBlockPlacement is free to displace
+  // SkipMBB (observed in practice once a function grows enough blocks), and
+  // a displaced skip makes the rel8 out of range.  The post-layout
+  // MCS251BranchRelaxation pass (added in addPreEmitPass, after the layout
+  // is final) rewrites any branch that no longer reaches -- it parses the
+  // three terminator shapes this backend emits directly, since the generic
+  // analyzeBranch/insertBranch/removeBranch hooks are deliberately not
+  // implemented -- so a displaced skip costs one extra relaxation, never a
+  // compile failure.
   MachineFunction *MF = BB->getParent();
   const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
   const DebugLoc &DL = MI.getDebugLoc();

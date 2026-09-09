@@ -120,11 +120,24 @@ class MCS251PassConfig final : public TargetPassConfig {
 public:
   MCS251PassConfig(MCS251TargetMachine &TM, PassManagerBase &PM)
       : TargetPassConfig(TM, PM) {
-    // Long conditional branches depend on the adjacent short-skip block.
-    // See MCS251TargetLowering::expandLongConditionalBranch. Re-enable only
-    // after implementing analyzeBranch/insertBranch/removeBranch AND real
-    // branch relaxation. Until then the generic folder cannot rewrite CFGs.
+    // The FinalizeISel long-branch expansion and the EJMP-based lowering
+    // already avoid long rel8 branches in the common shapes; see
+    // MCS251TargetLowering::expandLongConditionalBranch.  Correctness no
+    // longer depends on that shape: addPreEmitPass relaxes any rel8 branch
+    // that the final layout pushed out of range.  Tail merging stays off for
+    // now -- re-enabling it is a pure code-size optimization decision, no
+    // longer a correctness requirement.
     setEnableTailMerge(false);
+  }
+
+  void addPreEmitPass() override {
+    // E1 (branch relaxation): the jcc family and sjmp only reach +/-128
+    // bytes, and MachineBlockPlacement is free to displace a branch's skip
+    // block or a fallthrough target, so after the layout is final every
+    // out-of-range rel8 branch is rewritten into an equivalent always-
+    // reachable ejmp-based form.  Runs after all block-reordering passes;
+    // nothing after it changes instruction or block sizes.
+    addPass(createMCS251BranchRelaxationPass());
   }
 
   void addIRPasses() override {
@@ -186,5 +199,6 @@ LLVMInitializeMCS251Target() {
   RegisterTargetMachine<MCS251TargetMachine> X(getTheMCS251Target());
   PassRegistry &PR = *PassRegistry::getPassRegistry();
   initializeMCS251AsmPrinterPass(PR);
+  initializeMCS251BranchRelaxationPass(PR);
   initializeMCS251DAGToDAGISelLegacyPass(PR);
 }

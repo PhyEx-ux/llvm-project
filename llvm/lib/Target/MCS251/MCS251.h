@@ -8,13 +8,19 @@
 
 namespace llvm {
 class FunctionPass;
+class MachineFunctionPass;
 class MCS251TargetMachine;
 class PassRegistry;
 
 FunctionPass *createMCS251ISelDag(MCS251TargetMachine &TM,
                                   CodeGenOptLevel OptLevel);
 
+// Post-layout branch relaxation (assessment E1): rewrites rel8 branches the
+// final block order pushed out of range into equivalent ejmp-based forms.
+MachineFunctionPass *createMCS251BranchRelaxationPass();
+
 void initializeMCS251AsmPrinterPass(PassRegistry &);
+void initializeMCS251BranchRelaxationPass(PassRegistry &);
 void initializeMCS251DAGToDAGISelLegacyPass(PassRegistry &);
 } // namespace llvm
 

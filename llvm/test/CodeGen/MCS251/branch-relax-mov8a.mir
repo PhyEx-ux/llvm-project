@@ -1,0 +1,127 @@
+# RUN: split-file %s %t
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel %t/in.mir -o %t/out.s
+# RUN: FileCheck %s --check-prefix=ASM < %t/out.s
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/in.mir -o %t/out.o
+#
+# E2 regression (Alice round 2): the size table undercounted MOV8a r0-r7 as
+# 1 byte while the MC emitter produces the A5-escaped classic form (2 bytes;
+# gold "mov a,r0" = A5 E8).  A jcc+ejmp long branch whose displaced filler
+# was mostly MOV8a therefore computed its rel8 displacement 63 bytes too
+# small and stayed "in range" on paper -- relaxation never fired and the
+# pipeline died at assembly with "MCS251 PC-relative branch out of range".
+#
+# Shape: bb.0 = { je bb.2 ; ejmp bb.1 } (6 bytes); the ejmp edge flows
+# through filler block bb.1, so je's displacement to bb.2 is
+# 4 + size(bb.1):
+#
+#   8 x $rN = MOV8ri 90          24   (distinct sources; consecutive
+#   63 x MOV8a $rN              126    identical copies are coalesced
+#                                      down to one before relaxation)
+#   $wr6 = MOV16ri 0              4   }
+#   MOV8mr $wr6, $r0              3   } 7 bytes of other instructions
+#                                ---
+#   size(bb.1)                  157
+#
+# je's displacement = 4 + 157 = 161 > 127, so the branch must relax into the
+# same-condition trampoline form.  Under the old table size(bb.1) computed
+# as 94 and the displacement as 98 -- falsely in range.  The object-emission
+# RUN line is the regression assertion: the old table made llc die with
+# "MCS251 PC-relative branch out of range" there.
+#
+# The relaxed form is the same-condition trampoline 4 bytes below the branch.
+# ASM:      je .LBB[[T:[0-9_]+]]
+# ASM-NEXT: ejmp .LBB0_1
+# ASM-NEXT: .LBB[[T]]:
+# ASM-NEXT: ejmp .LBB0_2
+
+#--- in.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.2, %bb.1
+    JE %bb.2, implicit $psw
+    EJMP %bb.1
+  bb.1:
+    $r0 = MOV8ri 90
+    $r1 = MOV8ri 90
+    $r2 = MOV8ri 90
+    $r3 = MOV8ri 90
+    $r4 = MOV8ri 90
+    $r5 = MOV8ri 90
+    $r6 = MOV8ri 90
+    $r7 = MOV8ri 90
+    MOV8a $r0, implicit-def $a
+    MOV8a $r1, implicit-def $a
+    MOV8a $r2, implicit-def $a
+    MOV8a $r3, implicit-def $a
+    MOV8a $r4, implicit-def $a
+    MOV8a $r5, implicit-def $a
+    MOV8a $r6, implicit-def $a
+    MOV8a $r7, implicit-def $a
+    MOV8a $r0, implicit-def $a
+    MOV8a $r1, implicit-def $a
+    MOV8a $r2, implicit-def $a
+    MOV8a $r3, implicit-def $a
+    MOV8a $r4, implicit-def $a
+    MOV8a $r5, implicit-def $a
+    MOV8a $r6, implicit-def $a
+    MOV8a $r7, implicit-def $a
+    MOV8a $r0, implicit-def $a
+    MOV8a $r1, implicit-def $a
+    MOV8a $r2, implicit-def $a
+    MOV8a $r3, implicit-def $a
+    MOV8a $r4, implicit-def $a
+    MOV8a $r5, implicit-def $a
+    MOV8a $r6, implicit-def $a
+    MOV8a $r7, implicit-def $a
+    MOV8a $r0, implicit-def $a
+    MOV8a $r1, implicit-def $a
+    MOV8a $r2, implicit-def $a
+    MOV8a $r3, implicit-def $a
+    MOV8a $r4, implicit-def $a
+    MOV8a $r5, implicit-def $a
+    MOV8a $r6, implicit-def $a
+    MOV8a $r7, implicit-def $a
+    MOV8a $r0, implicit-def $a
+    MOV8a $r1, implicit-def $a
+    MOV8a $r2, implicit-def $a
+    MOV8a $r3, implicit-def $a
+    MOV8a $r4, implicit-def $a
+    MOV8a $r5, implicit-def $a
+    MOV8a $r6, implicit-def $a
+    MOV8a $r7, implicit-def $a
+    MOV8a $r0, implicit-def $a
+    MOV8a $r1, implicit-def $a
+    MOV8a $r2, implicit-def $a
+    MOV8a $r3, implicit-def $a
+    MOV8a $r4, implicit-def $a
+    MOV8a $r5, implicit-def $a
+    MOV8a $r6, implicit-def $a
+    MOV8a $r7, implicit-def $a
+    MOV8a $r0, implicit-def $a
+    MOV8a $r1, implicit-def $a
+    MOV8a $r2, implicit-def $a
+    MOV8a $r3, implicit-def $a
+    MOV8a $r4, implicit-def $a
+    MOV8a $r5, implicit-def $a
+    MOV8a $r6, implicit-def $a
+    MOV8a $r7, implicit-def $a
+    MOV8a $r0, implicit-def $a
+    MOV8a $r1, implicit-def $a
+    MOV8a $r2, implicit-def $a
+    MOV8a $r3, implicit-def $a
+    MOV8a $r4, implicit-def $a
+    MOV8a $r5, implicit-def $a
+    MOV8a $r6, implicit-def $a
+    $wr6 = MOV16ri 0
+    MOV8mr $wr6, $r0
+  bb.2:
+    ERET
+...

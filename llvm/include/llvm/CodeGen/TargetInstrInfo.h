@@ -440,10 +440,20 @@ public:
   enum class InstSizeVerifyMode {
     /// Do not verify instruction size.
     NoVerify,
-    /// Check that the instruction size matches exactly.
+    /// Check that the instruction size matches exactly.  Honored in
+    /// +asserts builds only; release builds skip the check unless the
+    /// target returns ExactSizeAlways.
     ExactSize,
-    /// Allow the reported instruction size to be larger than the actual size.
+    /// Allow the reported instruction size to be larger than the actual
+    /// size.  Honored in +asserts builds only; release builds skip the
+    /// check unless the target returns ExactSizeAlways.
     AllowOverEstimate,
+    /// Check that the instruction size matches exactly, and keep the check
+    /// enabled in release builds, where ExactSize and AllowOverEstimate are
+    /// compiled out.  For targets whose correctness depends on
+    /// getInstSizeInBytes() matching the emitted encoding, e.g. because
+    /// MIR-level branch relaxation consumes the size table.
+    ExactSizeAlways,
   };
 
   /// Determine whether/how the instruction size returned by

@@ -1,0 +1,28 @@
+Evidence: noinline removed from realhw-demo/main.c (2026-09-10 backend).
+
+With the fix in place, compiling main.c (all helpers inlined again) with the
+build.sh toolchain flags reaches the post-layout MCS251BranchRelaxation pass
+with 633 basic blocks and leaves 640: the pass inserted 7 trampolines for
+displaced long-branch skip blocks. Each trampoline is a fresh block holding
+a single ejmp to the original (now out-of-rel8-reach) skip destination:
+
+  bb.608: EJMP %bb.34
+  bb.609: EJMP %bb.45
+  bb.610: EJMP %bb.48
+  bb.611: EJMP %bb.53
+  bb.612: EJMP %bb.60
+  bb.613: EJMP %bb.70
+  bb.614: EJMP %bb.73
+
+On the pre-fix backend these 7 branches are exactly the kind that produced
+"MCS251 PC-relative branch out of range" during the development session; the
+inlined main.c of that session crossed the layout threshold where
+MachineBlockPlacement starts displacing skip blocks.
+
+Reproduction of the block delta (fixed toolchain):
+
+  llc -O2 -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 main.ll \
+    -stop-before=mcs251-branch-relaxation -o a.mir     # 633 blocks
+  llc -O2 -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 main.ll \
+    -stop-after=mcs251-branch-relaxation  -o b.mir     # 640 blocks
+

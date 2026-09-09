@@ -1,0 +1,296 @@
+# RUN: split-file %s %t
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel %t/fwd-in.mir -o %t/fwd-in.s
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel %t/fwd-out.mir -o %t/fwd-out.s
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel %t/bwd-in.mir -o %t/bwd-in.s
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel %t/bwd-out.mir -o %t/bwd-out.s
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/fwd-in.mir -o %t/fwd-in.o
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/fwd-out.mir -o %t/fwd-out.o
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/bwd-in.mir -o %t/bwd-in.o
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/bwd-out.mir -o %t/bwd-out.o
+# RUN: FileCheck %s --check-prefix=FWD-IN  < %t/fwd-in.s
+# RUN: FileCheck %s --check-prefix=FWD-OUT  < %t/fwd-out.s
+# RUN: FileCheck %s --check-prefix=BWD-IN  < %t/bwd-in.s
+# RUN: FileCheck %s --check-prefix=BWD-OUT < %t/bwd-out.s
+#
+# E1 branch relaxation boundary checks.  Every conditional jump is a 2-byte
+# instruction whose rel8 displacement is measured from the byte after the
+# instruction, so it reaches exactly [-128, +127].  These hand-built blocks
+# pin the two boundary edges (each filler instruction size is exact):
+#
+#   forward: bb.0 = { je bb.2 ; ejmp bb.1 } (6 bytes) and the ejmp edge
+#   flows through the filler block bb.1, so je's displacement to bb.2 is
+#   4 + size(bb.1): a 123 byte filler block gives +127 (in range), 124 gives
+#   +128 (must relax).
+#
+#   backward pair: bb.0 = 126 or 127 bytes of filler, bb.1 at that offset,
+#   so je's displacement to bb.0 is -(size(bb.0) + 2): 126 gives -128 (in
+#   range), 127 gives -129 (must be relaxed).
+#
+# The relaxed form is the same-condition trampoline: the branch keeps its
+# opcode but points at a fresh block inserted 4 bytes below (the ejmp in
+# between fixes the displacement), and that block carries an ejmp to the
+# original destination.  -verify-machineinstrs above also re-checks the CFG
+# surgery on every run.
+#
+# For FWD-IN the +127 displacement still reaches directly, no trampoline.
+# FWD-IN: je .LBB0_2
+# FWD-IN-NOT: ejmp .LBB0_2
+#
+# For FWD-OUT the +128 displacement does not reach; trampoline 4 bytes below.
+# FWD-OUT: je .LBB[[T:[0-9_]+]]
+# FWD-OUT-NEXT: ejmp .LBB0_1
+# FWD-OUT-NEXT: .LBB[[T]]:
+# FWD-OUT-NEXT: ejmp .LBB0_2
+#
+# For BWD-IN the -128 displacement still reaches directly, no trampoline.
+# BWD-IN: je .LBB0_0
+# BWD-IN-NOT: ejmp .LBB0_0
+#
+# For BWD-OUT the -129 displacement does not reach; trampoline 4 bytes below.
+# BWD-OUT: je .LBB[[T:[0-9_]+]]
+# BWD-OUT-NEXT: ejmp .LBB0_2
+# BWD-OUT-NEXT: .LBB[[T]]:
+# BWD-OUT-NEXT: ejmp .LBB0_0
+
+#--- fwd-in.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.2, %bb.1
+    JE %bb.2, implicit $psw
+    EJMP %bb.1
+  bb.1:
+    $r5 = MOV8ri 85
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8rr $r5(tied-def 0), $r5, implicit-def $psw
+    $wr6 = MOV16ri 0
+    MOV8mr $wr6, $r5
+  bb.2:
+    ERET
+  bb.3:
+    ERET
+...
+#--- fwd-out.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    successors: %bb.2, %bb.1
+    JE %bb.2, implicit $psw
+    EJMP %bb.1
+  bb.1:
+    $r5 = MOV8ri 85
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $wr6 = MOV16ri 0
+    MOV8mr $wr6, $r5
+  bb.2:
+    ERET
+  bb.3:
+    ERET
+...
+#--- bwd-in.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r5 = MOV8ri 85
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8rr $r5(tied-def 0), $r5, implicit-def $psw
+    $wr6 = MOV16ri 0
+    MOV8mr $wr6, $r5
+  bb.1:
+    successors: %bb.0, %bb.2
+    JE %bb.0, implicit $psw
+    EJMP %bb.2
+  bb.2:
+    ERET
+...
+#--- bwd-out.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r5 = MOV8ri 85
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $wr6 = MOV16ri 0
+    MOV8mr $wr6, $r5
+  bb.1:
+    successors: %bb.0, %bb.2
+    JE %bb.0, implicit $psw
+    EJMP %bb.2
+  bb.2:
+    ERET
+...

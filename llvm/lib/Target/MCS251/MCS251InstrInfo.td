@@ -494,9 +494,15 @@ let Defs = [PSW] in {
 //   skip:
 //
 // via the BRCC/BRCC8S pseudos below (expanded by FinalizeISel, which runs
-// after SelectionDAGISel when the full machine CFG already exists). This is
-// the conservative-but-always-correct scheme for a backend with no branch
-// relaxation infrastructure (SDCC emits the same shape).
+// after SelectionDAGISel when the full machine CFG already exists).  This
+// keeps every conditional branch compact as long as the skip block stays
+// layout-adjacent (SDCC emits the same shape).  It is an optimization, not a
+// correctness guarantee: the post-layout MCS251BranchRelaxation pass
+// (addPreEmitPass, after MachineBlockPlacement) rewrites any rel8 branch the
+// final layout pushed out of range into an ejmp-based trampoline form,
+// parsing the terminator shapes directly (the generic analyzeBranch hooks
+// are deliberately not implemented).  The assembler still rejects a
+// never-relaxed overflow as a backend bug.
 
 // Conditional jumps. Semantics (cmp a,b computes a-b; QEMU-run-verified,
 // manual truth tables agree):

@@ -2158,10 +2158,41 @@ void AsmPrinter::emitFunctionBody() {
       if (isVerbose())
         emitComments(MI, STI, OutStreamer->getCommentOS());
 
+      // Decide before the instruction is emitted whether this configuration
+      // will verify its size: the fragment position must be captured up
+      // front, so everything that will not verify -- text assembly output,
+      // a failed MC context, and modes disabled in this build -- reads
+      // nothing here.
+      //
+      // ExactSize and AllowOverEstimate keep their upstream semantics: they
+      // are honored in +asserts builds only, so PowerPC and AMDGPU, the
+      // existing users, behave exactly as before in release builds.
+      // ExactSizeAlways additionally opts a target in to release-build
+      // verification, for backends whose correctness depends on the size
+      // table matching the MC emitter (currently only MCS251, whose
+      // MIR-level branch relaxation consumes the table).
+      bool VerifyInstSize = false;
+      TargetInstrInfo::InstSizeVerifyMode Mode =
+          TargetInstrInfo::InstSizeVerifyMode::NoVerify;
+      const TargetInstrInfo *TII = nullptr;
+      if (OutStreamer->isObj() && !OutContext.hadError() &&
+          MI.getOpcode() != TargetOpcode::INLINEASM &&
+          MI.getOpcode() != TargetOpcode::INLINEASM_BR) {
+        TII = MF->getSubtarget().getInstrInfo();
+        Mode = TII->getInstSizeVerifyMode(MI);
 #ifndef NDEBUG
-      MCFragment *OldFragment = OutStreamer->getCurrentFragment();
-      size_t OldFragSize = OldFragment->getFixedSize();
+        VerifyInstSize = Mode != TargetInstrInfo::InstSizeVerifyMode::NoVerify;
+#else
+        VerifyInstSize =
+            Mode == TargetInstrInfo::InstSizeVerifyMode::ExactSizeAlways;
 #endif
+      }
+      MCFragment *OldFragment = nullptr;
+      size_t OldFragSize = 0;
+      if (VerifyInstSize) {
+        OldFragment = OutStreamer->getCurrentFragment();
+        OldFragSize = OldFragment->getFixedSize();
+      }
 
       switch (MI.getOpcode()) {
       case TargetOpcode::CFI_INSTRUCTION:
@@ -2281,53 +2312,48 @@ void AsmPrinter::emitFunctionBody() {
         break;
       }
 
-#ifndef NDEBUG
       // Verify that the instruction size reported by InstrInfo matches the
-      // actually emitted size. Many backends performing branch relaxation
-      // on the MIR level rely on this for correctness.
+      // actually emitted size.  Many backends performing branch relaxation
+      // on the MIR level rely on this for correctness.  Whether this runs is
+      // decided with VerifyInstSize before the instruction is emitted (the
+      // fragment position must be captured up front); re-checking hadError()
+      // preserves the upstream behavior of skipping the check when the
+      // emission itself reported an error.
       // TODO: We currently can't distinguish whether a parse error occurred
       // when handling INLINEASM.
-      if (OutStreamer->isObj() && !OutContext.hadError() &&
-          (MI.getOpcode() != TargetOpcode::INLINEASM &&
-           MI.getOpcode() != TargetOpcode::INLINEASM_BR)) {
-        const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
-        TargetInstrInfo::InstSizeVerifyMode Mode =
-            TII->getInstSizeVerifyMode(MI);
-        if (Mode != TargetInstrInfo::InstSizeVerifyMode::NoVerify) {
-          unsigned ExpectedSize = TII->getInstSizeInBytes(MI);
-          MCFragment *NewFragment = OutStreamer->getCurrentFragment();
-          unsigned ActualSize;
-          if (OldFragment == NewFragment) {
-            ActualSize = NewFragment->getFixedSize() - OldFragSize;
-          } else {
-            ActualSize = OldFragment->getFixedSize() - OldFragSize;
-            const MCFragment *F = OldFragment->getNext();
-            for (; F != NewFragment; F = F->getNext())
-              ActualSize += F->getFixedSize();
-            ActualSize += NewFragment->getFixedSize();
+      if (VerifyInstSize && !OutContext.hadError()) {
+        unsigned ExpectedSize = TII->getInstSizeInBytes(MI);
+        MCFragment *NewFragment = OutStreamer->getCurrentFragment();
+        unsigned ActualSize;
+        if (OldFragment == NewFragment) {
+          ActualSize = NewFragment->getFixedSize() - OldFragSize;
+        } else {
+          ActualSize = OldFragment->getFixedSize() - OldFragSize;
+          const MCFragment *F = OldFragment->getNext();
+          for (; F != NewFragment; F = F->getNext())
+            ActualSize += F->getFixedSize();
+          ActualSize += NewFragment->getFixedSize();
+        }
+        bool AllowOverEstimate =
+            Mode == TargetInstrInfo::InstSizeVerifyMode::AllowOverEstimate;
+        bool Valid = AllowOverEstimate ? ActualSize <= ExpectedSize
+                                       : ActualSize == ExpectedSize;
+        if (!Valid) {
+          dbgs() << "In function: " << MF->getName() << "\n";
+          dbgs() << "Size mismatch for: " << MI;
+          if (MI.isBundled()) {
+            dbgs() << "{\n";
+            auto It = MI.getIterator(), End = MBB.instr_end();
+            for (++It; It != End && It->isInsideBundle(); ++It)
+              dbgs().indent(2) << *It;
+            dbgs() << "}\n";
           }
-          bool AllowOverEstimate =
-              Mode == TargetInstrInfo::InstSizeVerifyMode::AllowOverEstimate;
-          bool Valid = AllowOverEstimate ? ActualSize <= ExpectedSize
-                                         : ActualSize == ExpectedSize;
-          if (!Valid) {
-            dbgs() << "In function: " << MF->getName() << "\n";
-            dbgs() << "Size mismatch for: " << MI;
-            if (MI.isBundled()) {
-              dbgs() << "{\n";
-              auto It = MI.getIterator(), End = MBB.instr_end();
-              for (++It; It != End && It->isInsideBundle(); ++It)
-                dbgs().indent(2) << *It;
-              dbgs() << "}\n";
-            }
-            dbgs() << "Expected " << (AllowOverEstimate ? "maximum" : "exact")
-                   << " size: " << ExpectedSize << "\n";
-            dbgs() << "Actual size: " << ActualSize << "\n";
-            abort();
-          }
+          dbgs() << "Expected " << (AllowOverEstimate ? "maximum" : "exact")
+                 << " size: " << ExpectedSize << "\n";
+          dbgs() << "Actual size: " << ActualSize << "\n";
+          abort();
         }
       }
-#endif
 
       if (MI.isCall()) {
         if (MF->getTarget().Options.BBAddrMap)
