@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE=$(cd -- "$(dirname -- "$0")" && pwd)
+OUT=${1:-$(mktemp -d /tmp/t10-g12.XXXXXX)}
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+if compgen -G "$OUT/*" >/dev/null; then printf 'output must be empty\n' >&2; exit 1; fi
+CLANG=${CLANG:-/home/liu/build-mcs251-s1/bin/clang}
+LLC=${LLC:-/home/liu/build-mcs251-s1/bin/llc}
+LLD=${LLD:-/home/liu/build-mcs251-lld/bin/mcs251-lld}
+YAML2OBJ=${YAML2OBJ:-/home/liu/build-mcs251-s1/bin/yaml2obj}
+OBJCOPY=${OBJCOPY:-/home/liu/build-mcs251-s1/bin/llvm-objcopy}
+SDAS=${SDAS:-/home/liu/build-sdcc/bin/sdas251}
+SDLD=${SDLD:-/home/liu/build-sdcc/bin/sdld}
+for unit in main isr helper; do
+  "$CLANG" --target=mcs251-unknown-none -std=c11 -O2 -Wall -Wextra -Werror \
+    -Xclang -mcs251-memory-contract=1,1,32,8,1 -S -emit-llvm \
+    "$HERE/$unit.c" -o "$OUT/$unit.ll"
+  "$LLC" -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 \
+    -verify-machineinstrs -mcs251-object-format=elf -filetype=obj \
+    "$OUT/$unit.ll" -o "$OUT/$unit.o"
+  "$LLC" -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 \
+    "$OUT/$unit.ll" -o "$OUT/$unit.asm"
+done
+python3 "$HERE/gen-sentinel.py" "$OUT" "$SDAS" "$SDLD" "$YAML2OBJ"
+CRT="$HERE/../../mcs251-elf/runtime/crt-irq.yaml"
+"$YAML2OBJ" "$CRT" -o "$OUT/crt.o"
+python3 "$HERE/../../mcs251-elf/runtime/check-crt-irq.py" "$OUT/crt.o"
+"$LLD" "$OUT/crt.o" "$OUT/sentinel.o" "$OUT/main.o" "$OUT/isr.o" "$OUT/helper.o" \
+  --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+  --area-start=XINIT=0xff8000 --area-start=DSEG=0x30 --edata-end=0x0fff \
+  --area-start=.mcs251.DATA.fixture=0x30 --area-start=.mcs251.DATA.result=0x100 \
+  --area-start=.mcs251.DATA.teststack=0x580 \
+  --flash-base=0xfe0000 --flash-size=0x20000 --map="$OUT/t10-g12.map" \
+  -o "$OUT/t10-g12.elf"
+"$OBJCOPY" -O ihex "$OUT/t10-g12.elf" "$OUT/t10-g12.hex"
+python3 "$HERE/check.py" "$OUT" "$HERE" "$CLANG" "$LLC" "$LLD" "$YAML2OBJ" "$OBJCOPY" "$SDAS" "$SDLD"
+printf 'Hardware image: %s/t10-g12.hex\n' "$OUT"
