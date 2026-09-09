@@ -33,9 +33,10 @@ frozen by the T10 card:
                               ENABLE|NOIRQ|NOTIMER and masks CPU_INTERRUPT_
                               HARD out of every step; the harness negotiates
                               "Qqemu.sstep=1" (SSTEP_ENABLE only) after
-                              connect and reads the mask back as proof,
-                              otherwise an injected interrupt is never
-                              accepted while single-stepping.
+                              connect and reads the mask back with
+                              "qqemu.sstep" as proof, otherwise an injected
+                              interrupt is never accepted while
+                              single-stepping.
 
 Run methodology (per the T10 rework):
 
@@ -983,8 +984,14 @@ class FakeRspTransport:
             else:
                 model.sstep_mask = mask
                 reply = b"OK"
-        elif payload == b"qR qemu.sstep":
+        elif payload == b"qqemu.sstep":
             reply = ("0x%x" % model.sstep_mask).encode("ascii")
+        # The historical "qR qemu.sstep" form deliberately has no branch
+        # here: "qR" is not a legal read prefix and the embedded space is
+        # not a valid packet name, so it falls through to the unknown-
+        # packet branch below and is answered with an empty reply — exactly
+        # what a compliant stub (real QEMU included) does. Giving it a
+        # branch is how R04 was masked in the first place.
         elif payload == b"D":
             reply = b"OK"
         else:
@@ -1858,12 +1865,16 @@ class SelfTest:
     # -- 9. single-step IRQ negotiation --------------------------------------
 
     def check_sstep_negotiation_wire_and_readback(self):
+        # Protocol expectations are pinned by independent literals (R04: the
+        # self-test once repeated the production typo and masked it). The
+        # read query is the registered packet name "qemu.sstep" under the
+        # 'q' dispatcher prefix — "qqemu.sstep" on the wire, no space.
         transport = ScriptedTransport()
         transport.expect(
             b"$Qqemu.sstep=1#",
             b"+" + rsp.encode_packet(b"OK"))
         transport.expect(
-            b"$qR qemu.sstep#",
+            b"$qqemu.sstep#",
             b"+" + rsp.encode_packet(b"0x1"))
         mask = negotiate_sstep_irq(rsp.RspClient(transport))
         _check(mask == SSTEP_IRQ_NEGOTIATION_MASK,
@@ -1871,8 +1882,12 @@ class SelfTest:
         _check(b"$Qqemu.sstep=1#" in transport.written,
                "negotiation must clear NOIRQ/NOTIMER (mask = SSTEP_ENABLE "
                "only), wire: %r" % transport.written)
-        _check(b"$qR qemu.sstep#" in transport.written,
+        _check(b"$qqemu.sstep#" in transport.written,
                "negotiation must read the mask back as proof")
+        _check(b"$qR qemu.sstep#" not in transport.written,
+               "negotiation must not send the invalid 'qR qemu.sstep' form "
+               "(unknown packet for every compliant stub), wire: %r"
+               % transport.written)
 
     def check_sstep_negotiation_rejects_e22(self):
         transport = ScriptedTransport()
@@ -1894,7 +1909,7 @@ class SelfTest:
             b"$Qqemu.sstep=1#",
             b"+" + rsp.encode_packet(b"OK"))
         transport.expect(
-            b"$qR qemu.sstep#",
+            b"$qqemu.sstep#",
             b"+" + rsp.encode_packet(b"0x7"))
         try:
             negotiate_sstep_irq(rsp.RspClient(transport))
@@ -1903,6 +1918,121 @@ class SelfTest:
                    "wrong error for a non-sticky mask: %s" % exc)
         else:
             raise SelfTestFailure("non-sticky sstep mask was accepted")
+
+    def check_sstep_negotiation_rejects_empty_readback(self):
+        # A compliant stub answers an unknown packet with an empty reply; a
+        # harness that sent a wrong query would read exactly this and must
+        # stop, never treat the silence as success.
+        transport = ScriptedTransport()
+        transport.expect(
+            b"$Qqemu.sstep=1#",
+            b"+" + rsp.encode_packet(b"OK"))
+        transport.expect(
+            b"$qqemu.sstep#",
+            b"+" + rsp.encode_packet(b""))
+        try:
+            negotiate_sstep_irq(rsp.RspClient(transport))
+        except CaseEnvironmentError as exc:
+            _check("did not stick" in str(exc),
+                   "wrong error for an empty readback: %s" % exc)
+        else:
+            raise SelfTestFailure("empty sstep readback was accepted")
+
+    def check_sstep_negotiation_rejects_malformed_readback(self):
+        for bad in (b"1", b"0x", b"0X1"):
+            transport = ScriptedTransport()
+            transport.expect(
+                b"$Qqemu.sstep=1#",
+                b"+" + rsp.encode_packet(b"OK"))
+            transport.expect(
+                b"$qqemu.sstep#",
+                b"+" + rsp.encode_packet(bad))
+            try:
+                negotiate_sstep_irq(rsp.RspClient(transport))
+            except CaseEnvironmentError as exc:
+                _check("did not stick" in str(exc),
+                       "wrong error for malformed readback %r: %s"
+                       % (bad, exc))
+            else:
+                raise SelfTestFailure(
+                    "malformed sstep readback %r was accepted" % bad)
+
+    def check_sstep_negotiation_deadline_is_enforced(self):
+        transport = DeadlineTransport(ScriptedTransport(),
+                                      CASE_DEADLINE_SOURCE() - 0.01)
+        try:
+            negotiate_sstep_irq(rsp.RspClient(transport, default_timeout=5.0))
+        except rsp.RspTimeout:
+            pass
+        else:
+            raise SelfTestFailure(
+                "expired deadline did not stop the negotiation")
+
+    def check_sstep_query_old_form_is_unknown_packet(self):
+        # R04 negative proof: the fake model must behave like a real stub —
+        # the historical "qR qemu.sstep" form is an unknown packet (empty
+        # reply) while the legal forms are answered. Literals are pinned
+        # here independently of the production code.
+        client = rsp.RspClient(FakeRspTransport(FakeIsrModel()),
+                               default_timeout=5.0)
+        _check(client.command(b"qqemu.sstep") == b"0x7",
+               "legal sstep query must return the factory mask 0x7")
+        _check(client.command(b"qR qemu.sstep") == b"",
+               "the invalid 'qR qemu.sstep' form must be answered as an "
+               "unknown packet (empty reply), like every compliant stub")
+        _check(client.command(b"Qqemu.sstep=1") == b"OK",
+               "legal sstep write must be acknowledged")
+        _check(client.command(b"qqemu.sstep") == b"0x1",
+               "post-write sstep query must read back 0x1")
+
+    def check_negotiation_failure_precedes_qtest_probe(self):
+        # Q-01: the negotiation check must fail before any qtest IRQ probe
+        # or injection can happen (connect_and_probe ordering).
+        events = []
+
+        class OrderingSession:
+            def __init__(self):
+                self.deadline = CASE_DEADLINE_SOURCE() + 30
+
+            def connect_rsp(self):
+                events.append("rsp-connect")
+                transport = ScriptedTransport()
+                transport.expect(
+                    b"$Qqemu.sstep=1#",
+                    b"+" + rsp.encode_packet(b"OK"))
+                transport.expect(
+                    b"$qqemu.sstep#",
+                    b"+" + rsp.encode_packet(b""))
+                return rsp.RspClient(transport, default_timeout=5.0)
+
+            def connect_qtest(self):
+                events.append("qtest-connect")
+
+                class NoTraffic:
+                    def write(self, data):
+                        events.append("qtest-write")
+
+                    def read(self, n, timeout):
+                        raise TimeoutError("no qtest traffic expected")
+
+                    def close(self):
+                        pass
+
+                return qtest.QTestClient(NoTraffic(), default_timeout=1.0)
+
+            def close(self):
+                pass
+
+        try:
+            connect_and_probe(OrderingSession(), 1)
+        except CaseEnvironmentError as exc:
+            _check("did not stick" in str(exc),
+                   "wrong error when the negotiation fails: %s" % exc)
+        else:
+            raise SelfTestFailure("failing negotiation did not stop probing")
+        _check(events == ["rsp-connect"],
+               "negotiation failure must precede any qtest traffic: %r"
+               % events)
 
     def check_observe_requires_negotiation_for_acceptance(self):
         # With the factory NOIRQ mask still in force the injected interrupt
@@ -2732,6 +2862,12 @@ CASE_DEADLINE_SOURCE = time.monotonic
 #   * gdbstub/gdbstub.c:1553 handle_set_qemu_sstep accepts "Qqemu.sstep=<hex
 #     mask>", answers OK, and rejects bits the accelerator does not allow
 #     with E22;
+#   * gdbstub/gdbstub.c:1572 handle_query_qemu_sstep serves the read query
+#     "qqemu.sstep" (registered name "qemu.sstep" at gdbstub.c:1793 under
+#     the dispatcher's 'q' prefix) and answers "0x<hex mask>". RSP packet
+#     names carry no spaces and "qR" is not a legal read prefix, so a form
+#     like "qR qemu.sstep" is an unknown packet that a compliant stub
+#     answers with an empty reply (R04);
 #   * include/hw/core/cpu.h:1128-1130: SSTEP_ENABLE=0x1, SSTEP_NOIRQ=0x2,
 #     SSTEP_NOTIMER=0x4.
 # Clearing NOIRQ|NOTIMER (mask = SSTEP_ENABLE only) is required so that a
@@ -2946,7 +3082,9 @@ def negotiate_sstep_irq(rsp_client, deadline=None):
     """Clear SSTEP_NOIRQ so single-stepping can accept injected IRQs.
 
     Sends "Qqemu.sstep=1" (SSTEP_ENABLE only — see the SSTEP_* provenance
-    comment near the constants) and reads the current mask back as proof.
+    comment near the constants), then reads the mask back with the query
+    "qqemu.sstep" (the registered name "qemu.sstep" under the 'q'
+    dispatcher prefix; RSP packets carry no spaces) as proof.
     Any E reply, malformed reply or deadline breach is a prerequisite
     failure: without this negotiation an injected interrupt is never
     accepted while single-stepping and every case would misreport.
@@ -2960,11 +3098,11 @@ def negotiate_sstep_irq(rsp_client, deadline=None):
             % (SSTEP_IRQ_NEGOTIATION_MASK, reply)
         )
     timeout = _remaining(deadline) if deadline is not None else None
-    mask_text = rsp_client.command(b"qR qemu.sstep", timeout=timeout)
+    mask_text = rsp_client.command(b"qqemu.sstep", timeout=timeout)
     match = re.match(r"^0x([0-9a-fA-F]+)$", mask_text.decode("ascii", "replace"))
     if not match or int(match.group(1), 16) != SSTEP_IRQ_NEGOTIATION_MASK:
         raise CaseEnvironmentError(
-            "single-step IRQ negotiation did not stick: qR qemu.sstep -> %r"
+            "single-step IRQ negotiation did not stick: qqemu.sstep -> %r"
             % mask_text
         )
     return SSTEP_IRQ_NEGOTIATION_MASK
