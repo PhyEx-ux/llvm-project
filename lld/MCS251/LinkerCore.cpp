@@ -112,6 +112,14 @@ struct InputFile {
   std::vector<IsrRecord> IsrRecords;
 };
 
+// E3: one occupied DATA range plus its provenance.  The owner string is the
+// conflict source quoted by allocation-failure diagnostics, so a user can fix
+// the layout without reading the linker implementation.
+struct DataUse {
+  Range R;
+  std::string What;
+};
+
 static bool fail(raw_ostream &Err, const Twine &Msg) {
   Err << "mcs251 linker: error: " << Msg << "\n";
   return false;
@@ -690,7 +698,7 @@ private:
   std::vector<Range> XDataUsed;
   std::map<uint32_t, uint8_t> Image;
   std::map<std::string, uint32_t> Synth;
-  std::vector<Range> DataUsed;
+  std::vector<DataUse> DataUsed;
   uint32_t StackH = 0;
   uint32_t SPX = 0;
   uint32_t Capacity = 0;
@@ -972,20 +980,41 @@ bool Linker::synthesizeIRQVectors() {
 bool Linker::reserve(uint32_t Start, uint32_t Size, StringRef What) {
   if (!Size)
     return true;
-  if (!rangeFits(Start, Size, 0x10000))
-    return fail(Err, What + ": address range is out of bounds");
+  if (!rangeFits(Start, Size, 0x10000)) {
+    std::string Msg;
+    raw_string_ostream OS(Msg);
+    OS << What << ": address range is out of bounds (["
+       << format_hex(Start, 6, false) << ","
+       << format_hex(uint64_t(Start) + Size, 6, false)
+       << ") does not fit the 16-bit DATA space)";
+    return fail(Err, Msg);
+  }
   Range R{Start, Start + Size};
-  for (const Range &U : DataUsed)
-    if (R.Start < U.End && U.Start < R.End)
-      return fail(Err, "internal DATA overlap for " + What);
-  DataUsed.push_back(R);
+  for (const DataUse &U : DataUsed)
+    if (R.Start < U.R.End && U.R.Start < R.End) {
+      std::string Msg;
+      raw_string_ostream OS(Msg);
+      OS << "internal DATA overlap for " << What << ": new range ["
+         << format_hex(R.Start, 6, false) << ","
+         << format_hex(R.End, 6, false) << ") collides with ["
+         << format_hex(U.R.Start, 6, false) << ","
+         << format_hex(U.R.End, 6, false) << ") from " << U.What;
+      return fail(Err, Msg);
+    }
+  DataUsed.push_back({R, What.str()});
   StackH = std::max(StackH, R.End);
   return true;
 }
 
+// E3: report why no first-fit slot exists, with every field a layout fix
+// needs: the failing object/section and its symbols, the request size and
+// alignment, the allocation window, the largest free hole, and every occupied
+// range inside the window with its conflict source.  The window itself is
+// policy (direct-addressing semantics) and is never changed here.
 bool Linker::allocate(InputSection &S, uint32_t Lo, uint32_t Hi) {
   if (!S.Size)
     return true;
+  const uint32_t WinEnd = Hi + 1; // Exclusive; windows are <= 0x100 bytes.
   for (uint32_t A = Lo; A <= Hi && S.Size <= Hi - A + 1; ++A) {
     if (S.Align > 1)
       A = (A + S.Align - 1) & ~(S.Align - 1);
@@ -993,8 +1022,8 @@ bool Linker::allocate(InputSection &S, uint32_t Lo, uint32_t Hi) {
       break;
     Range R{A, A + static_cast<uint32_t>(S.Size)};
     bool Good = true;
-    for (const Range &U : DataUsed)
-      if (R.Start < U.End && U.Start < R.End) {
+    for (const DataUse &U : DataUsed)
+      if (R.Start < U.R.End && U.R.Start < R.End) {
         Good = false;
         break;
       }
@@ -1003,7 +1032,92 @@ bool Linker::allocate(InputSection &S, uint32_t Lo, uint32_t Hi) {
       return reserve(A, S.Size, S.Name);
     }
   }
-  return fail(Err, "cannot allocate " + S.Name);
+
+  // Allocation failed: build the actionable diagnostic.
+  std::string Msg;
+  raw_string_ostream OS(Msg);
+  OS << "cannot allocate " << S.Name;
+  if (S.File && !S.File->Path.empty())
+    OS << " (from " << S.File->Path << ")";
+  OS << ": size " << S.Size << " bytes, align " << S.Align;
+  {
+    // Named definitions carried by this section (up to four are listed).
+    std::vector<StringRef> Names;
+    unsigned Total = 0;
+    for (const auto &F : Files)
+      for (const InputSymbol &Sym : F->Symbols)
+        if (Sym.Defined && Sym.Sec == &S && !Sym.Name.empty()) {
+          if (Names.size() < 4)
+            Names.push_back(Sym.Name);
+          ++Total;
+        }
+    if (Total) {
+      OS << ", symbols";
+      for (StringRef N : Names)
+        OS << ' ' << N;
+      if (Total > Names.size())
+        OS << " (+" << (Total - Names.size()) << " more)";
+    }
+  }
+  OS << "; window [" << format_hex(Lo, 6, false) << ","
+     << format_hex(WinEnd, 6, false) << ")";
+
+  // Occupied ranges clipped to the window, sorted and merged, so the free
+  // holes and their owners can be reported exactly.
+  std::vector<std::pair<Range, StringRef>> Occ;
+  for (const DataUse &U : DataUsed) {
+    const uint32_t B = std::max(U.R.Start, Lo);
+    const uint32_t E = std::min(U.R.End, WinEnd);
+    if (B < E)
+      Occ.push_back({{B, E}, U.What});
+  }
+  llvm::sort(Occ, [](const auto &A, const auto &B) {
+    return A.first.Start < B.first.Start;
+  });
+  uint32_t Largest = 0;      // Largest free run, any alignment.
+  uint32_t LargestAligned = 0; // Largest run meeting S.Align.
+  {
+    uint32_t Cursor = Lo;
+    for (const auto &P : Occ) {
+      if (Cursor < P.first.Start) {
+        Largest = std::max(Largest, P.first.Start - Cursor);
+        const uint32_t AlignedStart =
+            (Cursor + S.Align - 1) & ~(S.Align - 1);
+        if (AlignedStart < P.first.Start)
+          LargestAligned =
+              std::max(LargestAligned, P.first.Start - AlignedStart);
+      }
+      Cursor = std::max(Cursor, P.first.End);
+    }
+    if (Cursor < WinEnd) {
+      Largest = std::max(Largest, WinEnd - Cursor);
+      const uint32_t AlignedStart = (Cursor + S.Align - 1) & ~(S.Align - 1);
+      if (AlignedStart < WinEnd)
+        LargestAligned = std::max(LargestAligned, WinEnd - AlignedStart);
+    }
+  }
+  if (Largest == 0)
+    OS << ": every byte is occupied";
+  else if (S.Align > 1)
+    OS << ": no free range of " << S.Size << " bytes at align " << S.Align
+       << "; largest aligned free range is " << LargestAligned
+       << " bytes (largest unaligned " << Largest << " bytes)";
+  else
+    OS << ": no free range of " << S.Size
+       << " bytes; largest free range is " << Largest << " bytes";
+  if (!Occ.empty()) {
+    OS << "; occupied:";
+    for (size_t I = 0; I != Occ.size() && I != 6; ++I) {
+      if (I)
+        OS << ',';
+      OS << " [" << format_hex(Occ[I].first.Start, 6, false) << ","
+         << format_hex(Occ[I].first.End, 6, false) << ") from "
+         << Occ[I].second;
+    }
+    if (Occ.size() > 6)
+      OS << " (+" << (Occ.size() - 6) << " more)";
+  }
+  return fail(Err, Msg);
 }
 
 bool Linker::layoutCode() {
@@ -1128,7 +1242,9 @@ bool Linker::layoutData() {
                          ? DsegStart + Config.IramSize
                          : 0x80;
   if (DsegStart >= DsegEnd)
-    return fail(Err, "invalid DSEG allocation window");
+    return fail(Err, "invalid DSEG allocation window: start 0x" +
+                         Twine::utohexstr(DsegStart) + ", end 0x" +
+                         Twine::utohexstr(DsegEnd));
   for (InputSection *S : AllSections)
     if (S->Region == "DSEG" && !allocate(*S, DsegStart, DsegEnd - 1))
       return false;
@@ -1141,7 +1257,9 @@ bool Linker::layoutData() {
                          ? IsegStart + Config.IramSize
                          : 0x100;
   if (IsegStart >= IsegEnd)
-    return fail(Err, "invalid ISEG allocation window");
+    return fail(Err, "invalid ISEG allocation window: start 0x" +
+                         Twine::utohexstr(IsegStart) + ", end 0x" +
+                         Twine::utohexstr(IsegEnd));
   for (InputSection *S : AllSections)
     if (S->Region == "ISEG") {
       if (S->Size) {
@@ -1187,8 +1305,8 @@ bool Linker::layoutData() {
           uint32_t End = A;
           while (End < IsegEnd) {
             bool Used = false;
-            for (const Range &R : DataUsed)
-              if (R.Start <= End && End < R.End) {
+            for (const DataUse &U : DataUsed)
+              if (U.R.Start <= End && End < U.R.End) {
                 Used = true;
                 break;
               }
@@ -1212,8 +1330,8 @@ bool Linker::layoutData() {
            ++A) {
         Range R{A, A + ReserveSize};
         bool Good = true;
-        for (const Range &U : DataUsed)
-          if (R.Start < U.End && U.Start < R.End) {
+        for (const DataUse &U : DataUsed)
+          if (R.Start < U.R.End && U.R.Start < R.End) {
             Good = false;
             break;
           }
@@ -1223,8 +1341,39 @@ bool Linker::layoutData() {
           break;
         }
       }
-      if (!Found)
-        return fail(Err, "cannot allocate SSEG (stack) in ISEG window");
+      if (!Found) {
+        // E3: keep the asserted message prefix, add the window and the hole
+        // facts so the stack placement can be fixed from the message alone.
+        uint32_t Largest = 0;
+        {
+          uint32_t Cursor = IsegStart;
+          std::vector<std::pair<uint32_t, uint32_t>> Occ;
+          for (const DataUse &U : DataUsed) {
+            const uint32_t B = std::max(U.R.Start, IsegStart);
+            const uint32_t E = std::min(U.R.End, IsegEnd);
+            if (B < E)
+              Occ.push_back({B, E});
+          }
+          llvm::sort(Occ);
+          for (const auto &P : Occ) {
+            if (Cursor < P.first)
+              Largest = std::max(Largest, P.first - Cursor);
+            Cursor = std::max(Cursor, P.second);
+          }
+          if (Cursor < IsegEnd)
+            Largest = std::max(Largest, IsegEnd - Cursor);
+        }
+        std::string Msg;
+        raw_string_ostream OS(Msg);
+        OS << "cannot allocate SSEG (stack) in ISEG window: need "
+           << ReserveSize << " bytes in ["
+           << format_hex(IsegStart, 6, false) << ","
+           << format_hex(IsegEnd, 6, false) << "), largest free range is "
+           << Largest << " bytes";
+        if (!Config.StackSize)
+          OS << " (no --stack-size given; the largest hole sizes the stack)";
+        return fail(Err, Msg);
+      }
       if (!reserve(SsegBase, ReserveSize, "SSEG"))
         return false;
       SsegRepresentative->Address = SsegBase;
@@ -1260,8 +1409,8 @@ bool Linker::layoutData() {
   Synth["s_DSEG"] = 0;
   uint32_t LowUsed = 0;
   for (uint32_t A = 0; A != 0x80; ++A)
-    for (const Range &R : DataUsed)
-      if (R.Start <= A && A < R.End) {
+    for (const DataUse &R : DataUsed)
+      if (R.R.Start <= A && A < R.R.End) {
         ++LowUsed;
         break;
       }

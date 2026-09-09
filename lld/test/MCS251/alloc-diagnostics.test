@@ -1,0 +1,250 @@
+#
+# E3: data allocation failure diagnostics.  The message must carry every
+# field needed to fix a layout without reading the linker implementation:
+#   - the failing section, its input object and its defined symbols,
+#   - the requested size and alignment,
+#   - the allocation window and the largest free hole in it,
+#   - every occupied range inside the window with its conflict source.
+# The allocation window itself is unchanged (direct-addressing semantics);
+# only the diagnostics changed.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj dseg-huge.yaml -o dseg-huge.o
+# RUN: yaml2obj frag.yaml -o frag.o
+# RUN: yaml2obj datasnap.yaml -o datasnap.o
+# RUN: yaml2obj dseg-fixed.yaml -o dseg-fixed.o
+# RUN: yaml2obj align2.yaml -o align2.o
+# RUN: yaml2obj sseg.yaml -o sseg.o
+
+# --- No space: request larger than the whole DSEG window [0x0000,0x0080) ---
+# RUN: not mcs251-lld dseg-huge.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/nospace.elf 2>&1 | FileCheck %s --check-prefix=NOSPACE
+# NOSPACE: cannot allocate .mcs251.DSEG.toobig (from dseg-huge.o): size 144 bytes, align 1, symbols _oversized
+# NOSPACE: window {{\[}}0x0000,0x0080): no free range of 144 bytes; largest free range is 128 bytes
+
+# --- Fragmentation: 40 free bytes in total but no single hole >= 20 ---
+# Holes: [0x0000,0x0010)=16, [0x0040,0x0050)=16, [0x0078,0x0080)=8.
+# RUN: not mcs251-lld frag.o --area-start=CSEG=0xff0200 \
+# RUN:   --reserve-data=0x10,0x30 --reserve-data=0x50,0x28 \
+# RUN:   -o %t/frag.elf 2>&1 | FileCheck %s --check-prefix=FRAG
+# FRAG: cannot allocate .mcs251.DSEG.app (from frag.o): size 20 bytes, align 1, symbols _app
+# FRAG: window {{\[}}0x0000,0x0080): no free range of 20 bytes; largest free range is 16 bytes
+# FRAG-SAME: occupied: {{\[}}0x0010,0x0040) from --reserve-data, {{\[}}0x0050,0x0078) from --reserve-data
+
+# --- Fixed reservation conflict: DATA_ABS placement collides with --reserve-data ---
+# RUN: not mcs251-lld datasnap.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=.mcs251.DATA.snap=0x30 --reserve-data=0x34,4 \
+# RUN:   -o %t/snap.elf 2>&1 | FileCheck %s --check-prefix=SNAP
+# SNAP: internal DATA overlap for .mcs251.DATA.snap: new range {{\[}}0x0030,0x0038) collides with {{\[}}0x0034,0x0038) from --reserve-data
+
+# --- Fixed reservation conflict: the reserve blocks the first-fit DSEG scan,
+#     and the message names the conflict source in the occupied list ---
+# RUN: not mcs251-lld dseg-fixed.o --area-start=CSEG=0xff0200 \
+# RUN:   --reserve-data=0x30,0x40 \
+# RUN:   -o %t/fixed.elf 2>&1 | FileCheck %s --check-prefix=FIXED
+# FIXED: cannot allocate .mcs251.DSEG.app (from dseg-fixed.o): size 96 bytes, align 1, symbols _app
+# FIXED: window {{\[}}0x0000,0x0080): no free range of 96 bytes; largest free range is 48 bytes
+# FIXED-SAME: occupied: {{\[}}0x0030,0x0070) from --reserve-data
+
+# --- Alignment: the ABI pins input alignment to 1 (rejected at load time),
+#     and the allocation diagnostic always states the alignment field ---
+# RUN: not mcs251-lld align2.o --area-start=CSEG=0xff0200 \
+# RUN:   -o %t/align.elf 2>&1 | FileCheck %s --check-prefix=ALIGN
+# ALIGN: ALLOC section alignment must be 1: .mcs251.DSEG.aligned
+
+# --- Stack window: the SSEG failure carries the request, window and hole size ---
+# RUN: not mcs251-lld sseg.o --area-start=CSEG=0xff0200 --stack-size=129 \
+# RUN:   -o %t/stk.elf 2>&1 | FileCheck %s --check-prefix=STKWIN
+# STKWIN: cannot allocate SSEG (stack) in ISEG window: need 129 bytes in {{\[}}0x0000,0x0080), largest free range is 128 bytes
+
+#--- dseg-huge.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.DSEG.toobig
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0x90
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _oversized
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.DSEG.toobig
+    Value: 0x0
+    Size: 4
+
+#--- frag.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.DSEG.app
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 20
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _app
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.DSEG.app
+    Value: 0x0
+    Size: 4
+
+#--- datasnap.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.DATA.snap
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _snap
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.DATA.snap
+    Value: 0x0
+    Size: 8
+
+#--- dseg-fixed.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.DSEG.app
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 96
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _app
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.DSEG.app
+    Value: 0x0
+    Size: 4
+
+#--- align2.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.DSEG.aligned
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 2
+    Size: 4
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- sseg.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.SSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
