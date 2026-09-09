@@ -1568,19 +1568,24 @@ bool Linker::applyRelocations() {
                                        S->Name + " uses registered ISR " +
                                        Target->Name + " as a plain address");
           if (IS->Type == ELF::STT_SECTION) {
+            // T07 step 15, final sentence: a section+addend candidate is
+            // cross-checked against the exact entry addresses of the known
+            // ISRs and the default entry. Only an exact-entry hit violates
+            // the rule; a branch from inside an ISR to its own body (entry
+            // + nonzero offset) is intra-function control flow the rule
+            // must not reject (the entry block of a function has no
+            // predecessors, so a compiler never emits addend 0 here).
             const int64_t Cand =
                 static_cast<int64_t>(IS->Address) + R.Addend;
-            auto Inside = [&](InputSymbol *P) {
-              const int64_t Lo = static_cast<int64_t>(P->Address);
-              const int64_t Hi = Lo + std::max<uint32_t>(P->Size, 1);
-              return Cand >= Lo && Cand < Hi;
+            auto AtEntry = [&](InputSymbol *P) {
+              return Cand == static_cast<int64_t>(P->Address);
             };
             for (InputSymbol *ISR : IsrSymbols)
-              if (Inside(ISR))
+              if (AtEntry(ISR))
                 return fail(Err, "MCS251 ISR: section+addend relocation in " +
                                      S->Name + " lands inside registered ISR " +
                                      ISR->Name);
-            if (DefaultSym && Inside(DefaultSym))
+            if (DefaultSym && AtEntry(DefaultSym))
               return fail(Err, "MCS251 ISR: section+addend relocation in " +
                                    S->Name + " lands inside the default entry");
           }

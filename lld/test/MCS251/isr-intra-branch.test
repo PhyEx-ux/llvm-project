@@ -1,0 +1,394 @@
+# T09 review (REVIEW-T09.md, finding 1) regression: T07 step 15's final
+# sentence cross-checks a section+addend relocation candidate against the
+# EXACT entry addresses of the registered ISRs and the default entry, not
+# against the whole function bodies. An EJMP from inside an ISR to its own
+# body (entry + nonzero offset) is intra-function control flow and must
+# link; an exact-entry hit from ordinary code must still be rejected. The
+# fixtures below are self-contained YAML (the frozen isr-fixture.py
+# interface and mutation set stay untouched), each ISR body being the
+# frozen 41-byte empty handler with a 4-byte EJMP spliced in mid-body.
+#
+# RUN: rm -rf %t-seed && split-file %s %t-seed
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o %t.crt.o
+
+# --- 1. Minimal positive regression: one registered ISR (slot 1, 45 bytes
+# --- at .text offset 0) whose body carries an EJMP field at +0x11 with an
+# --- R_MCS251_24 against the .text section symbol, addend 0x10 (its own
+# --- mid-body, not the entry). Must link, and the relocated field must
+# --- hold the .text load base + 0x10.
+# RUN: yaml2obj %t-seed/intra.yaml -o %t.intra.o
+# RUN: mcs251-lld %t.crt.o %t.intra.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.intra.map -o %t.intra.elf
+# RUN: FileCheck %s --check-prefix=IMAP < %t.intra.map
+# IMAP: .text 0xff0400 +0x2f
+# IMAP: IRQ 01 0xff000b ISR _irq1
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t.intra.elf 0xff0411 3 | \
+# RUN:   FileCheck %s --check-prefix=IBYTES
+# IBYTES: ff 04 10
+# A single ISR at .text offset 0 still satisfies the frozen checker's
+# slot-0 expectation (the .text base), so it runs here verbatim.
+# RUN: %python %S/Inputs/isr-check-image.py %t.intra.elf %t.intra.map --registered 1
+
+# --- 2. Anti-over-relaxation negative: the same object, but the ordinary
+# --- _main body takes the ISR's exact entry through the section symbol
+# --- (addend 0). The exact-entry protection must survive the fix.
+# RUN: yaml2obj %t-seed/intra-cross.yaml -o %t.cross.o
+# RUN: not mcs251-lld %t.crt.o %t.cross.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.cross.map -o %t.cross.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=CROSS1
+# CROSS1: MCS251 ISR: section+addend relocation in .text lands inside registered ISR _irq1
+
+# --- 3. Two ISRs of equal shape but laid out in non-ascending slot order
+# --- (slot 5 at offset 0, slot 2 at offset 0x2D), each with its own
+# --- intra-body EJMP. Must link; both fields relocate into their own
+# --- bodies, covering the adjacent-range boundary the old whole-body
+# --- range check used to reject.
+# RUN: yaml2obj %t-seed/intra-two.yaml -o %t.two.o
+# RUN: mcs251-lld %t.crt.o %t.two.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.two.map -o %t.two.elf
+# RUN: FileCheck %s --check-prefix=TMAP < %t.two.map
+# TMAP: .text 0xff0400 +0x5c
+# TMAP: IRQ 02 0xff0013 ISR _irq2
+# TMAP: IRQ 05 0xff002b ISR _irq5
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t.two.elf 0xff0411 3 | \
+# RUN:   FileCheck %s --check-prefix=IBYTES
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t.two.elf 0xff043a 3 | \
+# RUN:   FileCheck %s --check-prefix=T2BYTES
+# T2BYTES: ff 04 3d
+
+# --- 4. Second-entry protection: ordinary _main code taking the SECOND
+# --- ISR's exact entry (.text + 0x29) via section+addend is rejected too;
+# --- the equality check was not weakened to the first entry only.
+# RUN: yaml2obj %t-seed/intra-two-cross.yaml -o %t.twocross.o
+# RUN: not mcs251-lld %t.crt.o %t.twocross.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=XINIT=0xff8000 --flash-base=0xff0000 \
+# RUN:   --flash-size=0x10000 --map=%t.twocross.map -o %t.twocross.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=CROSS2
+# CROSS2: MCS251 ISR: section+addend relocation in .text lands inside registered ISR _irq2
+
+#--- intra.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D0CA0BCA1BCA2BCA3BCA4BCA5BCA6B8A000000CA7BCAEBDAEBDA7BDA6BDA5BDA4BDA3BDA2BDA1BDA0BD0D03280FE'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x11
+        Type: R_MCS251_24
+        Symbol: text_section
+        Addend: 0x10
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 45
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x2D
+    Size: 2
+
+#--- intra-cross.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D0CA0BCA1BCA2BCA3BCA4BCA5BCA6BCA7BCAEBDAEBDA7BDA6BDA5BDA4BDA3BDA2BDA1BDA0BD0D0328A00000080FE'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2A
+        Type: R_MCS251_24
+        Symbol: text_section
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 41
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x29
+    Size: 6
+
+#--- intra-two.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D0CA0BCA1BCA2BCA3BCA4BCA5BCA6B8A000000CA7BCAEBDAEBDA7BDA6BDA5BDA4BDA3BDA2BDA1BDA0BD0D032C0D0CA0BCA1BCA2BCA3BCA4B8A000000CA5BCA6BCA7BCAEBDAEBDA7BDA6BDA5BDA4BDA3BDA2BDA1BDA0BD0D03280FE'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100050001000000000000000000000000000100180201010100050001000000000000000000000000000100180101010100020001000000000000000000000000000100180201010100020001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x11
+        Type: R_MCS251_24
+        Symbol: text_section
+        Addend: 0x10
+      - Offset: 0x3A
+        Type: R_MCS251_24
+        Symbol: text_section
+        Addend: 0x3D
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq5
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq5
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x54
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq5
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 45
+  - Name: _irq2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x2D
+    Size: 45
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x5A
+    Size: 2
+
+#--- intra-two-cross.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D0CA0BCA1BCA2BCA3BCA4BCA5BCA6BCA7BCAEBDAEBDA7BDA6BDA5BDA4BDA3BDA2BDA1BDA0BD0D032C0D0CA0BCA1BCA2BCA3BCA4BCA5BCA6BCA7BCAEBDAEBDA7BDA6BDA5BDA4BDA3BDA2BDA1BDA0BD0D0328A00000080FE'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000100180101010100050001000000000000000000000000000100180201010100050001000000000000000000000000000100180101010100020001000000000000000000000000000100180201010100020001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x53
+        Type: R_MCS251_24
+        Symbol: text_section
+        Addend: 0x29
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq5
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq5
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x54
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    Flags: [ ]
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _irq5
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 41
+  - Name: _irq2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x29
+    Size: 41
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x52
+    Size: 6
