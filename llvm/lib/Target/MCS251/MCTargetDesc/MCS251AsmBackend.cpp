@@ -35,12 +35,14 @@
 
 #include "MCS251FixupKinds.h"
 #include "MCS251MCTargetDesc.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAssembler.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCELFObjectWriter.h"
+#include "llvm/MC/MCFixup.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/Support/MathExtras.h"
@@ -79,6 +81,21 @@ public:
     return std::make_unique<MCS251ELFStubWriter>();
   }
 
+  // The A3.4 ISR metadata association is a literal relocation: `.reloc`
+  // spells the frozen protocol name and the fixup carries relocation number
+  // 9 directly. No target fixup mode exists for it (zero write width, no
+  // address arithmetic, exact symbol association only).
+  std::optional<MCFixupKind> getFixupKind(StringRef Name) const override {
+    if (Name == "R_MCS251_ISR_REF")
+      return MCFixupKind(FirstLiteralRelocationKind + ELF::R_MCS251_ISR_REF);
+    return MCAsmBackend::getFixupKind(Name);
+  }
+
+  static bool isISRRefFixup(MCFixupKind Kind) {
+    return Kind == MCFixupKind(FirstLiteralRelocationKind +
+                               ELF::R_MCS251_ISR_REF);
+  }
+
   void applyFixup(const MCFragment &F, const MCFixup &Fixup,
                   const MCValue &Target, uint8_t *Data, uint64_t Value,
                   bool IsResolved) override {
@@ -93,6 +110,12 @@ public:
       // the addend: record FIRST, then apply the returned FixedValue (zero),
       // never the section offset which the REL writer needs in its payload.
       Asm->getWriter().recordRelocation(F, Fixup, Target, Value);
+      // Literal ISR_REF relocation: zero write width. The four bytes at the
+      // 24B record's symbol_reference field were emitted as literal zeros
+      // and must stay zero; no byte of the record -- and nothing beyond it
+      // -- is ever accessed.
+      if (isISRRefFixup(Fixup.getKind()))
+        return;
       unsigned Width;
       switch (Fixup.getKind()) {
       case FK_Data_1:
@@ -116,6 +139,14 @@ public:
       return;
     }
     if (!IsResolved) {
+      // The REL path gains no type-9 support: ISR records never reach it
+      // (the AsmPrinter hard-rejects ISR object output first), and a
+      // hand-written .reloc in a REL module is rejected here as well.
+      if (isISRRefFixup(Fixup.getKind())) {
+        getContext().reportError(Fixup.getLoc(),
+                                 "MCS251 ISR requires ELF object output");
+        return;
+      }
       uint64_t V = Value;
       if (Fixup.getKind() == FK_Data_2 ||
           Fixup.getKind() == MCS251::fixup_mcs251_16) {
@@ -183,6 +214,10 @@ public:
   }
 
   MCFixupKindInfo getFixupKindInfo(MCFixupKind Kind) const override {
+    // Literal relocations write no bytes: the only one this target names is
+    // R_MCS251_ISR_REF, whose info width is frozen at 0.
+    if (isISRRefFixup(Kind))
+      return {"R_MCS251_ISR_REF", 0, 0, 0};
     static const MCFixupKindInfo Infos[MCS251::NumTargetFixupKinds -
                                        FirstTargetFixupKind] = {
         {"fixup_mcs251_16", 0, 16, 0},

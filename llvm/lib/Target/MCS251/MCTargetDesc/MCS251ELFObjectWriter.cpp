@@ -56,6 +56,13 @@ public:
       report_fatal_error("MCS251 ELF: unsupported relocation fixup");
     }
   }
+
+  // A3.4: ISR_REF records must keep the exact named function symbol. Folding
+  // a local ISR symbol to a STT_SECTION reference would destroy the precise
+  // per-function identity the object protocol (and the linker) validate.
+  bool needsRelocateWithSymbol(const MCValue &, unsigned Type) const override {
+    return Type == ELF::R_MCS251_ISR_REF;
+  }
 };
 } // namespace
 

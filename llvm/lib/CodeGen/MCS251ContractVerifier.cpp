@@ -4,9 +4,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/MCS251ContractVerifier.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/ConstantFolding.h"
+#include "llvm/BinaryFormat/MCS251ISR.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
@@ -731,6 +735,190 @@ static Error checkUnsupportedArithmetic(const Instruction &I,
 
   return Error::success();
 }
+
+//===----------------------------------------------------------------------===//
+// MCS251 ISR (interrupt campaign T06, A2 interface freeze). These are target
+// contract checks, not generic LLVM IR validity: they must run even when the
+// generic verifier is disabled (-disable-verify / MIR entry), so the target
+// contract verifier owns them. They reuse the frozen structure logic of
+// Verifier::verifyMCS251ISR verbatim; no A/B-line safety-closure analysis is
+// added here. All diagnostics keep the frozen "MCS251 ISR:" sentences.
+//===----------------------------------------------------------------------===//
+
+// \return true when \p GV is the standard llvm.used keepalive container in
+// its full frozen structure: appending linkage, an array-of-pointers
+// initializer, the "llvm.metadata" section, and no ordinary use of the
+// container itself. Every other global terminates a use path as an ordinary
+// escape. (Mirrors the T01 Verifier helper.)
+static bool isMCS251LegalUsedRoot(const GlobalVariable &GV) {
+  if (GV.getName() != "llvm.used" || !GV.hasInitializer())
+    return false;
+  if (!GV.hasAppendingLinkage())
+    return false;
+  const auto *ArrTy = dyn_cast<ArrayType>(GV.getInitializer()->getType());
+  if (!ArrTy || !ArrTy->getElementType()->isPointerTy())
+    return false;
+  if (!GV.hasSection() || GV.getSection() != "llvm.metadata")
+    return false;
+  if (!GV.materialized_use_empty())
+    return false;
+  return true;
+}
+
+// Parse the canonical decimal slot text of \p F ("0" and "1" are legal;
+// "01", "+1", "0x1", the empty string and negative values are not).
+static bool isCanonicalISRSlotText(StringRef SlotText, uint64_t &SlotVal) {
+  bool Canonical =
+      !SlotText.empty() && (SlotText.size() == 1 || SlotText.front() != '0');
+  if (!Canonical)
+    return false;
+  for (char C : SlotText) {
+    if (!isDigit(C))
+      return false;
+    SlotVal = SlotVal * 10 + (C - '0');
+    if (SlotVal > 51)
+      break; // already out of profile; no need to accumulate further
+  }
+  return true;
+}
+
+// Verify the A2 structural contract for every interrupt entry in the module.
+// Ordinary functions without the CC/attribute pair are completely unaffected.
+static Error verifyMCS251ISRStructure(const Module &M) {
+  DenseMap<uint64_t, const Function *> SlotDefs;
+  for (const Function &F : M) {
+    Attribute VecAttr = F.getFnAttribute("mcs251-isr-vector");
+    bool HasCC = F.getCallingConv() == CallingConv::MCS251_INTR;
+    bool HasVector = VecAttr.isValid();
+    if (!HasCC && !HasVector)
+      continue;
+
+    // The convention and the vector attribute are inseparable.
+    if (!HasCC || !HasVector)
+      return reject("MCS251 ISR: calling convention and vector attribute must "
+                    "appear together");
+
+    uint64_t SlotVal = 0;
+    if (!isCanonicalISRSlotText(VecAttr.getValueAsString(), SlotVal) ||
+        !MCS251ISR::isLegalISRSlot(SlotVal))
+      return reject("MCS251 ISR: vector is not a legal slot in profile 0-51");
+
+    // An entry has hardware-fixed frame; only non-vararg void() is an entry.
+    if (!(F.getFunctionType()->getReturnType()->isVoidTy() &&
+          F.getFunctionType()->getNumParams() == 0 && !F.isVarArg()))
+      return reject("MCS251 ISR: interrupt entry must have non-vararg type "
+                    "void()");
+
+    // External, internal and private linkage only; aliases and ifuncs are
+    // separate global kinds and are rejected as ordinary uses below.
+    if (!(F.hasExternalLinkage() || F.hasInternalLinkage() ||
+          F.hasPrivateLinkage()))
+      return reject("MCS251 ISR: unsupported interrupt entry linkage");
+    if (F.hasComdat())
+      return reject("MCS251 ISR: interrupt entry may not be in a COMDAT");
+
+    // Only structurally correct llvm.used keepalive entries may reference the
+    // entry; ordinary calls and ordinary pointer values may not. The
+    // traversal walks every use path upward with an iterative worklist and a
+    // visited set, so the verdict never depends on use-list order even when
+    // constants are shared between the registration root and an ordinary
+    // escape. Only aggregates and single-operand no-op pointer casts
+    // (bitcast/addrspacecast) may act as intermediate nodes; aliases, ifuncs,
+    // every other constant kind and every instruction are rejected as
+    // non-registration escapes.
+    SmallPtrSet<const User *, 32> VisitedUses;
+    SmallVector<const User *, 32> UseWorklist;
+    bool Rooted = false;
+    auto WalkUsePaths = [&](const User *Seed) -> Error {
+      UseWorklist.push_back(Seed);
+      while (!UseWorklist.empty()) {
+        const User *U = UseWorklist.pop_back_val();
+        if (!VisitedUses.insert(U).second)
+          continue;
+        if (const auto *CB = dyn_cast<CallBase>(U)) {
+          // A call-like instruction entering the ISR is rejected regardless
+          // of the calling convention written on the call itself.
+          if (CB->getCalledOperand()->stripPointerCasts() == &F)
+            return reject("MCS251 ISR: interrupt entry may not be called");
+          return reject("MCS251 ISR: interrupt entry has a non-registration "
+                        "use");
+        }
+        if (const auto *GV = dyn_cast<GlobalVariable>(U)) {
+          // A global is a terminal of the traversal: the standard keepalive
+          // container completes only this branch; anything else (an ordinary
+          // escaped global, llvm.compiler.used, a malformed container) is a
+          // non-registration use.
+          if (isMCS251LegalUsedRoot(*GV)) {
+            Rooted = true;
+            continue;
+          }
+          return reject("MCS251 ISR: interrupt entry has a non-registration "
+                        "use");
+        }
+        const Constant *C = dyn_cast<Constant>(U);
+        const Operator *Op = C ? dyn_cast<Operator>(C) : nullptr;
+        bool MayContinue =
+            C && (isa<ConstantAggregate>(C) ||
+                  (Op && Op->getNumOperands() == 1 &&
+                   (Op->getOpcode() == Instruction::BitCast ||
+                    Op->getOpcode() == Instruction::AddrSpaceCast)));
+        if (MayContinue) {
+          for (const User *UU : U->users())
+            UseWorklist.push_back(UU);
+          continue;
+        }
+        return reject("MCS251 ISR: interrupt entry has a non-registration use");
+      }
+      return Error::success();
+    };
+    for (const User *U : F.users())
+      if (Error Err = WalkUsePaths(U))
+        return Err;
+
+    if (F.isDeclaration())
+      continue;
+
+    // BlockAddress constants hold their BasicBlock* raw and have no
+    // operands; every real use of a taken block address must pass the same
+    // registration whitelist.
+    for (const BasicBlock &BB : F)
+      if (const BlockAddress *BA = BlockAddress::lookup(&BB))
+        for (const User *U : BA->users())
+          if (Error Err = WalkUsePaths(U))
+            return Err;
+
+    if (!F.hasFnAttribute(Attribute::NoInline))
+      return reject("MCS251 ISR: interrupt definition must be noinline");
+    if (!Rooted)
+      return reject("MCS251 ISR: interrupt definition must be kept alive by "
+                    "llvm.used");
+
+    auto SlotIt = SlotDefs.insert({SlotVal, &F}).first;
+    if (SlotIt->second != &F)
+      return reject("MCS251 ISR: vector slot is already registered by another "
+                    "definition in this module");
+  }
+
+  // A2.11: no call may itself carry the interrupt convention, and no
+  // call-like instruction may target an interrupt entry.
+  for (const Function &F : M) {
+    if (F.isDeclaration())
+      continue;
+    for (const BasicBlock &BB : F)
+      for (const Instruction &I : BB) {
+        const auto *CB = dyn_cast<CallBase>(&I);
+        if (!CB)
+          continue;
+        if (CB->getCallingConv() == CallingConv::MCS251_INTR)
+          return reject("MCS251 ISR: interrupt entry may not be called");
+        const auto *Callee =
+            dyn_cast<Function>(CB->getCalledOperand()->stripPointerCasts());
+        if (Callee && Callee->getCallingConv() == CallingConv::MCS251_INTR)
+          return reject("MCS251 ISR: interrupt entry may not be called");
+      }
+  }
+  return Error::success();
+}
 } // namespace
 
 Error llvm::MCS251::verifyModuleContract(const Module &M,
@@ -763,6 +951,15 @@ Error llvm::MCS251::verifyModuleContract(const Module &M,
       return reject("module data layout conflicts with the selected memory "
                     "contract");
   }
+
+  // ISR campaign T06 step 1: the A2 ISR identity/registration checks are
+  // target contract, not generic LLVM IR validity. They run here on every
+  // invocation of this pass (both the structural pre-pass and the post-
+  // optimization arithmetic pass), even when the generic verifier is turned
+  // off. The A2 structure logic is reused verbatim; no safety-closure
+  // analysis is added.
+  if (Error Err = verifyMCS251ISRStructure(M))
+    return Err;
 
   SmallPtrSet<const Type *, 32> Seen;
   SmallPtrSet<const Constant *, 32> ConstSeen;

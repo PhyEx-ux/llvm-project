@@ -38,6 +38,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MCS251.h"
+#include "MCS251InstrInfo.h"
 #include "MCS251MCInstLower.h"
 #include "MCS251TargetMachine.h"
 #include "MCS251TargetObjectFile.h"
@@ -47,11 +48,15 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/MCS251ISR.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
@@ -102,12 +107,37 @@ namespace {
 class MCS251AsmPrinter final : public AsmPrinter {
   StringSet<> LocalParameterSlots;
   StringSet<> DeclaredExternalSymbols;
+  // Next free record index in the single .mcs251.isr section of this object;
+  // the A3.4 relocation of record N sits at r_offset 24*N+12.
+  unsigned ISRRecordCount = 0;
+  // Whether this module defines any interrupt entry. The A2.2 keepalive
+  // exemption (object gate, storage-reservation scan, global emission)
+  // exists only for ISR modules; modules without ISR definitions keep the
+  // original behavior for llvm.used unchanged.
+  bool ModuleHasISRDefinitions = false;
 
   const MCS251TargetMachine &getMCS251TM() const {
     return static_cast<const MCS251TargetMachine &>(TM);
   }
 
   bool usesELFObjects() const { return getMCS251TM().usesELFObjects(); }
+
+  // The slot value is canonical decimal text ("0" and "1" are legal;
+  // "01", "+1", "0x1", the empty string and negative values are not).
+  // (Mirrors the frozen T01 structure check.)
+  static bool isCanonicalISRSlotText(StringRef SlotText, uint64_t &SlotVal) {
+    if (SlotText.empty() ||
+        (SlotText.size() > 1 && SlotText.front() == '0'))
+      return false;
+    for (char C : SlotText) {
+      if (!isDigit(C))
+        return false;
+      SlotVal = SlotVal * 10 + (C - '0');
+      if (SlotVal > 51)
+        break; // already out of profile; no need to accumulate further
+    }
+    return true;
+  }
 
   static bool hasV1PointerTypes(Type *Ty,
                                 SmallPtrSetImpl<Type *> &Seen) {
@@ -177,6 +207,58 @@ class MCS251AsmPrinter final : public AsmPrinter {
     return true;
   }
 
+  //===--------------------------------------------------------------------===//
+  // ISR campaign (T06). The A2.2 keepalive-root helpers mirror the frozen
+  // structure logic of the T01 IR Verifier; the object gate may exempt only
+  // exactly verified keepalive paths, never a whole container by name or
+  // section.
+  //===--------------------------------------------------------------------===//
+
+  // \return true when \p GV is the standard llvm.used keepalive container in
+  // its full frozen structure: appending linkage, an array-of-pointers
+  // initializer, the "llvm.metadata" section, and no ordinary use of the
+  // container itself.
+  static bool isMCS251KeepaliveRoot(const GlobalVariable &GV) {
+    if (GV.getName() != "llvm.used" || !GV.hasInitializer())
+      return false;
+    if (!GV.hasAppendingLinkage())
+      return false;
+    const auto *ArrTy = dyn_cast<ArrayType>(GV.getInitializer()->getType());
+    if (!ArrTy || !ArrTy->getElementType()->isPointerTy())
+      return false;
+    if (!GV.hasSection() || GV.getSection() != "llvm.metadata")
+      return false;
+    if (!GV.materialized_use_empty())
+      return false;
+    return true;
+  }
+
+  // \return the program-address-space function a verified keepalive member
+  // keeps alive: the function reference itself (the "AS4 direct" form) or a
+  // chain of single-operand no-op pointer casts (bitcast/addrspacecast, the
+  // standard address-space adaptation of a used member) ending at one.
+  // Anything else in a member position is not a verified keepalive item.
+  static const Function *getKeepaliveFunction(const Constant *C) {
+    while (true) {
+      if (const auto *F = dyn_cast<Function>(C))
+        return F;
+      const auto *CE = dyn_cast<ConstantExpr>(C);
+      if (!CE || CE->getNumOperands() != 1)
+        return nullptr;
+      unsigned Opcode = CE->getOpcode();
+      if (Opcode != Instruction::BitCast &&
+          Opcode != Instruction::AddrSpaceCast)
+        return nullptr;
+      C = cast<Constant>(CE->getOperand(0));
+    }
+  }
+
+  static bool isISRDefinition(const Function &F) {
+    return !F.isDeclaration() &&
+           F.getCallingConv() == CallingConv::MCS251_INTR &&
+           F.hasFnAttribute("mcs251-isr-vector");
+  }
+
   bool isV1ObjectCompatible(const Module &M) const {
     const auto &Contract = getMCS251TM().Options.MCS251Memory;
     if (!Contract.isSpecified() || Contract.ASLayoutVersion == 1)
@@ -193,6 +275,30 @@ class MCS251AsmPrinter final : public AsmPrinter {
     SmallPtrSet<Type *, 32> SeenTypes;
     SmallPtrSet<const Constant *, 32> SeenConstants;
     for (const GlobalVariable &GV : M.globals()) {
+      // T06 step 8(i): the only AS4-pointer exemption is a per-member path
+      // check of a structurally verified llvm.used keepalive container (A2.2
+      // "AS4 direct" or the standard single-operand cast chain). It applies
+      // only to modules that actually define interrupt entries (T06 rework
+      // R2): a module without ISR definitions keeps the original gate
+      // behavior, so an AS4 cast root over ordinary functions is still
+      // rejected by the ordinary walk below. The exemption is computed
+      // without touching the shared seen-sets, so the same cast constant
+      // escaping through an ordinary global or an instruction is still
+      // rejected there. The container is never skipped by name or section
+      // without this verification, and members that are not exactly
+      // verified keepalive items (ordinary AS4 data or function pointers,
+      // malformed chains) keep the original rejection.
+      if (ModuleHasISRDefinitions && isMCS251KeepaliveRoot(GV)) {
+        const auto *ArrTy = cast<ArrayType>(GV.getInitializer()->getType());
+        for (unsigned I = 0, E = ArrTy->getNumElements(); I != E; ++I) {
+          const Constant *Member = GV.getInitializer()->getAggregateElement(I);
+          const Function *Kept = Member ? getKeepaliveFunction(Member) : nullptr;
+          if (!Kept || Kept->getAddressSpace() !=
+                           M.getDataLayout().getProgramAddressSpace())
+            return false;
+        }
+        continue;
+      }
       if (GV.getAddressSpace() != 0 ||
           !hasV1PointerTypes(GV.getValueType(), SeenTypes))
         return false;
@@ -367,10 +473,114 @@ public:
   }
 
   bool runOnMachineFunction(MachineFunction &MF) override {
+    // T06 card steps 8/9: the final machine boundary is validated before any
+    // byte of the function is emitted.
+    verifyFinalMachineBoundary(MF);
     SetupMachineFunction(MF);
     emitParameterSlots(MF);
     emitFunctionBody();
+    emitISRRecords(MF); // A3.5: ISR definitions, ELF object output only.
     return false;
+  }
+
+  // Final machine boundary. For ISR definitions every return must be the
+  // dedicated RETI; ordinary functions must never contain RETI. A target
+  // pseudo instruction reaching this stage is an unexpanded compiler bug and
+  // is a hard error. Only *target* opcodes are checked: a blanket
+  // MI->isPseudo() assert here would also fire on legitimate LLVM generic
+  // pseudo instructions, which stay below INSTRUCTION_LIST_START.
+  void verifyFinalMachineBoundary(const MachineFunction &MF) const {
+    const Function &F = MF.getFunction();
+    bool IsISR = isISRDefinition(F);
+    for (const MachineBasicBlock &BB : MF)
+      for (const MachineInstr &MI : BB) {
+        // Target opcodes begin right after the generic opcode range; a
+        // remaining pseudo there is an unexpanded target pseudo.
+        if (MI.isPseudo() &&
+            MI.getOpcode() > (unsigned)TargetOpcode::GENERIC_OP_END) {
+          StringRef Name =
+              MF.getSubtarget().getInstrInfo()->getName(MI.getOpcode());
+          report_fatal_error("MCS251: unexpanded target pseudo instruction '" +
+                             Twine(Name) + "' reached the instruction emitter");
+        }
+        if (MI.getOpcode() == MCS251::RETI) {
+          if (!IsISR)
+            report_fatal_error(
+                "MCS251: RETI is only valid inside an interrupt service "
+                "routine; function '" +
+                Twine(F.getName()) + "' is an ordinary function");
+        } else if (IsISR && MI.isReturn()) {
+          report_fatal_error("MCS251: interrupt service routine '" +
+                             Twine(F.getName()) +
+                             "' must return with RETI");
+        }
+      }
+  }
+
+  // A3.5: after emitFunctionBody, emit the frozen A3.2 24-byte metadata
+  // records for every ISR definition -- exactly one ENTRY and one REGISTER
+  // per definition, referencing the precise function symbol through the A3.4
+  // type-9 RELA relocation. Emitted only for ISR definitions and only for
+  // ELF object output.
+  void emitISRRecords(MachineFunction &MF) {
+    const Function &F = MF.getFunction();
+    if (!isISRDefinition(F))
+      return;
+    if (!getMCS251TM().emitsObjectFile()) {
+      // Assembly text is an inspection artifact: the module-level
+      // .mcs251_isr_nonobject marker emitted by emitStartOfAsmFile already
+      // disqualifies it from the production assembler. No records in text.
+      return;
+    }
+    if (!usesELFObjects())
+      // REL objects do not gain type-9 support; ISR object output on the REL
+      // path is hard-rejected before any record is emitted.
+      report_fatal_error("MCS251 ISR requires ELF object output");
+
+    // A3.5 step 1: re-validate the ISR identity (CC, canonical slot) here at
+    // the object boundary; the return-opcode boundary was checked in
+    // verifyFinalMachineBoundary.
+    Attribute VecAttr = F.getFnAttribute("mcs251-isr-vector");
+    if (F.getCallingConv() != CallingConv::MCS251_INTR || !VecAttr.isValid())
+      report_fatal_error("MCS251 ISR: calling convention and vector attribute "
+                         "must appear together");
+    uint64_t Slot = 0;
+    if (!isCanonicalISRSlotText(VecAttr.getValueAsString(), Slot) ||
+        !MCS251ISR::isLegalISRSlot(Slot))
+      report_fatal_error("MCS251 ISR: vector is not a legal slot in profile "
+                         "0-51");
+
+    MCSection *Saved = OutStreamer->getCurrentSectionOnly();
+    // A3.2: SHT_PROGBITS, flags 0, alignment 4, no entry size, big-endian
+    // fields, no section header, no trailing padding.
+    MCSectionELF *Meta = OutContext.getELFSection(
+        MCS251ISR::MetaSectionName, ELF::SHT_PROGBITS, /*Flags=*/0);
+    Meta->setAlignment(Align(MCS251ISR::MetaSectionAlignment));
+    OutStreamer->switchSection(Meta);
+    for (uint8_t Kind : {MCS251ISR::RK_ISR_ENTRY, MCS251ISR::RK_ISR_REGISTER}) {
+      OutStreamer->emitIntValue(MCS251ISR::ProtocolVersion, 2);
+      OutStreamer->emitIntValue(MCS251ISR::RecordSize, 2);
+      OutStreamer->emitIntValue(Kind, 1);
+      OutStreamer->emitIntValue(MCS251ISR::EK_IRQ_RETI, 1);
+      OutStreamer->emitIntValue(MCS251ISR::HardwareProfileIRQ4, 1);
+      OutStreamer->emitIntValue(MCS251ISR::SaveProfileINT37, 1);
+      OutStreamer->emitIntValue(Slot, 2);
+      OutStreamer->emitIntValue(MCS251ISR::RequiredCaps, 2);
+      // symbol_reference stays four literal zero bytes: the A3.4 relocation
+      // is a zero-write-width association with the exact function symbol, so
+      // no byte of the 24B record (and nothing beyond it) is ever touched.
+      OutStreamer->emitIntValue(0, 4);
+      OutStreamer->emitRelocDirective(
+          *MCConstantExpr::create(ISRRecordCount * MCS251ISR::RecordSize +
+                                      MCS251ISR::RecordOffset::SymbolReference,
+                                  OutContext),
+          "R_MCS251_ISR_REF",
+          MCSymbolRefExpr::create(getSymbol(&F), OutContext));
+      OutStreamer->emitIntValue(MCS251ISR::AssetProfileCompiled, 4);
+      OutStreamer->emitIntValue(0, 4);
+      ++ISRRecordCount;
+    }
+    OutStreamer->switchSection(Saved);
   }
 
   void emitParameterSlots(const MachineFunction &MF) {
@@ -456,6 +666,10 @@ public:
     // validated specimen and the smoke crt0 template (sdas251 accepts it
     // without a file argument; a filename argument was never exercised).
     const std::string ModuleName = getMCS251ModuleName(M);
+    // ISR identity of the module decides where the A2.2 keepalive exemption
+    // applies (object gate, storage-reservation scan, global emission).
+    ModuleHasISRDefinitions =
+        llvm::any_of(M, [](const Function &F) { return isISRDefinition(F); });
     bool V1Compatible = isV1ObjectCompatible(M);
     if (getMCS251TM().emitsObjectFile() && !V1Compatible)
       report_fatal_error(
@@ -480,10 +694,26 @@ public:
     // other MainFileName consumer is DWARF line-table setup, which this
     // target never enables).
     OutStreamer->getContext().setMainFileName(ModuleName);
+    // A3.5: an ISR module's assembly text is an inspection artifact only.
+    // The marker is deliberately not an ASxxxx directive, so the text can
+    // never be assembled into a "production" object that carries the plain
+    // ABI signature without the ISR registration protocol. The records
+    // themselves are only ever emitted into ELF objects.
+    if (!getMCS251TM().emitsObjectFile() && ModuleHasISRDefinitions)
+      emitASxxxxText("\t.mcs251_isr_nonobject");
+    ISRRecordCount = 0;
     if (llvm::any_of(M, [](const Function &F) {
           return !F.isDeclaration() && F.arg_size() > 1;
-        }) || llvm::any_of(M.globals(), [](const GlobalVariable &GV) {
-          return !GV.isDeclaration() && !GV.isConstant();
+        }) ||
+        llvm::any_of(M.globals(), [this](const GlobalVariable &GV) {
+          // T06 rework R1: precisely verified ISR keepalive metadata is
+          // registration data and reserves no storage. The standard llvm.used
+          // root has appending linkage and is NOT a constant, so the
+          // exclusion needs this structural verification -- never a bare
+          // name/section test. Real mutable globals keep triggering the
+          // reservation exactly as before.
+          return !GV.isDeclaration() && !GV.isConstant() &&
+                 !(ModuleHasISRDefinitions && isMCS251KeepaliveRoot(GV));
         })) {
       // REL synthesizes the A record. ELF needs an actual NOBITS reservation.
       if (usesELFObjects()) {
@@ -510,6 +740,20 @@ public:
 
   void emitGlobalVariable(const GlobalVariable *GV) override {
     if (GV->isDeclaration()) {
+      AsmPrinter::emitGlobalVariable(GV);
+      return;
+    }
+
+    // ISR campaign T06 step 8(ii): for modules that define interrupt
+    // entries, the verified keepalive metadata is registration data, not
+    // global storage. (The standard llvm.used root has appending linkage and
+    // is not a constant.) Route the structurally correct container through
+    // the generic AsmPrinter, whose special-LLVM-global path consumes it
+    // without emitting bytes, CODE pointer data, relocations, or DSEG/XINIT
+    // records; the storage-reservation scan in emitStartOfAsmFile excludes
+    // it as well. Modules without ISR definitions keep the original
+    // rejection path unchanged (T06 rework R2).
+    if (ModuleHasISRDefinitions && isMCS251KeepaliveRoot(*GV)) {
       AsmPrinter::emitGlobalVariable(GV);
       return;
     }
