@@ -1,0 +1,10 @@
+; All code is in FF program Flash. No mutable C globals or XINIT are used.
+-mwx
+-i @OUTPUT_IHX@
+-b HOME = 0xff0000
+-b CSEG = 0xff0200
+-b ISEG = 0x0000
+-b BSEG = 0x0000
+@HWFRAME_REL@
+@REPORT_REL@
+-e
