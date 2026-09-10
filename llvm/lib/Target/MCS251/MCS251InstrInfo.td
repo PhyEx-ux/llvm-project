@@ -69,6 +69,16 @@ def mcs251_dis16 : Operand<i16> { let PrintMethod = "printDis16"; }
 // direct 0x80-0xff is the SFR space.
 def mcs251_dir8  : Operand<i8>  { let PrintMethod = "printDir8"; }
 
+// Bit address (bit8) of a bit-addressed operand. An 8-bit byte, but a
+// DIFFERENT address space from dir8: the bit-address map is
+//   0x00-0x7f  internal RAM bit space (backing byte 0x20 + (B >> 3),
+//              bit index B & 7; bit address 0 is the first bit of 0x20),
+//   0x80-0xff  bit-addressable SFR space (backing byte B & 0xf8,
+//              bit index B & 7).
+// The byte printed is the bit address itself (sdas251 `setb 0x00` gold),
+// never the backing byte.
+def mcs251_bitaddr : Operand<i8> { let PrintMethod = "printBitAddr"; }
+
 // Branch target: the operand is a MachineBasicBlock which MCS251MCInstLower
 // turns into an MCSymbolRefExpr and MCS251InstPrinter prints as a label
 // (same shape as upstream MSP430's jmptarget).
@@ -224,6 +234,90 @@ def CLRC : MCS251Inst<(outs), (ins), "clr c", []>;
 let Defs = [PSW, A], Uses = [PSW, A] in {
 def RLCA : MCS251Inst<(outs), (ins), "rlc a", []>;
 def RRCA : MCS251Inst<(outs), (ins), "rrc a", []>;
+}
+
+//===----------------------------------------------------------------------===//
+//  Bit-addressed instructions (8051 classic semantics)
+//===----------------------------------------------------------------------===//
+//
+// The bit-address operand is a constant 8-bit bit address (see
+// mcs251_bitaddr). Encodings are 8051 Classic (Area II, low nibble 2 so
+// putOpcode adds no A5 source-mode escape) and were re-verified byte-for-byte
+// against sdas251 V05.50.4 source mode (gold):
+//
+//   setb bit  -> D2 <bit>      clr bit -> C2 <bit>   cpl bit -> B2 <bit>
+//   mov c,bit -> A2 <bit>      mov bit,c -> 92 <bit>
+//   jb  bit,rel -> 20 <bit> rel8   jnb bit,rel -> 30 <bit> rel8
+//   jbc bit,rel -> 10 <bit> rel8
+//   setb c -> D3   clr c -> C3   cpl c -> B3
+//
+// Memory effect model: every one of these reaches memory (the backing byte of
+// the bit), so none may be folded away; a bit-address op can alias an ordinary
+// RAM byte (the 0x20-0x2f page-zero bit space overlaps ordinary edata), so the
+// static per-instruction flags are deliberately conservative:
+//
+//   * setb/clr/cpl, mov bit,c and jbc WRITE the backing byte -> mayStore.
+//     setb/clr/cpl and jbc also READ it (they are read-modify-write), and
+//     mov bit,c reads it too (the bit-addressed operand is loaded into the
+//     addressed bit) -> mayLoad for all four, including mov bit,c.
+//   * mov c,bit and jb/jnb only READ the backing byte -> mayLoad.
+//   * hasSideEffects is left 0: the memory flags already prevent deletion, and
+//     leaving it clear keeps the (rare) real instruction visible to DCE when
+//     its result is unused the same way MOV8di is.
+//
+// CY/PSW modelling: the explicit C forms carry the flag dependency. setb c /
+// clr c only WRITE CY (Defs=[PSW]); cpl c READS and writes it (Uses/Defs
+// [PSW]); mov c,bit writes CY (Defs=[PSW]) while mov bit,c READS CY
+// (Uses=[PSW]). The bit-address forms are otherwise flag-neutral AS WRITTEN,
+// but a bit address of 0xd7 names PSW.CY -- the lowering routes that constant
+// to the C form so the virtual PSW stays accurate; it never emits a bare
+// bit-address op with 0xd7 and then ignores the flag.
+let mayLoad = 1, mayStore = 1, Size = 2 in {
+  def SETBBIT : MCS251Inst<(outs), (ins mcs251_bitaddr:$bit),
+                           "setb $bit", []>;
+  def CLRBIT  : MCS251Inst<(outs), (ins mcs251_bitaddr:$bit),
+                           "clr $bit", []>;
+  def CPLBIT  : MCS251Inst<(outs), (ins mcs251_bitaddr:$bit),
+                           "cpl $bit", []>;
+  def MOVBITC : MCS251Inst<(outs), (ins mcs251_bitaddr:$bit),
+                           "mov $bit, c", []> {
+    // Writes the addressed bit FROM the current carry, so it reads CY (PSW).
+    let Uses = [PSW];
+  }
+}
+// Bit branches. OPERAND 0 IS THE BRANCH TARGET (a brtarget/MBB), operand 1 is
+// the bit address. This is the target-wide invariant the post-layout
+// MCS251BranchRelaxation pass and MCS251MCInstLower rely on
+// (MI.getOperand(0).isMBB() / .getMBB()); putting the bit address first would
+// silently break branch relaxation. The AsmString still prints the source
+// shape `jb bit, rel`.
+//
+// JBC is a read-modify-write branch (clears the bit when set), so it carries
+// mayStore as well as mayLoad. None of the three touches PSW.
+let isBranch = 1, isTerminator = 1, mayLoad = 1, Size = 3 in {
+  def JB : MCS251Inst<(outs),
+                      (ins brtarget:$dst, mcs251_bitaddr:$bit),
+                      "jb $bit, $dst", []>;
+  def JNB : MCS251Inst<(outs),
+                       (ins brtarget:$dst, mcs251_bitaddr:$bit),
+                       "jnb $bit, $dst", []>;
+}
+let isBranch = 1, isTerminator = 1, mayLoad = 1, mayStore = 1, Size = 3 in
+def JBC : MCS251Inst<(outs),
+                     (ins brtarget:$dst, mcs251_bitaddr:$bit),
+                     "jbc $bit, $dst", []>;
+let mayLoad = 1, Defs = [PSW], Size = 2 in
+def MOVCBIT : MCS251Inst<(outs), (ins mcs251_bitaddr:$bit),
+                         "mov c, $bit", []>;
+
+// CY forms. clr c is the pre-existing CLRC; setb c / cpl c write CY. Both are
+// single-byte classic encodes (opcode+1 of the bit form). cpl c is a
+// read-modify-write of CY, so it Uses as well as Defs PSW.
+let Defs = [PSW], Size = 1 in {
+  def SETBC : MCS251Inst<(outs), (ins), "setb c", []>;
+  def CPLC  : MCS251Inst<(outs), (ins), "cpl c", []> {
+    let Uses = [PSW];
+  }
 }
 
 //===----------------------------------------------------------------------===//

@@ -59,6 +59,15 @@ public:
   unsigned getInstSizeInBytes(const MachineInstr &MI) const override;
   InstSizeVerifyMode
   getInstSizeVerifyMode(const MachineInstr &MI) const override;
+
+  // Cross-check the tablegen MCInstrDesc `Size` of the bit-addressed
+  // instruction family against the exact encoded size computed here.  The
+  // AsmPrinter's ExactSize verification only compares EMITTED BYTES against
+  // getInstSizeInBytes; it never looks at the TD Size, so a drifted
+  // `let Size = N` on SETBBIT/JB/... would otherwise go unnoticed.  Run by
+  // the machine verifier (llc -verify-machineinstrs).
+  bool verifyInstruction(const MachineInstr &MI,
+                         StringRef &ErrInfo) const override;
 };
 } // namespace llvm
 

@@ -1,0 +1,38 @@
+# RUN: split-file %s %t
+# RUN: not llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog %t/movbitc.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=PSW
+# RUN: not llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog %t/cplc.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=PSW
+#
+# A3 dependency regression: MOVBITC writes the addressed bit FROM the current
+# carry, and CPLC reads-then-writes the carry. Both therefore declare
+# Uses = [PSW]; the MIR parser / machine verifier require the explicit
+# `implicit $psw` operand, so dropping the dependency in the .td would surface
+# as "missing implicit register operand" here.
+#
+#PSW: missing implicit register operand 'implicit $psw'
+#
+#--- movbitc.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+tracksRegLiveness: false
+body: |
+  bb.0:
+    MOVBITC 42
+    ERET
+...
+#--- cplc.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+tracksRegLiveness: false
+body: |
+  bb.0:
+    CPLC implicit-def $psw
+    ERET
+...

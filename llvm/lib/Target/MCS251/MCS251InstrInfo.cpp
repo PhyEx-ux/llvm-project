@@ -3,11 +3,14 @@
 #include "MCS251InstrInfo.h"
 #include "MCS251.h"
 #include "MCS251Subtarget.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <string>
 
 using namespace llvm;
 
@@ -269,6 +272,14 @@ bool MCS251InstrInfo::isCondBranchOpcode(unsigned Opc) {
   case MCS251::JSGE:
   case MCS251::JSG:
   case MCS251::JSLE:
+  // Bit-test branches share the rel8 shape (opcode + bit address + rel8);
+  // operand 0 is the target for all of them. JBC is included: its taken edge
+  // branches (after clearing the bit), its fallthrough does not -- relaxing it
+  // keeps the SAME opcode/condition and only redirects the target through a
+  // trampoline, so the bit is still tested and cleared exactly once.
+  case MCS251::JB:
+  case MCS251::JNB:
+  case MCS251::JBC:
     return true;
   default:
     return false;
@@ -326,6 +337,9 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case MCS251::RRCA:
   case MCS251::RLCA:
   case MCS251::CLRC:
+  // CY bit forms: opcode+1 of the single-byte classic bit family.
+  case MCS251::SETBC:
+  case MCS251::CPLC:
     return 1;
   case MCS251::MOVADDR32:
     return 8;
@@ -365,6 +379,18 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case MCS251::MOV8rmD:
   case MCS251::MOV8mrD:
     return 4;
+  // Bit-addressed ops: opcode + bit address.
+  case MCS251::SETBBIT:
+  case MCS251::CLRBIT:
+  case MCS251::CPLBIT:
+  case MCS251::MOVCBIT:
+  case MCS251::MOVBITC:
+    return 2;
+  // Bit branches: opcode + bit address + rel8.
+  case MCS251::JB:
+  case MCS251::JNB:
+  case MCS251::JBC:
+    return 3;
   case MCS251::MOV8a:
   case MCS251::MOV8ra:
     // Always exactly 2 bytes.  The classic rn form (0xe8+rn / 0xf8+rn) has a
@@ -469,4 +495,44 @@ MCS251InstrInfo::getInstSizeVerifyMode(const MachineInstr &MI) const {
   // AsmPrinter check alive in release builds too; no other target returns
   // it, so the release-build cost stays an MCS251-local opt-in.
   return InstSizeVerifyMode::ExactSizeAlways;
+}
+
+// The AsmPrinter's ExactSize check compares emitted bytes to
+// getInstSizeInBytes; it never inspects the tablegen MCInstrDesc `Size`.  A
+// wrong `let Size = N` on the bit-addressed family therefore used to be
+// invisible (the base MCS251Inst class defaults Size=1).  Catch that drift
+// here, on any MI the machine verifier visits, by requiring the TD Size to
+// equal the exact encoded size from getInstSizeInBytes.
+bool MCS251InstrInfo::verifyInstruction(const MachineInstr &MI,
+                                        StringRef &ErrInfo) const {
+  unsigned Opc = MI.getOpcode();
+  switch (Opc) {
+  case MCS251::SETBBIT:
+  case MCS251::CLRBIT:
+  case MCS251::CPLBIT:
+  case MCS251::MOVCBIT:
+  case MCS251::MOVBITC:
+  case MCS251::JB:
+  case MCS251::JNB:
+  case MCS251::JBC:
+  case MCS251::SETBC:
+  case MCS251::CPLC:
+    break;
+  default:
+    return true;
+  }
+  unsigned TDSize = get(Opc).getSize();
+  unsigned ExactSize = getInstSizeInBytes(MI);
+  if (TDSize != ExactSize) {
+    // ErrInfo is a StringRef that MachineVerifier consumes synchronously right
+    // after this call, so a function-local static buffer is a safe owner.
+    static thread_local std::string SizeErrMsg;
+    SizeErrMsg = ("MCS251: tablegen Size (" + Twine(TDSize) + ") of '" +
+                  getName(Opc) + "' disagrees with the encoded size (" +
+                  Twine(ExactSize) + ")")
+                     .str();
+    ErrInfo = StringRef(SizeErrMsg);
+    return false;
+  }
+  return true;
 }

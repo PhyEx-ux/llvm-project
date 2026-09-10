@@ -60,6 +60,16 @@ public:
   SDValue LowerSTACKRESTORE(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerAddrSpaceCast(SDValue Op, SelectionDAG &DAG) const;
 
+  // MCS251 bit-access intrinsics (BIT task BT03):
+  //   llvm.mcs251.bit.read/set/clear/toggle
+  // set/clear/toggle are chain-only INTRINSIC_VOID nodes; read is an
+  // INTRINSIC_W_CHAIN with an i1 result that the type legalizer promotes to
+  // i8 via ReplaceNodeResults.  Both entry points build the same fixed
+  // MOV C,bit + materialise or single RMW instruction shape.
+  SDValue LowerBitIntrinsic(SDValue Op, SelectionDAG &DAG) const;
+  void ReplaceBitReadResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
+                             SelectionDAG &DAG) const;
+
   MachineBasicBlock *
   EmitInstrWithCustomInserter(MachineInstr &MI,
                               MachineBasicBlock *MBB) const override;

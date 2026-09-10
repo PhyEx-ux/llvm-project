@@ -1,0 +1,94 @@
+# RUN: split-file %s %t
+# RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -mcs251-object-format=elf -filetype=obj %t/neg.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+# RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -mcs251-object-format=elf -filetype=obj %t/wide.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+# RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -mcs251-object-format=elf -filetype=obj %t/oob300.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+# RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -mcs251-object-format=elf -filetype=obj %t/symbolic.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=BADSYM
+#
+# The printer path (-filetype=asm) must reject exactly the same inputs as the
+# object path: the shared validator (MCS251BitAddr.h) is used by both
+# MCS251InstPrinter::printBitAddr and MCS251MCCodeEmitter::putBitAddr, so an
+# out-of-range/symbolic bit address is loud on both.
+# RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog %t/neg.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+# RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog %t/wide.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+# RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog %t/oob300.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+#
+# Bit branches carry their bit address in operand 1 (operand 0 is the branch
+# target); the same range check must apply there too (JB/JNB/JBC).
+# RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -mcs251-object-format=elf -filetype=obj %t/branch-neg.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+# RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog %t/branch-neg.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+#
+# BT01 negative cases: the bit-address field must be a constant in [0, 255].
+# A negative value or an out-of-range value must be rejected loudly rather
+# than silently masked to a different, valid-looking bit address. (The pre-fix
+# emitter used put8(), which truncated -1/256/300 to 0xff/0x00/0x2c; these
+# assertions are the reverse of that bug.)
+#BAD: LLVM ERROR: MCS251: bit address
+#BADSYM: LLVM ERROR: MCS251: bit address must be a constant immediate
+#
+#--- neg.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+tracksRegLiveness: false
+body: |
+  bb.0:
+    SETBBIT -1
+    ERET
+...
+#--- wide.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+tracksRegLiveness: false
+body: |
+  bb.0:
+    SETBBIT 256
+    ERET
+...
+#--- oob300.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+tracksRegLiveness: false
+body: |
+  bb.0:
+    SETBBIT 300
+    ERET
+...
+#--- branch-neg.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+tracksRegLiveness: false
+body: |
+  bb.0:
+    JB %bb.1, 300
+  bb.1:
+    ERET
+...
+#--- symbolic.mir
+--- |
+  target triple = "mcs251"
+  declare void @sym()
+  define void @f() { ret void }
+...
+---
+name: f
+tracksRegLiveness: false
+body: |
+  bb.0:
+    SETBBIT @sym
+    ERET
+...

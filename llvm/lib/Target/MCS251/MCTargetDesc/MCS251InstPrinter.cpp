@@ -1,6 +1,7 @@
 //===-- MCS251InstPrinter.cpp - Print MCS-251 MC instructions ------------===//
 
 #include "MCS251InstPrinter.h"
+#include "MCS251BitAddr.h"
 #include "MCS251MCTargetDesc.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -91,6 +92,19 @@ void MCS251InstPrinter::printDir8(const MCInst *MI, unsigned OpNo,
                                   raw_ostream &O) {
   assert(MI->getOperand(OpNo).isImm() && "dir8 must be an immediate");
   O << format("0x%02x", MI->getOperand(OpNo).getImm() & 0xff);
+}
+
+// Bit address (`setb 0x00`, `mov c, 0x2a`). Part of the address syntax, so
+// no '#' prefix.
+//
+// The value is validated through the SAME helper as the object emitter
+// (MCS251BitAddr.h), not masked: `-filetype=asm` must reject an out-of-range
+// or symbolic bit address exactly like `-filetype=obj` does. Masking with
+// `& 0xff` (and an assert-only guard) silently printed setb 0xff/0x00/0x2c
+// for -1/256/300 in release builds, so the text and object paths disagreed.
+void MCS251InstPrinter::printBitAddr(const MCInst *MI, unsigned OpNo,
+                                     raw_ostream &O) {
+  O << format("0x%02x", MCS251::getBitAddr(MI->getOperand(OpNo)));
 }
 
 // Frame-slot address (mcs251_stack operand): OpNo is the base register

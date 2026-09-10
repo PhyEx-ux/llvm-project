@@ -23,6 +23,11 @@ public:
   void printImm16(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printDis16(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printDir8(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+  // Bit address of a bit-addressed operand (`setb 0x00`): the numeric bit
+  // address itself, never the backing byte. Validated (range + immediate) by
+  // the shared MCS251::getBitAddr helper, so the text path rejects the same
+  // inputs as the object emitter.
+  void printBitAddr(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   // Frame-slot address @dr60/@dr16<+/-displacement> (mcs251_stack operand,
   // two MC operands: base register + signed 16-bit displacement).
   void printStackAddr(const MCInst *MI, unsigned OpNo, raw_ostream &O);

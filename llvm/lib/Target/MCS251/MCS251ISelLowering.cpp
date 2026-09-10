@@ -11,6 +11,8 @@
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsMCS251.h"
 #include "llvm/IR/Mangler.h"
 #include "llvm/IR/RuntimeLibcalls.h"
 #include "llvm/MC/MCSymbol.h"
@@ -188,6 +190,16 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
     setOperationAction(ISD::ATOMIC_LOAD, VT, Custom);
     setOperationAction(ISD::ATOMIC_STORE, VT, Custom);
   }
+
+  // Controlled bit-access intrinsics (BIT BT03). set/clear/toggle are
+  // chain-only INTRINSIC_VOID nodes; read is an INTRINSIC_W_CHAIN with an i1
+  // result. The type legalizer promotes that i1 through ReplaceNodeResults
+  // (registered on MVT::i1), and the operation legalizer handles the
+  // chain-only writes and the promoted read's re-legalization through
+  // LowerOperation (registered on MVT::Other).
+  setOperationAction(ISD::INTRINSIC_W_CHAIN, MVT::Other, Custom);
+  setOperationAction(ISD::INTRINSIC_W_CHAIN, MVT::i1, Custom);
+  setOperationAction(ISD::INTRINSIC_VOID, MVT::Other, Custom);
 
   // i64 and true f64 IR remain unsupported. In particular, double=32 in
   // TargetInfo is a frontend ABI choice, not permission to route f64 DAG nodes
@@ -456,6 +468,24 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
   case ISD::ATOMIC_LOAD:
   case ISD::ATOMIC_STORE:
     report_fatal_error("MCS251: atomic memory operations are not supported");
+  case ISD::INTRINSIC_VOID:
+  case ISD::INTRINSIC_W_CHAIN: {
+    // Both node shapes carry the intrinsic ID as operand 1 (operand 0 is the
+    // chain). The set/clear/toggle intrinsics are chain-only writes; the read
+    // intrinsic is an INTRINSIC_W_CHAIN, but its illegal i1 result is promoted
+    // by the type legalizer (ReplaceNodeResults) before operation
+    // legalization, so it never reaches here. Any other target intrinsic has
+    // no lowering.
+    unsigned IID = Op.getConstantOperandVal(1);
+    switch (IID) {
+    case Intrinsic::mcs251_bit_set:
+    case Intrinsic::mcs251_bit_clear:
+    case Intrinsic::mcs251_bit_toggle:
+      return LowerBitIntrinsic(Op, DAG);
+    default:
+      report_fatal_error("MCS251: unsupported target intrinsic");
+    }
+  }
   }
 }
 
@@ -474,6 +504,10 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
 void MCS251TargetLowering::ReplaceNodeResults(
     SDNode *N, SmallVectorImpl<SDValue> &Results, SelectionDAG &DAG) const {
   EVT VT = N->getValueType(0);
+  // Controlled bit read (BIT BT03): the i1 result is illegal, so the type
+  // legalizer routes it here. Handle it before the f32/f64/i64 cases.
+  if (N->getOpcode() == ISD::INTRINSIC_W_CHAIN && VT == MVT::i1)
+    return ReplaceBitReadResults(N, Results, DAG);
   if (VT == MVT::f32 || VT == MVT::f64 || VT == MVT::i64) {
     // Attempt to constant-fold this node. FoldConstantArithmetic handles
     // binary integer ops (add, sub, mul, udiv, etc.), unary and binary FP
@@ -706,6 +740,128 @@ SDValue MCS251TargetLowering::LowerAddrSpaceCast(SDValue Op,
                        "an explicit checked conversion");
   }
   report_fatal_error("MCS251: unsupported address-space cast");
+}
+
+//===----------------------------------------------------------------------===//
+//  Controlled bit-access intrinsics (BIT task BT03)
+//===----------------------------------------------------------------------===//
+//
+// llvm.mcs251.bit.read/set/clear/toggle are the ONLY routes into the bit
+// address space; ordinary addrspace(5) loads/stores stay fail-closed (see
+// checkDataAddressSpace). The bit address is an immarg i32 constant in
+// [0, 255]; ImmArg<0> makes the IR verifier reject a dynamic address before
+// any backend code runs, and the range/constant checks below are the
+// backend's own loud guard.
+//
+// Instruction mapping:
+//   set    -> SETBBIT bit      clear -> CLRBIT bit     toggle -> CPLBIT bit
+//   read   -> MOVCBIT bit ; materialise the carry into a byte
+// Where the bit address names PSW.CY (0xd7) the flag-bearing C form is used
+// instead (SETBC / CLRC / CPLC), so the virtual PSW register stays accurate
+// (the bit forms do not declare a PSW def/use).
+//
+// toggle is deliberately a single CPL: it must NOT be split into a read
+// followed by a write (that would be a non-atomic read-modify-write).
+//
+// read builds one atomic sample group that cannot be reordered by the
+// scheduler:
+//
+//   mov c, bit    (MOVCBIT, reads the bit into CY; Defs=[PSW])
+//   mov a, #0     (MOVAI)
+//   rlc a         (RLCA: A = 0<<1 | CY = CY; Uses/Defs=[PSW,A])
+//   mov <dst>, a  (MOV8ra: the i8 result, 0 or 1)
+//
+// The group is pinned with a Glue chain and the implicit PSW/A register
+// dependencies, so no other instruction can be inserted between the sample
+// and its materialisation.
+
+// Validate the immarg bit-address constant of a bit intrinsic. A dynamic
+// (non-constant) operand is impossible after ImmArg<0>, but this is the
+// backend's own check and stays loud in release builds. The value is read
+// zero-extended: the operand is emitted as an i16 target constant precisely
+// so bit addresses >= 0x80 are not sign-extended back to a negative i8.
+static unsigned getBitIntrinsicAddr(const SDNode *N, unsigned OpNo) {
+  const ConstantSDNode *C = dyn_cast<ConstantSDNode>(N->getOperand(OpNo));
+  if (!C)
+    report_fatal_error("MCS251: bit intrinsic address must be a constant "
+                       "immediate (dynamic bit addresses are not supported)");
+  int64_t V = C->getZExtValue();
+  if (V < 0 || V > 0xff)
+    report_fatal_error("MCS251: bit intrinsic address " + Twine(V) +
+                       " is out of range [0, 255]");
+  return unsigned(V);
+}
+
+// The bit instruction for a set/clear/toggle request. Bit address 0xd7 is
+// PSW.CY, so it routes to the flag-bearing C form (the bit-address form would
+// not declare the PSW def/use the virtual flags register needs).
+static unsigned getBitWriteOpcode(unsigned IID, unsigned BitAddr) {
+  const bool Carry = BitAddr == 0xd7;
+  switch (IID) {
+  case Intrinsic::mcs251_bit_set:
+    return Carry ? MCS251::SETBC : MCS251::SETBBIT;
+  case Intrinsic::mcs251_bit_clear:
+    return Carry ? MCS251::CLRC : MCS251::CLRBIT;
+  case Intrinsic::mcs251_bit_toggle:
+    return Carry ? MCS251::CPLC : MCS251::CPLBIT;
+  default:
+    llvm_unreachable("unexpected MCS251 bit intrinsic");
+  }
+}
+
+SDValue MCS251TargetLowering::LowerBitIntrinsic(SDValue Op,
+                                                SelectionDAG &DAG) const {
+  SDNode *N = Op.getNode();
+  SDLoc DL(Op);
+  SDValue Chain = N->getOperand(0);
+  unsigned IID = N->getConstantOperandVal(1);
+  unsigned BitAddr = getBitIntrinsicAddr(N, 2);
+  unsigned Opc = getBitWriteOpcode(IID, BitAddr);
+  // The C forms take no bit-address operand (the mnemonic names the carry).
+  // The address is emitted as an i16 target constant so values >= 0x80 are
+  // not sign-extended to a negative i8 immediate (see getBitIntrinsicAddr).
+  SmallVector<SDValue, 2> Ops;
+  if (BitAddr != 0xd7)
+    Ops.push_back(DAG.getTargetConstant(BitAddr, DL, MVT::i16));
+  Ops.push_back(Chain);
+  return SDValue(DAG.getMachineNode(Opc, DL, MVT::Other, Ops), 0);
+}
+
+// Type-legalizer hook: the read intrinsic is an INTRINSIC_W_CHAIN whose i1
+// result is illegal on this target (no i1 register class), so its first
+// result is promoted. Build the whole sample group here and hand the generic
+// promotion machinery a TRUNCATE(i1) of the i8 the group produces; the
+// truncate is then promoted back to the i8 vreg, which already holds 0/1.
+void MCS251TargetLowering::ReplaceBitReadResults(
+    SDNode *N, SmallVectorImpl<SDValue> &Results, SelectionDAG &DAG) const {
+  assert(N->getOpcode() == ISD::INTRINSIC_W_CHAIN &&
+         N->getValueType(0) == MVT::i1 &&
+         "unexpected bit-read legalization request");
+  SDLoc DL(N);
+  SDValue Chain = N->getOperand(0);
+  unsigned BitAddr = getBitIntrinsicAddr(N, 2);
+
+  // mov c, bit -- sample the bit into CY. This is the side-effecting access:
+  // it consumes and produces the memory chain.
+  SDValue MovC(DAG.getMachineNode(
+                   MCS251::MOVCBIT, DL, DAG.getVTList(MVT::Other, MVT::Glue),
+                   {DAG.getTargetConstant(BitAddr, DL, MVT::i16), Chain}),
+               0);
+  SDValue Sample = MovC.getValue(0);
+  // mov a, #0 ; rlc a ; mov <dst>, a -- A = CY in {0, 1}.
+  SDValue Zero(DAG.getMachineNode(MCS251::MOVAI, DL, MVT::Glue,
+                                  {DAG.getTargetConstant(0, DL, MVT::i8),
+                                   MovC.getValue(1)}),
+               0);
+  SDValue Rlc(DAG.getMachineNode(MCS251::RLCA, DL, MVT::Glue, {Zero}), 0);
+  SDValue Byte(DAG.getMachineNode(MCS251::MOV8ra, DL, MVT::i8, {Rlc}), 0);
+
+  // Hand back a TRUNCATE to i1 (same shape as PPC's i1 intrinsic promotion):
+  // the type legalizer will then promote this truncate, and since i8 truncates
+  // to i1 by keeping the low bit -- and Byte is already exactly 0 or 1 -- the
+  // promoted value is Byte itself. The chain result is returned unchanged.
+  Results.push_back(DAG.getNode(ISD::TRUNCATE, DL, MVT::i1, Byte));
+  Results.push_back(Sample);
 }
 
 // Low 32 bits of (AH:AL)*(BH:BL): AL*BL + ((AH*BL + AL*BH) << 16).

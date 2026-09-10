@@ -1,0 +1,95 @@
+# RUN: split-file %s %t
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -mcs251-object-format=elf -filetype=obj %t/bit.mir -o %t/bit.o
+# RUN: llvm-objcopy --dump-section=.text=%t/bit.bin %t/bit.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == 'd200d207d208d27fd280d2ffc221b248a22a922ad3c3b3aa', b.hex()" %t/bit.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -mcs251-object-format=elf -filetype=obj %t/branch.mir -o %t/branch.o
+# RUN: llvm-objcopy --dump-section=.text=%t/branch.bin %t/branch.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '200007308004107f01aaaa', b.hex()" %t/branch.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -mcs251-object-format=elf -filetype=obj %t/back.mir -o %t/back.o
+# RUN: llvm-objcopy --dump-section=.text=%t/back.bin %t/back.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '200000aa', b.hex()" %t/back.bin
+#
+# BT01: bit-addressed instruction encodings, byte-exact against the
+# sdas251 V05.50.4 source-mode gold (MCS251MCCodeEmitter, putOpcode source
+# rule). Every opcode here has a low nibble < 6, so no A5 source-mode escape
+# is inserted. The bit-address field is the bit address itself (0x00-0xff),
+# never the backing byte.
+#
+#   setb bit  D2 B     clr bit  C2 B     cpl bit  B2 B
+#   mov c,bit A2 B     mov bit,c 92 B
+#   jb  20 B rel8      jnb 30 B rel8     jbc 10 B rel8
+#   setb c D3          clr c C3          cpl c B3
+#
+# The all.mir corpus walks the address-space edges (0, 7, 8, 127, 128, 255;
+# bit address 0 is legal):
+#   D2 00  D2 07  D2 08  D2 7F  D2 80  D2 FF  C2 21  B2 48
+#   A2 2A  92 2A  D3  C3  B3  AA(eret)
+#
+# The branch MIR pins the rel8 base: the displacement is measured from the
+# byte after the 3-byte bit branch, so with the target block 10 bytes in,
+# jb  (next byte 3) -> +7, jnb (next byte 6) -> +4, jbc (next byte 9) -> +1.
+# back.mir's branch is a FORWARD branch whose target is the next block: jb at
+# offset 0 (3 bytes) and bb.1 at offset 3 give a displacement of 3 - 3 = 0
+# (the name reflects that the branch is laid out before its target, not a
+# negative displacement).
+#
+# LLVM_ERROR: the MIR below is assembled through the real MC emitter, so the
+# exact-size verification (getInstSizeVerifyMode == ExactSizeAlways) also
+# checks every declared size against the emitted byte count.
+#
+#--- bit.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+tracksRegLiveness: false
+body: |
+  bb.0:
+    SETBBIT 0
+    SETBBIT 7
+    SETBBIT 8
+    SETBBIT 127
+    SETBBIT 128
+    SETBBIT 255
+    CLRBIT 33
+    CPLBIT 72
+    MOVCBIT 42, implicit-def $psw
+    MOVBITC 42, implicit $psw
+    SETBC implicit-def $psw
+    CLRC implicit-def $psw
+    CPLC implicit-def $psw, implicit $psw
+    ERET
+...
+#--- branch.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+tracksRegLiveness: false
+body: |
+  bb.0:
+    JB %bb.2, 0
+    JNB %bb.2, 128
+    JBC %bb.2, 127
+    ERET
+  bb.2:
+    ERET
+...
+#--- back.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+tracksRegLiveness: false
+body: |
+  bb.0:
+    JB %bb.1, 0
+  bb.1:
+    ERET
+...

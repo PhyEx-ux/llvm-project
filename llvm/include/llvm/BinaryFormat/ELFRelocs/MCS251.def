@@ -20,3 +20,9 @@ ELF_RELOC(R_MCS251_PC8,   6)
 ELF_RELOC(R_MCS251_J16,   7)
 ELF_RELOC(R_MCS251_J11,   8)
 ELF_RELOC(R_MCS251_ISR_REF, 9)
+// Bit-object relocations (BT00/BT12). R_MCS251_BIT_REF is the identity
+// association inside .rela.mcs251.bit (one per 8-byte bit-object record, at
+// record+4); R_MCS251_BITADDR8 writes a resolved 8-bit bit address into the
+// address field of a bit instruction. See lld/MCS251/BIT-OBJECT-CONTRACT.md.
+ELF_RELOC(R_MCS251_BIT_REF,   10)
+ELF_RELOC(R_MCS251_BITADDR8,  11)

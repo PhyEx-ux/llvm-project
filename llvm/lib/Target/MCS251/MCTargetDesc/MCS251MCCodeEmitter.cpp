@@ -48,6 +48,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "MCS251BitAddr.h"
 #include "MCS251MCCodeEmitter.h"
 #include "MCS251FixupKinds.h"
 #include "MCS251MCTargetDesc.h"
@@ -151,6 +152,16 @@ static void putImm8(const MCOperand &Op, SmallVectorImpl<char> &CB) {
     report_fatal_error("MCS251: symbolic 8-bit immediate is not supported; "
                        "use a 16-bit or 24-bit operand");
   put8(unsigned(Op.getImm()), CB);
+}
+
+// The bit-address field of a bit-addressed instruction.  It is a plain 8-bit
+// value (0x00-0xff), but the range must be validated BEFORE any masking:
+// a -1/256/300 that reached here through a MIR immediate would otherwise be
+// silently truncated to a different (valid-looking) bit address.  The check
+// itself is shared with the text-assembly printer (MCS251BitAddr.h) so both
+// output paths reject the same inputs.
+static void putBitAddr(const MCOperand &Op, SmallVectorImpl<char> &CB) {
+  put8(MCS251::getBitAddr(Op), CB);
 }
 
 // An @wr+dis16 / @dr+dis16 displacement: always a plain 16-bit immediate.
@@ -410,6 +421,37 @@ void MCS251MCCodeEmitter::encodeInstruction(
   case MCS251::RRCA: B(0x13); break;
   case MCS251::RLCA: B(0x33); break;
   case MCS251::CLRC: B(0xc3); break;
+
+  // Bit-addressed instructions (8051 classic, Area II).  Every opcode below
+  // has a low nibble of 0 or 2 (< 6), so putOpcode emits it bare -- no A5
+  // source-mode escape.  The operand byte is the bit address itself.
+  // sdas251 V05.50.4 source-mode gold:
+  //   setb 0x00 = D2 00, setb 0xff = D2 FF, clr 0x21 = C2 21,
+  //   cpl 0x48 = B2 48, mov c,0x2a = A2 2A, mov 0x2a,c = 92 2A,
+  //   jnb 0x00,rel = 30 00 <rel>, jb 0x80,rel = 20 80 <rel>,
+  //   jbc 0x7f,rel = 10 7F <rel>, setb c = D3, clr c = C3, cpl c = B3.
+  case MCS251::SETBBIT: B(0xd2); putBitAddr(MI.getOperand(0), CB); break;
+  case MCS251::CLRBIT:  B(0xc2); putBitAddr(MI.getOperand(0), CB); break;
+  case MCS251::CPLBIT:  B(0xb2); putBitAddr(MI.getOperand(0), CB); break;
+  case MCS251::MOVCBIT: B(0xa2); putBitAddr(MI.getOperand(0), CB); break;
+  case MCS251::MOVBITC: B(0x92); putBitAddr(MI.getOperand(0), CB); break;
+  // Bit branches: operand 0 is the branch target, operand 1 the bit address
+  // (see the operand-order note in MCS251InstrInfo.td).
+  case MCS251::JB:
+    B(0x20); putBitAddr(MI.getOperand(1), CB);
+    putBranch(MI.getOperand(0), CB.size(), CB, Fixups);
+    break;
+  case MCS251::JNB:
+    B(0x30); putBitAddr(MI.getOperand(1), CB);
+    putBranch(MI.getOperand(0), CB.size(), CB, Fixups);
+    break;
+  case MCS251::JBC:
+    B(0x10); putBitAddr(MI.getOperand(1), CB);
+    putBranch(MI.getOperand(0), CB.size(), CB, Fixups);
+    break;
+  // CY forms: opcode+1 of the bit-form family (classic single byte).
+  case MCS251::SETBC: B(0xd3); break;
+  case MCS251::CPLC:  B(0xb3); break;
 
   // Compare has no output/tied operand.
   case MCS251::CMP8rr:

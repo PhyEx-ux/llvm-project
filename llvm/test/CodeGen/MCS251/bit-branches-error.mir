@@ -1,0 +1,75 @@
+# RUN: split-file %s %t
+# RUN: not llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/symrel8.mir -o /dev/null 2>&1 | FileCheck %s
+#
+# BT02 negative: a MIR-only SYMBOLIC bit branch target (not an MBB, so the
+# relaxation pass deliberately leaves it alone) that is further away than rel8
+# can reach must be rejected by the assembler's range backstop rather than
+# silently truncated. The target is an internal function defined 126+3 bytes
+# below the branch site, so the local R_MCS251_PC8 resolution is out of range.
+#CHECK: MCS251 PC-relative branch out of range
+#
+#--- symrel8.mir
+--- |
+  target triple = "mcs251"
+  define internal void @gap() { ret void }
+  define void @f() { ret void }
+...
+---
+name: gap
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r5 = MOV8ri 85
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    $r5 = ADD8ri $r5(tied-def 0), 1, implicit-def $psw
+    ERET
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    JB @gap, 0
+    ERET
+...

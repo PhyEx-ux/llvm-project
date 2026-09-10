@@ -160,8 +160,12 @@ MCS251BranchRelaxation::getInstrOffset(const MachineInstr &MI) const {
 
 bool MCS251BranchRelaxation::isInRange(const MachineInstr &Br,
                                        const MachineBasicBlock &Dest) const {
+  // rel8 is measured from the byte after the instruction. The jcc family and
+  // sjmp are 2 bytes; the bit-test branches (jb/jnb/jbc) are 3 bytes
+  // (opcode + bit address + rel8). Ask the size table instead of assuming 2.
+  unsigned BrSize = TII->getInstSizeInBytes(Br);
   int64_t Disp = static_cast<int64_t>(Blocks[Dest.getNumber()].Offset) -
-                 static_cast<int64_t>(getInstrOffset(Br) + 2);
+                 static_cast<int64_t>(getInstrOffset(Br) + BrSize);
   return isInt<8>(Disp);
 }
 
