@@ -22,7 +22,8 @@ class LLVM_LIBRARY_VISIBILITY MCS251MCInstLower {
 
   MCSymbol *GetGlobalAddressSymbol(const MachineOperand &MO) const;
   MCSymbol *GetExternalSymbolSymbol(const MachineOperand &MO) const;
-  MCOperand LowerSymbolOperand(const MachineOperand &MO, MCSymbol *Sym) const;
+  MCOperand LowerSymbolOperand(const MachineOperand &MO, MCSymbol *Sym,
+                               bool IsBitAddrPos) const;
 
 public:
   explicit MCS251MCInstLower(AsmPrinter &Printer);

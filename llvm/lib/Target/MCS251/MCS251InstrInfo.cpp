@@ -290,6 +290,29 @@ bool MCS251InstrInfo::isUncondBranchOpcode(unsigned Opc) {
   return Opc == MCS251::SJMP || Opc == MCS251::EJMP;
 }
 
+// BT12: the bit-address operand position of a bit-addressed instruction (see
+// the declaration for the contract). Only the explicit bit-addressed forms are
+// listed; the carry forms (SETBC/CLRC/CPLC) take no operand and never carry a
+// handle, precisely because the bit address is implicit in the mnemonic.
+bool MCS251InstrInfo::isBitAddrOperand(unsigned Opc, unsigned OpIdx) {
+  switch (Opc) {
+  case MCS251::SETBBIT:
+  case MCS251::CLRBIT:
+  case MCS251::CPLBIT:
+  case MCS251::MOVCBIT:
+  case MCS251::MOVBITC:
+    // The only explicit operand is the bit address.
+    return OpIdx == 0;
+  case MCS251::JB:
+  case MCS251::JNB:
+  case MCS251::JBC:
+    // Operand 0 is the branch target; operand 1 is the bit address.
+    return OpIdx == 1;
+  default:
+    return false;
+  }
+}
+
 unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   unsigned Opc = MI.getOpcode();
   // Exact encoded size of every target instruction, mirroring the MC code

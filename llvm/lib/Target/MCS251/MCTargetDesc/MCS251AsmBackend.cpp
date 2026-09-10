@@ -86,16 +86,31 @@ public:
   // The A3.4 ISR metadata association is a literal relocation: `.reloc`
   // spells the frozen protocol name and the fixup carries relocation number
   // 9 directly. No target fixup mode exists for it (zero write width, no
-  // address arithmetic, exact symbol association only).
+  // address arithmetic, exact symbol association only). BT12 adds the
+  // zero-width bit-object association (type 10) by the same route.
   std::optional<MCFixupKind> getFixupKind(StringRef Name) const override {
     if (Name == "R_MCS251_ISR_REF")
       return MCFixupKind(FirstLiteralRelocationKind + ELF::R_MCS251_ISR_REF);
+    if (Name == "R_MCS251_BIT_REF")
+      return MCFixupKind(FirstLiteralRelocationKind + ELF::R_MCS251_BIT_REF);
     return MCAsmBackend::getFixupKind(Name);
   }
 
   static bool isISRRefFixup(MCFixupKind Kind) {
     return Kind == MCFixupKind(FirstLiteralRelocationKind +
                                ELF::R_MCS251_ISR_REF);
+  }
+
+  static bool isBitRefFixup(MCFixupKind Kind) {
+    return Kind == MCFixupKind(FirstLiteralRelocationKind +
+                               ELF::R_MCS251_BIT_REF);
+  }
+
+  // The zero-width record-association relocations (ISR_REF, BIT_REF) write no
+  // byte at all: the field they point at was emitted as literal zeros and must
+  // stay zero.
+  static bool isZeroWidthAssociation(MCFixupKind Kind) {
+    return isISRRefFixup(Kind) || isBitRefFixup(Kind);
   }
 
   void applyFixup(const MCFragment &F, const MCFixup &Fixup,
@@ -112,12 +127,20 @@ public:
       // the addend: record FIRST, then apply the returned FixedValue (zero),
       // never the section offset which the REL writer needs in its payload.
       Asm->getWriter().recordRelocation(F, Fixup, Target, Value);
-      // Literal ISR_REF relocation: zero write width. The four bytes at the
-      // 24B record's symbol_reference field were emitted as literal zeros
-      // and must stay zero; no byte of the record -- and nothing beyond it
-      // -- is ever accessed.
-      if (isISRRefFixup(Fixup.getKind()))
+      // Zero-width association relocations (literal ISR_REF/BIT_REF): no write
+      // width. The field bytes were emitted as literal zeros and must stay
+      // zero; no byte of the record -- and nothing beyond it -- is accessed.
+      if (isZeroWidthAssociation(Fixup.getKind()))
         return;
+      // BITADDR8 is a write-width relocation, but its object-image field is a
+      // mandatory zero placeholder (BIT-OBJECT-CONTRACT.md §4.2): the linker
+      // writes the resolved bit address and rejects a nonzero placeholder. Keep
+      // the byte zero here explicitly rather than relying on the ELF writer's
+      // zeroed RELA FixedValue.
+      if (Fixup.getKind() == MCS251::fixup_mcs251_bitaddr8) {
+        Data[0] = 0;
+        return;
+      }
       unsigned Width;
       switch (Fixup.getKind()) {
       case FK_Data_1:
@@ -141,12 +164,18 @@ public:
       return;
     }
     if (!IsResolved) {
-      // The REL path gains no type-9 support: ISR records never reach it
-      // (the AsmPrinter hard-rejects ISR object output first), and a
-      // hand-written .reloc in a REL module is rejected here as well.
-      if (isISRRefFixup(Fixup.getKind())) {
+      // The REL path gains no bit-object support: the metadata records and the
+      // BITADDR8 address field exist only in the ELF protocol. BT_REF/BITADDR8
+      // reaching here (a hand-written .reloc in a REL module) is rejected
+      // rather than silently mistranslated.
+      if (isZeroWidthAssociation(Fixup.getKind())) {
         getContext().reportError(Fixup.getLoc(),
-                                 "MCS251 ISR requires ELF object output");
+                                 "MCS251 bit object requires ELF object output");
+        return;
+      }
+      if (Fixup.getKind() == MCS251::fixup_mcs251_bitaddr8) {
+        getContext().reportError(Fixup.getLoc(),
+                                 "MCS251 bit object requires ELF object output");
         return;
       }
       uint64_t V = Value;
@@ -193,6 +222,15 @@ public:
     case MCS251::fixup_mcs251_hi8:
       Data[0] = uint8_t(V >> (8 * (Fixup.getKind() - MCS251::fixup_mcs251_lo8)));
       return;
+    case MCS251::fixup_mcs251_bitaddr8:
+      // A resolved bit address is a full 8-bit value in [0, 255]: never
+      // sign-extended, and 0 is a legal bit address (must not be treated as a
+      // null marker). An out-of-range resolved value is a link/allocator bug.
+      if (!isUIntN(8, V))
+        getContext().reportError(Fixup.getLoc(),
+                                 "MCS251 bit address fixup out of range");
+      Data[0] = uint8_t(V & 0xff);
+      return;
     case MCS251::fixup_mcs251_16:
       if (!isIntN(16, static_cast<int64_t>(V)) && !isUIntN(16, V))
         getContext().reportError(Fixup.getLoc(),
@@ -216,10 +254,12 @@ public:
   }
 
   MCFixupKindInfo getFixupKindInfo(MCFixupKind Kind) const override {
-    // Literal relocations write no bytes: the only one this target names is
-    // R_MCS251_ISR_REF, whose info width is frozen at 0.
+    // Literal relocations write no bytes: R_MCS251_ISR_REF and the BT12
+    // R_MCS251_BIT_REF record association have a frozen 0 write width.
     if (isISRRefFixup(Kind))
       return {"R_MCS251_ISR_REF", 0, 0, 0};
+    if (isBitRefFixup(Kind))
+      return {"R_MCS251_BIT_REF", 0, 0, 0};
     static const MCFixupKindInfo Infos[MCS251::NumTargetFixupKinds -
                                        FirstTargetFixupKind] = {
         {"fixup_mcs251_16", 0, 16, 0},
@@ -227,6 +267,9 @@ public:
         {"fixup_mcs251_lo8", 0, 8, 0},
         {"fixup_mcs251_mid8", 0, 8, 0},
         {"fixup_mcs251_hi8", 0, 8, 0},
+        // The bit-address field is one byte; the producer zero-fills it and the
+        // linker rewrites it (R_MCS251_BITADDR8).
+        {"fixup_mcs251_bitaddr8", 0, 8, 0},
     };
     if (Kind < FirstTargetFixupKind)
       return MCAsmBackend::getFixupKindInfo(Kind);

@@ -9,6 +9,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/ConstantFolding.h"
+#include "llvm/BinaryFormat/MCS251Bit.h"
 #include "llvm/BinaryFormat/MCS251ISR.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
@@ -782,6 +783,143 @@ static bool isCanonicalISRSlotText(StringRef SlotText, uint64_t &SlotVal) {
   return true;
 }
 
+//===----------------------------------------------------------------------===//
+// BT12: persistent bit-object placeholders and their escape gate.
+//===----------------------------------------------------------------------===//
+
+// \return true when \p GV is a bit-object placeholder (structural attribute).
+static bool isMCS251BitObjectGlobal(const GlobalVariable &GV) {
+  return GV.hasAttribute(MCS251Bit::BitObjectAttrName);
+}
+
+// A bit object must stay alive across optimization without being used as
+// storage. The frozen registration channel is the standard keepalive root
+// (llvm.used / llvm.compiler.used): appending linkage, an array-of-pointers
+// initializer and the "llvm.metadata" section. Same structural rule as the ISR
+// A2.2 exemption -- never a bare name/section test.
+static bool isMCS251BitKeepaliveRoot(const GlobalVariable &GV) {
+  if (GV.getName() != "llvm.used" && GV.getName() != "llvm.compiler.used")
+    return false;
+  if (!GV.hasInitializer() || !GV.hasAppendingLinkage())
+    return false;
+  const auto *ArrTy = dyn_cast<ArrayType>(GV.getInitializer()->getType());
+  if (!ArrTy || !ArrTy->getElementType()->isPointerTy())
+    return false;
+  if (!GV.hasSection() || GV.getSection() != "llvm.metadata")
+    return false;
+  return true;
+}
+
+// Verify that EVERY use path out of the aggregate constant \p C terminates at
+// a structurally verified keepalive root (llvm.used / llvm.compiler.used). Unlike
+// a reachability walk, one path reaching a root does not excuse the constant:
+// an aggregate uniqued between a keepalive root and an ordinary escape (e.g.
+// `@llvm.used = ... [ptr @flag]` shared with `ret [1 x ptr] [ptr @flag]`) has a
+// second, non-registration branch, so the whole constant is not exempt. Only
+// whole aggregates and single-operand no-op pointer casts may act as
+// intermediate nodes; any other user (an instruction, an ordinary global, a
+// GEP constant) is an escape.
+static bool isFullyKeepaliveConstant(const Constant *C) {
+  SmallPtrSet<const Constant *, 32> Seen;
+  SmallVector<const Constant *, 8> Work;
+  Work.push_back(C);
+  while (!Work.empty()) {
+    const Constant *Cur = Work.pop_back_val();
+    if (!Seen.insert(Cur).second)
+      continue;
+    for (const User *U : Cur->users()) {
+      if (const auto *GV = dyn_cast<GlobalVariable>(U)) {
+        if (!isMCS251BitKeepaliveRoot(*GV))
+          return false;
+        continue;
+      }
+      if (const auto *UC = dyn_cast<Constant>(U)) {
+        if (isa<ConstantAggregate>(UC)) {
+          Work.push_back(UC);
+          continue;
+        }
+        if (const auto *CE = dyn_cast<ConstantExpr>(UC))
+          if (CE->getNumOperands() == 1 &&
+              (CE->getOpcode() == Instruction::BitCast ||
+               CE->getOpcode() == Instruction::AddrSpaceCast)) {
+            Work.push_back(UC);
+            continue;
+          }
+        return false;
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+// A bit-object placeholder is object identity only: it must never be used as
+// ordinary storage. Reject every escape the frozen handle contract forbids
+// (ordinary load/store, GEP, cast, ptrtoint, a call argument, alias/ifunc, or a
+// constant expression / initializer export). The only accepted use of a handle
+// is the verified keepalive registration that keeps it alive; there is no
+// symbolic bit-access intrinsic yet (the frontend handle contract P09 is not
+// frozen), so a call or operand-bundle use is always an escape today. This runs
+// in the target entry pass, so it also applies with the generic verifier
+// disabled.
+static Error verifyMCS251BitObjects(const Module &M) {
+  auto bitReject = [](const GlobalVariable &GV, StringRef What) {
+    return reject(
+        (Twine("MCS251 bit object '") + GV.getName() + "'" + What).str());
+  };
+  for (const GlobalVariable &GV : M.globals()) {
+    if (!isMCS251BitObjectGlobal(GV))
+      continue;
+    if (GV.isThreadLocal() || GV.getAddressSpace() != 0 || GV.hasSection() ||
+        GV.hasComdat() ||
+        (!GV.hasExternalLinkage() && !GV.hasLocalLinkage() &&
+         !GV.hasPrivateLinkage()) ||
+        GV.getVisibility() != GlobalValue::DefaultVisibility ||
+        GV.getDLLStorageClass() != GlobalValue::DefaultStorageClass ||
+        GV.hasCommonLinkage())
+      return bitReject(GV, ": unsupported placement or linkage");
+    if (!GV.getValueType()->isIntegerTy(8))
+      return bitReject(GV, ": placeholder must be an i8 global");
+    if (!GV.isDeclaration()) {
+      const auto *CI = dyn_cast<ConstantInt>(GV.getInitializer());
+      if (!CI || CI->getValue().ugt(1))
+        return bitReject(GV, ": initializer must be the constant 0 or 1");
+    }
+    for (const User *U : GV.users()) {
+      if (isa<GlobalAlias>(U) || isa<GlobalIFunc>(U))
+        return bitReject(GV, ": handle must not escape through alias/ifunc");
+      // A call or an operand-bundle use is rejected outright: no target
+      // intrinsic consumes a bit-object pointer handle yet, and a name-prefix
+      // test is not an intrinsic identity. A same-named declaration that is
+      // not a real intrinsic, and a real intrinsic carrying the handle in an
+      // operand bundle, are both escapes.
+      if (isa<CallBase>(U))
+        return bitReject(GV,
+                         ": handle must not be used by a call or operand "
+                         "bundle; no symbolic bit intrinsic consumes a handle "
+                         "yet");
+      if (isa<Instruction>(U))
+        return bitReject(GV,
+                         ": handle escape (ordinary load/store/GEP/cast/"
+                         "ptrtoint/instruction use); a bit object has no byte "
+                         "address");
+      if (const auto *C = dyn_cast<Constant>(U)) {
+        // Require every use path of this constant to stay inside verified
+        // keepalive registration; a shared aggregate with a second, ordinary
+        // branch is not exempt.
+        if (isFullyKeepaliveConstant(C))
+          continue;
+        return bitReject(GV,
+                         ": handle must not escape through a constant expression "
+                         "or initializer");
+      }
+      return bitReject(GV,
+                       ": handle escape; a bit object has no byte address");
+    }
+  }
+  return Error::success();
+}
+
 // Verify the A2 structural contract for every interrupt entry in the module.
 // Ordinary functions without the CC/attribute pair are completely unaffected.
 static Error verifyMCS251ISRStructure(const Module &M) {
@@ -959,6 +1097,10 @@ Error llvm::MCS251::verifyModuleContract(const Module &M,
   // off. The A2 structure logic is reused verbatim; no safety-closure
   // analysis is added.
   if (Error Err = verifyMCS251ISRStructure(M))
+    return Err;
+
+  // BT12: persistent bit-object placeholder structure and escape gate.
+  if (Error Err = verifyMCS251BitObjects(M))
     return Err;
 
   SmallPtrSet<const Type *, 32> Seen;

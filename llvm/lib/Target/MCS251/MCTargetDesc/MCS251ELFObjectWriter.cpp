@@ -52,6 +52,11 @@ public:
       return ELF::R_MCS251_MID8;
     case MCS251::fixup_mcs251_hi8:
       return ELF::R_MCS251_HI8;
+    case MCS251::fixup_mcs251_bitaddr8:
+      // BT12: the bit-address field of a bit instruction whose operand is a
+      // persistent bit-object symbol. Width 1; the linker resolves the bit
+      // number and writes it (the object field is a zero placeholder).
+      return ELF::R_MCS251_BITADDR8;
     default:
       report_fatal_error("MCS251 ELF: unsupported relocation fixup");
     }
@@ -60,8 +65,16 @@ public:
   // A3.4: ISR_REF records must keep the exact named function symbol. Folding
   // a local ISR symbol to a STT_SECTION reference would destroy the precise
   // per-function identity the object protocol (and the linker) validate.
+  //
+  // BT12: the same exact-symbol rule applies to both bit relocations. A
+  // R_MCS251_BIT_REF association is resolved by the linker to the STT_OBJECT
+  // it names (a section+addend fold would have no symbol to identify), and a
+  // R_MCS251_BITADDR8 field must name the defining bit object so the linker can
+  // look its allocated bit address up in the ledger. A section-relative fold
+  // would silently drop the identity entirely.
   bool needsRelocateWithSymbol(const MCValue &, unsigned Type) const override {
-    return Type == ELF::R_MCS251_ISR_REF;
+    return Type == ELF::R_MCS251_ISR_REF || Type == ELF::R_MCS251_BIT_REF ||
+           Type == ELF::R_MCS251_BITADDR8;
   }
 };
 } // namespace

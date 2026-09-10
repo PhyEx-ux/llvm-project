@@ -25,18 +25,30 @@
 #define LLVM_LIB_TARGET_MCS251_MCTARGETDESC_MCS251BITADDR_H
 
 #include "llvm/ADT/Twine.h"
+#include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cstdint>
 
 namespace llvm {
 namespace MCS251 {
 
+/// MCSymbolRefExpr specifier for a bit-address operand that names a persistent
+/// bit object (BT12). The AsmPrinter's MCInstLower attaches it when the global
+/// is a marked bit-object placeholder; the MC emitter then emits a zero field
+/// plus R_MCS251_BITADDR8 instead of a constant immediate, and the printer
+/// prints the symbol. An arbitrary symbol on a bit operand (a MIR author's
+/// mistake) carries no specifier and stays rejected by the immediate validator.
+enum {
+  S_BITADDR = MCSymbolRefExpr::FirstTargetSpecifier,
+};
+
 // Validate a bit-address operand and return its value in [0, 255].  Report a
-// fatal error (effective in release builds too) for a symbolic operand or a
-// value outside the 8-bit bit-address space.  A bit address is never symbolic
-// -- it is a constant from the intrinsic or the frontend's fixed lvalue -- so
-// an expression here is a backend bug.
+// fatal error (effective in release builds too) for a non-immediate operand or
+// a value outside the 8-bit bit-address space.  A *constant* bit address is
+// never symbolic -- it is a constant from the intrinsic or the frontend's fixed
+// lvalue -- so an expression here is a backend bug.
 inline unsigned getBitAddr(const MCOperand &Op) {
   if (!Op.isImm())
     report_fatal_error("MCS251: bit address must be a constant immediate");
@@ -45,6 +57,26 @@ inline unsigned getBitAddr(const MCOperand &Op) {
     report_fatal_error("MCS251: bit address " + Twine(V) +
                        " is out of range [0, 255]");
   return unsigned(V);
+}
+
+// BT12: a bit-address operand may also be a persistent bit-object symbol.  The
+// backend then emits a zero-filled field plus R_MCS251_BITADDR8, and the linker
+// writes the allocated bit address.  The operand must be a plain symbol
+// reference (the contract freezes addend 0) AND carry the MCS251::S_BITADDR
+// specifier that MCInstLower attaches only when the named global is a marked
+// bit-object placeholder.  A bare symbol on a bit operand (e.g. a function)
+// therefore falls through to the constant validator and is rejected.  Shared
+// by the object emitter and the text printer so both agree.
+inline bool isSymbolicBitAddr(const MCOperand &Op, const MCExpr *&Sym) {
+  if (!Op.isExpr())
+    return false;
+  const MCExpr *E = Op.getExpr();
+  const auto *SRE = dyn_cast<MCSymbolRefExpr>(E);
+  if (SRE && SRE->getSpecifier() == S_BITADDR) {
+    Sym = E;
+    return true;
+  }
+  return false;
 }
 
 } // namespace MCS251

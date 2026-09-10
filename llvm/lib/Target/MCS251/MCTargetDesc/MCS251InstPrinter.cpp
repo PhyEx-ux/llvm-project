@@ -102,9 +102,23 @@ void MCS251InstPrinter::printDir8(const MCInst *MI, unsigned OpNo,
 // or symbolic bit address exactly like `-filetype=obj` does. Masking with
 // `& 0xff` (and an assert-only guard) silently printed setb 0xff/0x00/0x2c
 // for -1/256/300 in release builds, so the text and object paths disagreed.
+//
+// BT12: a persistent bit-object symbol is a legal bit-address operand for the
+// OBJECT path (zero field + R_MCS251_BITADDR8), but the assembly path has no
+// representation for a bit object at all. Printing the symbol would hand the
+// MCS251-specific S_BITADDR specifier to the generic MCAsmInfo::printExpr,
+// whose getSpecifierName does not know it and aborts. Fail with the frozen
+// diagnostic instead of crashing, regardless of whether the TU also defines a
+// bit object (the record-emission check is not an asm consumption point).
 void MCS251InstPrinter::printBitAddr(const MCInst *MI, unsigned OpNo,
                                      raw_ostream &O) {
-  O << format("0x%02x", MCS251::getBitAddr(MI->getOperand(OpNo)));
+  const MCOperand &Op = MI->getOperand(OpNo);
+  if (Op.isExpr()) {
+    const MCExpr *Sym = nullptr;
+    if (MCS251::isSymbolicBitAddr(Op, Sym))
+      report_fatal_error("MCS251 bit object requires ELF object output");
+  }
+  O << format("0x%02x", MCS251::getBitAddr(Op));
 }
 
 // Frame-slot address (mcs251_stack operand): OpNo is the base register

@@ -38,24 +38,29 @@
 //===----------------------------------------------------------------------===//
 
 #include "MCS251.h"
+#include "MCS251BitObject.h"
 #include "MCS251InstrInfo.h"
 #include "MCS251MCInstLower.h"
 #include "MCS251TargetMachine.h"
 #include "MCS251TargetObjectFile.h"
 #include "MCTargetDesc/MCS251ABISignature.h"
 #include "TargetInfo/MCS251TargetInfo.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/MCS251Bit.h"
 #include "llvm/BinaryFormat/MCS251ISR.h"
 #include "llvm/CodeGen/AsmPrinter.h"
+#include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
@@ -110,6 +115,20 @@ class MCS251AsmPrinter final : public AsmPrinter {
   // Next free record index in the single .mcs251.isr section of this object;
   // the A3.4 relocation of record N sits at r_offset 24*N+12.
   unsigned ISRRecordCount = 0;
+  // BT12: next free record index in the single .mcs251.bit section; the
+  // R_MCS251_BIT_REF association of record N sits at r_offset 8*N+4 and the
+  // kind-1 symbol's st_value is 8*N.
+  unsigned BitRecordCount = 0;
+  // BT12: whether this module defines any persistent bit-object placeholder.
+  bool ModuleHasBitObjects = false;
+  // BT12: symbol identity of every bit-object placeholder in the module. A
+  // handle is recognized by RESOLVING BACK TO THE GLOBALVALUE (never by
+  // operand kind), because MIR can name the same symbol three ways: as a
+  // MO_GlobalAddress (`@flag`), as a MO_ExternalSymbol (`&flag`, which the
+  // mangler maps onto the same MCContext symbol) or as a raw MO_MCSymbol.
+  // Built once per module in emitStartOfAsmFile, before any function is
+  // emitted, so verifyFinalMachineBoundary can consult it.
+  DenseMap<const MCSymbol *, const GlobalVariable *> BitObjectSymbols;
   // Whether this module defines any interrupt entry. The A2.2 keepalive
   // exemption (object gate, storage-reservation scan, global emission)
   // exists only for ISR modules; modules without ISR definitions keep the
@@ -257,6 +276,41 @@ class MCS251AsmPrinter final : public AsmPrinter {
     return !F.isDeclaration() &&
            F.getCallingConv() == CallingConv::MCS251_INTR &&
            F.hasFnAttribute("mcs251-isr-vector");
+  }
+
+  // BT12: the keepalive container that registers bit-object placeholders. It is
+  // the standard llvm.used / llvm.compiler.used structure (appending linkage,
+  // array-of-pointers initializer, "llvm.metadata" section), and every member
+  // must be a marked bit object (possibly behind a no-op pointer cast). A
+  // container that also carries an ordinary global is NOT exempted here; the
+  // ordinary global's own rejection stands.
+  static bool isMCS251BitObjectKeepaliveRoot(const GlobalVariable &GV) {
+    if (GV.getName() != "llvm.used" && GV.getName() != "llvm.compiler.used")
+      return false;
+    if (!GV.hasInitializer() || !GV.hasAppendingLinkage())
+      return false;
+    const auto *ArrTy = dyn_cast<ArrayType>(GV.getInitializer()->getType());
+    if (!ArrTy || !ArrTy->getElementType()->isPointerTy())
+      return false;
+    if (!GV.hasSection() || GV.getSection() != "llvm.metadata")
+      return false;
+    if (!GV.materialized_use_empty())
+      return false;
+    for (unsigned I = 0, E = ArrTy->getNumElements(); I != E; ++I) {
+      const Constant *Member = GV.getInitializer()->getAggregateElement(I);
+      while (const auto *CE = dyn_cast_or_null<ConstantExpr>(Member)) {
+        if (CE->getNumOperands() != 1 ||
+            (CE->getOpcode() != Instruction::BitCast &&
+             CE->getOpcode() != Instruction::AddrSpaceCast))
+          return false;
+        Member = cast<Constant>(CE->getOperand(0));
+      }
+      const auto *V = dyn_cast_or_null<GlobalVariable>(Member);
+      if (!V || !MCS251::isBitObjectGlobal(*V))
+        return false;
+    }
+    // Do not exempt an empty container (nothing to register).
+    return ArrTy->getNumElements() != 0;
   }
 
   bool isV1ObjectCompatible(const Module &M) const {
@@ -489,11 +543,105 @@ public:
   // is a hard error. Only *target* opcodes are checked: a blanket
   // MI->isPseudo() assert here would also fire on legitimate LLVM generic
   // pseudo instructions, which stay below INSTRUCTION_LIST_START.
+  //
+  // BT12: this is the machine-level boundary for a persistent bit-object
+  // handle -- one layer of the handle invariant's enforcement, alongside the
+  // module-level contract verifier (IR uses), the whole-module alias rejection
+  // in emitStartOfAsmFile, and the constant-pool check below. A handle has no
+  // byte address and is legal only as the bit-address operand of a
+  // bit-addressed instruction. The check runs before any instruction of the
+  // function is emitted, and covers every machine-operand spelling of the
+  // symbol: MO_GlobalAddress (`@flag`), MO_ExternalSymbol (`&flag`, which the
+  // mangler maps onto the same MCContext symbol) and MO_MCSymbol -- including
+  // operands of a generic INLINEASM, whose asm-string distribution bypasses
+  // MCS251MCInstLower entirely. A GlobalAlias resolving to a bit object never
+  // reaches this point: the module-level alias rejection fires first. It does
+  // NOT cover module-level standalone emission (e.g. raw metadata) or symbol
+  // references that never appear as a machine operand or constant-pool entry;
+  // those are the other layers' responsibility.
+
+  // Resolve a machine operand to the bit-object global it names, or nullptr.
+  // Identity is decided by resolving back to the GlobalValue (through the
+  // module's symbol table), never by trusting the operand kind: `@flag` and
+  // `&flag` are two spellings of one object.
+  const GlobalVariable *getBitObjectHandle(const MachineOperand &MO) const {
+    if (MO.isGlobal()) {
+      const GlobalValue *G = MO.getGlobal();
+      if (const auto *GV = dyn_cast<GlobalVariable>(G))
+        return MCS251::isBitObjectGlobal(*GV) ? GV : nullptr;
+      // A GlobalAddress operand may name the placeholder through an alias
+      // whose aliasee is an arbitrary constant expression. getAliaseeObject()
+      // is NOT a recursive containment check (an Add with base objects on
+      // both sides, or a Sub with one on the right, yields nullptr), so the
+      // defense-in-depth resolution here scans the whole expression for a
+      // placeholder at any depth -- the same rule the module-level alias
+      // rejection in emitStartOfAsmFile applies.
+      if (const auto *GA = dyn_cast<GlobalAlias>(G)) {
+        SmallPtrSet<const Constant *, 32> Seen;
+        return findBitObjectInConstant(GA->getAliasee(), Seen);
+      }
+      return nullptr;
+    }
+    if (BitObjectSymbols.empty())
+      return nullptr;
+    const MCSymbol *Sym = nullptr;
+    if (MO.isSymbol())
+      Sym = GetExternalSymbolSymbol(MO.getSymbolName());
+    else if (MO.isMCSymbol())
+      Sym = MO.getMCSymbol();
+    if (!Sym)
+      return nullptr;
+    auto It = BitObjectSymbols.find(Sym);
+    return It != BitObjectSymbols.end() ? It->second : nullptr;
+  }
+
+  // \return the first bit-object placeholder reachable inside \p C, through
+  // any depth of constant expressions (ptrtoint, add, sub, casts, aggregates).
+  // A GlobalVariable is a TERMINAL: a marked one is the hit itself; an
+  // ordinary one stops the walk, because its initializer is its own concern
+  // (guarded by the module-level contract verifier), not part of this
+  // expression's identity. A GlobalAlias is not terminal: its aliasee is an
+  // operand, so reaching a placeholder through an alias is still found.
+  static const GlobalVariable *
+  findBitObjectInConstant(const Constant *C,
+                          SmallPtrSetImpl<const Constant *> &Seen) {
+    if (!Seen.insert(C).second)
+      return nullptr;
+    if (const auto *GV = dyn_cast<GlobalVariable>(C))
+      return MCS251::isBitObjectGlobal(*GV) ? GV : nullptr;
+    for (const Value *Op : C->operands()) {
+      const auto *OC = dyn_cast<Constant>(Op);
+      if (!OC)
+        continue;
+      if (const auto *GV = findBitObjectInConstant(OC, Seen))
+        return GV;
+    }
+    return nullptr;
+  }
+
   void verifyFinalMachineBoundary(const MachineFunction &MF) const {
     const Function &F = MF.getFunction();
     bool IsISR = isISRDefinition(F);
     for (const MachineBasicBlock &BB : MF)
       for (const MachineInstr &MI : BB) {
+        // BT12: no bit-object handle may appear except as the bit-address
+        // operand of a bit-addressed instruction. A generic INLINEASM (or any
+        // other opcode) has no such operand, so any handle there is rejected.
+        for (const MachineOperand &MO : MI.operands()) {
+          const GlobalVariable *Handle = getBitObjectHandle(MO);
+          if (!Handle)
+            continue;
+          if (!MCS251InstrInfo::isBitAddrOperand(MI.getOpcode(),
+                                                 MO.getOperandNo()))
+            report_fatal_error(
+                "MCS251: bit object '" + Handle->getName() +
+                "' may only be used as the bit-address operand of a bit "
+                "instruction");
+          if (MO.getOffset())
+            report_fatal_error(
+                "MCS251: bit object '" + Handle->getName() +
+                "' bit-address operand must have no addend");
+        }
         // Target opcodes begin right after the generic opcode range; a
         // remaining pseudo there is an unexpanded target pseudo.
         if (MI.isPseudo() &&
@@ -514,6 +662,27 @@ public:
                              Twine(F.getName()) +
                              "' must return with RETI");
         }
+      }
+
+    // BT12: the machine constant pool is emitted (AsmPrinter::emitConstantPool
+    // -> emitGlobalConstant) without passing through machine operands, so a
+    // handle hidden inside a pool entry would silently become an ordinary
+    // address relocation. A constant pool has no bit-address operand position
+    // at all, so ANY appearance there is an escape, direct or nested.
+    if (ModuleHasBitObjects)
+      for (const MachineConstantPoolEntry &E :
+           MF.getConstantPool()->getConstants()) {
+        if (E.isMachineConstantPoolEntry())
+          // This target never creates MachineConstantPoolValues; refusing the
+          // shape outright keeps the layer closed if one ever appears.
+          report_fatal_error(
+              "MCS251: unsupported machine constant pool value in function '" +
+              Twine(F.getName()) + "'");
+        SmallPtrSet<const Constant *, 32> Seen;
+        if (const GlobalVariable *GV =
+                findBitObjectInConstant(E.Val.ConstVal, Seen))
+          report_fatal_error("MCS251: bit object '" + GV->getName() +
+                             "' may not appear in a constant pool entry");
       }
   }
 
@@ -579,6 +748,102 @@ public:
       OutStreamer->emitIntValue(MCS251ISR::AssetProfileCompiled, 4);
       OutStreamer->emitIntValue(0, 4);
       ++ISRRecordCount;
+    }
+    OutStreamer->switchSection(Saved);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // BT12: `.mcs251.bit` object-metadata records.
+  //===--------------------------------------------------------------------===//
+
+  // Validate a defined bit-object placeholder. The contract (BIT-OBJECT-
+  // CONTRACT.md §3, kind 1) requires a named symbol that the linker can
+  // resolve across TUs; the placeholder must not be weak/COMDAT/TLS/common and
+  // must have no ordinary byte storage. An i8 value with an integer
+  // initializer of 0 or 1 is the frozen shape.
+  void verifyBitObjectGlobal(const GlobalVariable &GV) const {
+    if (GV.isThreadLocal() || GV.getAddressSpace() != 0 || GV.hasSection() ||
+        GV.hasComdat() ||
+        (!GV.hasExternalLinkage() && !GV.hasLocalLinkage() &&
+         !GV.hasPrivateLinkage()) ||
+        GV.getVisibility() != GlobalValue::DefaultVisibility ||
+        GV.getDLLStorageClass() != GlobalValue::DefaultStorageClass ||
+        GV.hasCommonLinkage())
+      report_fatal_error("MCS251 bit object '" + GV.getName() +
+                         "': unsupported placement or linkage");
+    if (!GV.getValueType()->isIntegerTy(8))
+      report_fatal_error("MCS251 bit object '" + GV.getName() +
+                         "': placeholder must be an i8 global");
+    if (!GV.isDeclaration()) {
+      const Constant *Init = GV.getInitializer();
+      const auto *CI = dyn_cast_or_null<ConstantInt>(Init);
+      if (!CI || CI->getValue().ugt(1))
+        report_fatal_error("MCS251 bit object '" + GV.getName() +
+                           "': initializer must be the constant 0 or 1");
+    }
+  }
+
+  // Emit the single `.mcs251.bit` section of this object: one 8-byte big-endian
+  // kind-1 record per defined bit-object placeholder, in module order. Each
+  // record's symbol_reference is four literal zero bytes associated with the
+  // exact defining symbol by a zero-width R_MCS251_BIT_REF at record base + 4.
+  // The defining symbol is a label at the record base, so its st_value is the
+  // record's byte offset (contract §3); it is an STT_OBJECT of size 1.
+  void emitBitObjectRecords(Module &M) {
+    SmallVector<const GlobalVariable *, 8> Defs;
+    for (const GlobalVariable &GV : M.globals()) {
+      if (!MCS251::isBitObjectGlobal(GV))
+        continue;
+      // Validate every marked global, definition or declaration, and give each
+      // one the contract's STT_OBJECT identity. A declaration (extern bit) is a
+      // cross-TU use: it is referenced through R_MCS251_BITADDR8 but carries no
+      // record of its own (contract §3).
+      verifyBitObjectGlobal(GV);
+      MCSymbol *Sym = getSymbol(&GV);
+      if (usesELFObjects())
+        OutStreamer->emitSymbolAttribute(Sym, MCSA_ELF_TypeObject);
+      if (GV.isDeclaration()) {
+        emitLinkage(&GV, Sym);
+        continue;
+      }
+      Defs.push_back(&GV);
+    }
+    // An extern-only TU (all marked globals are declarations) carries no
+    // record of its own: the linker rejects an empty `.mcs251.bit` section, so
+    // emitting no section keeps the object well-formed. It still carries one
+    // BITADDR8 reference per symbolic use.
+    if (Defs.empty())
+      return;
+    if (!getMCS251TM().emitsObjectFile() || !usesELFObjects())
+      // The bit-object protocol exists only in the ELF object format; REL
+      // objects and assembly text carry no record.
+      report_fatal_error("MCS251 bit object requires ELF object output");
+
+    MCSection *Saved = OutStreamer->getCurrentSectionOnly();
+    // Contract §3: SHT_PROGBITS, sh_flags = 0, sh_addralign = 4, sh_entsize 0.
+    MCSectionELF *Meta = OutContext.getELFSection(
+        MCS251Bit::MetaSectionName, ELF::SHT_PROGBITS, /*Flags=*/0);
+    Meta->setAlignment(Align(MCS251Bit::MetaSectionAlignment));
+    OutStreamer->switchSection(Meta);
+    for (const GlobalVariable *GV : Defs) {
+      MCSymbol *Sym = getSymbol(GV);
+      emitLinkage(GV, Sym);
+      OutStreamer->emitELFSize(Sym, MCConstantExpr::create(1, OutContext));
+      OutStreamer->emitLabel(Sym);
+      const auto *CI = cast<ConstantInt>(GV->getInitializer());
+      OutStreamer->emitIntValue(MCS251Bit::ProtocolVersion, 1);
+      OutStreamer->emitIntValue(MCS251Bit::RK_DEFINITION, 1);
+      OutStreamer->emitIntValue(CI->getValue().getZExtValue(), 1);
+      OutStreamer->emitIntValue(MCS251Bit::Capabilities, 1);
+      // symbol_reference stays four literal zero bytes; the association is the
+      // zero-write-width R_MCS251_BIT_REF relocation below.
+      OutStreamer->emitIntValue(0, 4);
+      OutStreamer->emitRelocDirective(
+          *MCConstantExpr::create(BitRecordCount * MCS251Bit::RecordSize +
+                                      MCS251Bit::RecordOffset::SymbolReference,
+                                  OutContext),
+          "R_MCS251_BIT_REF", MCSymbolRefExpr::create(Sym, OutContext));
+      ++BitRecordCount;
     }
     OutStreamer->switchSection(Saved);
   }
@@ -670,6 +935,49 @@ public:
     // applies (object gate, storage-reservation scan, global emission).
     ModuleHasISRDefinitions =
         llvm::any_of(M, [](const Function &F) { return isISRDefinition(F); });
+    // BT12: a persistent bit object is object identity, not byte storage.
+    ModuleHasBitObjects = llvm::any_of(M.globals(), [](const GlobalVariable &GV) {
+      return MCS251::isBitObjectGlobal(GV);
+    });
+    // Build the symbol-identity table every later boundary check resolves
+    // through: one entry per placeholder, keyed by its MC symbol. `&flag` in
+    // MIR mangles to the same MCContext symbol, so the ExternalSymbol and
+    // GlobalAddress spellings of one object converge on one entry here.
+    BitObjectSymbols.clear();
+    if (ModuleHasBitObjects) {
+      for (const GlobalVariable &GV : M.globals())
+        if (MCS251::isBitObjectGlobal(GV))
+          BitObjectSymbols.try_emplace(getSymbol(&GV), &GV);
+      // A GlobalAlias resolving to a bit object is a second name for a handle
+      // and the contract forbids it outright (a handle is identity, not a
+      // byte address; an alias is a byte-address indirection). The IR-level
+      // contract verifier rejects it on the normal path, but a MIR entry
+      // (-start-after...) skips that verifier, so the alias is rejected here,
+      // once per module, before the functions, the module inline asm, the
+      // `.mcs251.bit` records and the alias itself are actually emitted.
+      // (Earlier generic section initialization may already have run; the
+      // claim is about the bit-object and alias emission, not about all
+      // module initialization.) This covers every later spelling of the alias
+      // symbol (`@alias`, `&alias`, inline asm, constant pool) in one place.
+      //
+      // The check scans the aliasee CONSTANT EXPRESSION for a placeholder at
+      // any depth, NOT getAliaseeObject(): that helper resolves a single base
+      // object and explicitly is not a containment check -- an Add with base
+      // objects on both sides, or a Sub with one on the right, yields nullptr,
+      // which would let an alias whose expression cancels back to (or
+      // computes on) a placeholder slip through as an ordinary address.
+      // Ordinary globals terminate the walk, so an alias to plain data is
+      // untouched.
+      for (const GlobalAlias &GA : M.aliases()) {
+        SmallPtrSet<const Constant *, 32> Seen;
+        const GlobalVariable *GV =
+            findBitObjectInConstant(GA.getAliasee(), Seen);
+        if (GV)
+          report_fatal_error("MCS251: bit object '" + GV->getName() +
+                             "' must not be aliased (alias '" +
+                             GA.getName() + "')");
+      }
+    }
     bool V1Compatible = isV1ObjectCompatible(M);
     if (getMCS251TM().emitsObjectFile() && !V1Compatible)
       report_fatal_error(
@@ -702,6 +1010,7 @@ public:
     if (!getMCS251TM().emitsObjectFile() && ModuleHasISRDefinitions)
       emitASxxxxText("\t.mcs251_isr_nonobject");
     ISRRecordCount = 0;
+    BitRecordCount = 0;
     if (llvm::any_of(M, [](const Function &F) {
           return !F.isDeclaration() && F.arg_size() > 1;
         }) ||
@@ -712,7 +1021,12 @@ public:
           // exclusion needs this structural verification -- never a bare
           // name/section test. Real mutable globals keep triggering the
           // reservation exactly as before.
+          // BT12: a persistent bit-object placeholder is also registration
+          // data (identity, not bytes) and reserves no ordinary RAM byte, and
+          // so is its verified keepalive container.
           return !GV.isDeclaration() && !GV.isConstant() &&
+                 !MCS251::isBitObjectGlobal(GV) &&
+                 !isMCS251BitObjectKeepaliveRoot(GV) &&
                  !(ModuleHasISRDefinitions && isMCS251KeepaliveRoot(GV));
         })) {
       // REL synthesizes the A record. ELF needs an actual NOBITS reservation.
@@ -736,9 +1050,24 @@ public:
         LocalParameterSlots.insert(
             (getSymbol(&F)->getName() + "_PARM_" + Twine(I + 1)).str());
     }
+
+    // BT12: the single `.mcs251.bit` section (if any bit-object placeholder is
+    // defined) is emitted after the module prologue so its label/symbol
+    // attributes do not disturb the CSEG ordering. Declarations (extern bit)
+    // are validated here but carry no record; their uses are handled by the
+    // symbolic BITADDR8 path in the code emitter.
+    if (ModuleHasBitObjects)
+      emitBitObjectRecords(M);
   }
 
   void emitGlobalVariable(const GlobalVariable *GV) override {
+    // BT12: a persistent bit object is identity, not storage. It was already
+    // turned into a kind-1 `.mcs251.bit` record (definition) or left as an
+    // undefined reference (extern) by emitStartOfAsmFile; it must never reach
+    // the ordinary DSEG/XINIT/CSEG paths as a byte object.
+    if (MCS251::isBitObjectGlobal(*GV))
+      return;
+
     if (GV->isDeclaration()) {
       AsmPrinter::emitGlobalVariable(GV);
       return;
@@ -754,6 +1083,15 @@ public:
     // it as well. Modules without ISR definitions keep the original
     // rejection path unchanged (T06 rework R2).
     if (ModuleHasISRDefinitions && isMCS251KeepaliveRoot(*GV)) {
+      AsmPrinter::emitGlobalVariable(GV);
+      return;
+    }
+
+    // BT12: the standard keepalive root that registers bit-object placeholders
+    // is likewise registration data (identity, not bytes). Only a container
+    // whose members are all marked bit objects is exempted -- a root that also
+    // escapes an ordinary global keeps the ordinary rejection.
+    if (isMCS251BitObjectKeepaliveRoot(*GV)) {
       AsmPrinter::emitGlobalVariable(GV);
       return;
     }

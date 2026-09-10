@@ -154,13 +154,27 @@ static void putImm8(const MCOperand &Op, SmallVectorImpl<char> &CB) {
   put8(unsigned(Op.getImm()), CB);
 }
 
-// The bit-address field of a bit-addressed instruction.  It is a plain 8-bit
-// value (0x00-0xff), but the range must be validated BEFORE any masking:
+// The bit-address field of a bit-addressed instruction.  Normally a plain
+// 8-bit value (0x00-0xff), but the range must be validated BEFORE any masking:
 // a -1/256/300 that reached here through a MIR immediate would otherwise be
 // silently truncated to a different (valid-looking) bit address.  The check
 // itself is shared with the text-assembly printer (MCS251BitAddr.h) so both
 // output paths reject the same inputs.
-static void putBitAddr(const MCOperand &Op, SmallVectorImpl<char> &CB) {
+//
+// BT12: the operand may instead be a persistent bit-object symbol.  The field
+// is then a zero placeholder plus an R_MCS251_BITADDR8 relocation (type 11);
+// the linker writes the allocated 8-bit bit address.  The zero-write rule is
+// normative -- the contract rejects a nonzero placeholder, so a symbolic
+// operand must never fall through to an immediate encode.
+static void putBitAddr(const MCOperand &Op, unsigned Offset,
+                       SmallVectorImpl<char> &CB,
+                       SmallVectorImpl<MCFixup> &Fixups) {
+  const MCExpr *Sym = nullptr;
+  if (MCS251::isSymbolicBitAddr(Op, Sym)) {
+    Fixups.push_back(MCFixup::create(Offset, Sym, MCS251::fixup_mcs251_bitaddr8));
+    put8(0, CB);
+    return;
+  }
   put8(MCS251::getBitAddr(Op), CB);
 }
 
@@ -430,23 +444,23 @@ void MCS251MCCodeEmitter::encodeInstruction(
   //   cpl 0x48 = B2 48, mov c,0x2a = A2 2A, mov 0x2a,c = 92 2A,
   //   jnb 0x00,rel = 30 00 <rel>, jb 0x80,rel = 20 80 <rel>,
   //   jbc 0x7f,rel = 10 7F <rel>, setb c = D3, clr c = C3, cpl c = B3.
-  case MCS251::SETBBIT: B(0xd2); putBitAddr(MI.getOperand(0), CB); break;
-  case MCS251::CLRBIT:  B(0xc2); putBitAddr(MI.getOperand(0), CB); break;
-  case MCS251::CPLBIT:  B(0xb2); putBitAddr(MI.getOperand(0), CB); break;
-  case MCS251::MOVCBIT: B(0xa2); putBitAddr(MI.getOperand(0), CB); break;
-  case MCS251::MOVBITC: B(0x92); putBitAddr(MI.getOperand(0), CB); break;
+  case MCS251::SETBBIT: B(0xd2); putBitAddr(MI.getOperand(0), CB.size(), CB, Fixups); break;
+  case MCS251::CLRBIT:  B(0xc2); putBitAddr(MI.getOperand(0), CB.size(), CB, Fixups); break;
+  case MCS251::CPLBIT:  B(0xb2); putBitAddr(MI.getOperand(0), CB.size(), CB, Fixups); break;
+  case MCS251::MOVCBIT: B(0xa2); putBitAddr(MI.getOperand(0), CB.size(), CB, Fixups); break;
+  case MCS251::MOVBITC: B(0x92); putBitAddr(MI.getOperand(0), CB.size(), CB, Fixups); break;
   // Bit branches: operand 0 is the branch target, operand 1 the bit address
   // (see the operand-order note in MCS251InstrInfo.td).
   case MCS251::JB:
-    B(0x20); putBitAddr(MI.getOperand(1), CB);
+    B(0x20); putBitAddr(MI.getOperand(1), CB.size(), CB, Fixups);
     putBranch(MI.getOperand(0), CB.size(), CB, Fixups);
     break;
   case MCS251::JNB:
-    B(0x30); putBitAddr(MI.getOperand(1), CB);
+    B(0x30); putBitAddr(MI.getOperand(1), CB.size(), CB, Fixups);
     putBranch(MI.getOperand(0), CB.size(), CB, Fixups);
     break;
   case MCS251::JBC:
-    B(0x10); putBitAddr(MI.getOperand(1), CB);
+    B(0x10); putBitAddr(MI.getOperand(1), CB.size(), CB, Fixups);
     putBranch(MI.getOperand(0), CB.size(), CB, Fixups);
     break;
   // CY forms: opcode+1 of the bit-form family (classic single byte).

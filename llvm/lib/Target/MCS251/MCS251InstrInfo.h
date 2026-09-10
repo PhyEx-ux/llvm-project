@@ -49,6 +49,15 @@ public:
   static bool isCondBranchOpcode(unsigned Opc);
   static bool isUncondBranchOpcode(unsigned Opc);
 
+  // BT12: the bit-address operand position of a bit-addressed instruction. A
+  // persistent bit-object handle is identity, not a byte address, and is legal
+  // ONLY in this operand. Every other operand position (and every other
+  // opcode, including a generic INLINEASM whose asm string references the
+  // symbol) is an illegal handle consumption. This is the single source of the
+  // position table, shared by the lowering/emission guard in
+  // MCS251MCInstLower and the whole-function boundary guard in the AsmPrinter.
+  static bool isBitAddrOperand(unsigned Opc, unsigned OpIdx);
+
   // Exact encoded size of every target instruction, mirroring the MC code
   // emitter byte-for-byte.  getInstSizeVerifyMode asks the AsmPrinter to
   // check each declared size against the emitted byte count on object

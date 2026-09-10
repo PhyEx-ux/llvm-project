@@ -1,0 +1,590 @@
+; BT12: R_MCS251_BITADDR8 emission. A bit instruction whose bit-address operand
+; is a persistent bit-object symbol emits a zero-filled address field plus a
+; width-1 R_MCS251_BITADDR8 relocation (type 11) naming the exact bit-object
+; symbol. The linker resolves the bit number and writes it; a constant bit
+; address stays a plain immediate (no relocation).
+;
+; The frozen field rule (lld/MCS251/BIT-OBJECT-CONTRACT.md §4.2): the field is
+; the second byte of a bit-opcode instruction (setb/clr/cpl/mov c,bit/mov
+; bit,c/jb/jnb/jbc), it must be zero-filled by the producer, and bit address 0
+; writes 0x00 (never treated as null).
+;
+; A symbolic operand is accepted only for a marked bit-object global (the
+; MCInstLower attaches MCS251::S_BITADDR). An arbitrary symbol on a bit operand
+; is still rejected -- see bit-instructions-errors.mir.
+
+; RUN: split-file %s %t
+; RUN: llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/use.mir -o %t/use.o
+; RUN: llvm-readobj --sections --section-data --symbols --relocations %t/use.o | FileCheck %s
+
+; The .text stream: the bit-address field is the zero placeholder in the object
+; image (D2 00 / C2 00 / 92 00 / A2 00 / 20 00 rel / 30 00 rel / 10 00 rel).
+;CHECK:      Name: .text
+;CHECK:      SectionData (
+;CHECK-NEXT:   0000: D200C200 9200A200 20000630 00031000
+;CHECK-NEXT:   0010: 00AA
+
+; One BITADDR8 per symbolic field, at the field byte, naming the bit object.
+; The constant-address fields carry no relocation.
+;CHECK:      Section ({{[0-9]+}}) .rela.text {
+;CHECK-NEXT:   0x1 R_MCS251_BITADDR8 _flag 0x0
+;CHECK-NEXT:   0x3 R_MCS251_BITADDR8 _flag 0x0
+;CHECK-NEXT:   0x5 R_MCS251_BITADDR8 _flag 0x0
+;CHECK-NEXT:   0x7 R_MCS251_BITADDR8 _flag 0x0
+;CHECK-NEXT:   0x9 R_MCS251_BITADDR8 _ext 0x0
+;CHECK-NEXT:   0xC R_MCS251_BITADDR8 _ext 0x0
+;CHECK-NEXT:   0xF R_MCS251_BITADDR8 _ext 0x0
+
+; The definition record for `_flag` is present; `_ext` is only referenced.
+;CHECK:      Section ({{[0-9]+}}) .rela.mcs251.bit {
+;CHECK-NEXT:   0x4 R_MCS251_BIT_REF _flag 0x0
+
+; A constant bit address must NOT gain a relocation: it stays an immediate.
+;RUN: llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/const.mir -o %t/const.o
+;RUN: llvm-readobj --sections --section-data %t/const.o | FileCheck %s --check-prefix=CONST --implicit-check-not=rela.text
+;CONST:      Name: .text
+;CONST:      SectionData (
+;CONST-NEXT:   0000: D207
+
+; Negative: a bare symbol that is NOT a marked bit object stays rejected (no
+; BITADDR8 is invented for an arbitrary symbol).
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/plain-sym.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=PLAIN
+
+;PLAIN: LLVM ERROR: MCS251: bit address must be a constant immediate
+
+; Internal (file-static) bit objects at a nonzero record offset: the BITADDR8
+; must keep the local symbol itself (not a section+addend fold), and the two
+; internal definitions sit at record offsets 0x8 and 0x10.
+;RUN: llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/local.mir -o %t/local.o
+;RUN: llvm-readobj --relocations --symbols --section-data %t/local.o | FileCheck %s --check-prefix=LOCAL
+
+;LOCAL:      Section ({{[0-9]+}}) .rela.text {
+;LOCAL-NEXT:   0x1 R_MCS251_BITADDR8 _shared 0x0
+;LOCAL-NEXT:   0x3 R_MCS251_BITADDR8 _shared 0x0
+;LOCAL-NEXT:   0x5 R_MCS251_BITADDR8 _flag 0x0
+;LOCAL:      Section ({{[0-9]+}}) .rela.mcs251.bit {
+;LOCAL-NEXT:   0x4 R_MCS251_BIT_REF _pad 0x0
+;LOCAL-NEXT:   0xC R_MCS251_BIT_REF _flag 0x0
+;LOCAL-NEXT:   0x14 R_MCS251_BIT_REF _shared 0x0
+;LOCAL:      Name: _flag
+;LOCAL:      Value: 0x8
+;LOCAL:      Binding: Local
+;LOCAL:      Type: Object
+;LOCAL:      Section: .mcs251.bit
+;LOCAL:      Name: _shared
+;LOCAL:      Value: 0x10
+;LOCAL:      Binding: Local
+;LOCAL:      Type: Object
+;LOCAL:      Section: .mcs251.bit
+
+; The assembly path has no representation for a bit object: a symbolic
+; bit-address operand must fail with the frozen diagnostic, whether or not the
+; TU also defines a record (the record-emission check is not an asm consumption
+; point). This covers an extern-only TU, where no `.mcs251.bit` is emitted.
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/use.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ASM
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/extern-only.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ASM
+;ASM: LLVM ERROR: MCS251 bit object requires ELF object output
+
+; A bit-object handle in a non-bit operand position is an illegal consumption:
+; it must be rejected at the machine-operand lowering entry, before either the
+; asm printer (which would crash) or the object writer (which would emit an
+; ordinary 16/24-bit relocation) sees it. MIR reaches this path without passing
+; the IR contract verifier, so the guard is positional. Both output kinds, and
+; -verify-machineinstrs, must reject.
+;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=asm %t/nonbit-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/nonbit-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=asm %t/nonbit-addr32.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/nonbit-addr32.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=asm %t/nonbit-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/nonbit-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;NONBIT: LLVM ERROR: MCS251: bit object 'flag' may only be used as the bit-address operand of a bit instruction
+
+; A bit-address operand with an addend violates the frozen r_addend == 0 rule.
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/bit-addend.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ADDEND
+;ADDEND: LLVM ERROR: MCS251: bit object 'flag' bit-address operand must have no addend
+
+; Generic inline asm bypasses the target instruction emitter entirely: its
+; operand is distributed by the generic AsmPrinter inline-asm path, not by
+; MCS251MCInstLower. A bit-object handle there is still an illegal consumption
+; and must be rejected by the whole-function machine boundary, on both the asm
+; and object paths (extern-only: no record is emitted, so only the position
+; guard can catch it).
+;RUN: not --crash llc -mtriple=mcs251 -filetype=asm -start-after=prolog-epilog %t/inlineasm-c.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
+;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -filetype=asm -start-after=prolog-epilog %t/inlineasm-c.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
+;RUN: not --crash llc -mtriple=mcs251 -filetype=asm -start-after=prolog-epilog %t/inlineasm-a.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
+;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -filetype=asm -start-after=prolog-epilog %t/inlineasm-a.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
+;INLINEASM: LLVM ERROR: MCS251: bit object 'flag' may only be used as the bit-address operand of a bit instruction
+
+; The `&name` MIR spelling is a MO_ExternalSymbol, not a MO_GlobalAddress: it
+; must not slip past a guard that only inspects globals. The boundary check
+; resolves every symbol reference back to the underlying GlobalValue, so
+; `&flag` (which the mangler maps onto the same MCContext symbol as `@flag`)
+; is the same handle. Both output kinds reject.
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/external-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/external-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/external-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/external-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+
+; A machine constant-pool entry is emitted through emitConstantPool /
+; emitGlobalConstant without ever passing through a machine operand, so a
+; handle hidden there would become an ordinary address relocation
+; (.rela.data.rel.ro R_MCS251_16). A constant pool has no bit-address operand
+; position at all, so both the direct and the nested spelling are escapes, on
+; both output kinds.
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/cp16-direct.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/cp16-direct.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/cp16-nested.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
+;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/cp16-nested.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
+;CONSTPOOL: LLVM ERROR: MCS251: bit object 'flag' may not appear in a constant pool entry
+
+; A GlobalAlias resolving to a bit object is a second name for a handle, which
+; the contract forbids outright. It is rejected once per module (when the
+; symbol-identity table is built), which covers every later spelling of the
+; alias -- `@alias`, `&alias`, a call target -- in one place. The runs use an
+; EXPLICIT v1 memory contract: under the default v2 contract the alias would
+; be rejected by the v1-object gate first, masking this layer.
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-global.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-external.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-call-global.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-call-external.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-global.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-external.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;ALIAS: LLVM ERROR: MCS251: bit object 'flag' must not be aliased (alias 'alias')
+
+; The alias rejection must scan the aliasee CONSTANT EXPRESSION for a
+; placeholder at any depth. getAliaseeObject() resolves only a single base
+; object (an Add with bases on both sides, or a Sub with one on the right,
+; yields nullptr), so an alias whose expression cancels back to -- or
+; computes on -- a placeholder would slip through as an ordinary address
+; relocation. The cancel form references @flag through arithmetic that
+; algebraically returns to it; the difference form computes on two
+; placeholders. The unused form has no use in the body at all, proving the
+; rejection is module-level, not use-driven. All four operand spellings and
+; both output kinds, under an EXPLICIT v1 contract.
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-cancel.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-expr-cancel.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-cancel-ecall-g.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-cancel-ecall-e.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-diff.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-expr-diff.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-unused.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+
+;--- alias-expr-cancel.mir
+--- |
+  target triple = "mcs251"
+  @flag = global i8 0 #0
+  @other = global i8 0
+  @alias = alias i8, inttoptr (i32 add (i32 sub (i32 ptrtoint (ptr @flag to i32), i32 ptrtoint (ptr @other to i32)), i32 ptrtoint (ptr @other to i32)) to ptr)
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri @alias
+    ERET
+...
+;--- alias-expr-cancel-ecall-g.mir
+--- |
+  target triple = "mcs251"
+  @flag = global i8 0 #0
+  @other = global i8 0
+  @alias = alias i8, inttoptr (i32 add (i32 sub (i32 ptrtoint (ptr @flag to i32), i32 ptrtoint (ptr @other to i32)), i32 ptrtoint (ptr @other to i32)) to ptr)
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ECALL @alias, csr_mcs251, implicit-def dead $psw, implicit-def $dpl
+    ERET
+...
+;--- alias-expr-cancel-ecall-e.mir
+--- |
+  target triple = "mcs251"
+  @flag = global i8 0 #0
+  @other = global i8 0
+  @alias = alias i8, inttoptr (i32 add (i32 sub (i32 ptrtoint (ptr @flag to i32), i32 ptrtoint (ptr @other to i32)), i32 ptrtoint (ptr @other to i32)) to ptr)
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ECALL &alias, csr_mcs251, implicit-def dead $psw, implicit-def $dpl
+    ERET
+...
+;--- alias-expr-diff.mir
+--- |
+  target triple = "mcs251"
+  @flag = global i8 0 #0
+  @other = global i8 0 #0
+  @alias = alias i8, inttoptr (i32 sub (i32 ptrtoint (ptr @flag to i32), i32 ptrtoint (ptr @other to i32)) to ptr)
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri @alias
+    ERET
+...
+;--- alias-expr-unused.mir
+--- |
+  target triple = "mcs251"
+  @flag = global i8 0 #0
+  @other = global i8 0
+  @alias = alias i8, inttoptr (i32 add (i32 sub (i32 ptrtoint (ptr @flag to i32), i32 ptrtoint (ptr @other to i32)), i32 ptrtoint (ptr @other to i32)) to ptr)
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ERET
+...
+
+;--- alias-global.mir
+--- |
+  target triple = "mcs251"
+  @flag = global i8 0 #0
+  @alias = alias i8, ptr @flag
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri @alias
+    ERET
+...
+;--- alias-external.mir
+--- |
+  target triple = "mcs251"
+  @flag = global i8 0 #0
+  @alias = alias i8, ptr @flag
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri &alias
+    ERET
+...
+;--- alias-call-global.mir
+--- |
+  target triple = "mcs251"
+  @flag = global i8 0 #0
+  @alias = alias i8, ptr @flag
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ECALL @alias, csr_mcs251, implicit-def dead $psw, implicit-def $dpl
+    ERET
+...
+;--- alias-call-external.mir
+--- |
+  target triple = "mcs251"
+  @flag = global i8 0 #0
+  @alias = alias i8, ptr @flag
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ECALL &alias, csr_mcs251, implicit-def dead $psw, implicit-def $dpl
+    ERET
+...
+
+;--- external-imm16.mir
+--- |
+  target triple = "mcs251"
+  @flag = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri &flag
+    ERET
+...
+;--- external-call.mir
+--- |
+  target triple = "mcs251"
+  @flag = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ECALL &flag, csr_mcs251, implicit-def dead $psw, implicit-def $dpl
+    ERET
+...
+;--- cp16-direct.mir
+--- |
+  target triple = "mcs251"
+  @flag = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+constants:
+  - id: 0
+    value: 'i16 ptrtoint (ptr @flag to i16)'
+    alignment: 1
+body: |
+  bb.0:
+    ERET
+...
+;--- cp16-nested.mir
+--- |
+  target triple = "mcs251"
+  @flag = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+constants:
+  - id: 0
+    value: 'i16 add (i16 ptrtoint (ptr @flag to i16), i16 3)'
+    alignment: 1
+body: |
+  bb.0:
+    ERET
+...
+
+;--- inlineasm-c.mir
+--- |
+  target triple = "mcs251"
+  @flag = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    INLINEASM &"mov wr0, #${0:c}", 1, 13, @flag
+    ERET
+...
+;--- inlineasm-a.mir
+--- |
+  target triple = "mcs251"
+  @flag = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    INLINEASM &"mov wr0, #${0:a}", 1, 13, @flag
+    ERET
+...
+
+;--- nonbit-imm16.mir
+--- |
+  target triple = "mcs251"
+  @flag = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $wr0 = MOV16ri @flag
+    ERET
+...
+;--- nonbit-addr32.mir
+--- |
+  target triple = "mcs251"
+  @flag = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr4 = MOVADDR32 @flag
+    ERET
+...
+;--- nonbit-call.mir
+--- |
+  target triple = "mcs251"
+  @flag = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    ECALL @flag, csr_mcs251, implicit-def dead $psw, implicit-def $dpl
+    ERET
+...
+;--- bit-addend.mir
+--- |
+  target triple = "mcs251"
+  @flag = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SETBBIT @flag + 1
+    ERET
+...
+
+;--- extern-only.mir
+--- |
+  target triple = "mcs251"
+  @ext = external global i8 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SETBBIT @ext
+    ERET
+...
+;--- local.mir
+--- |
+  target triple = "mcs251"
+  @pad = global i8 0 #0
+  @flag = internal global i8 0 #0
+  @shared = internal global i8 0 #0
+  attributes #0 = { "mcs251-bit-object" }
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SETBBIT @shared
+    CPLBIT @shared
+    MOVCBIT @flag, implicit-def $psw
+    ERET
+...
+
+;--- plain-sym.mir
+--- |
+  target triple = "mcs251"
+  declare void @sym()
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SETBBIT @sym
+    ERET
+...
+
+;--- use.mir
+--- |
+  target triple = "mcs251"
+  @flag = global i8 1 #0
+  @ext = external global i8 #0
+  define void @f() { ret void }
+  attributes #0 = { "mcs251-bit-object" }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SETBBIT @flag
+    CLRBIT @flag
+    MOVBITC @flag, implicit $psw
+    MOVCBIT @flag, implicit-def $psw
+    JB %bb.1, @ext
+    JNB %bb.1, @ext
+    JBC %bb.1, @ext
+  bb.1:
+    ERET
+...
+#--- const.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    SETBBIT 7
+    ERET
+...

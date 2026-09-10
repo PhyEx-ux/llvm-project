@@ -38,6 +38,15 @@ enum Fixups {
   fixup_mcs251_lo8,
   fixup_mcs251_mid8,
   fixup_mcs251_hi8,
+  // BT12: the one-byte bit-address field of a bit instruction whose operand is
+  // a persistent bit-object symbol.  The producer zero-fills the field; the
+  // linker (R_MCS251_BITADDR8, type 11) writes the resolved bit address.  The
+  // relocation must keep the exact named symbol, never a section+addend fold
+  // (the linker identifies the bit object by that symbol).  The zero-width
+  // R_MCS251_BIT_REF record association is a *literal* relocation, not a
+  // target fixup (see MCS251AsmBackend::getFixupKind), so the two are kept
+  // deliberately separate.
+  fixup_mcs251_bitaddr8,
   NumTargetFixupKinds,
 };
 
