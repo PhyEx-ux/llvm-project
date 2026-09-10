@@ -38,6 +38,32 @@ static constexpr uint32_t SHF_MCS251_OVERLAY = 0x10000000;
 static constexpr uint32_t ABI_FLAGS = 0x00000001;
 static constexpr uint32_t EF_ABI_MASK = 0xff;
 
+// Bit-object input contract (lld/MCS251/BIT-OBJECT-CONTRACT.md).  The bit
+// relocation numbers 10/11 are an lld-local extension until the public
+// MCS251.def header registers them (BT00 owns that llvm/** change); the
+// backend stream emits the raw numeric types in the meantime.
+static constexpr uint32_t R_MCS251_BIT_REF = 10;    // zero-width identity
+static constexpr uint32_t R_MCS251_BITADDR8 = 11;   // 1-byte address field
+static constexpr StringRef BitObjectSectionName = ".mcs251.bit";
+static constexpr StringRef BitProfileSectionName = ".mcs251.bitprofile";
+static constexpr uint32_t BitObjectRecordSize = 8;
+// 128 bit addresses 0x00-0x7F map onto bytes 0x20-0x2F.
+static constexpr uint32_t BitWindowBase = 0x20;
+static constexpr uint32_t BitCount = 128;
+static constexpr uint32_t BitByteCount = 16;
+// Record field offsets (big-endian; the section is a whole number of records).
+namespace BitRec {
+static constexpr unsigned Version = 0;       // u8, must be 1
+static constexpr unsigned Kind = 1;          // u8, 1=definition 2=reference
+static constexpr unsigned InitValue = 2;     // u8, 0 or 1
+static constexpr unsigned Capabilities = 3;  // u8, must be 1
+static constexpr unsigned SymbolRef = 4;     // u32 zero; R_MCS251_BIT_REF at +4
+} // namespace BitRec
+static constexpr uint8_t BitRecordVersion = 1;
+static constexpr uint8_t BitKindDefinition = 1;
+static constexpr uint8_t BitKindReference = 2;
+static constexpr uint8_t BitCapabilities = 1;
+
 struct InputSection;
 struct InputFile;
 struct InputSymbol;
@@ -62,6 +88,17 @@ struct IsrRecord {
   uint32_t Offset = 0;   // Record base inside the metadata section.
   uint32_t SymIndex = 0; // Symbol table index of the type9 association.
   InputSymbol *Ref = nullptr; // Exact referenced definition.
+};
+
+// One 8-byte record of a `.mcs251.bit` section (BIT-OBJECT-CONTRACT.md §3).
+// The symbol association is carried by exactly one R_MCS251_BIT_REF at
+// record base + 4 and is resolved after symbol loading.
+struct BitRecord {
+  uint32_t Offset = 0;        // Record base inside the bit metadata section.
+  uint32_t Kind = 0;          // 1 = definition, 2 = fixed reference.
+  uint32_t InitValue = 0;     // 0 or 1 (kind 1 only).
+  uint32_t SymIndex = 0;      // Symbol table index of the association.
+  InputSymbol *Ref = nullptr; // Exact referenced symbol.
 };
 
 struct InputSymbol {
@@ -93,6 +130,9 @@ struct InputSection {
   bool IsNobits = false;
   bool IsOverlay = false;
   bool IsLoadable = false;
+  // True only for sections lld itself created (vector slots, synthesized bit
+  // XINIT): they are trusted owners and are exempt from input-side checks.
+  bool Synthesized = false;
   std::vector<uint8_t> Data;
   std::vector<Relocation> Relocs;
   std::string Region;
@@ -110,6 +150,9 @@ struct InputFile {
   bool HasIsrMeta = false;
   InputSection *MetaSection = nullptr;
   std::vector<IsrRecord> IsrRecords;
+  // BT12: at most one `.mcs251.bit` per object.
+  InputSection *BitSection = nullptr;
+  std::vector<BitRecord> BitRecords;
 };
 
 // E3: one occupied DATA range plus its provenance.  The owner string is the
@@ -136,9 +179,232 @@ static uint16_t read16BE(ArrayRef<uint8_t> B, size_t O) {
 static uint32_t relocWidth(uint32_t Type) {
   return Type == ELF::R_MCS251_16 || Type == ELF::R_MCS251_J16 ||
                  Type == ELF::R_MCS251_J11 ? 2
-                 : Type == ELF::R_MCS251_24 ? 3
-                 : Type == ELF::R_MCS251_NONE ? 0
-                                              : 1;
+         : Type == ELF::R_MCS251_24 ? 3
+         : Type == R_MCS251_BIT_REF || Type == ELF::R_MCS251_NONE ? 0
+                                                                  : 1;
+}
+
+// BIT-OBJECT-CONTRACT.md §4.2: an R_MCS251_BITADDR8 field is the 8-bit
+// bit-address operand of a bit instruction, and it immediately follows that
+// instruction's opcode byte (the frozen classic encodes are opcode + operand:
+// setb/clr/cpl <bit>, mov c,<bit>, mov <bit>,c and jb/jnb/jbc <bit>,rel).
+// This is the link-time legality boundary for a bit-address field: a bit
+// relocation may only land on such a field, never on an arbitrary byte of an
+// executable section (an opcode, an immediate, or any non-code section).
+// Symbol identity being valid is not field-position validity.
+static bool isBitFieldOpcode(uint8_t Op) {
+  switch (Op) {
+  case 0xD2: // setb bit
+  case 0xC2: // clr bit
+  case 0xB2: // cpl bit
+  case 0x92: // mov bit,c
+  case 0xA2: // mov c,bit
+  case 0x20: // jb bit,rel
+  case 0x30: // jnb bit,rel
+  case 0x10: // jbc bit,rel
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Exact encoded length of the MCS251 instruction starting at Off, mirroring
+// the MC code emitter (MCTargetDesc/MCS251MCCodeEmitter.cpp) byte-for-byte.
+// Returns 0 for an unknown opcode or a truncated variable-length form, which
+// makes the whole byte stream undecodable.  The A5 source-mode escape only
+// precedes the classic register-move forms (low nibble >= 6 without a native
+// spelling), so an escaped instruction is exactly two bytes.
+//
+// This exists so a BITADDR8 field can be validated against real instruction
+// *boundaries* after every relocation has been applied, not merely against the
+// numeric value of the preceding byte: 75 D2 00 (D2 is an immediate) and
+// 74 D2 00 (D2 is an opcode, not the field's opcode) must both be rejected.
+static unsigned mcs251InstrLen(ArrayRef<uint8_t> B, size_t Off) {
+  auto At = [&](size_t I) -> int {
+    return I < B.size() ? int(B[I]) : -1;
+  };
+  const int Op = At(Off);
+  if (Op < 0)
+    return 0;
+  if (Op == 0xA5) {
+    const int O2 = At(Off + 1);
+    if (O2 < 0)
+      return 0;
+    // mov a,rn / mov rn,a, classic forms E8-EF / F8-FF.
+    if ((O2 >= 0xE8 && O2 <= 0xEF) || (O2 >= 0xF8 && O2 <= 0xFF))
+      return 2;
+    return 0;
+  }
+  switch (Op) {
+  // Single-byte classics.
+  case 0x13: // rrc a
+  case 0x33: // rlc a
+  case 0xC3: // clr c
+  case 0xA4: // mul ab
+  case 0xAA: // eret
+  case 0x32: // reti
+  case 0xB3: // cpl c
+  case 0xD3: // setb c
+    return 1;
+  // Opcode + one specifier/operand byte.
+  case 0x0E: // sra8/sra16
+  case 0x1E: // srl8/srl16
+  case 0x3E: // sll8/sll16
+  case 0x2C: // add8rr
+  case 0x2D: // add16rr
+  case 0x2F: // add32rr
+  case 0x4C: // or8rr / or8a
+  case 0x4D: // or16rr
+  case 0x5C: // and8rr
+  case 0x5D: // and16rr
+  case 0x6C: // xor8rr
+  case 0x6D: // xor16rr
+  case 0x9C: // sub8rr
+  case 0x9D: // sub16rr
+  case 0x9F: // sub32rr
+  case 0x7C: // mov8rr / mov8a / mov8ra (r>=8 forms)
+  case 0x7D: // mov16rr
+  case 0x7F: // mov32rr / setfp / restoresp
+  case 0xBC: // cmp8rr
+  case 0xBD: // cmp16rr
+  case 0xBF: // cmp32rr
+  case 0x92: // mov bit,c
+  case 0xA2: // mov c,bit
+  case 0xB2: // cpl bit
+  case 0xC2: // clr bit
+  case 0xD2: // setb bit
+  case 0x74: // mov a,#imm8
+  case 0x99: // ecall r
+  case 0xAD: // mulw
+  case 0xC0: // push psw
+  case 0xD0: // pop psw
+  case 0xCA: // pushfp / push dr
+  case 0xDA: // popfp / pop dr
+    return 2;
+  // Opcode + rel8.
+  case 0x08: // jsle
+  case 0x18: // jsg
+  case 0x28: // jle
+  case 0x38: // jg
+  case 0x40: // jc
+  case 0x48: // jsl
+  case 0x50: // jnc
+  case 0x58: // jsge
+  case 0x68: // je
+  case 0x78: // jne
+  case 0x80: // sjmp
+    return 2;
+  // Opcode + bit address + rel8.
+  case 0x10: // jbc
+  case 0x20: // jb
+  case 0x30: // jnb
+    return 3;
+  // Opcode + specifier + disp16.
+  case 0x09: // mov8rmD
+  case 0x19: // mov8mrD
+  case 0x29: // mov8rm displaced
+  case 0x39: // mov8mr displaced
+  case 0x69: // mov16rmS displaced
+  case 0x79: // mov16mrS displaced
+    return 4;
+  // Opcode + addr24.
+  case 0x8A: // ejmp
+  case 0x9A: // ecall
+    return 4;
+  // incspx/decspx (specifier FC/FD/FE) or the zero-displacement 16-bit
+  // stack short form (any other specifier).
+  case 0x0B: // incspx / mov16rmS zero
+  case 0x1B: // decspx / mov16mrS zero
+  {
+    const int S = At(Off + 1);
+    if (S < 0)
+      return 0;
+    if (S == 0xFC || S == 0xFD || S == 0xFE)
+      return 2;
+    return 3;
+  }
+  // mov dr/wr immediate family: nibble 4 (16-bit imm) and 8 (dr, 16-bit
+  // immediate) carry a second immediate word; the rest carry one byte.
+  case 0x7E: {
+    const int S = At(Off + 1);
+    if (S < 0)
+      return 0;
+    const int Nib = S & 0x0F;
+    return (Nib == 4 || Nib == 8) ? 4 : 3;
+  }
+  // mov hdr immediate (nibble C) carries a 16-bit immediate; the direct/B/
+  // memory forms carry one byte.
+  case 0x7A: {
+    const int S = At(Off + 1);
+    if (S < 0)
+      return 0;
+    return ((S & 0x0F) == 0x0C) ? 4 : 3;
+  }
+  // add/sub/and/or/xor 8/16 immediate: nibble 4 selects the 16-bit form.
+  case 0x2E:
+  case 0x9E:
+  case 0x5E:
+  case 0x4E:
+  case 0x6E:
+  case 0xBE: { // cmp8ri / cmp16ri
+    const int S = At(Off + 1);
+    if (S < 0)
+      return 0;
+    return ((S & 0x0F) == 4) ? 4 : 3;
+  }
+  default:
+    return 0;
+  }
+}
+
+// BT13/BT15: prove that every required BITADDR8 field is the bit-address
+// operand of a real bit instruction, by decoding the *entire* byte stream from
+// offset 0 to the section end with mcs251InstrLen.  This is used twice:
+//
+//   * on the producer's original input bytes, before any relocation is applied
+//     (so a field that is not a bit operand in the source cannot be laundered
+//     into one by a later relocation rewriting the bytes before it), and
+//   * again on the final post-relocation image (so a relocation that rewrites
+//     the field's own opcode cannot launder an invalid field the other way).
+//
+// Three independent rules, all mandatory:
+//   1. every instruction must decode (unknown opcode => fail),
+//   2. the stream must not end in a truncated instruction (e.g. a jb with a
+//      missing rel8 byte, or any trailing partial instruction after the last
+//      field),
+//   3. a field must sit exactly one byte into a bit-opcode instruction.
+// A field merely having a bit-looking preceding byte is not sufficient.
+// `Fields` must be sorted ascending and unique.
+static bool validateBitAddrStream(ArrayRef<uint8_t> B, StringRef SecName,
+                                  const std::vector<size_t> &Fields,
+                                  raw_ostream &Err) {
+  size_t Next = 0;
+  size_t Cursor = 0;
+  while (Cursor < B.size()) {
+    unsigned Len = mcs251InstrLen(B, Cursor);
+    if (Len == 0)
+      return fail(Err, "MCS251 bit: " + SecName +
+                           " is not a decodable instruction stream at offset "
+                           "0x" + Twine::utohexstr(Cursor));
+    if (Cursor + Len > B.size())
+      return fail(Err, "MCS251 bit: " + SecName +
+                           " ends in a truncated instruction at offset 0x" +
+                           Twine::utohexstr(Cursor));
+    while (Next < Fields.size() && Fields[Next] < Cursor + Len) {
+      const size_t Off = Fields[Next++];
+      if (Off != Cursor + 1 || !isBitFieldOpcode(B[Cursor]))
+        return fail(Err, "MCS251 bit: BITADDR8 field at 0x" +
+                             Twine::utohexstr(Off) + " in " + SecName +
+                             " is not the bit-address operand of a bit "
+                             "instruction");
+    }
+    Cursor += Len;
+  }
+  if (Next != Fields.size())
+    return fail(Err, "MCS251 bit: BITADDR8 field at 0x" +
+                         Twine::utohexstr(Fields[Next]) + " in " + SecName +
+                         " lies outside the section stream");
+  return true;
 }
 
 // A5: each legal vector slot starts with the EJMP opcode byte 0x8A followed
@@ -291,6 +557,18 @@ static bool validateMetaSection(const InputSection &S, raw_ostream &Err) {
     return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 &&
                S.Align == MCS251ISR::MetaSectionAlignment ||
            fail(Err, "malformed " + MCS251ISR::MetaSectionName);
+  // BT12: the bit-object metadata section, exact name only.
+  if (N == BitObjectSectionName)
+    return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 && S.Align == 4 ||
+           fail(Err, "malformed " + BitObjectSectionName);
+  // BT14: the bit-aware CRT profile is a reserved name that this lld stream
+  // does not consume yet.  Fail closed with the exact name rather than the
+  // generic unsupported-metadata message, so a new-profile asset mixed with
+  // the current bit protocol is a loud error and never silently ignored.
+  if (N == BitProfileSectionName)
+    return fail(Err, "unsupported " + BitProfileSectionName +
+                         ": the bit-aware CRT profile is not accepted by this "
+                         "linker; use the legacy IRQ CRT bit protocol");
   if (N == ".symtab")
     return S.Type == ELF::SHT_SYMTAB && S.Flags == 0 ||
            fail(Err, "malformed .symtab");
@@ -401,6 +679,19 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
       if (F.MetaSection)
         return fail(Err, Path + ": MCS251 ISR: at most one .mcs251.isr per object");
       F.MetaSection = S.get();
+    }
+    if (S->Name == BitObjectSectionName) {
+      // BT12: record-only, no entry size, no trailing padding, one per file.
+      if (S->Size == 0)
+        return fail(Err, Path + ": MCS251 bit: empty .mcs251.bit section");
+      if (H.sh_entsize != 0)
+        return fail(Err, Path + ": MCS251 bit: .mcs251.bit must have sh_entsize 0");
+      if (S->Size % BitObjectRecordSize != 0)
+        return fail(Err, Path + ": MCS251 bit: size must be a multiple of 8 "
+                             "with no trailing padding");
+      if (F.BitSection)
+        return fail(Err, Path + ": MCS251 bit: at most one .mcs251.bit per object");
+      F.BitSection = S.get();
     }
     if (S->IsAlloc && S->Align != 1)
       return fail(Err, Path + ": ALLOC section alignment must be 1: " + S->Name);
@@ -554,7 +845,40 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
     }
   }
 
+  // BT12: parse the fixed 8-byte bit-object records. Field-level structure is
+  // validated here (so --print-input exercises it); the symbol association and
+  // the definition/reference payload checks need resolved symbols and are done
+  // in the RELA loop below and in buildBitIdentities().
+  if (F.BitSection) {
+    const InputSection &M = *F.BitSection;
+    const ArrayRef<uint8_t> B(M.Data);
+    for (uint32_t Off = 0; M.Size != 0 && Off <= M.Size - BitObjectRecordSize;
+         Off += BitObjectRecordSize) {
+      BitRecord R;
+      R.Offset = Off;
+      if (B[Off + BitRec::Version] != BitRecordVersion)
+        return fail(Err, Path + ": MCS251 bit: unsupported record version");
+      R.Kind = B[Off + BitRec::Kind];
+      if (R.Kind != BitKindDefinition && R.Kind != BitKindReference)
+        return fail(Err, Path + ": MCS251 bit: unknown record kind");
+      R.InitValue = B[Off + BitRec::InitValue];
+      if (R.InitValue > 1)
+        return fail(Err, Path + ": MCS251 bit: init_value must be 0 or 1");
+      if (B[Off + BitRec::Capabilities] != BitCapabilities)
+        return fail(Err, Path + ": MCS251 bit: unsupported capabilities");
+      if (read32BE(B, Off + BitRec::SymbolRef) != 0)
+        return fail(Err, Path + ": MCS251 bit: symbol_reference must be zero; "
+                             "the association is carried by the bit RELA");
+      F.BitRecords.push_back(R);
+    }
+  }
+
   unsigned MetaRelaCount = 0;
+  unsigned BitRelaCount = 0;
+  // BT13/BT15: BITADDR8 field offsets per executable section, collected while
+  // parsing the RELA tables; decoded against the pre-relocation bytes once the
+  // whole section's relocations are known.
+  std::map<InputSection *, std::vector<uint32_t>> BitFieldsAtLoad;
   for (uint32_t I = 0; I != RawSections->size(); ++I) {
     const ELF32BE::Shdr &Rela = (*RawSections)[I];
     if (Rela.sh_type != ELF::SHT_RELA)
@@ -633,6 +957,53 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
                              " has no type9 association");
       continue;
     }
+    if (TS == F.BitSection) {
+      // BT12: the bit-object association RELA, under the frozen exact name.
+      ++BitRelaCount;
+      if (F.Sections[I]->Name != ".rela.mcs251.bit")
+        return fail(Err, Path + ": MCS251 bit: bit RELA must be named "
+                             ".rela.mcs251.bit");
+      if (Relocs->size() != F.BitRecords.size())
+        return fail(Err, Path + ": MCS251 bit: metadata needs exactly one "
+                             "BIT_REF relocation per record");
+      std::vector<bool> Covered(F.BitRecords.size(), false);
+      for (const ELF32BE::Rela &RelaEntry : *Relocs) {
+        Relocation R{static_cast<uint32_t>(RelaEntry.r_offset),
+                     RelaEntry.getType(false), RelaEntry.getSymbol(false),
+                     static_cast<int32_t>(RelaEntry.r_addend)};
+        if (R.Type != R_MCS251_BIT_REF)
+          return fail(Err, Path + ": MCS251 bit: only R_MCS251_BIT_REF is "
+                             "allowed in the bit RELA");
+        if (R.Addend != 0)
+          return fail(Err, Path + ": MCS251 bit: BIT_REF addend must be zero");
+        if (R.Sym >= F.Symbols.size())
+          return fail(Err, Path + ": relocation symbol index out of range");
+        // r_offset = record base + 4; subtraction-style bound first.
+        if (R.Offset < BitRec::SymbolRef)
+          return fail(Err, Path + ": MCS251 bit: BIT_REF offset must be "
+                             "record base + 4");
+        const uint32_t Into = R.Offset - BitRec::SymbolRef;
+        if (Into % BitObjectRecordSize != 0 ||
+            Into / BitObjectRecordSize >= F.BitRecords.size())
+          return fail(Err, Path + ": MCS251 bit: BIT_REF offset must be "
+                             "record base + 4");
+        const uint32_t Rec = Into / BitObjectRecordSize;
+        if (Covered[Rec])
+          return fail(Err, Path + ": MCS251 bit: each record carries exactly "
+                             "one BIT_REF relocation");
+        Covered[Rec] = true;
+        const InputSymbol &Sym = F.Symbols[R.Sym];
+        if (Sym.Name.empty() || Sym.Type != ELF::STT_OBJECT)
+          return fail(Err, Path + ": MCS251 bit: BIT_REF must name an "
+                             "STT_OBJECT symbol (never a section+addend fold)");
+        F.BitRecords[Rec].SymIndex = R.Sym;
+      }
+      for (size_t Rec = 0; Rec != Covered.size(); ++Rec)
+        if (!Covered[Rec])
+          return fail(Err, Path + ": MCS251 bit: record " + Twine(Rec) +
+                             " has no BIT_REF association");
+      continue;
+    }
     if (!TS->IsAlloc || TS->Type == ELF::SHT_NOBITS)
       return fail(Err, Path + ": RELA targets non-loadable section " + TS->Name);
     // SPEC §4.1: an empty PROGBITS .data section with a non-empty RELA is
@@ -650,13 +1021,53 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
       if (R.Type == ELF::R_MCS251_ISR_REF)
         return fail(Err, Path + ": MCS251 ISR: R_MCS251_ISR_REF is only "
                            "allowed in the ISR metadata RELA");
+      if (R.Type == R_MCS251_BIT_REF)
+        return fail(Err, Path + ": MCS251 bit: R_MCS251_BIT_REF is only "
+                           "allowed in the bit metadata RELA");
       uint32_t Width = relocWidth(R.Type);
-      if (R.Type > ELF::R_MCS251_J11 || R.Offset > TS->Size ||
-          Width > TS->Size - R.Offset)
+      if ((R.Type > ELF::R_MCS251_J11 && R.Type != R_MCS251_BITADDR8) ||
+          R.Offset > TS->Size || Width > TS->Size - R.Offset)
         return fail(Err, Path + ": relocation offset/type out of range");
+      if (R.Type == R_MCS251_BITADDR8) {
+        if (R.Addend != 0)
+          return fail(Err, Path + ": MCS251 bit: BITADDR8 addend must be zero");
+        // BT13/BT15: the field must be the bit-address operand of a bit
+        // instruction in an executable PROGBITS section, and the producer must
+        // have zero-filled it (BIT-OBJECT-CONTRACT.md §4.2).  The *position*
+        // proof is not a single-byte peek: the whole section is decoded below,
+        // on these original (pre-relocation) bytes, so a field that is not a
+        // bit operand in the producer's output cannot be laundered into one by
+        // a later relocation rewriting the bytes before it.  Symbol identity is
+        // validated later; target legitimacy never authorises a write location.
+        if (!TS->IsCode || TS->Type != ELF::SHT_PROGBITS)
+          return fail(Err, Path + ": MCS251 bit: BITADDR8 field must live in an "
+                             "executable PROGBITS section, not " + TS->Name);
+        const ArrayRef<uint8_t> TB(TS->Data);
+        if (R.Offset >= TB.size())
+          return fail(Err, Path + ": relocation offset/type out of range");
+        if (TB[R.Offset] != 0)
+          return fail(Err, Path + ": MCS251 bit: BITADDR8 placeholder byte at "
+                             "offset 0x" + Twine::utohexstr(R.Offset) +
+                             " in " + TS->Name + " must be zero");
+        BitFieldsAtLoad[TS].push_back(R.Offset);
+      }
       TS->RelocIndex = I;
       TS->Relocs.push_back(R);
     }
+  }
+  // BT13/BT15: prove every BITADDR8 field is the bit-address operand of a bit
+  // instruction in the *producer's original* byte stream, before any
+  // relocation is applied.  The final post-relocation image is re-checked
+  // separately in validateBitAddrFields(); both steps are required, because a
+  // later relocation may rewrite an earlier byte (laundering an invalid field
+  // into a valid-looking one) while the field itself stays put.
+  for (auto &E : BitFieldsAtLoad) {
+    InputSection *S = E.first;
+    std::vector<size_t> Offs(E.second.begin(), E.second.end());
+    llvm::sort(Offs);
+    Offs.erase(std::unique(Offs.begin(), Offs.end()), Offs.end());
+    if (!validateBitAddrStream(ArrayRef<uint8_t>(S->Data), S->Name, Offs, Err))
+      return false;
   }
   // R1: object-level association completeness, enforced at input-structure
   // validation time (--print-input rejects it too), never deferred to the
@@ -669,6 +1080,16 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
       return fail(Err, Path + ": MCS251 ISR: more than one RELA targets "
                          ".mcs251.isr");
   }
+  if (F.BitSection) {
+    if (BitRelaCount == 0)
+      return fail(Err, Path + ": MCS251 bit: records have no "
+                         ".rela.mcs251.bit association section");
+    if (BitRelaCount > 1)
+      return fail(Err, Path + ": MCS251 bit: more than one RELA targets "
+                         ".mcs251.bit");
+  }
+  if (!F.BitSection && BitRelaCount)
+    return fail(Err, Path + ": MCS251 bit: bit RELA targets a non-bit section");
   // SPEC §4.1: a size=0 PROGBITS .data section is only ignorable when it has
   // no defined symbols and no relocations.  Relocations are already rejected
   // above; here we check for defined symbols.
@@ -705,10 +1126,37 @@ private:
   uint32_t SsegReservedSize = 0;
   bool StackRequested = false;
 
+  // BT13: cross-TU bit slot allocation state.  BitOf maps a resolved bit
+  // symbol to its allocated bit address (0..0x7F for objects, 0x00..0xFF for
+  // fixed references).  BitOwner records, per backing byte, the bit mask owned
+  // by automatic kind-1 objects and the value mask of bits initialized to 1.
+  // BitPoolByte marks bytes already physically reserved by a BSEG_BYTES slice
+  // (the CRT pool): they must not be reserved a second time.
+  std::map<InputSymbol *, uint32_t> BitOf;
+  std::map<uint32_t, uint8_t> BitMask;
+  std::map<uint32_t, uint8_t> BitValue;
+  std::set<uint32_t> BitPoolByte;
+  std::set<uint32_t> BitExclusiveByte;
+  // BT13 auditability: per backing byte, where its physical reservation came
+  // from ("crt-pool" for a BSEG_BYTES slice, else the first reserving owner).
+  std::map<uint32_t, std::string> BitByteOrigin;
+  // BT13 auditability: RAM bytes owned by a fixed reference (no automatic bit)
+  // and their owner names, so the map can report owner/init policy for a
+  // fixed-only byte instead of omitting it.  BitInputXInitDest records which
+  // destination bytes an *input* XINIT record covers, so the user's own
+  // initialization is distinguishable from "never initialized".
+  std::map<uint32_t, std::string> BitFixedByte;
+  std::map<uint32_t, std::string> BitInputXInitDest;
+  // BT13/BT15: every applied BITADDR8 field (section, offset), revalidated
+  // against instruction boundaries after all relocations are applied.
+  std::set<std::pair<InputSection *, uint32_t>> BitAddrFields;
+
   uint32_t areaStart(StringRef Name, uint32_t Default) const;
   bool hasAreaStart(StringRef Name) const;
   bool rejectInputVecs();
   bool resolveSymbols();
+  bool buildBitIdentities();
+  bool allocateBitSlots();
   bool validateISRIdentitiesAndRegistrations();
   bool synthesizeIRQVectors();
   bool layout();
@@ -716,9 +1164,11 @@ private:
   bool validateIRQReservedRangesAndCRT();
   bool layoutCode();
   bool layoutData();
+  bool reserveCode(uint32_t Start, uint32_t Size, StringRef What);
   bool allocate(InputSection &S, uint32_t Lo, uint32_t Hi);
   bool reserve(uint32_t Start, uint32_t Size, StringRef What);
   bool applyRelocations();
+  bool validateBitAddrFields();
   bool applyVectorJumps();
   bool validateIRQFinalAssets();
   bool validateXInit();
@@ -812,9 +1262,60 @@ bool Linker::resolveSymbols() {
   return true;
 }
 
+// BT13: resolve the bit-object records to exact symbol identities and validate
+// the definition/reference payload against the loaded symbols. Runs after
+// resolveSymbols() so global references have their final resolution.
+bool Linker::buildBitIdentities() {
+  for (auto &F : Files)
+    for (BitRecord &R : F->BitRecords) {
+      InputSymbol *IS = &F->Symbols[R.SymIndex];
+      if (R.Kind == BitKindDefinition) {
+        // A definition names a symbol defined by this same object's
+        // `.mcs251.bit` record; a cross-TU use is a BITADDR8 reference, never
+        // a definition record, so no global resolution applies here.
+        R.Ref = IS;
+        if (!IS->Defined || IS->Sec != F->BitSection)
+          return fail(Err, F->Path + ": MCS251 bit: definition " + IS->Name +
+                               " is not defined in this object's .mcs251.bit");
+        if (IS->Type != ELF::STT_OBJECT || IS->Size != 1)
+          return fail(Err, F->Path + ": MCS251 bit: definition " + IS->Name +
+                               " must be an STT_OBJECT of size 1");
+        // BIT-OBJECT-CONTRACT.md §3: a kind-1 symbol's st_value IS the byte
+        // offset of its record.  Enforcing the exact identity makes the
+        // record<->symbol association unambiguous: a symbol whose value names
+        // a different record (or a second record naming the same symbol) is a
+        // malformed object, not a second slot for one logical bit object.
+        if (IS->Value != R.Offset)
+          return fail(Err, F->Path + ": MCS251 bit: definition " + IS->Name +
+                               " st_value 0x" + Twine::utohexstr(IS->Value) +
+                               " does not name its record offset 0x" +
+                               Twine::utohexstr(R.Offset));
+      } else {
+        // A fixed reference names a defined SHN_ABS object whose value is the
+        // bit address; several aliases of one address are idempotent.  An
+        // undefined global resolves to its single definition.
+        InputSymbol *Def = IS;
+        if (!IS->Defined && IS->Bind != ELF::STB_LOCAL) {
+          auto It = Globals.find(IS->Name);
+          if (It != Globals.end() && It->second->Defined)
+            Def = It->second;
+        }
+        R.Ref = Def;
+        if (!Def->Defined || Def->Section != ELF::SHN_ABS ||
+            Def->Type != ELF::STT_OBJECT)
+          return fail(Err, F->Path + ": MCS251 bit: fixed reference " +
+                               IS->Name +
+                               " must be a defined SHN_ABS STT_OBJECT");
+        if (Def->Value > 0xff)
+          return fail(Err, F->Path + ": MCS251 bit: fixed reference " +
+                               IS->Name + " bit address 0x" +
+                               Twine::utohexstr(Def->Value) + " exceeds 0xff");
+      }
+    }
+  return true;
+}
+
 // T07 step 7: the synthesized table is the only VECS in IRQ mode. Any input
-// VECS section is rejected, including a zero-size one: an old asset must not
-// masquerade as the companion CRT.
 bool Linker::rejectInputVecs() {
   for (const auto &F : Files)
     for (const auto &S : F->Sections)
@@ -1122,18 +1623,22 @@ bool Linker::allocate(InputSection &S, uint32_t Lo, uint32_t Hi) {
   return fail(Err, Msg);
 }
 
+bool Linker::reserveCode(uint32_t Start, uint32_t Size, StringRef What) {
+  if (!rangeFits(Start, Size))
+    return fail(Err, "CODE address overflow in " + What);
+  Range R{Start, Start + Size};
+  for (const Range &U : CodeUsed)
+    if (R.Start < U.End && U.Start < R.End)
+      return fail(Err, "CODE overlap for " + What);
+  if (Size)
+    CodeUsed.push_back(R);
+  return true;
+}
+
 bool Linker::layoutCode() {
   CodeUsed.clear();
   auto reserveCode = [&](uint32_t Start, uint32_t Size, StringRef What) {
-    if (!rangeFits(Start, Size))
-      return fail(Err, "CODE address overflow in " + What);
-    Range R{Start, Start + Size};
-    for (const Range &U : CodeUsed)
-      if (R.Start < U.End && U.Start < R.End)
-        return fail(Err, "CODE overlap for " + What);
-    if (Size)
-      CodeUsed.push_back(R);
-    return true;
+    return this->reserveCode(Start, Size, What);
   };
   struct Cursor { uint32_t V; };
   std::map<std::string, Cursor> C;
@@ -1165,6 +1670,230 @@ bool Linker::layoutCode() {
           return fail(Err, "duplicate CODE byte at 0x" + Twine::utohexstr(A));
         Image[A] = S->Data[I];
       }
+  }
+  return true;
+}
+
+// BT13: cross-TU bit slot allocation (BIT-OBJECT-CONTRACT.md §5).  Runs inside
+// layoutData() after the BSEG_BYTES pool and the legacy BIT_BANK overlay are
+// placed, and before any ordinary RAM class.  Its DATA-ledger reservations are
+// what exclude a bit byte from DSEG/OSEG/ISEG/SSEG.
+bool Linker::allocateBitSlots() {
+  BitOf.clear();
+  BitMask.clear();
+  BitValue.clear();
+  BitPoolByte.clear();
+  BitExclusiveByte.clear();
+  BitByteOrigin.clear();
+  BitFixedByte.clear();
+
+  // The physical pool is the byte range already reserved by BSEG_BYTES slices
+  // (the CRT owns 16 bytes).  Those bytes are never reserved twice: they are
+  // only sub-allocated.  A legacy BIT_BANK byte is overlay storage and is not
+  // part of the pool, so automatic objects never land in it.
+  for (InputSection *S : AllSections)
+    if (S->Region == "BSEG_BYTES" && S->Size)
+      for (uint32_t B = S->Address; B != S->Address + S->Size; ++B) {
+        BitPoolByte.insert(B);
+        BitByteOrigin[B] = "crt-pool " + S->Name;
+      }
+
+  auto InPool = [&](uint32_t Byte) { return BitPoolByte.count(Byte) != 0; };
+  auto Reserved = [&](uint32_t Byte) {
+    for (const DataUse &U : DataUsed)
+      if (U.R.Start <= Byte && Byte < U.R.End)
+        return true;
+    return false;
+  };
+
+  // Deterministic order: input-file order, then record order inside each
+  // file's single `.mcs251.bit` section.
+  std::vector<std::pair<InputFile *, BitRecord *>> Recs;
+  for (auto &F : Files)
+    for (BitRecord &R : F->BitRecords)
+      Recs.push_back({F.get(), &R});
+
+  // 1. Fixed references reserve their whole backing byte exclusively.  A byte
+  //    already in the pool needs no second reservation; SFR addresses
+  //    (>= 0x80) have no RAM backing at all.  Aliases of one address are
+  //    idempotent by construction.
+  for (auto &E : Recs) {
+    BitRecord *R = E.second;
+    if (R->Kind != BitKindReference)
+      continue;
+    const uint32_t Bit = R->Ref->Value;
+    BitOf[R->Ref] = Bit;
+    if (Bit > 0x7f)
+      continue; // SFR bit reference: no window byte.
+    const uint32_t Byte = BitWindowBase + (Bit >> 3);
+    if (BitExclusiveByte.count(Byte))
+      continue;
+    if (!InPool(Byte)) {
+      if (Reserved(Byte))
+        return fail(Err, "MCS251 bit: fixed reference " + R->Ref->Name +
+                             " needs backing byte 0x" + Twine::utohexstr(Byte) +
+                             " which is already occupied");
+      if (!reserve(Byte, 1, "bit fixed " + R->Ref->Name))
+        return false;
+    }
+    BitExclusiveByte.insert(Byte);
+    if (!BitByteOrigin.count(Byte))
+      BitByteOrigin[Byte] = "fixed " + R->Ref->Name;
+    // First fixed alias of this byte names it for the auditability rows.
+    if (!BitFixedByte.count(Byte))
+      BitFixedByte[Byte] = R->Ref->Name;
+  }
+
+  // 2. Automatic objects first-fit the lowest free bit of a non-exclusive
+  //    byte.  Different translation units share a byte's free bits.
+  uint32_t DefCount = 0;
+  for (auto &E : Recs)
+    if (E.second->Kind == BitKindDefinition)
+      ++DefCount;
+  std::set<uint32_t> ReservedAuto; // Non-pool bytes reserved by this pass.
+  uint32_t NextBit = 0;
+  uint32_t Placed = 0;
+  for (auto &E : Recs) {
+    BitRecord *R = E.second;
+    if (R->Kind != BitKindDefinition)
+      continue;
+    InputSymbol *Sym = R->Ref;
+    bool Found = false;
+    for (uint32_t B = NextBit; B < BitCount; ++B) {
+      const uint32_t Byte = BitWindowBase + (B >> 3);
+      if (BitExclusiveByte.count(Byte))
+        continue;
+      // A byte reserved by a non-pool DATA use is blocked, but a byte this
+      // pass reserved for an earlier bit of the same pool is not.
+      if (!InPool(Byte) && ReservedAuto.count(Byte) == 0 && Reserved(Byte))
+        continue;
+      const uint32_t Idx = B & 7;
+      BitOf[Sym] = B;
+      BitMask[Byte] |= uint8_t(1u << Idx);
+      if (R->InitValue)
+        BitValue[Byte] |= uint8_t(1u << Idx);
+      if (!InPool(Byte) && !ReservedAuto.count(Byte)) {
+        if (!reserve(Byte, 1, "bit object " + Sym->Name))
+          return false;
+        ReservedAuto.insert(Byte);
+        BitByteOrigin[Byte] = "bit " + Sym->Name;
+      }
+      NextBit = B + 1;
+      Found = true;
+      ++Placed;
+      break;
+    }
+    if (!Found) {
+      // BT13 auditability: report why each byte in the window is unavailable,
+      // naming every occupied source without truncation, so the exhausted owner
+      // is fully accounted for from the message alone.  A byte is unavailable
+      // when a fixed reference reserves it exclusively, when an ordinary DATA
+      // reservation (or --reserve-data) covers it, or when automatic bit
+      // objects have already claimed all eight of its bits (the full-window
+      // case, where no byte is *blocked* yet no bit is free).
+      std::vector<std::pair<uint32_t, std::string>> Blocked;
+      for (uint32_t B = 0; B < BitCount; ++B) {
+        const uint32_t Byte = BitWindowBase + (B >> 3);
+        if (BitExclusiveByte.count(Byte)) {
+          Blocked.push_back({Byte, BitByteOrigin.count(Byte)
+                                      ? BitByteOrigin[Byte]
+                                      : std::string("fixed reference")});
+          continue;
+        }
+        if (!InPool(Byte) && ReservedAuto.count(Byte) == 0 && Reserved(Byte)) {
+          std::string What = "ordinary DATA reservation";
+          for (const DataUse &U : DataUsed)
+            if (U.R.Start <= Byte && Byte < U.R.End) {
+              What = U.What;
+              break;
+            }
+          Blocked.push_back({Byte, What});
+          continue;
+        }
+        auto M = BitMask.find(Byte);
+        if (M != BitMask.end() && M->second == 0xFF)
+          Blocked.push_back({Byte, "bit objects (full mask 0xff)"});
+      }
+      llvm::sort(Blocked);
+      Blocked.erase(std::unique(Blocked.begin(), Blocked.end()), Blocked.end());
+      std::string Occ;
+      for (const auto &P : Blocked)
+        Occ += " 0x" + Twine::utohexstr(P.first).str() + " from " + P.second;
+      // List every allocated automatic bit with its owner so a full window is
+      // fully attributable.
+      std::vector<std::pair<uint32_t, std::string>> AutoSlots;
+      for (const auto &P : BitOf)
+        if (P.second <= 0x7f)
+          AutoSlots.push_back({P.second, P.first->Name});
+      llvm::sort(AutoSlots);
+      std::string Allocd;
+      for (const auto &P : AutoSlots)
+        Allocd += " 0x" + Twine::utohexstr(P.first).str() + "=" + P.second;
+      return fail(Err, "MCS251 bit: bit slot exhaustion: cannot allocate bit "
+                       "object " + Sym->Name + " (placed " + Twine(Placed) +
+                           " of " + Twine(DefCount) +
+                           " objects in the 128-bit window [0x00,0x7f]); no "
+                           "byte-RAM fallback exists; blocked bytes:" +
+                           (Occ.empty() ? std::string(" none") : Occ) +
+                           "; allocated bits:" +
+                           (Allocd.empty() ? std::string(" none") : Allocd));
+    }
+  }
+
+  // 3. Aggregate one v1 XINIT record per byte with a nonzero initial value.
+  //    Every such byte is either pool storage (the CRT owns the whole window)
+  //    or a byte lld reserved exclusively for bits (this pass rejects any
+  //    other kind of collision), so a whole-byte payload cannot clobber an
+  //    unrelated ordinary object.  Zero-initialized bits are produced by the
+  //    CRT's explicit window clear, never by NOBITS.  validateXInit() accepts
+  //    these allocator-owned bytes as destinations.
+  if (!BitValue.empty()) {
+    if (!hasAreaStart("XINIT"))
+      return fail(Err, "MCS251 bit: a nonzero bit initial value requires "
+                       "--area-start=XINIT");
+    uint32_t XinitEnd = areaStart("XINIT", 0);
+    for (InputSection *S : AllSections)
+      if (S->Region == "XINIT" && S->Size)
+        XinitEnd = std::max(XinitEnd, S->Address + uint32_t(S->Size));
+    std::vector<uint8_t> Data;
+    for (const auto &P : BitValue) {
+      Data.push_back(static_cast<uint8_t>(P.first >> 8));
+      Data.push_back(static_cast<uint8_t>(P.first));
+      Data.push_back(0);
+      Data.push_back(1); // object_size
+      Data.push_back(0);
+      Data.push_back(1); // payload_size
+      Data.push_back(P.second);
+    }
+    auto S = std::make_unique<InputSection>();
+    S->Name = ".mcs251.xinit.bit";
+    S->Type = ELF::SHT_PROGBITS;
+    S->Flags = ELF::SHF_ALLOC;
+    S->Size = Data.size();
+    S->Align = 1;
+    S->Address = XinitEnd;
+    S->Region = "XINIT";
+    S->IsAlloc = true;
+    S->IsLoadable = true;
+    S->Synthesized = true;
+    S->Data = Data;
+    // BT13/BT15: the synthesized section obeys exactly the CODE range and
+    // occupancy rules every ordinary XINIT section obeys (XINIT is a CODE-class
+    // ROM area selected by Region, like an input .mcs251.xinit).  reserveCode()
+    // enforces the always-on 24-bit address limit (rangeFits) and rejects any
+    // overlap with an already occupied CODE range; the optional board-level
+    // flash gate is not a substitute for the architectural address check.
+    if (!reserveCode(S->Address, static_cast<uint32_t>(S->Size), S->Name))
+      return false;
+    for (size_t I = 0; I != Data.size(); ++I) {
+      const uint32_t A = S->Address + static_cast<uint32_t>(I);
+      if (Image.count(A))
+        return fail(Err, "MCS251 bit: synthesized XINIT byte overlaps CODE at "
+                         "0x" + Twine::utohexstr(A));
+      Image[A] = Data[I];
+    }
+    AllSections.push_back(S.get());
+    OwnedSynth.push_back(std::move(S));
   }
   return true;
 }
@@ -1236,6 +1965,12 @@ bool Linker::layoutData() {
     return true;
   };
   if (!allocateOverlayGroup("BIT_BANK", 0x20, 0x2f))
+    return false;
+
+  // BT13: cross-TU bit slot allocation. Runs after the BSEG_BYTES pool and the
+  // legacy BIT_BANK overlay are placed, and before any ordinary RAM class, so
+  // a byte owned by an automatic bit object is excluded from DSEG/OSEG/...
+  if (!allocateBitSlots())
     return false;
 
   uint32_t DsegStart = areaStart("DSEG", 0);
@@ -1703,6 +2438,34 @@ bool Linker::applyRelocations() {
           if (It != Globals.end())
             Target = It->second;
         }
+        // BT13: bit relocations. BITADDR8 writes the resolved bit address; the
+        // bit symbol's ELF Address field is never a byte address, so it is
+        // looked up in the allocation ledger, not read from Target->Address.
+        if (R.Type == R_MCS251_BITADDR8) {
+          auto BitIt = BitOf.find(Target);
+          if (BitIt == BitOf.end())
+            return fail(Err, "MCS251 bit: BITADDR8 in " + S->Name +
+                                 " target " + Target->Name +
+                                 " is not a bit object or fixed bit reference");
+          const uint32_t BitAddr = BitIt->second;
+          if (R.Offset + 1 > S->Size || S->IsNobits)
+            return fail(Err, "relocation writes outside PROGBITS section " +
+                                 S->Name);
+          if (!Written.insert({S.get(), R.Offset}).second)
+            return fail(Err, "overlapping relocation in " + S->Name);
+          const uint8_t B = static_cast<uint8_t>(BitAddr);
+          S->Data[R.Offset] = B;
+          Image[S->Address + R.Offset] = B;
+          BitAddrFields.insert({S.get(), R.Offset});
+          continue;
+        }
+        // A bit object has no byte address: an ordinary address relocation may
+        // never target one.  Fixed SHN_ABS bit references are only identified
+        // by a bit relocation consuming them, so they are left untouched here.
+        if (Target->Defined && Target->Sec && Target->File &&
+            Target->Sec == Target->File->BitSection)
+          return fail(Err, "MCS251 bit: ordinary relocation in " + S->Name +
+                               " targets bit object " + Target->Name);
         // T07 step 15 / R3: an ordinary ALLOC relocation may never use a
         // known registered ISR or the default entry as a plain address/call
         // target. The synthesized vector jumps are the single sanctioned
@@ -1807,10 +2570,48 @@ bool Linker::applyRelocations() {
   // T07 step 6: the synthesized EJMP table is applied after layout, when the
   // vetted targets have final addresses. Metadata type9 relocations are never
   // seen here: they are consumed during loadFile() (T07 step 14).
+  // BT13/BT15: re-validate every BITADDR8 field against the *final* image,
+  // after all relocations (including ones that could overwrite the field's
+  // opcode byte) have been applied.  This is the same boundary rule as the
+  // load-time check, but on the resolved bytes, so a relocation that turns
+  // D2 00 into 74 xx or a truncated/decoy byte pair cannot slip through.
+  if (!validateBitAddrFields())
+    return false;
   if (IrqMode && !applyVectorJumps())
     return false;
   if (IrqMode && !validateIRQFinalAssets())
     return false;
+  return true;
+}
+
+// BT13/BT15: final (post-relocation) BITADDR8 field validation.  Every
+// recorded bit-address field must be the operand of a real bit instruction in
+// the completed image: the section stream must decode as instructions with a
+// bit opcode immediately before the field.  A field that no longer sits on a
+// bit-instruction boundary -- because another relocation rewrote its opcode,
+// or because the surrounding bytes were never a valid instruction stream -- is
+// a hard error.  This is deliberately independent of the numeric value of the
+// preceding byte.
+bool Linker::validateBitAddrFields() {
+  // Group the recorded fields by section, in offset order, and decode the
+  // FINAL image with the same full-stream rule used before relocation.  The
+  // whole section is decoded to its end, so a field placed inside a
+  // truncated trailing instruction (or a stream that stops decoding) fails
+  // closed even when the field's own bytes look right.
+  std::map<InputSection *, std::vector<size_t>> Fields;
+  for (const auto &P : BitAddrFields) {
+    if (P.second >= P.first->Data.size())
+      return fail(Err, "MCS251 bit: BITADDR8 field outside " + P.first->Name);
+    Fields[P.first].push_back(P.second);
+  }
+  for (auto &E : Fields) {
+    InputSection *S = E.first;
+    std::vector<size_t> &Offs = E.second;
+    llvm::sort(Offs);
+    Offs.erase(std::unique(Offs.begin(), Offs.end()), Offs.end());
+    if (!validateBitAddrStream(ArrayRef<uint8_t>(S->Data), S->Name, Offs, Err))
+      return false;
+  }
   return true;
 }
 
@@ -1877,13 +2678,68 @@ bool Linker::validateIRQFinalAssets() {
 }
 
 bool Linker::validateXInit() {
+  // BT13/BT14 ownership is unconditional: a byte holding an automatic bit
+  // object belongs to the bit allocator for initialization, so *no* input
+  // XINIT record may target it -- whether or not a __mcs251_globals_init
+  // walker happens to be linked.  This runs before the walker gate below so
+  // the constraint cannot be bypassed by omitting the CRT (the previous
+  // walker-gated placement let a conflicting object link cleanly when the
+  // walker was absent).  A byte owned only by a fixed reference is the user's
+  // and is not restricted; the synthesized record section is exempt.
+  for (InputSection *S : AllSections) {
+    if (S->Region != "XINIT" || S->Synthesized)
+      continue;
+    size_t SOffset = 0;
+    while (SOffset != S->Data.size()) {
+      // Structural record errors are deliberately not reported here: the
+      // walker-gated loop below owns that diagnostic order, so this pre-pass
+      // stops at the first record it cannot parse and leaves the message to
+      // the established path.  Only the ownership conflict is emitted here.
+      if (S->Data.size() - SOffset < 6)
+        break;
+      ArrayRef<uint8_t> Record(S->Data);
+      uint32_t Destination = (uint32_t(Record[SOffset]) << 8) |
+                             Record[SOffset + 1];
+      uint32_t ObjectSize = (uint32_t(Record[SOffset + 2]) << 8) |
+                            Record[SOffset + 3];
+      uint32_t PayloadSize = (uint32_t(Record[SOffset + 4]) << 8) |
+                             Record[SOffset + 5];
+      if (!ObjectSize || (PayloadSize != 0 && PayloadSize != ObjectSize) ||
+          PayloadSize > S->Data.size() - SOffset - 6)
+        break;
+      const uint32_t DestEnd = Destination + ObjectSize;
+      for (uint32_t B = Destination; B < DestEnd; ++B)
+        BitInputXInitDest[B] = S->Name;
+      for (const auto &P : BitMask) {
+        const uint32_t B = P.first;
+        if (Destination < B + 1 && B < DestEnd)
+          return fail(Err, "MCS251 bit: XINIT record in " + S->Name +
+                               " initializes byte 0x" + Twine::utohexstr(B) +
+                               " owned by automatic bit objects; the bit "
+                               "allocator owns that initialization and no "
+                               "input XINIT record may target it");
+      }
+      SOffset += 6 + PayloadSize;
+    }
+  }
+
   bool InitializerPresent = false;
   for (const auto &F : Files)
     for (const InputSymbol &S : F->Symbols)
       if (S.Name == "__mcs251_globals_init" && S.Defined)
         InitializerPresent = true;
-  if (!InitializerPresent)
+  if (!InitializerPresent) {
+    // A nonzero automatic bit initial value needs the globals-init walker to
+    // apply its synthesized record.  Without one the value would be silently
+    // dropped (the section would sit in ROM unconsumed), and NOBITS must never
+    // be trusted as power-on zero: fail closed instead of emitting a bit
+    // object whose declared initial value is not realized.
+    if (!BitValue.empty())
+      return fail(Err, "MCS251 bit: a nonzero bit initial value requires a "
+                       "__mcs251_globals_init initializer in the link; none "
+                       "is present, so the value could not be applied");
     return true;
+  }
   uint64_t TotalXInit = 0;
   for (InputSection *S : AllSections) {
     if (S->Region != "XINIT")
@@ -1925,6 +2781,16 @@ bool Linker::validateXInit() {
           WithinOneSlice = true;
           break;
         }
+      // BT13/BT14: a byte lld reserved for an automatic bit object (outside
+      // every BSEG_BYTES pool) is an owned initialization target too.  Only
+      // bytes with a nonzero synthesized value are eligible, so this cannot
+      // widen the accepted set for unrelated input records.
+      if (!WithinOneSlice)
+        for (const auto &P : BitValue)
+          if (Destination == P.first && ObjectSize == 1) {
+            WithinOneSlice = true;
+            break;
+          }
       if (!WithinOneSlice)
         return fail(Err, "XINIT destination is not within one DSEG slice");
       Offset += 6 + PayloadSize;
@@ -2395,6 +3261,95 @@ void Linker::buildMap(raw_ostream &Out) const {
     Out << "stack H=" << format_hex(StackH, 4, false) << " SPX="
         << format_hex(SPX, 4, false) << " capacity=" << Capacity
         << " edata_end=" << format_hex(Config.EdataEnd, 4, false) << '\n';
+  // BT13: bit allocation rows, emitted only when bit objects exist so links
+  // without them keep byte-identical maps (frozen artifacts).  Each row names
+  // the bit object, its bit address, backing byte/index, owner and init value.
+  if (!BitMask.empty() || !BitOf.empty()) {
+    auto Hex2 = [](uint32_t V) {
+      const char *D = "0123456789abcdef";
+      std::string S = "0x";
+      S += D[(V >> 4) & 0xf];
+      S += D[V & 0xf];
+      return S;
+    };
+    std::vector<std::pair<std::string, uint32_t>> Bits;
+    for (const auto &P : BitOf) {
+      // LOCAL objects are file-scoped: qualify the name with the defining
+      // object so two same-named statics are not confused in the map.
+      std::string N = P.first->Name;
+      if (P.first->Bind == ELF::STB_LOCAL && P.first->File)
+        N = P.first->File->Path + ":" + N;
+      auto It = P.second <= 0x7f
+                    ? BitMask.find(BitWindowBase + (P.second >> 3))
+                    : BitMask.end();
+      const bool Automatic = It != BitMask.end() &&
+                             (It->second & (1u << (P.second & 7)));
+      Bits.push_back({N + (Automatic ? "" : " fixed"), P.second});
+    }
+    llvm::sort(Bits, [](const auto &A, const auto &B) {
+      return A.second != B.second ? A.second < B.second : A.first < B.first;
+    });
+    for (const auto &P : Bits) {
+      Out << "BIT " << P.first << " = " << Hex2(P.second);
+      if (P.second > 0x7f) {
+        // SFR bit: no RAM backing byte; byte/index are the SFR encoding.
+        Out << " sfr byte " << Hex2(P.second & 0xf8) << " index "
+            << (P.second & 7) << " init 0\n";
+        continue;
+      }
+      const uint32_t Byte = BitWindowBase + (P.second >> 3);
+      Out << " byte " << Hex2(Byte) << " index " << (P.second & 7);
+      const bool Automatic = BitMask.count(Byte) != 0;
+      if (Automatic) {
+        auto V = BitValue.find(Byte);
+        Out << " init "
+            << ((V != BitValue.end() && (V->second & (1u << (P.second & 7))))
+                    ? 1
+                    : 0)
+            << '\n';
+      } else {
+        // A fixed-reference bit is never initialized by the allocator.  Report
+        // the user's own input-XINIT coverage honestly instead of the value 0:
+        // "xinit" means an input record writes this byte, "none" means the bit
+        // has no declared initial value (which is NOT the same as init 0).
+        Out << " init "
+            << (BitInputXInitDest.count(Byte) ? "user-xinit" : "none") << '\n';
+      }
+    }
+    for (const auto &P : BitMask) {
+      auto V = BitValue.find(P.first);
+      const uint32_t Value = V == BitValue.end() ? 0 : V->second;
+      // BT13 auditability: name the physical owner of the byte and how the
+      // bits reach their initial value.  A pool byte is produced by the CRT's
+      // explicit window clear followed by the synthesized XINIT record; a
+      // non-pool byte has no clear, so only its nonzero bits are written.
+      auto O = BitByteOrigin.find(P.first);
+      Out << "BITBYTE " << Hex2(P.first) << " mask " << Hex2(P.second)
+          << " value " << Hex2(Value) << " owner "
+          << (O == BitByteOrigin.end() ? std::string("?") : O->second)
+          << " init "
+          << (BitPoolByte.count(P.first)
+                  ? (Value ? "crt-clear+xinit" : "crt-clear")
+                  : (Value ? "xinit" : "none"))
+          << '\n';
+    }
+    // BT13 auditability: a byte owned ONLY by a fixed reference carries no
+    // automatic mask, so it has no BITBYTE row above.  Emit one for each such
+    // RAM byte with its owner and init policy, so a fixed RAM reference is
+    // fully traceable and "no declared init" is distinguishable from
+    // "initialized to 0" (user-xinit vs none).
+    for (const auto &P : BitFixedByte) {
+      if (BitMask.count(P.first))
+        continue; // Covered by the automatic row above.
+      const bool InPool = BitPoolByte.count(P.first) != 0;
+      const bool UserXInit = BitInputXInitDest.count(P.first) != 0;
+      Out << "BITBYTE " << Hex2(P.first) << " mask 0x00 value 0x00 owner "
+          << "fixed " << P.second << " init "
+          << (InPool ? (UserXInit ? "crt-clear+user-xinit" : "crt-clear")
+                     : (UserXInit ? "user-xinit" : "none"))
+          << '\n';
+    }
+  }
   // T07 steps 17-19: in IRQ mode the map carries exactly the 52 synthesized
   // vector rows (slot as two decimal digits, address as 6 lowercase hex
   // digits). No ISR-safe, stack or priority fields exist anywhere.
@@ -2434,8 +3389,14 @@ void Linker::collectSymbols(std::vector<OutputSymbol> &Out) const {
     for (const auto &F : Files)
       for (const InputSymbol &S : F->Symbols)
         if (S.Defined && !S.Name.empty() && S.Type != ELF::STT_SECTION &&
-            S.Bind == Bind)
+            S.Bind == Bind) {
+          // BT13: a bit object has no byte address (its st_value is a bit
+          // metadata record offset), so it never enters the byte-address
+          // symbol table.  The bit allocation is reported in the map instead.
+          if (S.Sec && F->BitSection == S.Sec)
+            continue;
           Out.push_back({S.Name, S.Address, S.Size, S.Bind, S.Type, false});
+        }
   };
   Emit(ELF::STB_LOCAL);
   Emit(ELF::STB_GLOBAL);
@@ -2475,6 +3436,8 @@ bool Linker::run(LinkerResult &Result) {
   if (Config.PrintInput)
     return true;
   if (!resolveSymbols())
+    return false;
+  if (!buildBitIdentities())
     return false;
   if (IrqMode && (!validateISRIdentitiesAndRegistrations() ||
                   !synthesizeIRQVectors()))

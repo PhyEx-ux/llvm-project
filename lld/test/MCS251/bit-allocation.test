@@ -1,0 +1,530 @@
+#
+# BT13: cross-TU bit-slot allocator.
+#   - bit 0/7/8/127 boundaries and the backing-byte mapping
+#   - a full 128-bit window succeeds, the 129th bit fails (no byte-RAM fallback)
+#   - one fixed reference byte leaves 120 automatic bits; 121 fails
+#   - cross-TU packing shares a byte's free bits; extern merges to one slot
+#   - the backing byte is excluded from ordinary RAM
+#   - BITADDR8 fills the bit instruction's address field with the bit number
+#   - a legacy BIT_BANK overlay is never implicitly overlaid by a bit object
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: %python %S/Inputs/bit-fixture.py %t/full128.yaml records 128
+# RUN: %python %S/Inputs/bit-fixture.py %t/full129.yaml records 129
+# RUN: %python %S/Inputs/bit-fixture.py %t/one_fixed120.yaml records 120 --fixed 0
+# RUN: %python %S/Inputs/bit-fixture.py %t/one_fixed121.yaml records 121 --fixed 0
+# RUN: %python %S/Inputs/bit-fixture.py %t/tu_def.yaml cross shared def
+# RUN: %python %S/Inputs/bit-fixture.py %t/tu_use.yaml cross shared use
+# RUN: %python %S/Inputs/bit-fixture.py %t/tu_other.yaml cross other def
+# RUN: %python %S/Inputs/bit-fixture.py %t/tu_missing.yaml cross nosuch use
+
+# --- bit 0/7/8/127 fixed references and the byte mapping ---
+# RUN: yaml2obj fixed-boundaries.yaml -o fixed.o
+# RUN: mcs251-lld fixed.o --area-start=CSEG=0xff0200 --map=%t/fb.map -o %t/fb.elf
+# RUN: FileCheck %s --check-prefix=FB <%t/fb.map
+# FB-DAG: BIT f0 fixed = 0x00 byte 0x20 index 0
+# FB-DAG: BIT f7 fixed = 0x07 byte 0x20 index 7
+# FB-DAG: BIT f8 fixed = 0x08 byte 0x21 index 0
+# FB-DAG: BIT f127 fixed = 0x7f byte 0x2f index 7
+# --- BITADDR8 wrote the exact bit numbers into the .text fields ---
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/fb.elf 0xff0200 8 | FileCheck %s --check-prefix=FBBYTES
+# FBBYTES: d2 00 d2 07 d2 08 d2 7f
+
+# --- no automatic bit object lands in an exclusively fixed byte ---
+# RUN: yaml2obj auto-vs-fixed.yaml -o af.o
+# RUN: mcs251-lld af.o --area-start=CSEG=0xff0200 --map=%t/af.map -o %t/af.elf
+# RUN: FileCheck %s --check-prefix=AF <%t/af.map
+# AF: BIT f7 fixed = 0x07 byte 0x20 index 7
+# AF: BIT a = 0x08 byte 0x21 index 0
+
+# --- a full 128-bit window succeeds ---
+# RUN: yaml2obj full128.yaml -o f128.o
+# RUN: mcs251-lld f128.o --area-start=CSEG=0xff0200 --map=%t/f128.map -o %t/f128.elf
+# RUN: FileCheck %s --check-prefix=F128 <%t/f128.map
+# F128-COUNT-1: BIT b0 = 0x00 byte 0x20 index 0
+# F128: BIT b127 = 0x7f byte 0x2f index 7
+# F128: BITBYTE 0x2f mask 0xff value 0x00
+
+# --- the 129th bit fails; never degrades to byte RAM ---
+# RUN: yaml2obj full129.yaml -o f129.o
+# RUN: not mcs251-lld f129.o --area-start=CSEG=0xff0200 -o %t/f129.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=EXH
+# RUN: test ! -e %t/f129.elf
+# EXH: bit slot exhaustion
+# EXH: no byte-RAM fallback exists
+
+# --- one fixed byte reserved leaves exactly 120 automatic bits ---
+# RUN: yaml2obj one_fixed120.yaml -o f120.o
+# RUN: mcs251-lld f120.o --area-start=CSEG=0xff0200 --map=%t/f120.map -o %t/f120.elf
+# RUN: FileCheck %s --check-prefix=F120 <%t/f120.map
+# F120: BIT b0 = 0x08 byte 0x21 index 0
+# F120: BIT b119 = 0x7f byte 0x2f index 7
+# RUN: yaml2obj one_fixed121.yaml -o f121.o
+# RUN: not mcs251-lld f121.o --area-start=CSEG=0xff0200 -o %t/f121.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=EXH121
+# RUN: test ! -e %t/f121.elf
+# EXH121: bit slot exhaustion: cannot allocate bit object b120
+
+# --- cross-TU packing + extern merge ---
+# RUN: yaml2obj tu_def.yaml -o tu_def.o
+# RUN: yaml2obj tu_use.yaml -o tu_use.o
+# RUN: yaml2obj tu_other.yaml -o tu_other.o
+# RUN: mcs251-lld tu_def.o tu_other.o tu_use.o --area-start=CSEG=0xff0200 \
+# RUN:   --map=%t/xtu.map -o %t/xtu.elf
+# RUN: FileCheck %s --check-prefix=XTU <%t/xtu.map
+# XTU: BIT shared = 0x00 byte 0x20 index 0
+# XTU: BIT other = 0x01 byte 0x20 index 1
+# --- swapping the two definitions must not change the run result ---
+# RUN: mcs251-lld tu_other.o tu_def.o tu_use.o --area-start=CSEG=0xff0200 \
+# RUN:   --map=%t/xtu2.map -o %t/xtu2.elf
+# RUN: FileCheck %s --check-prefix=XTU2 <%t/xtu2.map
+# XTU2: BIT other = 0x00 byte 0x20 index 0
+# XTU2: BIT shared = 0x01 byte 0x20 index 1
+
+# --- extern with no definition fails normally ---
+# RUN: yaml2obj tu_missing.yaml -o tu_missing.o
+# RUN: not mcs251-lld tu_missing.o --area-start=CSEG=0xff0200 -o %t/m.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=UNDEF
+# UNDEF: undefined symbol: nosuch
+
+# --- the backing byte is excluded from ordinary RAM: DSEG cannot fit ---
+# RUN: yaml2obj dseg-push.yaml -o dseg-push.o
+# RUN: not mcs251-lld dseg-push.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=DSEG=0x20 --iram-size=16 -o %t/dp.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=DSG
+# DSG: cannot allocate .mcs251.dseg
+# DSG: window [0x0020,0x0030)
+# DSG: no free range of 16 bytes; largest free range is 15 bytes
+# DSG: from bit object a
+
+# --- a legacy BIT_BANK byte is never implicitly overlaid by a bit object ---
+# RUN: yaml2obj bank.yaml -o bank.o
+# RUN: mcs251-lld bank.o --area-start=CSEG=0xff0200 --map=%t/bank.map -o %t/bank.elf
+# RUN: FileCheck %s --check-prefix=BANK <%t/bank.map
+# BANK: BIT a = 0x20 byte 0x24 index 0
+
+# --- a user --reserve-data byte is excluded from automatic bit packing ---
+# RUN: %python %S/Inputs/bit-fixture.py %t/rd.yaml records 2
+# RUN: yaml2obj rd.yaml -o rd.o
+# RUN: mcs251-lld rd.o --area-start=CSEG=0xff0200 --reserve-data=0x20,1 \
+# RUN:   --map=%t/rd.map -o %t/rd.elf
+# RUN: FileCheck %s --check-prefix=RD <%t/rd.map
+# RD: BIT b0 = 0x08 byte 0x21 index 0
+# RD: BIT b1 = 0x09 byte 0x21 index 1
+# RD: BITBYTE 0x21 mask 0x03 value 0x00
+
+# --- a .mcs251.DATA.* absolute reservation blocks the same byte ---
+# RUN: yaml2obj data-abs.yaml -o da.o
+# RUN: mcs251-lld da.o --area-start=CSEG=0xff0200 --area-start=.mcs251.DATA.ABS=0x20 \
+# RUN:   --map=%t/da.map -o %t/da.elf
+# RUN: FileCheck %s --check-prefix=DABS <%t/da.map
+# DABS: BIT a = 0x08 byte 0x21 index 0
+
+# --- two same-named LOCAL statics are distinct objects, not one merged slot ---
+# RUN: yaml2obj local.yaml -o local.o
+# RUN: mcs251-lld local.o local.o --area-start=CSEG=0xff0200 --map=%t/loc.map \
+# RUN:   -o %t/loc.elf
+# RUN: FileCheck %s --check-prefix=LOCAL <%t/loc.map
+# LOCAL: BIT local.o:s = 0x00 byte 0x20 index 0
+# LOCAL: BIT local.o:s = 0x01 byte 0x20 index 1
+
+# --- an SFR bit reference reserves no RAM byte ---
+# RUN: yaml2obj sfr.yaml -o sfr.o
+# RUN: mcs251-lld sfr.o --area-start=CSEG=0xff0200 --map=%t/sfr.map -o %t/sfr.elf
+# RUN: FileCheck %s --check-prefix=SFR <%t/sfr.map
+# SFR: BIT ea fixed = 0xaf sfr byte 0xa8 index 7
+# SFR-NOT: BITBYTE
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/sfr.elf 0xff0200 2 | FileCheck %s --check-prefix=SFRB
+# SFRB: d2 af
+
+#--- local.yaml
+# One LOCAL (static) bit object named s in each translation unit: the two
+# copies must occupy two slots, never be merged like a GLOBAL extern.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: s
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: s
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- fixed-boundaries.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200D200D200D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000010200010000000001020001000000000102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: f0
+        Addend: 0
+      - Offset: 0xC
+        Type: 10
+        Symbol: f7
+        Addend: 0
+      - Offset: 0x14
+        Type: 10
+        Symbol: f8
+        Addend: 0
+      - Offset: 0x1C
+        Type: 10
+        Symbol: f127
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: f0
+        Addend: 0
+      - Offset: 0x3
+        Type: 11
+        Symbol: f7
+        Addend: 0
+      - Offset: 0x5
+        Type: 11
+        Symbol: f8
+        Addend: 0
+      - Offset: 0x7
+        Type: 11
+        Symbol: f127
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: f0
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0
+    Index: SHN_ABS
+  - Name: f7
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 7
+    Index: SHN_ABS
+  - Name: f8
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 8
+    Index: SHN_ABS
+  - Name: f127
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 127
+    Index: SHN_ABS
+
+#--- auto-vs-fixed.yaml
+# A fixed reference at bit 7 excludes its whole byte 0x20; the automatic
+# object must land at bit 8 (byte 0x21), never bit 6 of the same byte.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '01020001000000000101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: f7
+        Addend: 0
+      - Offset: 0xC
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: f7
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 7
+    Index: SHN_ABS
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x8
+    Size: 1
+
+#--- dseg-push.yaml
+# The DSEG window is pinned to [0x20,0x30) with 16 bytes; the bit object
+# occupies 0x20 first, so a 16-byte DSEG slice cannot fit and must fail.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 16
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- bank.yaml
+# A legacy BIT_BANK overlay (0x20..0x23) must not host an automatic bit object;
+# the object lands at 0x24 instead of overlaying the bank.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.BIT_BANK
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- sfr.yaml
+# An SFR bit reference (bit address 0xAF = EA) encodes into the instruction
+# field but reserves no RAM backing byte.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS
+
+#--- data-abs.yaml
+# A .mcs251.DATA.ABS reservation at 0x20 is a user-owned byte: an automatic bit
+# object must not be placed there and must first-fit into the next byte.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.DATA.ABS
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1

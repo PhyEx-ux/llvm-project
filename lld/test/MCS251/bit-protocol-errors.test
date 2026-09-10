@@ -1,0 +1,1541 @@
+#
+# BT13/BT15: bit-object protocol and relocation errors.  Every case is a
+# fail-closed rejection; the coalescing CHECK lines prove the link fails for
+# the intended reason rather than by accident.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+
+# --- malformed records ---
+# RUN: yaml2obj bad-version.yaml -o bv.o
+# RUN: not mcs251-lld bv.o --area-start=CSEG=0xff0200 -o %t/bv.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=ERR
+# RUN: yaml2obj bad-kind.yaml -o bk.o
+# RUN: not mcs251-lld bk.o --area-start=CSEG=0xff0200 -o %t/bk.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=KIND
+# RUN: yaml2obj bad-init.yaml -o bi.o
+# RUN: not mcs251-lld bi.o --area-start=CSEG=0xff0200 -o %t/bi.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=INIT
+# RUN: yaml2obj bad-caps.yaml -o bc.o
+# RUN: not mcs251-lld bc.o --area-start=CSEG=0xff0200 -o %t/bc.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=CAPS
+# RUN: yaml2obj bad-len.yaml -o bl.o
+# RUN: not mcs251-lld bl.o --area-start=CSEG=0xff0200 -o %t/bl.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=LEN
+# RUN: yaml2obj bad-symref.yaml -o bs.o
+# RUN: not mcs251-lld bs.o --area-start=CSEG=0xff0200 -o %t/bs.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=SYMREF
+# ERR: unsupported record version
+# KIND: unknown record kind
+# INIT: init_value must be 0 or 1
+# CAPS: unsupported capabilities
+# LEN: size must be a multiple of 8
+# SYMREF: symbol_reference must be zero
+
+# --- missing / extra association relocation ---
+# RUN: yaml2obj no-rela.yaml -o nr.o
+# RUN: not mcs251-lld nr.o --area-start=CSEG=0xff0200 -o %t/nr.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=NORELA
+# RUN: yaml2obj bad-offset.yaml -o bo.o
+# RUN: not mcs251-lld bo.o --area-start=CSEG=0xff0200 -o %t/bo.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=OFFSET
+# RUN: yaml2obj wrong-rela-name.yaml -o wr.o
+# RUN: not mcs251-lld wr.o --area-start=CSEG=0xff0200 -o %t/wr.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=RNAME
+# NORELA: records have no .rela.mcs251.bit association section
+# OFFSET: BIT_REF offset must be record base + 4
+# RNAME: bit RELA must be named .rela.mcs251.bit
+
+# --- wrong relocation targets ---
+# RUN: yaml2obj addr8-to-func.yaml -o af.o
+# RUN: not mcs251-lld af.o --area-start=CSEG=0xff0200 -o %t/af.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=TOFUNC
+# RUN: yaml2obj addr8-addend.yaml -o aa.o
+# RUN: not mcs251-lld aa.o --area-start=CSEG=0xff0200 -o %t/aa.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=ADDEND
+# RUN: yaml2obj addr8-to-dseg.yaml -o ad.o
+# RUN: not mcs251-lld ad.o --area-start=CSEG=0xff0200 -o %t/ad.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=TODSEG
+# RUN: yaml2obj ordinary-to-bit.yaml -o ob.o
+# RUN: not mcs251-lld ob.o --area-start=CSEG=0xff0200 -o %t/ob.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=TOBIT
+# RUN: yaml2obj bitref-outside.yaml -o bb.o
+# RUN: not mcs251-lld bb.o --area-start=CSEG=0xff0200 -o %t/bb.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=OUTSIDE
+# TOFUNC: BITADDR8 in .text target fn is not a bit object or fixed bit reference
+# ADDEND: BITADDR8 addend must be zero
+# TODSEG: BITADDR8 in .text target d is not a bit object or fixed bit reference
+# TOBIT: ordinary relocation in .text targets bit object a
+# OUTSIDE: R_MCS251_BIT_REF is only allowed in the bit metadata RELA
+
+# --- BITADDR8 field legality: position and zero placeholder (contract §4.2) ---
+# A valid symbol target never authorises an arbitrary write location.  The
+# field must be the bit-address operand immediately after a bit instruction's
+# opcode, in executable PROGBITS, and must be zero-filled by the producer.
+# RUN: yaml2obj addr8-in-rodata.yaml -o ar.o
+# RUN: not mcs251-lld ar.o --area-start=CSEG=0xff0200 -o %t/ar.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=FIELDRO
+# RUN: yaml2obj addr8-on-opcode.yaml -o ao.o
+# RUN: not mcs251-lld ao.o --area-start=CSEG=0xff0200 -o %t/ao.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=FIELDOP
+# RUN: yaml2obj addr8-nonzero-placeholder.yaml -o anp.o
+# RUN: not mcs251-lld anp.o --area-start=CSEG=0xff0200 -o %t/anp.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=FIELDZERO
+# FIELDRO: BITADDR8 field must live in an executable PROGBITS section, not .rodata
+# FIELDOP: BITADDR8 field at 0x1 in .text is not the bit-address operand of a bit instruction
+# FIELDZERO: BITADDR8 placeholder byte at offset 0x1 in .text must be zero
+
+# --- BITADDR8 field must be a real instruction boundary, not a byte lookalike ---
+# The preceding-byte check alone is spoofable: 75 D2 00 makes D2 an immediate
+# of "mov direct,#imm"; 74 D2 00 makes D2 the opcode of the next instruction;
+# 20 00 is a jb missing its rel8.  The post-relocation decoder must reject all
+# three (contract §4.2), while a genuine bit opcode boundary is accepted.
+# RUN: yaml2obj addr8-immediate-bypass.yaml -o ib.o
+# RUN: not mcs251-lld ib.o --area-start=CSEG=0xff0200 -o %t/ib.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=FIELDBOUND
+# RUN: yaml2obj addr8-opcode-bypass.yaml -o opb.o
+# RUN: not mcs251-lld opb.o --area-start=CSEG=0xff0200 -o %t/opb.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=FIELDBOUND
+# RUN: yaml2obj addr8-truncated-jb.yaml -o tjb.o
+# RUN: not mcs251-lld tjb.o --area-start=CSEG=0xff0200 -o %t/tjb.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=FIELDTRUNC
+# RUN: yaml2obj addr8-reloc-opcode.yaml -o rob.o
+# RUN: not mcs251-lld rob.o --area-start=CSEG=0xff0200 -o %t/rob.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=FIELDRELOCOP
+# FIELDBOUND: is not a decodable instruction stream
+# FIELDTRUNC: ends in a truncated instruction
+# FIELDRELOCOP: is not the bit-address operand of a bit instruction
+# --- a genuine bit-opcode boundary stays accepted (positive control) ---
+# RUN: yaml2obj addr8-legal-jb.yaml -o ljb.o
+# RUN: mcs251-lld ljb.o --area-start=CSEG=0xff0200 -o %t/ljb.elf
+# --- pre-relocation decoding: a later relocation cannot launder a bad field ---
+# .text = 74 D2 00 with the field at offset 2.  In the producer's original
+# stream 74 D2 is mov a,#0xD2, so offset 2 is not a bit operand and the link
+# must fail on the ORIGINAL bytes -- even though an ordinary LO8 relocation
+# rewriting offset 0 to 0x13 would make the final image 13 D2 AF look valid.
+# RUN: yaml2obj addr8-pre-launder.yaml -o pl.o
+# RUN: not mcs251-lld pl.o --area-start=CSEG=0xff0200 -o %t/pl.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=FIELDPRE
+# FIELDPRE: is not a decodable instruction stream
+# --- decoding continues past the last field: a truncated tail fails closed ---
+# .text = D2 00 20: the SETB/field at offsets 0-1 is valid, but the trailing
+# 20 is a jb with both operand bytes missing.  The old code broke out of the
+# decoder at the field and never saw the tail.
+# RUN: yaml2obj addr8-trailing-truncated.yaml -o ttt.o
+# RUN: not mcs251-lld ttt.o --area-start=CSEG=0xff0200 -o %t/ttt.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=FIELDTAIL
+# FIELDTAIL: ends in a truncated instruction
+
+# --- reserved-symbol conflict ---
+# RUN: yaml2obj fixed-abs.yaml -o fx.o
+# RUN: not mcs251-lld fx.o --area-start=CSEG=0xff0200 --reserve-data=0x20,1 \
+# RUN:   -o %t/fx.elf 2>&1 | FileCheck %s --check-prefix=CONFLICT
+# CONFLICT: fixed reference f7 needs backing byte 0x20 which is already occupied
+
+# --- bit symbol definitions ---
+# RUN: yaml2obj def-wrong-type.yaml -o dw.o
+# RUN: not mcs251-lld dw.o --area-start=CSEG=0xff0200 -o %t/dw.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=DEFTYPE
+# RUN: yaml2obj dupdef.yaml -o dd.o
+# RUN: not mcs251-lld dd.o dd.o --area-start=CSEG=0xff0200 -o %t/dd.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=DUP
+# DEFTYPE: definition a must be an STT_OBJECT of size 1
+# DUP: duplicate definition of shared
+
+# --- a definition symbol must name its own record offset (contract §3) ---
+# The symbol st_value is the record's byte offset; a symbol pointing at another
+# record (or a second record reusing one symbol) is a malformed object that
+# would otherwise alias two logical bit objects onto one slot.
+# RUN: yaml2obj def-offset.yaml -o do.o
+# RUN: not mcs251-lld do.o --area-start=CSEG=0xff0200 -o %t/do.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=DEFOFF
+# DEFOFF: definition b st_value 0x8 does not name its record offset 0x0
+
+# --- the bit-aware CRT profile is fail-closed for this lld stream ---
+# A .mcs251.bitprofile section names the BT14 profile this protocol does not
+# consume; it must be a loud error, never silently ignored.
+# RUN: yaml2obj profile.yaml -o bp.o
+# RUN: not mcs251-lld bp.o --area-start=CSEG=0xff0200 -o %t/bp.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=PROFILE
+# PROFILE: unsupported .mcs251.bitprofile: the bit-aware CRT profile is not accepted
+
+# --- a nonzero initial value requires the XINIT area ---
+# RUN: yaml2obj init1.yaml -o i1.o
+# RUN: not mcs251-lld i1.o --area-start=CSEG=0xff0200 -o %t/i1.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=XINITREQ
+# XINITREQ: a nonzero bit initial value requires --area-start=XINIT
+
+#--- bad-version.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0201000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- bad-kind.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0109000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- bad-init.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101020100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- bad-caps.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000200000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- bad-len.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '010100010000000001'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- bad-symref.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000001'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- no-rela.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- bad-offset.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x0
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- wrong-rela-name.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.bogus
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- addr8-to-func.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: fn
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: fn
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- addr8-addend.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: fn
+        Addend: 1
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: fn
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- addr8-to-dseg.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: d
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: d
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.dseg
+    Value: 0
+    Size: 1
+
+#--- ordinary-to-bit.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x0
+        Type: 1
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- bitref-outside.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x0
+        Type: 10
+        Symbol: fn
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: fn
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- fixed-abs.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: f7
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: f7
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 7
+    Index: SHN_ABS
+
+#--- def-wrong-type.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 2
+
+#--- dupdef.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: shared
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: shared
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- init1.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101010100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- def-offset.yaml
+# Two records, but the first record's symbol b carries st_value 0x8 (the second
+# record's offset).  The association is ambiguous and must be rejected.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '01010001000000000101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: b
+        Addend: 0
+      - Offset: 0xC
+        Type: 10
+        Symbol: a
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: b
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x8
+    Size: 1
+  - Name: a
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x8
+    Size: 1
+
+#--- profile.yaml
+# A reserved BT14 bit-aware profile section this lld stream does not accept.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '01000000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- addr8-in-rodata.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.rodata
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .rodata
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS
+
+#--- addr8-on-opcode.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7400'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS
+
+#--- addr8-nonzero-placeholder.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D2AF'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS
+
+#--- addr8-immediate-bypass.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '75D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS
+
+#--- addr8-opcode-bypass.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '74D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS
+
+#--- addr8-truncated-jb.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '2000'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS
+
+#--- addr8-reloc-opcode.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x0
+        Type: 3
+        Symbol: replacement
+        Addend: 0
+      - Offset: 0x1
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS
+  - Name: replacement
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0x74
+    Index: SHN_ABS
+
+#--- addr8-legal-jb.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '2000AA'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS
+
+#--- addr8-pre-launder.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '74D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x0
+        Type: 3
+        Symbol: replacement
+        Addend: 0
+      - Offset: 0x2
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS
+  - Name: replacement
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0x13
+    Index: SHN_ABS
+
+#--- addr8-trailing-truncated.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D20020'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ea
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: ea
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ea
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0xAF
+    Index: SHN_ABS

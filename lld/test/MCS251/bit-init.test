@@ -1,0 +1,741 @@
+#
+# BT14 (lld side): bit initial-value synthesis and CRT order.
+#
+# The linker aggregates one v1 XINIT record per automatic backing byte with a
+# nonzero value, placed after every input XINIT section.  The IRQ CRT clears
+# the whole [0x20,0x30) window and then runs the __mcs251_globals_init walker,
+# so an explicit 1 takes effect after the zeroing clear; the clear is what
+# produces the 0 initial values, never NOBITS.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o crt.o
+
+# --- one record per nonzero byte; zero bits need no record ---
+# RUN: yaml2obj bits.yaml -o bits.o
+# RUN: mcs251-lld crt.o bits.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=XINIT=0xff8000 --map=%t/b.map -o %t/b.elf
+# RUN: FileCheck %s --check-prefix=MAP <%t/b.map
+# MAP: BIT d0 = 0x00 byte 0x20 index 0 init 1
+# MAP: BIT d1 = 0x01 byte 0x20 index 1 init 0
+# MAP: BIT d8 = 0x08 byte 0x21 index 0 init 1
+# MAP: BITBYTE 0x20 mask 0xff value 0x01
+# MAP: BITBYTE 0x21 mask 0x01 value 0x01
+# --- exactly the two nonzero bytes get records, after the empty input XINIT ---
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/b.elf 0xff8000 14 | FileCheck %s --check-prefix=REC
+# REC: 00 20 00 01 00 01 01 00 21 00 01 00 01 01
+# --- the CRT pool is reserved once, not twice (l_BSEG_BYTES stays 16) ---
+# RUN: FileCheck %s --check-prefix=ONCE <%t/b.map
+# ONCE: l_BSEG_BYTES = 0x0010
+# ONCE: l_DSEG = 0x0010
+# --- the CRT clears the window (mov 0x20,#0) before the walker applies XINIT ---
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/b.elf 0xff021c 6 | FileCheck %s --check-prefix=CLEAR
+# CLEAR: 75 20 00 75 21 00
+
+# --- all-zero initial values synthesize no section and no bytes ---
+# RUN: yaml2obj zero.yaml -o zero.o
+# RUN: mcs251-lld crt.o zero.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=XINIT=0xff8000 --map=%t/z.map -o %t/z.elf
+# RUN: FileCheck %s --check-prefix=ZERO <%t/z.map
+# ZERO: l_XINIT = 0x0000
+# ZERO: s_XINIT = 0xff8000
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/z.elf 0xff8000 1 > %t/z.bytes 2>&1 \
+# RUN:   || true
+# RUN: FileCheck %s --check-prefix=NOROM <%t/z.bytes
+# NOROM: not mapped by any PT_LOAD
+
+# --- the synthesized section obeys the always-on 24-bit CODE range ---
+# A nonzero bit initial value placed at XINIT=0xffffff makes the 7-byte record
+# run past the 0x1000000 address limit.  This must fail even with no board
+# flash gate configured: --flash-base/--flash-size is optional policy, never a
+# substitute for the architectural address bound.
+# RUN: yaml2obj nit.yaml -o nit.o
+# RUN: not mcs251-lld nit.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xffffff -o %t/nit.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=XOVER
+# XOVER: CODE address overflow in .mcs251.xinit.bit
+# RUN: test ! -e %t/nit.elf
+
+# --- cross-TU mixed values aggregate into one byte record ---
+# RUN: yaml2obj a1.yaml -o a1.o
+# RUN: yaml2obj a2.yaml -o a2.o
+# RUN: mcs251-lld crt.o a1.o a2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=XINIT=0xff8000 --map=%t/ag.map -o %t/ag.elf
+# RUN: FileCheck %s --check-prefix=AGG <%t/ag.map
+# AGG: BIT ba = 0x00 byte 0x20 index 0 init 1
+# AGG: BIT bb = 0x01 byte 0x20 index 1 init 1
+# AGG: BITBYTE 0x20 mask 0x03 value 0x03
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/ag.elf 0xff8000 7 | FileCheck %s --check-prefix=AGGREC
+# AGGREC: 00 20 00 01 00 01 03
+
+# --- a fixed reference byte is never initialized by the allocator ---
+# RUN: yaml2obj fixedplus.yaml -o fp.o
+# RUN: mcs251-lld crt.o fp.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=XINIT=0xff8000 --map=%t/fp.map -o %t/fp.elf
+# RUN: FileCheck %s --check-prefix=FP <%t/fp.map
+# FP: BIT f0 fixed = 0x00 byte 0x20 index 0 init none
+# FP: BIT auto = 0x08 byte 0x21 index 0 init 1
+# The fixed-only byte is traceable with mask 0 and no allocator initialization
+# (the CRT pool clear is the only write to it here).
+# FP: BITBYTE 0x21 mask 0x01 value 0x01
+# FP: BITBYTE 0x20 mask 0x00 value 0x00 owner fixed f0 init crt-clear
+
+# --- an input XINIT record may not initialize an automatic bit byte ---
+# The byte 0x20 holds automatic bit object z with declared init 0.  The CRT
+# clears the window and the walker then runs; an input record writing 0xff to
+# 0x20 would make z read 1 at main while the map says init 0, and no synthesized
+# record exists to correct a zero byte, so "synthesized records sort last" does
+# not save it.  This must be a hard conflict, not an ordering accident.
+# RUN: yaml2obj zero-xinit.yaml -o zx.o
+# RUN: not mcs251-lld crt.o zx.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t/zx.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=XCONFLICT
+# XCONFLICT: XINIT record in .mcs251.xinit initializes byte 0x20 owned by automatic bit objects
+# --- the ownership check is unconditional: dropping the CRT cannot bypass it ---
+# Without the walker the old gate returned before any ownership check, so the
+# same conflicting object linked cleanly.  The conflict must be rejected even
+# when no __mcs251_globals_init is present.
+# RUN: not mcs251-lld zx.o --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t/zxnw.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=XCONFLICT
+# --- and a nonzero bit init with no walker fails closed (value would be lost) ---
+# RUN: yaml2obj onebit.yaml -o ob1.o
+# RUN: not mcs251-lld ob1.o --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t/ob1.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=NOINIT
+# NOINIT: a nonzero bit initial value requires a __mcs251_globals_init initializer
+# --- the same conflict for a byte whose declared value is already nonzero ---
+# RUN: yaml2obj one-xinit.yaml -o ox.o
+# RUN: not mcs251-lld crt.o ox.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t/ox.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=XCONFLICT
+# --- a fixed-reference-only byte is the user's: input XINIT there is allowed ---
+# f0 pins byte 0x20 with no automatic bit, so the record is not an allocator
+# conflict.  (The allocator synthesizes nothing for a fixed-only byte.)  The map
+# must still make the byte traceable: owner fixed f0, and the user's own XINIT
+# coverage reported as user-xinit rather than a bare "init 0".
+# RUN: yaml2obj fixed-only-xinit.yaml -o fx.o
+# RUN: mcs251-lld crt.o fx.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=XINIT=0xff8000 --map=%t/fx.map -o %t/fx.elf
+# RUN: FileCheck %s --check-prefix=FIXEDX <%t/fx.map
+# FIXEDX: BIT f0 fixed = 0x00 byte 0x20 index 0 init user-xinit
+# FIXEDX: BITBYTE 0x20 mask 0x00 value 0x00 owner fixed f0 init crt-clear+user-xinit
+
+# --- exhaustion reports every blocked byte, untruncated and attributable ---
+# A --reserve-data covering the whole window must list all 16 bytes (not stop
+# at the old 200-char cutoff), and a full automatic window must name the
+# allocated bits and their owners rather than "blocked bytes: none".
+# RUN: yaml2obj onebit.yaml -o ob1.o
+# RUN: not mcs251-lld ob1.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --reserve-data=0x20,16 -o %t/ex.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=EXHAUSTWIN
+# EXHAUSTWIN: blocked bytes:
+# EXHAUSTWIN-DAG: 0x20 from
+# EXHAUSTWIN-DAG: 0x2f from
+# RUN: %python %S/Inputs/bit-fixture.py %t/f129.yaml records 129
+# RUN: yaml2obj f129.yaml -o f129.o
+# RUN: not mcs251-lld f129.o --area-start=CSEG=0xff0200 -o %t/ex2.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=EXHAUSTFULL
+# EXHAUSTFULL: blocked bytes:
+# EXHAUSTFULL: allocated bits:
+# EXHAUSTFULL-DAG: 0x0=b0
+# EXHAUSTFULL-DAG: 0x7f=b127
+
+#--- bits.yaml
+# Nine automatic objects d0..d8 pack bits 0..8: d0 at 0x20/bit0 (init 1), d1 at
+# 0x20/bit1 (init 0), d8 at 0x21/bit0 (init 1).  Two nonzero bytes -> two
+# records after the empty input XINIT.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '010101010000000001010001000000000101000100000000010100010000000001010001000000000101000100000000010100010000000001010001000000000101010100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: d0
+        Addend: 0
+      - Offset: 0xc
+        Type: 10
+        Symbol: d1
+        Addend: 0
+      - Offset: 0x14
+        Type: 10
+        Symbol: d2
+        Addend: 0
+      - Offset: 0x1c
+        Type: 10
+        Symbol: d3
+        Addend: 0
+      - Offset: 0x24
+        Type: 10
+        Symbol: d4
+        Addend: 0
+      - Offset: 0x2c
+        Type: 10
+        Symbol: d5
+        Addend: 0
+      - Offset: 0x34
+        Type: 10
+        Symbol: d6
+        Addend: 0
+      - Offset: 0x3c
+        Type: 10
+        Symbol: d7
+        Addend: 0
+      - Offset: 0x44
+        Type: 10
+        Symbol: d8
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: d0
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: d0
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: d1
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x8
+    Size: 1
+  - Name: d2
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x10
+    Size: 1
+  - Name: d3
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x18
+    Size: 1
+  - Name: d4
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x20
+    Size: 1
+  - Name: d5
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x28
+    Size: 1
+  - Name: d6
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x30
+    Size: 1
+  - Name: d7
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x38
+    Size: 1
+  - Name: d8
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x40
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- zero.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: z
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: z
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+#--- a1.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101010100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: ba
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: ba
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+#--- a2.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101010100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: bb
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: bb
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+#--- fixedplus.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '01020001000000000101010100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: f0
+        Addend: 0
+      - Offset: 0xC
+        Type: 10
+        Symbol: auto
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: f0
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0
+    Index: SHN_ABS
+  - Name: auto
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x8
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- zero-xinit.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '002000010001FF'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: z
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: z
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+#--- one-xinit.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '002000010001FF'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101010100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: z
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: z
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+#--- fixed-only-xinit.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '002000010001FF'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0102000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: f0
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: f0
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0
+    Index: SHN_ABS
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- nit.yaml
+# One automatic bit with a nonzero initial value: the synthesized XINIT record
+# is 7 bytes and must be range-checked at XINIT=0xffffff.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101010100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: z
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: z
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- onebit.yaml
+# One automatic bit with a nonzero initial value and NO __mcs251_globals_init:
+# the value could never be applied, so the link must fail closed rather than
+# silently emit a bit object whose declared initial value is unrealized.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101010100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: z
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: z
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
