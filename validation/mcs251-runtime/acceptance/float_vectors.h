@@ -99,6 +99,28 @@ static const uint32_t vec_neg_data[NVEC_NEG] = {
     F32_POS_TWO, F32_POS_HALF
 };
 
+/* 数学函数向量（2026-09-09 Kazimi 补回：math/float 验收草稿
+ * float_firmware.c / math_firmware.c / host_expect.c / host_math.c 引用；
+ * 覆盖正负小数（floor/ceil 借位路径）、pi 分数（三角象限）、
+ * e/10/100（log/exp 量级）与 2pi（三角回绕）） */
+#define NVEC_MATH 14
+static const uint32_t vec_math[NVEC_MATH] = {
+    F32_POS_HALF,   /* 0.5 */
+    F32_POS_ONE,    /* 1.0 */
+    F32_POS_TWO,    /* 2.0 */
+    0x3DCCCCCDu,    /* 0.1 */
+    0x41200000u,    /* 10.0 */
+    0x42C80000u,    /* 100.0 */
+    F32_PI_4,       /* pi/4 */
+    0x3FC90FDBu,    /* pi/2 */
+    F32_PI,         /* pi */
+    0x40C90FDBu,    /* 2*pi */
+    F32_E,          /* e */
+    0xBF000000u,    /* -0.5 */
+    0xBFC00000u,    /* -1.5 */
+    0xC0200000u     /* -2.5 */
+};
+
 /* int->float 转换向量 */
 #define NVEC_I2F 6
 static const int32_t vec_i2f[NVEC_I2F] = {
