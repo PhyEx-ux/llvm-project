@@ -1,0 +1,48 @@
+MCS251 map
+__mcs251_stack_base = 0x010f
+l_BOOT = 0x006f
+l_CSEG = 0x0d5f
+l_DSEG = 0x000c
+l_HOME = 0x0003
+l_IRAM = 0x0080
+l_OSEG = 0x0004
+l_REG_BANK_0 = 0x0008
+l_VECS = 0x0040
+l_XINIT = 0x0000
+s_BOOT = 0xff0100
+s_CSEG = 0xff0200
+s_DSEG = 0x0000
+s_HOME = 0xff0000
+s_OSEG = 0x0008
+s_REG_BANK_0 = 0x0000
+s_VECS = 0xff0003
+s_XINIT = 0xff8000
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/uartdemo-33m.o:.text 0xff0200 +0x60b
+/home/liu/c23demo-work/rt/mcs251rt_divulong.o:.text 0xff080b +0x3f3
+/home/liu/c23demo-work/rt/mcs251rt_divulong.o:.mcs251.REG_BANK_0 0x0000 +0x8
+/home/liu/c23demo-work/rt/mcs251rt_divulong.o:.mcs251.OSEG.0 0x0008 +0x4
+/home/liu/c23demo-work/rt/mcs251rt_modulong.o:.text 0xff0bfe +0x361
+/home/liu/c23demo-work/rt/mcs251rt_modulong.o:.mcs251.REG_BANK_0 0x0000 +0x8
+/home/liu/c23demo-work/rt/mcs251rt_modulong.o:.mcs251.OSEG.0 0x0008 +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.HOME 0xff0000 +0x3
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.0.bytes 0xff0003 +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.0.hole 0xff0007 +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.1.bytes 0xff000b +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.1.hole 0xff000f +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.2.bytes 0xff0013 +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.2.hole 0xff0017 +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.3.bytes 0xff001b +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.3.hole 0xff001f +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.4.bytes 0xff0023 +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.4.hole 0xff0027 +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.5.bytes 0xff002b +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.5.hole 0xff002f +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.6.bytes 0xff0033 +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.6.hole 0xff0037 +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.7.bytes 0xff003b +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.VECS.7.hole 0xff003f +0x4
+/home/liu/LLVM_STC32/MCS251/validation/mcs251-uartdemo-33m/build/crt-selfstart.o:.mcs251.BOOT 0xff0100 +0x6f
+FUNC 0xff0200 +0x5b5 _main
+FUNC 0xff080b +0x3f3 __divulong
+FUNC 0xff0bfe +0x361 __modulong
+stack H=0x100 SPX=0x10f capacity=3824 edata_end=0xfff
