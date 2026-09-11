@@ -197,6 +197,23 @@ def MOV8dpl : MCS251Inst<(outs), (ins GPR8:$src), "mov dpl, $src", []>;
 let Defs = [DPH] in
 def MOV8dph : MCS251Inst<(outs), (ins GPR8:$src), "mov dph, $src", []>;
 
+// DPXL (SFR 0x84) is the MOVX @DPTR region register (X2-1). Same shape as
+// MOV8dpl/MOV8dph: a pinned direct SFR write ("mov 0x84, rN"; sdas251
+// V05.50.4 gold 7A 21 84) whose only difference from the generic MOV8id
+// direct store is the Defs=[DPXL] pin -- the scheduler must treat every
+// DPXL re-point as a dependence of the MOVX ops that follow it (their
+// Uses=[DPXL] below), so two independent AS3 chains in one block can never
+// interleave a bank write across another chain's movx.  hasSideEffects is
+// explicit: the write hits architectural state no SSA value tracks, so
+// MachineCSE must not merge two re-points even for the same bank -- a merged
+// pair stretches one region write over two movx's, so the interrupt window
+// between them becomes visible to any DPXL change that is not restored
+// (handwritten ISR bodies, user SFR writes; the frames the backend generates
+// for ISRs DO restore DPXL, see ISR_PUSH/POP_DPX above and X2-4). The
+// conservative pin is pinned by xdata-dead-value.ll::twice.
+let Defs = [DPXL], hasSideEffects = 1 in
+def MOV8dpxl : MCS251Inst<(outs), (ins GPR8:$src), "mov 0x84, $src", []>;
+
 // Moves out of the fixed SFR argument locations (dpl = first i8 argument,
 // dpl:dph = first i16 argument; ABI measured on SDCC/QEMU hardware). The
 // mirror images of MOV8dpl/MOV8dph: the source is pinned by the instruction
@@ -373,6 +390,54 @@ let mayStore = 1 in {
   def MOV8id  : MCS251Inst<(outs), (ins mcs251_dir8:$addr, GPR8:$src),
                            "mov $addr, $src", []>;
 }
+
+//===----------------------------------------------------------------------===//
+//  XDATA access (AS3, the `__xdata` space) -- MOVX @DPTR channel (X2-1)
+//===----------------------------------------------------------------------===//
+//
+// The internal extended XRAM is reached with the classic MOVX @DPTR pair
+// (STC32G manual L70765-70786: "在汇编语言中，内部扩展 RAM 通过 MOVX 指令访
+// 问").  Byte-for-byte sdas251 V05.50.4 oracle (source mode):
+//
+//   movx a, @dptr   -> E0      (single byte, low nibble 0: no A5 escape)
+//   movx @dptr, a   -> F0
+//
+// The @Ri 8-bit forms (E2/E3/F2/F3) need the MXAX/P2 page maintenance and are
+// deliberately NOT implemented in this phase; per the STC32G manual
+// L71066-71069 MXAX only affects the @Ri forms, so it cannot extend the @DPTR
+// form either (Intel 251 manual 3.3.2.2: the region reached by MOVX is the
+// DPXL SFR, reset value 01h).
+//
+// X2-1 full 24-bit ruling (supersedes the phase-1 16-bit window): the frozen
+// AS3 contract (DESIGN.md B.2, 32/8 `__xdata`) requires the complete 24-bit
+// effective address. Every AS3 access byte therefore re-points DPXL from
+// address bits [23:16] with MOV8dpxl immediately before the MOVX (self-
+// healing: no DPXL value is ever assumed to survive any other access, ISR,
+// call or user SFR write -- the retention protocol is documented in
+// validation/mcs251-models/proposals/XDATA-CODE-DESIGN-SUPPLEMENT.md).
+// Never-assumes is one half of X2-4 only: the frames the backend itself
+// generates for async entries PRESERVE DPXL (ISR_PUSH/POP_DPX read/write
+// it), so an interrupt cannot leak its re-point into the interrupted
+// context.
+// Uses=[DPXL] on both MOVX ops plus Defs=[DPXL] on MOV8dpxl make the region
+// switch a scheduling dependence, so bank writes can never cross a movx.
+//
+// DPTR (dpl/dph) is the fixed reserved address register and A the fixed
+// transfer register: MOVXALD writes A, MOVXAST reads it, both address through
+// DPL/DPH -- hence the explicit Uses/Defs pins that order these against the
+// MOV8dpl/MOV8dph address-lane writes and the MOV8a/MOV8ra value moves.  No
+// Patterns: LowerLoad/LowerStore build the byte sequences as machine nodes
+// (same approach as the MOV8rm family above).
+//
+// MOVXALD's i8 result is deliberately unused by the lowering (the byte
+// travels through A into MOV8ra); the lowering pins the node into the
+// selected stream with a Glue edge into MOV8ra -- the same device the
+// bit-read sequence uses for its A-valued tail -- so no dead-load stripping
+// can remove the access from the chain.
+let mayLoad = 1, Defs = [A], Uses = [DPL, DPH, DPXL], Size = 1 in
+  def MOVXALD : MCS251Inst<(outs), (ins), "movx a, @dptr", []>;
+let mayStore = 1, Uses = [A, DPL, DPH, DPXL], Size = 1 in
+  def MOVXAST : MCS251Inst<(outs), (ins), "movx @dptr, a", []>;
 
 // Pseudo widening a byte to a word with a zero high lane
 // (zero/any-extending load of i8, and plain zext i8->i16):
@@ -739,6 +804,11 @@ def ERET : MCS251Inst<(outs), (ins), "eret", [(MCS251eret)]>;
 //     aliases, pop dr8 defines DR8 and A/B;
 //   * DPTR (dpl:dph) aliases the low word of DR56/DPX: push dpx reads DR56
 //     plus the DPTR overlay, pop dpx defines DR56 and DPL/DPH/DPTR;
+//   * DPXL (SFR 0x84) is the MOVX region byte of DPX: push dpx reads it,
+//     pop dpx defines it. The ISR frame therefore SAVES AND RESTORES DPXL
+//     (X2-4 interrupt-retention protocol: an async preemption must not
+//     leak its re-point into the interrupted context; the guarantee must
+//     not be dropped -- design supplement §3);
 //   * pop psw defines the virtual PSW flags register (the pushed one).
 //
 // Each push/pop encodes as two bytes (opcode byte + direct address or
@@ -780,7 +850,7 @@ let hasSideEffects = 1, mayStore = 1, Size = 2, Defs = [DR60] in {
     let Uses = [DR28, DR60];
   }
   def ISR_PUSH_DPX  : MCS251Inst<(outs), (ins), "push dpx", []> {
-    let Uses = [DR56, DPL, DPH, DPTR, DR60];
+    let Uses = [DR56, DPL, DPH, DPTR, DPXL, DR60];
   }
 }
 
@@ -815,7 +885,7 @@ let hasSideEffects = 1, mayLoad = 1, Size = 2, Uses = [DR60] in {
     let Defs = [DR28, DR60];
   }
   def ISR_POP_DPX  : MCS251Inst<(outs), (ins), "pop dpx", []> {
-    let Defs = [DR56, DPL, DPH, DPTR, DR60];
+    let Defs = [DR56, DPL, DPH, DPTR, DPXL, DR60];
   }
 }
 

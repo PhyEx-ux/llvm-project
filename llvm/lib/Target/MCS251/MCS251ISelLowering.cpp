@@ -2005,25 +2005,22 @@ static SDValue foldDispIntoBase(SDValue Base, int64_t Disp, const SDLoc &DL,
                                     {Base, D}), 0);
 }
 
-// DF0 P0-A/P0-B: Reject non-zero AS data uses fail-closed, by *use* not by
-// number. AS4 (CODE) data store is always rejected; AS4 data load, AS5 (bit
-// space), AS7 (reserved) and any unassigned AS are not yet implemented for
-// data access. AS4 *function* addresses (calls/returns) are a separate
-// capability and must not be caught here.
+// DF0 P0-A/P0-B, narrowed by X2. AS3 (XDATA) and AS4 (CODE) *data* access are
+// now implemented -- AS3 through the MOVX @DPTR channel, AS4 loads through the
+// 24-bit DR unified-space channel (`mov r,@dr`) -- so the fail-closed set is
+// exactly: AS4 *stores* (CODE is read-only by the space's definition), AS5
+// (bit space; the controlled-bit lvalue mechanism is the only route), AS7
+// (reserved) and every unassigned AS number. AS4 *function* addresses
+// (calls/returns) are a separate capability and must not be caught here.
 //
-// Allowed data access AS set: {0,1,2,3,6,8,9} (AS0 default RAM, AS1/2/8
-// near RAM, AS3/9 far RAM, AS6 SFR direct-byte). This mirrors the implemented
-// Shizuku Tiny/XTiny lowering and is NOT a blanket "number allocated" pass:
-// AS5/AS7 are allocated in the layout but their data access is still rejected.
+// Allowed data access AS set: {0,1,2,3,4,6,8,9}. AS0 default RAM, AS1/2/8
+// near RAM, AS9 far RAM share the generic DR lowering; AS3/AS4 are split off
+// to their own channels in LowerLoad/LowerStore. This mirrors the implemented
+// Shizuku Tiny/XTiny lowering and is NOT a blanket "number allocated" pass.
 static void checkDataAddressSpace(unsigned AS, bool IsStore) {
-  if (AS == 4) {
-    // CODE: store is always forbidden; load is not yet implemented.
-    report_fatal_error(IsStore
-                          ? "MCS251: store to CODE (address space 4) is not "
-                            "permitted; CODE is read-only"
-                          : "MCS251: CODE (address space 4) data load is not "
-                            "yet implemented");
-  }
+  if (AS == 4 && IsStore)
+    report_fatal_error("MCS251: store to CODE (address space 4) is not "
+                       "permitted; CODE is read-only");
   if (AS == 5)
     report_fatal_error("MCS251: address space 5 (bit space) data access is not "
                        "supported; use the controlled-bit lvalue mechanism "
@@ -2031,9 +2028,10 @@ static void checkDataAddressSpace(unsigned AS, bool IsStore) {
   if (AS == 7)
     report_fatal_error("MCS251: address space 7 is reserved and its data "
                        "access is not yet implemented");
-  // AS0/1/2/3/6/8/9 are the implemented data-access set; anything else is
-  // unassigned and must not fall back to a DataLayout p0 default.
-  static const unsigned Implemented[] = {0, 1, 2, 3, 6, 8, 9};
+  // AS0/1/2/6/8/9 are the generic data-access set, AS3 the XDATA (MOVX)
+  // channel and AS4 the CODE (DR read) channel; anything else is unassigned
+  // and must not fall back to a DataLayout p0 default.
+  static const unsigned Implemented[] = {0, 1, 2, 3, 4, 6, 8, 9};
   for (unsigned A : Implemented)
     if (AS == A)
       return;
@@ -2063,7 +2061,16 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
                          "space 0, 1, 2 or 8");
     }
   } else if (PtrVT != MVT::i32 ||
-             (AddressSpace != 0 && AddressSpace != 3 && AddressSpace != 9)) {
+             (AddressSpace != 0 && AddressSpace != 4 && AddressSpace != 9)) {
+    // AS4 (CODE) joins the far set in X2. Channel ruling: AS4 loads use the
+    // 24-bit DR unified-space read (`mov r,@dr`, L80558) rather than MOVC
+    // @A+DPTR -- the G144K246 manual separates `code` (classic FF: 16-bit
+    // window) from `ecode` (80:0000~FF:FFFF, 24-bit), and the DR read covers
+    // both plus the EEPROM FE: mapping (L125052 explicitly forbids MOVC for
+    // EEPROM) with one sequence over the frozen 32-bit p4 pointer. AS3
+    // (XDATA) is deliberately NOT classified here -- it has its own MOVX
+    // @DPTR builder (buildXDATAAddress below) with its per-byte DPXL
+    // re-pointing discipline; reaching the generic far path would bypass it.
     report_fatal_error("MCS251: unsupported address space for generic RAM access");
   }
 
@@ -2207,6 +2214,184 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
   return A;
 }
 
+//===----------------------------------------------------------------------===//
+//  XDATA (AS3) MOVX @DPTR lowering with full 24-bit addresses (X2-1)
+//===----------------------------------------------------------------------===//
+//
+// X2-1 full 24-bit ruling (supersedes the phase-1 16-bit window): the frozen
+// AS3 contract (DESIGN.md B.2, `__xdata` 32/8, "保持完整 24 位有效地址") is
+// implemented literally.  Every AS3 access byte re-points the MOVX region
+// register DPXL (SFR 0x84, Intel 251 manual 3.3.2.2) from the canonical
+// address bits [23:16] immediately before the MOVX @DPTR over the low 16
+// bits:
+//
+//   mov  rN, #bank      ; constant bank: folded at compile time
+//   mov  0x84, rN       ; MOV8dpxl -- region before EVERY access byte
+//   mov  dpl/dph, ...   ; window offset, low 16 address bits
+//   movx a,@dptr / movx @dptr,a
+//
+// The sequence is self-healing: no DPXL value is ever assumed to survive a
+// previous access, an ISR, a call or a user SFR write, so the phase-1 "DPXL
+// is always 01h" placement assumption is gone.  Never-assumes is one half of
+// the X2-4 retention protocol only: the frames the backend generates for
+// async entries PRESERVE DPXL (ISR_PUSH/POP_DPX read/write it), while
+// ordinary calls may clobber it freely (the next access re-points it) and
+// the CRT has no initial-value obligation.  Defs=[DPXL] on MOV8dpxl and
+// Uses=[DPXL] on both MOVX ops make the region switch a scheduling
+// dependence, so two independent AS3 chains in one block can never interleave
+// a bank write across another chain's movx.  The retention protocol
+// (CRT/ISR/call boundaries, user SFR 0x84 writes) is documented in the
+// XDATA-CODE design supplement
+// (validation/mcs251-models/proposals/XDATA-CODE-DESIGN-SUPPLEMENT.md); a
+// user's own AS6 write to 0x84 inside a sequence window is a documented
+// undefined interaction -- the backend never interleaves foreign code into a
+// generated sequence.
+//
+// The phase-1 constant-window rejection is gone: constant banks fold at
+// compile time, and bank==01h is still emitted (the local-omission
+// optimisation is deliberately deferred to a future pass with whole-function
+// analysis; per-access cost is +2 instructions constant, +2~3 dynamic).
+// MXAX sequences (@Ri + P2 + page register) remain out of scope, matching
+// the manual's own guidance against pdata-style access.
+
+// Materialise an i8 constant (constant XDATA bank bytes, store value bytes);
+// defined with the store helpers below.
+static SDValue buildMOV8ri(uint64_t Imm, const SDLoc &DL, SelectionDAG &DAG);
+
+static void splitXDATAAddress(SDValue Full, const SDLoc &DL,
+                              SelectionDAG &DAG, SDValue &Bank,
+                              SDValue &Addr16) {
+  // bits [15:0] drive DPTR, bits [23:16] drive DPXL.  Bits [31:24] of the
+  // canonical i32 container are ignored: pollution there cannot change the
+  // access.
+  Addr16 = DAG.getTargetExtractSubreg(MCS251::sub_lo16, DL, MVT::i16, Full);
+  SDValue Hi =
+      DAG.getTargetExtractSubreg(MCS251::sub_hi16, DL, MVT::i16, Full);
+  Bank = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, Hi);
+}
+
+// Build (bank, window address) for one AS3 access byte at base+ByteOff.
+static void buildXDATAAddress(SDValue Ptr, int64_t ByteOff, const SDLoc &DL,
+                              SelectionDAG &DAG, SDValue &Bank,
+                              SDValue &Addr16) {
+  if (Ptr.getValueType() != MVT::i32)
+    report_fatal_error("MCS251: XDATA (address space 3) pointers are 32-bit");
+  int64_t Off = ByteOff;
+  // Peel constant GEP offsets; a register+register add stays in the 32-bit
+  // pointer value and keeps its carry into the bank byte.
+  while (Ptr.getOpcode() == ISD::ADD) {
+    SDValue LHS = Ptr.getOperand(0), RHS = Ptr.getOperand(1);
+    if (auto *C = dyn_cast<ConstantSDNode>(RHS)) {
+      Off += C->getSExtValue();
+      Ptr = LHS;
+      continue;
+    }
+    if (auto *C = dyn_cast<ConstantSDNode>(LHS)) {
+      Off += C->getSExtValue();
+      Ptr = RHS;
+      continue;
+    }
+    break;
+  }
+  if (isa<FrameIndexSDNode>(Ptr))
+    report_fatal_error("MCS251: XDATA access through a frame object is not "
+                       "supported (allocas live in address space 0)");
+  if (auto *GA = dyn_cast<GlobalAddressSDNode>(Ptr)) {
+    // Full canonical address through the byte-of-24 relocation channel --
+    // the same shape as the AS9 far globals (pointer32.ll pins the form).
+    // The bank byte is split off at runtime, so the sequence is independent
+    // of where the linker places the xdata object (X3 ruling 1: never cut
+    // an XSEG address down to its low 16 bits).
+    SDValue Base(DAG.getMachineNode(
+                     MCS251::MOVADDR32, DL, MVT::i32,
+                     DAG.getTargetGlobalAddress(GA->getGlobal(), DL, MVT::i32,
+                                                GA->getOffset() + Off)),
+                 0);
+    splitXDATAAddress(Base, DL, DAG, Bank, Addr16);
+    return;
+  }
+  if (auto *ES = dyn_cast<ExternalSymbolSDNode>(Ptr)) {
+    SDValue Base(DAG.getMachineNode(
+                     MCS251::MOVADDR32, DL, MVT::i32,
+                     DAG.getTargetExternalSymbol(ES->getSymbol(), MVT::i32)),
+                 0);
+    splitXDATAAddress(foldDispIntoBase(Base, Off, DL, DAG), DL, DAG, Bank,
+                      Addr16);
+    return;
+  }
+  if (isa<ConstantPoolSDNode>(Ptr) || isa<JumpTableSDNode>(Ptr) ||
+      isa<BlockAddressSDNode>(Ptr))
+    report_fatal_error(
+        "MCS251: XDATA constant-pool/jump-table addresses are not supported");
+  if (auto *C = dyn_cast<ConstantSDNode>(Ptr)) {
+    // Constant canonical address: bank and window both fold at compile
+    // time.  The i32 container wraps at 2^32; bits [23:0] are the address.
+    uint64_t K = (C->getZExtValue() + Off) & 0xffffffffULL;
+    Bank = buildMOV8ri((K >> 16) & 0xff, DL, DAG);
+    Addr16 = buildMOV16ri(K & 0xffff, DL, DAG);
+    return;
+  }
+  // Runtime pointer: fold any remaining constant offset in full 32-bit
+  // arithmetic (never an i16 add -- the carry belongs in the bank byte),
+  // then split bank/window at runtime.
+  SDValue Full = Off ? foldDispIntoBase(Ptr, Off, DL, DAG) : Ptr;
+  splitXDATAAddress(Full, DL, DAG, Bank, Addr16);
+}
+
+// One MOVX byte load: re-point DPXL to the byte's bank, set dptr from the
+// 16-bit window address, movx a,@dptr, then move the byte out of A into its
+// virtual register. The chain is threaded through every setup move and the
+// DPL/DPH/A/DPXL pins on the instruction descriptors keep the physical-
+// register dependencies explicit. The loaded byte reaches its consumer
+// through A (MOV8ra), never through the node's i8 result -- which therefore
+// stays unused and would let selection dead-strip the node when it rewrites
+// the chain. The bit-read sequence (ReplaceBitReadResults) solves the
+// identical problem for its A-valued RRCA/MOV8ra tail with a Glue edge; the
+// same Glue result rides MOVXALD into MOV8ra here, pinning the access into
+// the selected stream.
+static SDValue buildMOVXByteLoad(SDValue Bank, SDValue Addr16,
+                                 const SDLoc &DL, SelectionDAG &DAG,
+                                 SDValue Chain, MachineMemOperand *MMO,
+                                 SDValue &Byte) {
+  // Self-healing region switch first: DPXL always matches this byte's bank,
+  // whatever any earlier access, ISR or user write left behind.
+  Chain = SDValue(
+      DAG.getMachineNode(MCS251::MOV8dpxl, DL, MVT::Other, {Bank, Chain}), 0);
+  SDValue Lo = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, Addr16);
+  SDValue Hi = DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8, Addr16);
+  Chain = SDValue(
+      DAG.getMachineNode(MCS251::MOV8dpl, DL, MVT::Other, {Lo, Chain}), 0);
+  Chain = SDValue(
+      DAG.getMachineNode(MCS251::MOV8dph, DL, MVT::Other, {Hi, Chain}), 0);
+  SDVTList ResTys = DAG.getVTList(MVT::i8, MVT::Other, MVT::Glue);
+  SDNode *N = DAG.getMachineNode(MCS251::MOVXALD, DL, ResTys, Chain);
+  DAG.setNodeMemRefs(cast<MachineSDNode>(N), {MMO});
+  Byte = SDValue(
+      DAG.getMachineNode(MCS251::MOV8ra, DL, MVT::i8, SDValue(N, 2)), 0);
+  return SDValue(N, 1);
+}
+
+// One MOVX byte store: re-point DPXL, set dptr, move the value byte into A,
+// movx @dptr,a. The chain is threaded through every setup move, mirroring
+// the load side.
+static SDValue buildMOVXByteStore(SDValue Bank, SDValue Addr16, SDValue Val,
+                                  const SDLoc &DL, SelectionDAG &DAG,
+                                  SDValue Chain, MachineMemOperand *MMO) {
+  Chain = SDValue(
+      DAG.getMachineNode(MCS251::MOV8dpxl, DL, MVT::Other, {Bank, Chain}), 0);
+  SDValue Lo = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, Addr16);
+  SDValue Hi = DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8, Addr16);
+  Chain = SDValue(
+      DAG.getMachineNode(MCS251::MOV8dpl, DL, MVT::Other, {Lo, Chain}), 0);
+  Chain = SDValue(
+      DAG.getMachineNode(MCS251::MOV8dph, DL, MVT::Other, {Hi, Chain}), 0);
+  Chain = SDValue(
+      DAG.getMachineNode(MCS251::MOV8a, DL, MVT::Other, {Val, Chain}), 0);
+  SDNode *N = DAG.getMachineNode(MCS251::MOVXAST, DL, MVT::Other, Chain);
+  DAG.setNodeMemRefs(cast<MachineSDNode>(N), {MMO});
+  return SDValue(N, 0);
+}
+
 // Build the byte-load machine node for an i8 memory object, classified per
 // parseAddress, and attach the original MachineMemOperand (volatile flag
 // and aliasing info) to it.
@@ -2254,12 +2439,43 @@ SDValue MCS251TargetLowering::LowerLoad(SDValue Op, SelectionDAG &DAG) const {
   if (MemVT != MVT::i8 && MemVT != MVT::i16 && MemVT != MVT::i32)
     report_fatal_error("MCS251: only i8/i16/i32 memory objects are supported (load)");
 
-  // DF0 P0-B: reject unimplemented non-zero AS data loads before parseAddress
-  // classifies the pointer value. parseAddress keeps its own width/AS guard as
-  // a second line of defence; the check here gives a use-specific diagnostic.
+  // DF0 P0-B (narrowed by X2): reject the still-unimplemented data-load AS
+  // set (AS5/AS7/unassigned; AS4 loads are now served by the DR channel)
+  // before parseAddress classifies the pointer value. parseAddress keeps its
+  // own width/AS guard as a second line of defence; the check here gives a
+  // use-specific diagnostic.
   checkDataAddressSpace(LD->getAddressSpace(), /*IsStore=*/false);
 
   unsigned Size = MemVT.getSizeInBits() / 8;
+  // X2-1: AS3 (XDATA) lowers through the MOVX @DPTR channel, one byte at a
+  // time, each byte with its own DPXL bank byte and 16-bit window address
+  // (see the full 24-bit ruling above buildXDATAAddress).
+  if (LD->getAddressSpace() == 3) {
+    SDValue Chain = LD->getChain();
+    SmallVector<SDValue, 4> Bytes;
+    for (unsigned I = 0; I < Size; ++I) {
+      SDValue Bank, Addr16;
+      buildXDATAAddress(LD->getBasePtr(), I, DL, DAG, Bank, Addr16);
+      auto *MMO = DAG.getMachineFunction().getMachineMemOperand(
+          LD->getMemOperand(), I, /*Size=*/1);
+      SDValue Byte;
+      Chain = buildMOVXByteLoad(Bank, Addr16, DL, DAG, Chain, MMO, Byte);
+      Bytes.push_back(Byte);
+    }
+    // Same big-endian object layout and extension forwarding as the generic
+    // path below: mem[base] is the HIGH byte of the object.
+    SDValue Res = Bytes[0];
+    if (Size >= 2)
+      Res = makeWord(Bytes[0], Bytes[1], DL, DAG);
+    if (Size == 4)
+      Res = makeDR(Res, makeWord(Bytes[2], Bytes[3], DL, DAG), DL, DAG);
+    if (ValVT != MemVT)
+      Res = DAG.getNode(LD->getExtensionType() == ISD::SEXTLOAD
+                            ? ISD::SIGN_EXTEND
+                            : ISD::ZERO_EXTEND,
+                        DL, ValVT, Res);
+    return DAG.getMergeValues({Res, Chain}, DL);
+  }
   MCS251Address A = parseAddress(LD->getBasePtr(), DL, DAG,
                                  /*AllowDirect=*/MemVT == MVT::i8,
                                  LD->getAddressSpace(), Size);
@@ -2300,7 +2516,8 @@ SDValue MCS251TargetLowering::LowerLoad(SDValue Op, SelectionDAG &DAG) const {
   return DAG.getMergeValues({Res, Chain}, DL);
 }
 
-// Materialise an i8 constant value into a GPR8 vreg for the store forms.
+// Materialise an i8 constant value into a GPR8 vreg for the store forms and
+// for constant XDATA bank bytes (buildXDATAAddress).
 static SDValue buildMOV8ri(uint64_t Imm, const SDLoc &DL, SelectionDAG &DAG) {
   return SDValue(
       DAG.getMachineNode(MCS251::MOV8ri, DL, MVT::i8,
@@ -2354,14 +2571,12 @@ SDValue MCS251TargetLowering::LowerStore(SDValue Op, SelectionDAG &DAG) const {
   if (MemVT != MVT::i8 && MemVT != MVT::i16 && MemVT != MVT::i32)
     report_fatal_error("MCS251: only i8/i16/i32 memory objects are supported (store)");
 
-  // DF0 P0-A: reject CODE (AS4) stores and all unimplemented non-zero AS data
-  // stores before parseAddress touches the pointer value.
+  // DF0 P0-A (narrowed by X2): CODE (AS4) stores stay forbidden and the
+  // remaining unimplemented non-zero AS data stores are still rejected,
+  // before parseAddress touches the pointer value.
   checkDataAddressSpace(ST->getAddressSpace(), /*IsStore=*/true);
 
   unsigned Size = MemVT.getSizeInBits() / 8;
-  MCS251Address A = parseAddress(ST->getBasePtr(), DL, DAG,
-                                 /*AllowDirect=*/MemVT == MVT::i8,
-                                 ST->getAddressSpace(), Size);
 
   SmallVector<SDValue, 4> Bytes;
   if (auto *C = dyn_cast<ConstantSDNode>(Val)) {
@@ -2381,6 +2596,23 @@ SDValue MCS251TargetLowering::LowerStore(SDValue Op, SelectionDAG &DAG) const {
     }
   }
   SDValue Chain = ST->getChain();
+  // X2-1: AS3 (XDATA) stores go through the MOVX @DPTR channel (the write
+  // half of the same byte-at-a-time sequence as the load side above, each
+  // byte re-pointing DPXL first). The address classification is the XDATA
+  // builder's; parseAddress must never see AS3.
+  if (ST->getAddressSpace() == 3) {
+    for (unsigned I = 0; I < Size; ++I) {
+      SDValue Bank, Addr16;
+      buildXDATAAddress(ST->getBasePtr(), I, DL, DAG, Bank, Addr16);
+      auto *MMO = DAG.getMachineFunction().getMachineMemOperand(
+          ST->getMemOperand(), I, /*Size=*/1);
+      Chain = buildMOVXByteStore(Bank, Addr16, Bytes[I], DL, DAG, Chain, MMO);
+    }
+    return Chain;
+  }
+  MCS251Address A = parseAddress(ST->getBasePtr(), DL, DAG,
+                                 /*AllowDirect=*/MemVT == MVT::i8,
+                                 ST->getAddressSpace(), Size);
   for (unsigned I = 0; I < Size; ++I) {
     MCS251Address ByteAddr = A;
     ByteAddr.Disp += I;

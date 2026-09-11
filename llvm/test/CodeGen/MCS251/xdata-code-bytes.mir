@@ -1,0 +1,125 @@
+# RUN: split-file %s %t
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/movxald.mir -o %t/movxald.o
+# RUN: llvm-objcopy --dump-section=.text=%t/movxald.bin %t/movxald.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e005a7a01827e10127a1183e0a5fbbe3001aa', b.hex()" %t/movxald.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/movxast.mir -o %t/movxast.o
+# RUN: llvm-objcopy --dump-section=.text=%t/movxast.bin %t/movxast.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e402aa5ecf0a5fbbe3001aa', b.hex()" %t/movxast.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/dpxl.mir -o %t/dpxl.o
+# RUN: llvm-objcopy --dump-section=.text=%t/dpxl.bin %t/dpxl.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e60427a61847e00007a01827e10127a1183e0a5fbbe3001aa', b.hex()" %t/dpxl.bin
+# RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/drread.mir -o %t/drread.o
+# RUN: llvm-objcopy --dump-section=.text=%t/drread.bin %t/drread.o
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e3812347a3c00ab7e3b50be5001aa', b.hex()" %t/drread.bin
+#
+# X2 byte-exact anchors for the two new channels (same scaffold as
+# instr-sizes.mir: the AsmPrinter ExactSizeAlways check plus
+# verifyInstruction's tablegen-Size cross-check police these opcodes on every
+# -verify-machineinstrs object run; the pins below are the fine net).
+#
+# sdas251 V05.50.4 oracle (source mode):
+#   movx a, @dptr   -> E0        movx @dptr, a  -> F0
+#   mov r5, @dr4    -> 7E 1B 50  mov @dr4,r5    -> 7A 1B 50
+#   mov r10,@dr4+0x1234 -> 29 A1 12 34
+#   mov 0x84,r2     -> 7A 21 84  (DPXL region write, X2-1)
+#
+# movxald.mir: mov r0,#0x5a / mov dpl,r0 / mov r1,#0x12 / mov dph,r1 /
+#              movx a,@dptr (= E0) / mov r3,a / cmp r3,#1 / eret
+#   7e005a 7a0182 7e1012 7a1183 e0 a5fb be3001 aa
+#
+# movxast.mir: mov r0,#0x2a / mov a,r0 (= A5 EC) / movx @dptr,a (= F0) /
+#              mov r3,a / cmp / eret
+#   7e402a a5ec f0 a5fb be3001 aa
+#
+# dpxl.mir: the X2-1 AS3 load shape with a runtime bank byte:
+#   mov r6,#0x42 (7E 60 42) / mov 0x84,r6 (= 7A 61 84, MOV8dpxl) /
+#   mov r0,#0 / mov dpl,r0 (7A 01 82) / mov r1,#0x12 / mov dph,r1 (7A 11 83) /
+#   movx a,@dptr (= E0) / mov r3,a / cmp r3,#1 / eret.
+#   The MOVX ops carry Uses=[DPXL] (with their DPL/DPH uses), and MOV8dpxl
+#   carries Defs=[DPXL], so the verifier sees the region dependence.
+#   7e6042 7a6184 7e0000 7a0182 7e1012 7a1183 e0 a5fb be3001 aa
+#
+# drread.mir: the AS4 CODE-load shape, DR write sequence then the
+#   unified-space read: mov dr12,#0x1234 (= 7E 38 12 34) /
+#   movh dr12,#0x00ab (= 7A 3C 00 AB, dr12 = 0x00ab1234) /
+#   mov r5,@dr12 (= 7E 3B 50; regCode(dr12)=3, low nibble B = byte @DRk) /
+#   cmp r5,#1 / eret
+#   7e381234 7a3c00ab 7e3b50 be5001 aa
+#
+#--- movxald.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r0 = MOV8ri 90
+    MOV8dpl $r0, implicit-def $dpl
+    $r1 = MOV8ri 18
+    MOV8dph $r1, implicit-def $dph
+    MOVXALD implicit-def $a, implicit $dpl, implicit $dph, implicit $dpxl
+    $r3 = MOV8ra implicit $a
+    CMP8ri $r3, 1, implicit-def $psw
+    ERET
+...
+#--- movxast.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r4 = MOV8ri 42
+    MOV8a $r4, implicit-def $a
+    MOVXAST implicit $a, implicit $dpl, implicit $dph, implicit $dpxl
+    $r3 = MOV8ra implicit $a
+    CMP8ri $r3, 1, implicit-def $psw
+    ERET
+...
+#--- dpxl.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $r6 = MOV8ri 66
+    MOV8dpxl $r6, implicit-def $dpxl
+    $r0 = MOV8ri 0
+    MOV8dpl $r0, implicit-def $dpl
+    $r1 = MOV8ri 18
+    MOV8dph $r1, implicit-def $dph
+    MOVXALD implicit-def $a, implicit $dpl, implicit $dph, implicit $dpxl
+    $r3 = MOV8ra implicit $a
+    CMP8ri $r3, 1, implicit-def $psw
+    ERET
+...
+#--- drread.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+body: |
+  bb.0:
+    $dr12 = MOVDRri 4660
+    $dr12 = MOVHDRi $dr12, 171
+    $r5 = MOV8rmP $dr12, 0
+    CMP8ri $r5, 1, implicit-def $psw
+    ERET
+...

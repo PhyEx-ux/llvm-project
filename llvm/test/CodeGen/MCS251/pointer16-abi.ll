@@ -56,7 +56,10 @@ define i8 @far_second(i8 %tag, ptr addrspace(3) %p) {
 ; CHECK: mov {{r[0-9]+}}, @{{wr[0-9]+}}
 ; CHECK: add {{wr[0-9]+}}, #0x0003
 ; CHECK: mov {{r[0-9]+}}, @{{wr[0-9]+}}
-; CHECK: mov {{r[0-9]+}}, @{{dr[0-9]+}}
+; X2: the AS3 load itself now travels through the MOVX @DPTR channel.
+; CHECK: mov dpl, r{{[0-9]+}}
+; CHECK: mov dph, r{{[0-9]+}}
+; CHECK: movx a, @dptr
   %v = load volatile i8, ptr addrspace(3) %p, align 1
   %r = xor i8 %v, %tag
   ret i8 %r

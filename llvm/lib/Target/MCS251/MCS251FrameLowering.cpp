@@ -52,13 +52,16 @@ static const unsigned ISRPopSequence[] = {
 // The asynchronous interrupted context is REAL entry state: every push reads
 // the register it saves (T04 Uses; never marked undef, never pseudo-defined),
 // so the entry block must honestly carry these as live-ins. A and B are
-// separately modelled SFRs (no register-file alias to DR8), and DPL/DPH/DPTR
-// are separately modelled aliases of the DPX overlay -- each is read by the
-// corresponding push and therefore listed itself.
+// separately modelled SFRs (no register-file alias to DR8), DPL/DPH/DPTR
+// are separately modelled aliases of the DPX overlay, and DPXL (the MOVX
+// region byte of DPX) is a separately modelled SFR -- each is read by the
+// corresponding push and therefore listed itself (DPXL: X2-4, the ISR frame
+// saves the interrupted region and pop dpx restores it).
 static const MCPhysReg ISRAsyncLiveIns[] = {
     MCS251::PSW,  MCS251::DR0,  MCS251::DR4,  MCS251::DR8,  MCS251::DR12,
     MCS251::DR16, MCS251::DR20, MCS251::DR24, MCS251::DR28, MCS251::DR56,
-    MCS251::A,    MCS251::B,    MCS251::DPL,  MCS251::DPH,  MCS251::DPTR};
+    MCS251::A,    MCS251::B,    MCS251::DPL,  MCS251::DPH,  MCS251::DPTR,
+    MCS251::DPXL};
 
 static bool isISRFunction(const MachineFunction &MF) {
   return MF.getFunction().getCallingConv() == CallingConv::MCS251_INTR;

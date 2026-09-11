@@ -77,6 +77,9 @@ namespace {
 static constexpr unsigned SFR_B = 0xF0;
 static constexpr unsigned SFR_DPL = 0x82;
 static constexpr unsigned SFR_DPH = 0x83;
+// MOVX @DPTR region register (Intel 251 manual 3.3.2.2), re-pointed by the
+// AS3 access sequence before every movx (X2-1).
+static constexpr unsigned SFR_DPXL = 0x84;
 
 // Map an LLVM register to its architectural encoding (see file comment).
 static unsigned regCode(MCRegister R) {
@@ -322,6 +325,10 @@ void MCS251MCCodeEmitter::encodeInstruction(
     B(0x17a); put8((R(MI, 0) << 4) | 1, CB); put8(SFR_DPL, CB); break;
   case MCS251::MOV8dph:
     B(0x17a); put8((R(MI, 0) << 4) | 1, CB); put8(SFR_DPH, CB); break;
+  // X2-1: pinned DPXL region write ("mov 0x84, rN"; sdas251 V05.50.4 gold
+  // 7A 21 84), the direct-store encoding with the fixed address 0x84.
+  case MCS251::MOV8dpxl:
+    B(0x17a); put8((R(MI, 0) << 4) | 1, CB); put8(SFR_DPXL, CB); break;
   case MCS251::MOV8rdpl:
     B(0x17e); put8((R(MI, 0) << 4) | 1, CB); put8(SFR_DPL, CB); break;
   case MCS251::MOV8rdph:
@@ -365,6 +372,13 @@ void MCS251MCCodeEmitter::encodeInstruction(
     putDisp16(MI.getOperand(1), CB); break;
   case MCS251::MOV8id:
     B(0x17a); put8((R(MI, 1) << 4) | 1, CB); put8(Imm(MI, 0), CB); break;
+
+  // XDATA channel (AS3): the classic MOVX @DPTR pair.  sdas251 V05.50.4
+  // source-mode gold: "movx a,@dptr" -> E0, "movx @dptr,a" -> F0.  Both
+  // opcodes have a low nibble of 0, so putOpcode adds no A5 escape and each
+  // encodes as a single byte.
+  case MCS251::MOVXALD: B(0x0e0); break;
+  case MCS251::MOVXAST: B(0x0f0); break;
 
   // sdas251 source-mode gold and frozen-QEMU probe: A4 / AD 64.
   case MCS251::MULAB: B(0xa4); break;

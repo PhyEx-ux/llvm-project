@@ -360,6 +360,10 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case MCS251::RRCA:
   case MCS251::RLCA:
   case MCS251::CLRC:
+  // XDATA channel: the single-byte MOVX @DPTR pair (sdas251 gold E0 / F0;
+  // low nibble 0, no A5 escape).
+  case MCS251::MOVXALD:
+  case MCS251::MOVXAST:
   // CY bit forms: opcode+1 of the single-byte classic bit family.
   case MCS251::SETBC:
   case MCS251::CPLC:
@@ -379,6 +383,7 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case MCS251::MOV8ri:
   case MCS251::MOV8dpl:
   case MCS251::MOV8dph:
+  case MCS251::MOV8dpxl:
   case MCS251::MOV8rdpl:
   case MCS251::MOV8rdph:
   case MCS251::MOV8b:
@@ -540,6 +545,11 @@ bool MCS251InstrInfo::verifyInstruction(const MachineInstr &MI,
   case MCS251::JBC:
   case MCS251::SETBC:
   case MCS251::CPLC:
+  // X2: the MOVX @DPTR pair carries a fixed Size = 1 in the .td; keep the
+  // tablegen Size honest against the emitter's single E0/F0 byte the same
+  // way the bit-addressed family is policed.
+  case MCS251::MOVXALD:
+  case MCS251::MOVXAST:
     break;
   default:
     return true;

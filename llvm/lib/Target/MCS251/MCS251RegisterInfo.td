@@ -136,6 +136,23 @@ let SubRegIndices = [sub_lo16, sub_hi16], CoveredBySubRegs = 1,
 def DPL : MCS251Reg<"dpl", 61>;
 def DPH : MCS251Reg<"dph", 62>;
 
+// DPXL (SFR 0x84, Intel 251 manual 3.3.2.2) selects the 64-Kbyte region the
+// MOVX @DPTR channel reaches (reset value 01h). X2-1 ruling: the backend
+// never relies on the region surviving an access -- every AS3 access sequence
+// re-points DPXL from the canonical 24-bit address bits [23:16] immediately
+// before the MOVX (self-healing, see the XDATA lowering in
+// MCS251ISelLowering.cpp and the DPXL retention protocol in
+// validation/mcs251-models/proposals/XDATA-CODE-DESIGN-SUPPLEMENT.md). Like
+// dpl/dph it is a member of no register class (reached only through the
+// dedicated MOV8dpxl direct form) and is reserved in getReservedRegs().
+// never allocated (class-less) and reserved in getReservedRegs().
+// X2-4 retention protocol, ISR half: the ISR fixed frame covers DPXL --
+// push dpx reads it, pop dpx restores it (ISR_PUSH/POP_DPX Uses/Defs).
+// HWEncoding 60 is a placeholder (the encoding field is bits<6>, so the
+// dpl/dph convention numbers max out at 63; 60 is unused), following the
+// dpl/dph 61/62 convention above.
+def DPXL : MCS251Reg<"dpxl", 60>;
+
 // ACC (A, SFR 0xe0) and B (SFR 0xf0) are independent fixed ABI registers.
 // Their byte-slot aliases R11 (ACC) and R10 (B) are intentionally not modeled
 // as register-file aliases: R10/R11 remain excluded from GPR8, while A/B are

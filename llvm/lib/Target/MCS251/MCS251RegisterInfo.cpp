@@ -64,6 +64,10 @@ BitVector MCS251RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   Reserved.set(MCS251::DPL);
   Reserved.set(MCS251::DPH);
   Reserved.set(MCS251::DPTR);
+  // DPXL (SFR 0x84) is the MOVX @DPTR region register re-pointed by every
+  // AS3 access sequence (X2-1). Class-less like DPL/DPH, reserved the same
+  // way; the backend never assumes the region survives any event.
+  Reserved.set(MCS251::DPXL);
   // A (ACC, SFR 0xe0) and B (SFR 0xf0) are fixed ABI byte locations.
   // They intentionally remain separate from their R11/R10 byte aliases.
   Reserved.set(MCS251::A);
