@@ -17,6 +17,7 @@
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/Initialization.h"
 #include "clang/Sema/Lookup.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "clang/Sema/Ownership.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/ScopeInfo.h"
@@ -333,6 +334,17 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
     if (CheckNakedParmReference(OutputExpr, *this))
       return StmtError();
 
+    // An asm output's address is computed at runtime, so its expression is
+    // evaluated. Apply the MCS-251 controlled fixed bit operation rules to that
+    // computation (e.g. `a[X ^= 1]` consumes the toggle result). This path does
+    // not go through ActOnFinishFullExpr.
+    // Route through the public entry so the same deferred-in-statement-
+    // expression handling applies; the enclosing full expression re-walks the
+    // asm statement when it is actually evaluated.
+    if (MCS251().CheckMCS251ControlledBitRMW(Exprs[i],
+                                             /*DiscardedValue=*/false))
+      return StmtError();
+
     // Check that the output expression is compatible with memory constraint.
     if (Info.allowsMemory() &&
         checkExprMemoryConstraintCompat(*this, OutputExpr, Info, false))
@@ -486,6 +498,18 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
           Diag(InputExpr->getBeginLoc(), diag::err_asm_invalid_type)
           << InputExpr->getType() << 1 /*Output*/
           << InputExpr->getSourceRange());
+
+    // An asm input consumed by a register is a real use of the expression's
+    // value. Apply the MCS-251 controlled fixed bit operation rules here too,
+    // so a CPL toggle used as an asm input is rejected rather than accepted
+    // (this path does not go through ActOnFinishFullExpr). The input value is
+    // consumed, so ResultUsed is true.
+    // Route through the public entry so the same deferred-in-statement-
+    // expression handling applies; the enclosing full expression re-walks the
+    // asm statement when it is actually evaluated.
+    if (MCS251().CheckMCS251ControlledBitRMW(Exprs[i],
+                                             /*DiscardedValue=*/false))
+      return StmtError();
 
     InputConstraintInfos.push_back(Info);
 

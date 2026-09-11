@@ -1531,6 +1531,14 @@ CodeGenFunction::emitBuiltinObjectSize(const Expr *E, unsigned Type,
   if (Type == 3 || (!EmittedE && E->HasSideEffects(getContext())))
     return getDefaultBuiltinObjectSizeResult(Type, ResType);
 
+  // An MCS-251 bit object (a bit compound literal or a folded bit declaration)
+  // in the argument has no lowering yet, so the argument cannot be emitted:
+  // return the default result instead of materializing unsupported bit
+  // storage, mirroring the side-effect bail above (the builtins are declared
+  // with UnevaluatedArguments).
+  if (!EmittedE && exprContainsMCS251BitObject(E, getContext()))
+    return getDefaultBuiltinObjectSizeResult(Type, ResType);
+
   Value *Ptr = EmittedE ? EmittedE : EmitScalarExpr(E);
   assert(Ptr->getType()->isPointerTy() &&
          "Non-pointer passed to __builtin_object_size?");

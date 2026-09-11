@@ -3278,6 +3278,12 @@ void CXXNameMangler::mangleType(const BuiltinType *T) {
   case BuiltinType::Bool:
     Out << 'b';
     break;
+  case BuiltinType::MCS251Bit:
+    // MCS-251 bit is a C-only target type (see P08); C++ mangling never sees
+    // it. Emit a distinct marker rather than relying on llvm_unreachable,
+    // which is UB in release builds without assertions.
+    Out << "bit";
+    break;
   case BuiltinType::Char_U:
   case BuiltinType::Char_S:
     Out << 'c';

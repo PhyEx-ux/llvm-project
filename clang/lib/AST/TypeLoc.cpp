@@ -326,6 +326,8 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
     return TST_void;
   case BuiltinType::Bool:
     return TST_bool;
+  case BuiltinType::MCS251Bit:
+    return TST_mcs251_bit;
   case BuiltinType::Char_U:
   case BuiltinType::Char_S:
     return TST_char;

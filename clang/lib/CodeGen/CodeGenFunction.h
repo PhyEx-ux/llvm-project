@@ -254,6 +254,13 @@ public:
   ~ApplyAtomGroup();
 };
 
+/// Whether \p E contains an MCS-251 bit object (a bit compound literal or a
+/// folded bit declaration) in an evaluated position. Defined in
+/// CGExprConstant.cpp and shared with the object size builtins in
+/// CGBuiltin.cpp: their pointer argument is unevaluated whenever it cannot be
+/// emitted, so it must not materialize unsupported bit storage.
+bool exprContainsMCS251BitObject(const Expr *E, ASTContext &Ctx);
+
 /// CodeGenFunction - This class organizes the per-function state that is used
 /// while generating LLVM code.
 class CodeGenFunction : public CodeGenTypeCache {

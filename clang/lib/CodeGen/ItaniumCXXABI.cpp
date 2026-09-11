@@ -3734,6 +3734,7 @@ static bool TypeInfoIsInStandardLibrary(const BuiltinType *Ty) {
     case BuiltinType::Void:
     case BuiltinType::NullPtr:
     case BuiltinType::Bool:
+    case BuiltinType::MCS251Bit:
     case BuiltinType::WChar_S:
     case BuiltinType::WChar_U:
     case BuiltinType::Char_U:

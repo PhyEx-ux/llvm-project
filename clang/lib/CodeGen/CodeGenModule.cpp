@@ -4736,6 +4736,13 @@ void CodeGenModule::EmitGlobal(GlobalDecl GD) {
   // If this is an alias definition (which otherwise looks like a declaration)
   // emit it now.
   if (Global->hasAttr<AliasAttr>()) {
+    // A bit alias would degrade the controlled bit identity to an ordinary byte
+    // alias. Fail closed: the relocation/identity for a bit symbol is not
+    // defined yet (M2).
+    if (Global->getType().getUnqualifiedType()->isMCS251BitType()) {
+      ErrorUnsupported(Global, "MCS251 bit alias");
+      return;
+    }
     if (shouldSkipAliasEmission(*this, Global))
       return;
     return EmitAliasDefinition(GD);
@@ -6508,6 +6515,20 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D,
   QualType ASTTy = D->getType();
   if (getLangOpts().OpenCL && ASTTy->isSamplerT())
     return;
+
+  // Fail closed on MCS-251 bit objects. A `bit` global (or an old-style `sbit`
+  // fixed reference) is program state with a controlled bit-location identity
+  // that must not be silently emitted as an ordinary byte global. The storage
+  // and initialization protocol (global/static bit slots, cross-TU packing,
+  // CRT) is a later capability (M2/S3); until it exists, error rather than
+  // degrade to a plain i8 global.
+  if (ASTTy.getUnqualifiedType()->isMCS251BitType() ||
+      D->hasAttr<MCS251BitAddressAttr>()) {
+    ErrorUnsupported(D, D->hasAttr<MCS251BitAddressAttr>()
+                            ? "MCS251 fixed bit reference definition"
+                            : "MCS251 bit global");
+    return;
+  }
 
   // HLSL default buffer constants will be emitted during HLSLBufferDecl codegen
   if (getLangOpts().HLSL &&

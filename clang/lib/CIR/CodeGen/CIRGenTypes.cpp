@@ -349,6 +349,11 @@ mlir::Type CIRGenTypes::convertType(QualType type) {
       resultType = cir::BoolType::get(&getMLIRContext());
       break;
 
+    // MCS-251 bit has boolean value semantics.
+    case BuiltinType::MCS251Bit:
+      resultType = cir::BoolType::get(&getMLIRContext());
+      break;
+
     // Signed integral types.
     case BuiltinType::Char_S:
     case BuiltinType::Int:

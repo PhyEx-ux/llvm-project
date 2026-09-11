@@ -21,6 +21,7 @@
 #include "clang/Sema/Initialization.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/Sema.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Casting.h"
 
@@ -2089,77 +2090,92 @@ StmtResult SemaOpenACC::ActOnEndStmtDirective(
     OpenACCAtomicKind AtomicKind, SourceLocation RParenLoc,
     SourceLocation EndLoc, ArrayRef<OpenACCClause *> Clauses,
     StmtResult AssocStmt) {
+  StmtResult Res;
   switch (K) {
   case OpenACCDirectiveKind::Invalid:
     return StmtError();
   case OpenACCDirectiveKind::Parallel:
   case OpenACCDirectiveKind::Serial:
   case OpenACCDirectiveKind::Kernels: {
-    return OpenACCComputeConstruct::Create(
+    Res = OpenACCComputeConstruct::Create(
         getASTContext(), K, StartLoc, DirLoc, EndLoc, Clauses,
         AssocStmt.isUsable() ? AssocStmt.get() : nullptr);
+    break;
   }
   case OpenACCDirectiveKind::ParallelLoop:
   case OpenACCDirectiveKind::SerialLoop:
   case OpenACCDirectiveKind::KernelsLoop: {
-    return OpenACCCombinedConstruct::Create(
+    Res = OpenACCCombinedConstruct::Create(
         getASTContext(), K, StartLoc, DirLoc, EndLoc, Clauses,
         AssocStmt.isUsable() ? AssocStmt.get() : nullptr);
+    break;
   }
   case OpenACCDirectiveKind::Loop: {
-    return OpenACCLoopConstruct::Create(
+    Res = OpenACCLoopConstruct::Create(
         getASTContext(), ActiveComputeConstructInfo.Kind, StartLoc, DirLoc,
         EndLoc, Clauses, AssocStmt.isUsable() ? AssocStmt.get() : nullptr);
+    break;
   }
   case OpenACCDirectiveKind::Data: {
-    return OpenACCDataConstruct::Create(
+    Res = OpenACCDataConstruct::Create(
         getASTContext(), StartLoc, DirLoc, EndLoc, Clauses,
         AssocStmt.isUsable() ? AssocStmt.get() : nullptr);
+    break;
   }
   case OpenACCDirectiveKind::EnterData: {
-    return OpenACCEnterDataConstruct::Create(getASTContext(), StartLoc, DirLoc,
+    Res = OpenACCEnterDataConstruct::Create(getASTContext(), StartLoc, DirLoc,
                                              EndLoc, Clauses);
+    break;
   }
   case OpenACCDirectiveKind::ExitData: {
-    return OpenACCExitDataConstruct::Create(getASTContext(), StartLoc, DirLoc,
+    Res = OpenACCExitDataConstruct::Create(getASTContext(), StartLoc, DirLoc,
                                             EndLoc, Clauses);
+    break;
   }
   case OpenACCDirectiveKind::HostData: {
-    return OpenACCHostDataConstruct::Create(
+    Res = OpenACCHostDataConstruct::Create(
         getASTContext(), StartLoc, DirLoc, EndLoc, Clauses,
         AssocStmt.isUsable() ? AssocStmt.get() : nullptr);
+    break;
   }
   case OpenACCDirectiveKind::Wait: {
-    return OpenACCWaitConstruct::Create(
+    Res = OpenACCWaitConstruct::Create(
         getASTContext(), StartLoc, DirLoc, LParenLoc, Exprs.front(), MiscLoc,
         Exprs.drop_front(), RParenLoc, EndLoc, Clauses);
+    break;
   }
   case OpenACCDirectiveKind::Init: {
-    return OpenACCInitConstruct::Create(getASTContext(), StartLoc, DirLoc,
+    Res = OpenACCInitConstruct::Create(getASTContext(), StartLoc, DirLoc,
                                         EndLoc, Clauses);
+    break;
   }
   case OpenACCDirectiveKind::Shutdown: {
-    return OpenACCShutdownConstruct::Create(getASTContext(), StartLoc, DirLoc,
+    Res = OpenACCShutdownConstruct::Create(getASTContext(), StartLoc, DirLoc,
                                             EndLoc, Clauses);
+    break;
   }
   case OpenACCDirectiveKind::Set: {
-    return OpenACCSetConstruct::Create(getASTContext(), StartLoc, DirLoc,
+    Res = OpenACCSetConstruct::Create(getASTContext(), StartLoc, DirLoc,
                                        EndLoc, Clauses);
+    break;
   }
   case OpenACCDirectiveKind::Update: {
-    return OpenACCUpdateConstruct::Create(getASTContext(), StartLoc, DirLoc,
+    Res = OpenACCUpdateConstruct::Create(getASTContext(), StartLoc, DirLoc,
                                           EndLoc, Clauses);
+    break;
   }
   case OpenACCDirectiveKind::Atomic: {
-    return OpenACCAtomicConstruct::Create(
+    Res = OpenACCAtomicConstruct::Create(
         getASTContext(), StartLoc, DirLoc, AtomicKind, EndLoc, Clauses,
         AssocStmt.isUsable() ? AssocStmt.get() : nullptr);
+    break;
   }
   case OpenACCDirectiveKind::Cache: {
     assert(Clauses.empty() && "Cache doesn't allow clauses");
-    return OpenACCCacheConstruct::Create(getASTContext(), StartLoc, DirLoc,
+    Res = OpenACCCacheConstruct::Create(getASTContext(), StartLoc, DirLoc,
                                          LParenLoc, MiscLoc, Exprs, RParenLoc,
                                          EndLoc);
+    break;
   }
   case OpenACCDirectiveKind::Routine:
     llvm_unreachable("routine shouldn't handled here");
@@ -2172,7 +2188,15 @@ StmtResult SemaOpenACC::ActOnEndStmtDirective(
     return SemaRef.ActOnDeclStmt(DeclGroupPtrTy::make(DR), StartLoc, EndLoc);
   }
   }
-  llvm_unreachable("Unhandled case in directive handling?");
+
+  // The clause operands of the construct are not full expressions of their
+  // own, so the MCS-251 controlled-bit rules are applied to them here, once,
+  // at directive completion (a directive inside a statement expression defers
+  // to the enclosing full-expression walk).
+  if (Res.isUsable() &&
+      SemaRef.MCS251().CheckMCS251ControlledBitDirectiveClauses(Res.get()))
+    return StmtError();
+  return Res;
 }
 
 StmtResult SemaOpenACC::ActOnAssociatedStmt(

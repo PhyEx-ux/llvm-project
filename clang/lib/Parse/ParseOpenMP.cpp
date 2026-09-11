@@ -1984,6 +1984,14 @@ Parser::DeclGroupPtrTy Parser::ParseOpenMPDeclarativeDirectiveWithExtDecl(
   ParsingOpenMPDirectiveRAII DirScope(*this);
   ParenBraceBracketBalancer BalancerRAIIObj(*this);
   llvm::omp::Version OMPVersion = Actions.getLangOpts().getOpenMPVersion();
+  // P08 revision (Alice ruling, plan B): declaration-context OpenMP
+  // directives (declare simd/variant with the associated declaration parsed
+  // here, declare reduction/mapper/requires/assumes clause input, declare
+  // target clause input) run inside the MCS251 construct restriction context.
+  // The cached-token forms (declare simd/variant) re-parse their clauses
+  // below, still inside this context; nothing depends on source ranges.
+  Sema::EnterMCS251DirectiveRestriction MCS251Restriction(
+      Actions, Tok.getLocation(), /*IsOpenACC=*/false);
 
   SourceLocation Loc;
   OpenMPDirectiveKind DKind;
@@ -2571,6 +2579,15 @@ StmtResult Parser::ParseOpenMPDeclarativeOrExecutableDirective(
            "Not an OpenMP directive!");
   ParsingOpenMPDirectiveRAII DirScope(*this);
   ParenBraceBracketBalancer BalancerRAIIObj(*this);
+  // P08 revision (Alice ruling, plan B): enter the MCS251 construct
+  // restriction context for the whole directive input -- pragma expression
+  // arguments, all clauses, the associated statement (including loop headers,
+  // captured structured blocks, and nested constructs), and declarative
+  // dispatch. This is an independent context: the ParsingOpenMPDirectiveRAII
+  // above is temporarily false while the associated body parses and must not
+  // be reused for the boundary. Error-recovery safe via the RAII destructor.
+  Sema::EnterMCS251DirectiveRestriction MCS251Restriction(
+      Actions, Tok.getLocation(), /*IsOpenACC=*/false);
   SourceLocation Loc = ReadDirectiveWithinMetadirective
                            ? Tok.getLocation()
                            : ConsumeAnnotationToken();

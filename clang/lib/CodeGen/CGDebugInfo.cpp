@@ -1172,6 +1172,7 @@ llvm::DIType *CGDebugInfo::CreateType(const BuiltinType *BT) {
     Encoding = llvm::dwarf::DW_ATE_signed;
     break;
   case BuiltinType::Bool:
+  case BuiltinType::MCS251Bit:
     Encoding = llvm::dwarf::DW_ATE_boolean;
     break;
   case BuiltinType::Half:

@@ -213,6 +213,17 @@ void CodeGenFunction::EmitVarDecl(const VarDecl &D) {
     // Don't emit it now, allow it to be emitted lazily on its first use.
     return;
 
+  // MCS-251 bit objects (including old-style `sbit` fixed references) are a
+  // controlled capability whose storage/lowering is not yet implemented (M2).
+  // Fail closed rather than emitting an ordinary byte alloca/global for them.
+  if (D.getType().getUnqualifiedType()->isMCS251BitType() ||
+      D.hasAttr<MCS251BitAddressAttr>()) {
+    CGM.ErrorUnsupported(&D, D.hasAttr<MCS251BitAddressAttr>()
+                                 ? "MCS251 fixed bit reference"
+                                 : "MCS251 bit object");
+    return;
+  }
+
   // Some function-scope variable does not have static storage but still
   // needs to be emitted like a static variable, e.g. a function-scope
   // variable in constant address space in OpenCL.
@@ -2684,6 +2695,14 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
   // FIXME: Why isn't ImplicitParamDecl a ParmVarDecl?
   assert((isa<ParmVarDecl>(D) || isa<ImplicitParamDecl>(D)) &&
          "Invalid argument to EmitParmDecl");
+
+  // MCS-251 bit parameters are not lowered yet (M2 covers the i8 ABI and the
+  // parameter-local object path). Fail closed rather than materializing an i1
+  // parameter and a byte alloca/store for a real bit object.
+  if (D.getType().getUnqualifiedType()->isMCS251BitType()) {
+    CGM.ErrorUnsupported(&D, "MCS251 bit parameter");
+    return;
+  }
 
   // Set the name of the parameter's initial value to make IR easier to
   // read. Don't modify the names of globals.

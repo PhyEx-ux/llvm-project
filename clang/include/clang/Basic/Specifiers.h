@@ -74,6 +74,7 @@ namespace clang {
     TST_float128,
     TST_ibm128,
     TST_bool,       // _Bool
+    TST_mcs251_bit, // MCS-251 'bit'/'__bit' target scalar type
     TST_decimal32,  // _Decimal32
     TST_decimal64,  // _Decimal64
     TST_decimal128, // _Decimal128

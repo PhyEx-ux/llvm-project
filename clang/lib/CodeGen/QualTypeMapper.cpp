@@ -156,6 +156,13 @@ QualTypeMapper::convertBuiltinType(const BuiltinType *BT) {
     return Builder.getIntegerType(1, getTypeAlign(QT), /*Signed=*/false,
                                   /*IsBitInt=*/false);
 
+  case BuiltinType::MCS251Bit:
+    // ABI classification sees the normalized 1-byte payload (value 0/1), not
+    // an i1: the frozen bit ABI materializes bit values as i8 at function
+    // boundaries. See BIT-FIRST-CLASS-INCREMENT.md §4.
+    return Builder.getIntegerType(8, getTypeAlign(QT), /*Signed=*/false,
+                                  /*IsBitInt=*/false);
+
   case BuiltinType::Char_S:
   case BuiltinType::Char_U:
   case BuiltinType::SChar:

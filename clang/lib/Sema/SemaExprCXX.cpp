@@ -42,6 +42,7 @@
 #include "clang/Sema/SemaCUDA.h"
 #include "clang/Sema/SemaHLSL.h"
 #include "clang/Sema/SemaLambda.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "clang/Sema/SemaObjC.h"
 #include "clang/Sema/SemaPPC.h"
 #include "clang/Sema/Template.h"
@@ -7879,6 +7880,12 @@ ExprResult Sema::ActOnFinishFullExpr(Expr *FE, SourceLocation CC,
 
     DiagnoseUnusedExprResult(FullExpr.get(), diag::warn_unused_expr);
   }
+
+  // Enforce the MCS-251 controlled fixed bit operation rules (§7.5) at the end
+  // of a full expression, where we know whether the result is discarded.
+  if (FullExpr.isUsable() &&
+      MCS251().CheckMCS251ControlledBitRMW(FullExpr.get(), DiscardedValue))
+    return ExprError();
 
   if (FullExpr.isInvalid())
     return ExprError();

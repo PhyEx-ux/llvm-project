@@ -8053,6 +8053,9 @@ QualType ASTReader::GetType(TypeID ID) {
     case PREDEF_TYPE_IBM128_ID:
       T = Context.Ibm128Ty;
       break;
+    case PREDEF_TYPE_MCS251_BIT_ID:
+      T = Context.MCS251BitTy;
+      break;
     case PREDEF_TYPE_OVERLOAD_ID:
       T = Context.OverloadTy;
       break;

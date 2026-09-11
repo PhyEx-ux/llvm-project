@@ -734,6 +734,9 @@ void USRGenerator::VisitType(QualType T) {
       case BuiltinType::Bool:
         Out << 'b';
         break;
+      case BuiltinType::MCS251Bit:
+        Out << "bit";
+        break;
       case BuiltinType::UChar:
         Out << 'c';
         break;

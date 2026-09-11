@@ -12724,6 +12724,66 @@ def err_mcs251_isr_alias_target
     : Error<"MCS251 interrupt entry cannot be an alias or weakref target">;
 def err_mcs251_ifunc_unsupported
     : Error<"'ifunc' attribute is not supported for MCS251 targets">;
+def err_mcs251_bit_address_of
+    : Error<"cannot take the address of an MCS251 'bit' object">;
+def err_mcs251_bit_pointer
+    : Error<"cannot form a pointer to MCS251 'bit' type %0">;
+def err_mcs251_bit_array
+    : Error<"array of MCS251 'bit' is not allowed">;
+def err_mcs251_bit_field
+    : Error<"MCS251 'bit' is not allowed in a struct or union field">;
+def err_mcs251_bit_layout_query
+    : Error<"%0 of MCS251 'bit' type is not allowed">;
+def err_mcs251_bit_atomic
+    : Error<"atomic MCS251 'bit' type is not allowed">;
+def err_mcs251_bit_addrspace
+    : Error<"MCS251 'bit' cannot be declared in a non-default address space">;
+def err_mcs251_sbit_requires_static
+    : Error<"'sbit' declaration must be at file scope with static storage">;
+def err_mcs251_sbit_missing_initializer
+    : Error<"'sbit' declaration requires a bit-address initializer">;
+def err_mcs251_sbit_bad_base
+    : Error<"'sbit' base must be a bit-addressable SFR byte (0x80-0xFF with its low 3 bits zero)">;
+def err_mcs251_sbit_bad_index
+    : Error<"'sbit' bit index must be a constant in the range 0-7">;
+def err_mcs251_sbit_bad_address
+    : Error<"'sbit' bit address %0 is outside the valid range 0-255">;
+def err_mcs251_sbit_not_constant
+    : Error<"'sbit' initializer must be an integer constant expression">;
+def err_mcs251_sbit_declarator
+    : Error<"'sbit' declarator must be a plain identifier">;
+def err_mcs251_sbit_redecl
+    : Error<"conflicting redeclaration of 'sbit' %0 at a different bit address">;
+def err_mcs251_bit_lvalue_not_constant
+    : Error<"bit address argument to %0 must be an integer constant expression">;
+def err_mcs251_bit_lvalue_range
+    : Error<"bit address %0 is outside the valid range 0-255">;
+def err_mcs251_bit_cxx_unsupported
+    : Error<"MCS251 bit support is not available in C++ mode; '%0' requires C">;
+def err_mcs251_bit_lvalue_result_used
+    : Error<"the result of a controlled MCS251 bit toggle cannot be used; "
+            "the toggle is only valid as a discarded-value expression">;
+def err_mcs251_bit_rmw_unsupported
+    : Error<"read-modify-write '%0' of a controlled MCS251 bit is not "
+            "supported; sample the bit into an ordinary value first">;
+def err_mcs251_sbit_ordinary_redecl
+    : Error<"%0 was declared as a controlled MCS251 fixed bit reference; it "
+            "cannot be redeclared as an ordinary object">;
+// P08 revision (Alice ruling, plan B): the first slice rejects every MCS251 bit
+// capability (bit types/objects, sbit, L1 fixed-bit references) *inside* an
+// enabled OpenMP/OpenACC construct: directive arguments, clauses, associated
+// statements/declarations, and captures, regardless of read/write, storage
+// binding, or evaluation. Ordinary C bit semantics outside constructs and
+// bit-free constructs are unchanged. These are true errors: CodeGen must not
+// be the backstop for construct input.
+def err_mcs251_bit_omp_construct
+    : Error<"MCS251 bit types, objects and fixed-bit references are not "
+            "supported in OpenMP constructs">;
+def err_mcs251_bit_acc_construct
+    : Error<"MCS251 bit types, objects and fixed-bit references are not "
+            "supported in OpenACC constructs">;
+def note_mcs251_bit_construct_here
+    : Note<"entered %select{OpenMP|OpenACC}0 construct here">;
 def err_omp_lambda_capture_in_declare_target_not_to : Error<
   "variable captured in declare target region must appear in a to clause">;
 def err_omp_device_type_mismatch : Error<

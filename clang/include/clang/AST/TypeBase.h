@@ -2619,6 +2619,11 @@ public:
   /// Determine whether this type is a scoped enumeration type.
   bool isScopedEnumeralType() const;
   bool isBooleanType() const;
+  /// Determine whether this is the MCS-251 'bit'/'__bit' target scalar type.
+  /// It is deliberately not `isBooleanType()`: it shares boolean value
+  /// semantics (0/1, nonzero -> 1, promotes to int) but has a distinct object
+  /// identity, ABI and addressability rules. See BuiltinTypes.def.
+  bool isMCS251BitType() const;
   bool isCharType() const;
   bool isWideCharType() const;
   bool isChar8Type() const;
@@ -9248,6 +9253,12 @@ inline bool Type::isIntegralOrEnumerationType() const {
 inline bool Type::isBooleanType() const {
   if (const auto *BT = dyn_cast<BuiltinType>(CanonicalType))
     return BT->getKind() == BuiltinType::Bool;
+  return false;
+}
+
+inline bool Type::isMCS251BitType() const {
+  if (const auto *BT = dyn_cast<BuiltinType>(CanonicalType))
+    return BT->getKind() == BuiltinType::MCS251Bit;
   return false;
 }
 

@@ -414,6 +414,13 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
       ResultType = llvm::Type::getInt1Ty(getLLVMContext());
       break;
 
+    case BuiltinType::MCS251Bit:
+      // The MCS-251 bit type is an i1 in expressions (boolean value), but its
+      // object/memory representation and ABI boundary are a normalized i8
+      // carrying 0/1. ConvertTypeForMem materializes the i8 carrier.
+      ResultType = llvm::Type::getInt1Ty(getLLVMContext());
+      break;
+
     case BuiltinType::Char_S:
     case BuiltinType::Char_U:
     case BuiltinType::SChar:

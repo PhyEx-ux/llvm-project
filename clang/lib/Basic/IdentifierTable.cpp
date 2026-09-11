@@ -307,6 +307,26 @@ void IdentifierTable::AddKeywords(const LangOptions &LangOpts) {
     AddKeyword("interrupt", tok::kw___mcs251_interrupt, KEYALL, LangOpts,
                *this);
 
+  // MCS251 bit/sbit dialect. The core spelling "__bit" is available on the
+  // MCS-251 target whenever the language option is set (TargetInfo::adjust
+  // sets LangOptions::MCS251Bit), even without -fmcs251-keil. The bare Keil
+  // spellings "bit" and "sbit" are registered only under -fmcs251-keil so
+  // they never shadow ordinary identifiers elsewhere. See
+  // TESTING_KEYWORD(__mcs251_bit/__mcs251_sbit) in TokenKinds.def.
+  //
+  // Per P08 the bit dialect is C-only for the first slice: in C++ the tokens
+  // are left unregistered so '__bit'/'bit' fall back to ordinary identifier
+  // lookup and produce the usual "unknown type name" diagnostic instead of a
+  // half-parsed declaration.
+  if (!LangOpts.CPlusPlus) {
+    if (LangOpts.MCS251Bit)
+      AddKeyword("__bit", tok::kw___mcs251_bit, KEYALL, LangOpts, *this);
+    if (LangOpts.MCS251Keil) {
+      AddKeyword("bit", tok::kw___mcs251_bit, KEYALL, LangOpts, *this);
+      AddKeyword("sbit", tok::kw___mcs251_sbit, KEYALL, LangOpts, *this);
+    }
+  }
+
   // Add the 'import' and 'module' contextual keywords.
   get("import").setKeywordImport(true);
   get("module").setModuleKeyword(true);

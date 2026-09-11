@@ -25,6 +25,7 @@
 #include "clang/Sema/Initialization.h"
 #include "clang/Sema/SemaAMDGPU.h"
 #include "clang/Sema/SemaHLSL.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "clang/Sema/SemaObjC.h"
 #include "clang/Sema/SemaRISCV.h"
 #include "llvm/ADT/SmallVector.h"
@@ -432,6 +433,17 @@ ExprResult Sema::ActOnBuiltinBitCastExpr(SourceLocation KWLoc, Declarator &D,
   TypeSourceInfo *TInfo = GetTypeForDeclaratorCast(D, Operand.get()->getType());
   if (D.isInvalidType())
     return ExprError();
+
+  // MCS251 (final rework F8): __builtin_bit_cast is parsed as a cast-like
+  // expression (Parser::ParseBuiltinBitCast) and never becomes a CallExpr,
+  // so the builtin-by-ID construct entry does not see it. Its destination
+  // type is pure type input of the construct, established here exactly like
+  // the target type of an explicit cast in ActOnCastExpr; the operand
+  // expression is checked at its own entry, so no double reporting occurs.
+  if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+    MCS251Ptr->CheckTypeInputInDirectiveRestriction(
+        TInfo->getType(), TInfo->getTypeLoc().getBeginLoc(),
+        TInfo->getTypeLoc().getSourceRange());
 
   return BuildBuiltinBitCastExpr(KWLoc, TInfo, Operand.get(), RParenLoc);
 }

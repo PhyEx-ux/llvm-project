@@ -16322,6 +16322,10 @@ GCCTypeClass EvaluateBuiltinClassifyType(QualType T,
     case BuiltinType::Bool:
       return GCCTypeClass::Bool;
 
+    case BuiltinType::MCS251Bit:
+      // Boolean-representation target scalar: same GCC type class as _Bool.
+      return GCCTypeClass::Bool;
+
     case BuiltinType::Char_U:
     case BuiltinType::UChar:
     case BuiltinType::WChar_U:

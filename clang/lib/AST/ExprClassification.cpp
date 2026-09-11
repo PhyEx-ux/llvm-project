@@ -17,6 +17,7 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/ExprObjC.h"
+#include "clang/Basic/TargetBuiltins.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace clang;
@@ -357,6 +358,13 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::CXXMemberCallExprClass:
   case Expr::UserDefinedLiteralClass:
   case Expr::CUDAKernelCallExprClass:
+    // The MCS-251 controlled fixed bit lvalue builtin is a real lvalue in C
+    // (unlike ordinary calls), with the value kind assigned during Sema. Honor
+    // that value kind instead of forcing function-call rules.
+    if (const auto *CE = dyn_cast<CallExpr>(E))
+      if (const FunctionDecl *FD = CE->getDirectCallee())
+        if (FD->getBuiltinID() == MCS251::BI__builtin_mcs251_bit_lvalue)
+          return ClassifyExprValueKind(Ctx.getLangOpts(), E, E->getValueKind());
     return ClassifyUnnamed(Ctx, cast<CallExpr>(E)->getCallReturnType(Ctx));
 
   case Expr::CXXRewrittenBinaryOperatorClass:

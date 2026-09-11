@@ -53,6 +53,7 @@
 #include "clang/Sema/ParsedTemplate.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/ScopeInfo.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "clang/Sema/SemaAMDGPU.h"
 #include "clang/Sema/SemaARM.h"
 #include "clang/Sema/SemaCUDA.h"
@@ -1815,9 +1816,16 @@ ExprResult Sema::ActOnGenericSelectionExpr(
 
   TypeSourceInfo **Types = new TypeSourceInfo*[NumAssocs];
   for (unsigned i = 0; i < NumAssocs; ++i) {
-    if (ArgTypes[i])
+    if (ArgTypes[i]) {
       (void) GetTypeFromParser(ArgTypes[i], &Types[i]);
-    else
+      // MCS251 (final rework F7): a _Generic association type is pure type
+      // input of the construct; a bit (or bit-carrying) association type is
+      // rejected even though no value of it is computed.
+      if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction() && Types[i])
+        MCS251Ptr->CheckTypeInputInDirectiveRestriction(
+            Types[i]->getType(), Types[i]->getTypeLoc().getBeginLoc(),
+            Types[i]->getTypeLoc().getSourceRange());
+    } else
       Types[i] = nullptr;
   }
 
@@ -1828,6 +1836,13 @@ ExprResult Sema::ActOnGenericSelectionExpr(
     (void)GetTypeFromParser(ParsedType::getFromOpaquePtr(ControllingExprOrType),
                             &ControllingType);
     assert(ControllingType && "couldn't get the type out of the parser");
+    // MCS251 (final rework F7): the type-controlled _Generic form names the
+    // controlling type directly; same pure type input as an association.
+    if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+      MCS251Ptr->CheckTypeInputInDirectiveRestriction(
+          ControllingType->getType(),
+          ControllingType->getTypeLoc().getBeginLoc(),
+          ControllingType->getTypeLoc().getSourceRange());
     ControllingExprOrType = ControllingType;
   }
 
@@ -2505,6 +2520,15 @@ Sema::BuildDeclRefExpr(ValueDecl *D, QualType Ty, ExprValueKind VK,
                        NestedNameSpecifierLoc NNS, NamedDecl *FoundD,
                        SourceLocation TemplateKWLoc,
                        const TemplateArgumentListInfo *TemplateArgs) {
+  // MCS251 (P08 revision, plan B): while an OpenMP/OpenACC construct
+  // restriction context is active, a reference whose semantic identity carries
+  // the bit capability (bit-typed variable through typedef/cv qualifiers,
+  // fixed-address sbit, bit-returning function) is rejected at this, the
+  // single object-reference entry point. Casting to int or wrapping in a comma
+  // expression does not help: the reference is built first.
+  if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+    MCS251Ptr->CheckDeclRefInDirectiveRestriction(D, NameInfo.getLoc());
+
   bool RefersToCapturedVariable = isa<VarDecl, BindingDecl>(D) &&
                                   NeedToCaptureVariable(D, NameInfo.getLoc());
 
@@ -4502,6 +4526,15 @@ bool Sema::CheckUnaryExprOrTypeTraitOperand(Expr *E,
   ExprTy = E->getType();
   assert(!ExprTy->isReferenceType());
 
+  // MCS-251 'bit' has no source-level size or alignment.
+  if ((ExprKind == UETT_SizeOf || ExprKind == UETT_AlignOf ||
+       ExprKind == UETT_PreferredAlignOf || ExprKind == UETT_DataSizeOf) &&
+      ExprTy->isMCS251BitType()) {
+    Diag(E->getExprLoc(), diag::err_mcs251_bit_layout_query)
+        << getTraitSpelling(ExprKind) << E->getSourceRange();
+    return true;
+  }
+
   if (ExprTy->isFunctionType()) {
     Diag(E->getExprLoc(), diag::err_sizeof_alignof_function_type)
         << getTraitSpelling(ExprKind) << E->getSourceRange();
@@ -4747,6 +4780,14 @@ bool Sema::CheckUnaryExprOrTypeTraitOperand(QualType ExprType,
                                             SourceRange ExprRange,
                                             UnaryExprOrTypeTrait ExprKind,
                                             StringRef KWName) {
+  // MCS251 (final rework F7): the operand type of sizeof/_Alignof is pure
+  // type input of the construct (`sizeof(F)`, `_Alignof(F)` with a
+  // bit-signature F); the boundary is evaluation-blind, and the expr form's
+  // operand, if it involves bit, has already fired at its own entry.
+  if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+    MCS251Ptr->CheckTypeInputInDirectiveRestriction(ExprType, OpLoc,
+                                                    ExprRange);
+
   if (ExprType->isDependentType())
     return false;
 
@@ -4782,6 +4823,15 @@ bool Sema::CheckUnaryExprOrTypeTraitOperand(QualType ExprType,
   if (ExprKind == UETT_PtrAuthTypeDiscriminator)
     return checkPtrAuthTypeDiscriminatorOperandType(*this, ExprType, OpLoc,
                                                     ExprRange);
+
+  // MCS-251 'bit' has a logical 1-bit value but no source-level size or
+  // alignment: sizeof/alignof/offsetof-style layout queries are rejected.
+  if ((ExprKind == UETT_SizeOf || ExprKind == UETT_AlignOf ||
+       ExprKind == UETT_PreferredAlignOf || ExprKind == UETT_DataSizeOf) &&
+      ExprType->isMCS251BitType()) {
+    Diag(OpLoc, diag::err_mcs251_bit_layout_query) << KWName << ExprRange;
+    return true;
+  }
 
   // Explicitly list some types as extensions.
   if (!CheckExtensionTraitOperandType(*this, ExprType, OpLoc, ExprRange,
@@ -7462,6 +7512,14 @@ Sema::BuildCompoundLiteralExpr(SourceLocation LParenLoc, TypeSourceInfo *TInfo,
                                SourceLocation RParenLoc, Expr *LiteralExpr) {
   QualType literalType = TInfo->getType();
 
+  // MCS251 (P08 revision, plan B; final rework F5): a compound literal whose
+  // type carries the bit capability -- the bit scalar itself or bit reached
+  // through a signature (`(F){0}` with `typedef __bit (*F)(void)`) -- is
+  // construct input and is rejected at this, its type-establishment entry.
+  if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+    MCS251Ptr->CheckTypeInputInDirectiveRestriction(
+        literalType, LParenLoc, SourceRange(LParenLoc, RParenLoc));
+
   if (literalType->isArrayType()) {
     if (RequireCompleteSizedType(
             LParenLoc, Context.getBaseElementType(literalType),
@@ -8232,6 +8290,16 @@ Sema::ActOnCastExpr(Scope *S, SourceLocation LParenLoc,
 
   QualType castType = castTInfo->getType();
   Ty = CreateParsedType(castType, castTInfo);
+
+  // MCS251 (P08 revision, plan B; final rework F5): an explicit cast whose
+  // target type carries the bit capability -- the bit scalar itself or bit
+  // reached through a signature (`((F)raw)(1)`) -- is a bit-value
+  // construction and is rejected inside OpenMP/OpenACC constructs. (A cast
+  // *from* a bit object is already rejected when its operand reference is
+  // built; a compound literal does not pass through here.)
+  if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+    MCS251Ptr->CheckTypeInputInDirectiveRestriction(
+        castType, LParenLoc, SourceRange(LParenLoc, RParenLoc));
 
   bool isVectorLiteral = false;
 
@@ -15063,6 +15131,14 @@ QualType Sema::CheckAddressOfOperand(ExprResult &OrigOp, SourceLocation OpLoc) {
   // Make sure to ignore parentheses in subsequent checks
   Expr *op = OrigOp.get()->IgnoreParens();
 
+  // MCS-251 'bit' objects are not addressable; diagnose before the generic
+  // lvalue path so the message names the bit type rather than reporting a
+  // generic invalid-lvalue error.
+  if (!op->getType()->isDependentType() && op->getType()->isMCS251BitType()) {
+    Diag(OpLoc, diag::err_mcs251_bit_address_of) << op->getSourceRange();
+    return QualType();
+  }
+
   // In OpenCL captures for blocks called as lambda functions
   // are located in the private address space. Blocks used in
   // enqueue_kernel can be located in a different address space
@@ -17030,6 +17106,13 @@ void Sema::ActOnBlockArguments(SourceLocation CaretLoc, Declarator &ParamInfo,
   assert(T->isFunctionType() &&
          "GetTypeForDeclarator made a non-function block signature");
 
+  // MCS251 (final rework F2): the block literal's signature is construct
+  // input; a bit return type or bit parameter is rejected inside an
+  // OpenMP/OpenACC construct. Blocks do not go through HandleDeclarator.
+  if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+    MCS251Ptr->CheckBlockSignatureInDirectiveRestriction(
+        T, CaretLoc, SourceRange(CaretLoc, ParamInfo.getEndLoc()));
+
   // Look for an explicit signature in that function type.
   FunctionProtoTypeLoc ExplicitSignature;
 
@@ -17337,6 +17420,14 @@ ExprResult Sema::ActOnVAArg(SourceLocation BuiltinLoc, Expr *E, ParsedType Ty,
 ExprResult Sema::BuildVAArgExpr(SourceLocation BuiltinLoc,
                                 Expr *E, TypeSourceInfo *TInfo,
                                 SourceLocation RPLoc) {
+  // MCS251 (final rework F3): a bit (or bit-carrying) type argument of
+  // __builtin_va_arg establishes a bit value inside an OpenMP/OpenACC
+  // construct and is rejected there. Outside constructs the registered M2
+  // va_arg-of-bit gap keeps its current accepted behavior.
+  if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction() && TInfo)
+    MCS251Ptr->CheckVAArgTypeInDirectiveRestriction(
+        TInfo->getType(), BuiltinLoc, SourceRange(BuiltinLoc, RPLoc));
+
   Expr *OrigExpr = E;
   VAArgExpr::VarArgKind VAKind = VAArgExpr::VA_Std;
 

@@ -392,6 +392,8 @@ NSAPI::getNSNumberFactoryMethodKind(QualType T) const {
   case BuiltinType::Bool:
     return NSAPI::NSNumberWithBool;
 
+  // MCS-251 bit has no Objective-C NSNumber mapping; unreachable on target.
+  case BuiltinType::MCS251Bit:
   case BuiltinType::Void:
   case BuiltinType::WChar_U:
   case BuiltinType::WChar_S:

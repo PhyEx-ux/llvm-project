@@ -2480,7 +2480,7 @@ bool Type::hasBooleanRepresentation() const {
     return ED->isComplete() && ED->getIntegerType()->isBooleanType();
   if (const auto *IT = dyn_cast<BitIntType>(CanonicalType))
     return IT->getNumBits() == 1;
-  return isBooleanType();
+  return isBooleanType() || isMCS251BitType();
 }
 
 Type::ScalarTypeKind Type::getScalarTypeKind() const {
@@ -2489,6 +2489,11 @@ Type::ScalarTypeKind Type::getScalarTypeKind() const {
   const Type *T = CanonicalType.getTypePtr();
   if (const auto *BT = dyn_cast<BuiltinType>(T)) {
     if (BT->getKind() == BuiltinType::Bool)
+      return STK_Bool;
+    // The MCS-251 bit type is a boolean-valued scalar; mapping it to STK_Bool
+    // keeps the boolean conversion sites (CK_IntegralToBoolean and friends)
+    // applicable, matching its 0/1 value semantics.
+    if (BT->getKind() == BuiltinType::MCS251Bit)
       return STK_Bool;
     if (BT->getKind() == BuiltinType::NullPtr)
       return STK_CPointer;
@@ -3524,6 +3529,9 @@ StringRef BuiltinType::getName(const PrintingPolicy &Policy) const {
     return "void";
   case Bool:
     return Policy.Bool ? "bool" : "_Bool";
+  case MCS251Bit:
+    // The core spelling; bare 'bit' is a Keil-dialect alias of the same type.
+    return "__bit";
   case Char_S:
     return "char";
   case Char_U:

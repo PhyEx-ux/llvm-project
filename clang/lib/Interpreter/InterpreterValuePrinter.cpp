@@ -671,6 +671,10 @@ __clang_Interpreter_SetValueNoAlloc(void *This, void *OutVal, void *OpaqueType,
     case BuiltinType::Bool:
       VRef.setBool(va_arg(args, int));
       break;
+    case BuiltinType::MCS251Bit:
+      // Promotes to int in the default argument promotions.
+      VRef.setBool(va_arg(args, int));
+      break;
     case BuiltinType::Char_S:
       VRef.setChar_S(va_arg(args, int));
       break;

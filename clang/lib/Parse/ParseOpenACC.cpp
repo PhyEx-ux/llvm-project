@@ -1648,6 +1648,13 @@ Parser::ParseOpenACCDirectiveDecl(AccessSpecifier &AS, ParsedAttributes &Attrs,
   assert(Tok.is(tok::annot_pragma_openacc) && "expected OpenACC Start Token");
 
   ParsingOpenACCDirectiveRAII DirScope(*this);
+  // P08 revision (Alice ruling, plan B): declaration-context OpenACC
+  // directives (routine with its associated declaration and body, and every
+  // declarative clause input) run inside the MCS251 construct restriction
+  // context. Independent of ParsingOpenACCDirectiveRAII above, which does not
+  // describe the construct's restricted interval.
+  Sema::EnterMCS251DirectiveRestriction MCS251Restriction(
+      getActions(), Tok.getLocation(), /*IsOpenACC=*/true);
 
   OpenACCDirectiveParseInfo DirInfo = ParseOpenACCDirective();
 
@@ -1667,6 +1674,13 @@ StmtResult Parser::ParseOpenACCDirectiveStmt() {
   assert(Tok.is(tok::annot_pragma_openacc) && "expected OpenACC Start Token");
 
   ParsingOpenACCDirectiveRAII DirScope(*this);
+  // P08 revision (Alice ruling, plan B): statement-context OpenACC constructs
+  // (compute constructs, data/update/wait/init/shutdown/set/cache, with or
+  // without an associated statement) run inside the MCS251 construct
+  // restriction context, covering clause input, the associated statement, and
+  // nested constructs.
+  Sema::EnterMCS251DirectiveRestriction MCS251Restriction(
+      getActions(), Tok.getLocation(), /*IsOpenACC=*/true);
 
   OpenACCDirectiveParseInfo DirInfo = ParseOpenACCDirective();
   if (getActions().OpenACC().ActOnStartStmtDirective(

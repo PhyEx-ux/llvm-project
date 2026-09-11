@@ -169,6 +169,7 @@ class SemaHLSL;
 class SemaHexagon;
 class SemaLoongArch;
 class SemaM68k;
+class SemaMCS251;
 class SemaMIPS;
 class SemaMSP430;
 class SemaNVPTX;
@@ -1498,6 +1499,49 @@ public:
     return *M68kPtr;
   }
 
+  SemaMCS251 &MCS251() {
+    assert(MCS251Ptr);
+    return *MCS251Ptr;
+  }
+
+  /// Enter the MCS251 OpenMP/OpenACC construct restriction context around the
+  /// input of a construct (P08 revision, Alice ruling plan B): pragma
+  /// expression arguments, all clause input, the associated statement or
+  /// declaration, and the related Sema construction (captures, generated
+  /// private copies). While active, the finite semantic entry points in
+  /// SemaMCS251 reject every MCS251 bit capability entering the construct.
+  ///
+  /// The object is nestable (inner constructs get their own context and their
+  /// own first-violation diagnostic) and error-recovery safe (the destructor
+  /// restores the state on every exit path). It intentionally does not reuse
+  /// the parser's ParsingOpenMPDirectiveRAII/ParsingOpenACCDirectiveRAII
+  /// boolean: those are temporarily false while the associated body is
+  /// parsed, which is not the construct's restricted interval.
+  class EnterMCS251DirectiveRestriction {
+    Sema &S;
+    /// Whether this object pushed a frame (the marked-definition constructor
+    /// may legitimately not push; the destructor must then not pop).
+    bool Entered = false;
+
+  public:
+    /// Enter around the input of an OpenMP/OpenACC construct;
+    /// \p DirectiveLoc is the pragma location reported by the diagnostic
+    /// note. Inactive on non-MCS251 targets.
+    EnterMCS251DirectiveRestriction(Sema &S, SourceLocation DirectiveLoc,
+                                    bool IsOpenACC);
+    /// Enter around the body of a function definition that belongs to a
+    /// declarative construct (OpenMP declare target, OpenACC routine): the
+    /// definition region inherits the restriction. Inactive when \p Fn is not
+    /// marked by such a directive or the target is not MCS251.
+    EnterMCS251DirectiveRestriction(Sema &S, const Decl *Fn);
+    ~EnterMCS251DirectiveRestriction();
+
+    EnterMCS251DirectiveRestriction(const EnterMCS251DirectiveRestriction &) =
+        delete;
+    EnterMCS251DirectiveRestriction &
+    operator=(const EnterMCS251DirectiveRestriction &) = delete;
+  };
+
   SemaMIPS &MIPS() {
     assert(MIPSPtr);
     return *MIPSPtr;
@@ -1621,6 +1665,7 @@ private:
   std::unique_ptr<SemaHexagon> HexagonPtr;
   std::unique_ptr<SemaLoongArch> LoongArchPtr;
   std::unique_ptr<SemaM68k> M68kPtr;
+  std::unique_ptr<SemaMCS251> MCS251Ptr;
   std::unique_ptr<SemaMIPS> MIPSPtr;
   std::unique_ptr<SemaMSP430> MSP430Ptr;
   std::unique_ptr<SemaNVPTX> NVPTXPtr;
@@ -3916,6 +3961,18 @@ public:
   void ProcessPragmaExport(DeclaratorDecl *newDecl);
 
   Decl *ActOnDeclarator(Scope *S, Declarator &D);
+
+  /// ActOnMCS251SbitDecl - Build a controlled fixed bit declaration from an
+  /// old-style MCS-251 `sbit NAME = BIT_ADDR;` / `sbit NAME = BASE ^ INDEX;`
+  /// declaration (enabled by -fmcs251-keil). \p BitAddr must be an already
+  /// validated integer constant expression in [0, 255]; it is attached to the
+  /// resulting VarDecl as an implicit MCS251BitAddress attribute. The
+  /// declaration is documented as not a definition of storage; the address is
+  /// a controlled fixed bit location shared by every reference to the name.
+  VarDecl *ActOnMCS251SbitDecl(Scope *S, IdentifierInfo *Name,
+                               SourceLocation NameLoc, Expr *BitAddr,
+                               SourceLocation StartLoc, SourceLocation EndLoc,
+                               bool &Redeclaration);
 
   NamedDecl *HandleDeclarator(Scope *S, Declarator &D,
                               MultiTemplateParamsArg TemplateParameterLists);

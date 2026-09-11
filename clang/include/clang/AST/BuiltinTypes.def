@@ -62,6 +62,16 @@ BUILTIN_TYPE(Void, VoidTy)
 // 'bool' in C++, '_Bool' in C99
 UNSIGNED_TYPE(Bool, BoolTy)
 
+// 'bit' / '__bit' on MCS-251. A distinct target boolean scalar type, not a
+// typedef of '_Bool' or 'unsigned _BitInt(1)': boolean value semantics (only
+// 0/1, integer-nonzero -> 1, promotes to the current C int, zero-extends when
+// converted to int) with a distinct object/ABI identity and no addressable
+// representation. It is placed immediately after Bool so the integer/unsigned
+// classification ranges (Bool..Int128 / Bool..UInt128) include it and normal
+// arithmetic conversions apply, while the boolean-specific sites below opt in
+// explicitly.
+UNSIGNED_TYPE(MCS251Bit, MCS251BitTy)
+
 // 'char' for targets where it's unsigned
 SHARED_SINGLETON_TYPE(UNSIGNED_TYPE(Char_U, CharTy))
 

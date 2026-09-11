@@ -268,6 +268,7 @@ public:
   static const TST TST_float128 = clang::TST_float128;
   static const TST TST_ibm128 = clang::TST_ibm128;
   static const TST TST_bool = clang::TST_bool;
+  static const TST TST_mcs251_bit = clang::TST_mcs251_bit;
   static const TST TST_decimal32 = clang::TST_decimal32;
   static const TST TST_decimal64 = clang::TST_decimal64;
   static const TST TST_decimal128 = clang::TST_decimal128;

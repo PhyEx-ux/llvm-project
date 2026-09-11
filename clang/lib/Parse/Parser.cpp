@@ -1046,6 +1046,15 @@ bool Parser::isStartOfFunctionDefinition(const ParsingDeclarator &Declarator) {
 Parser::DeclGroupPtrTy Parser::ParseDeclOrFunctionDefInternal(
     ParsedAttributes &Attrs, ParsedAttributes &DeclSpecAttrs,
     ParsingDeclSpec &DS, AccessSpecifier AS) {
+  // Old-style MCS-251 Keil 'sbit' declarations have their own grammar and are
+  // intercepted before the ordinary declaration-specifier path. The token is
+  // only registered under -fmcs251-keil (see IdentifierTable::AddKeywords).
+  if (Tok.is(tok::kw___mcs251_sbit)) {
+    ProhibitAttributes(Attrs);
+    ProhibitAttributes(DeclSpecAttrs);
+    return ParseMCS251SbitDeclaration(DeclaratorContext::File);
+  }
+
   // Because we assume that the DeclSpec has not yet been initialised, we simply
   // overwrite the source range and attribute the provided leading declspec
   // attributes.
@@ -1367,6 +1376,14 @@ Decl *Parser::ParseFunctionDefinition(ParsingDeclarator &D,
   // Break out of the ParsingDeclSpec context, too.  This const_cast is
   // safe because we're always the sole owner.
   D.getMutableDeclSpec().abort();
+
+  // P08 revision (Alice ruling, plan B): the definition of a function that
+  // belongs to a declarative OpenMP/OpenACC construct (declare target,
+  // acc routine) is part of that construct's restricted region even when the
+  // definition is textually outside the pragma. No-op for unmarked functions
+  // (and off the MCS251 target); the RAII covers ctor initializers, the body,
+  // and every error-recovery path.
+  Sema::EnterMCS251DirectiveRestriction MCS251OwnedFnRestriction(Actions, Res);
 
   if (BodyKind != Sema::FnBodyKind::Other) {
     Actions.SetFunctionBodyKind(Res, KWLoc, BodyKind, DeletedMessage);

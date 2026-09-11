@@ -32,6 +32,9 @@ serialization::TypeIdxFromBuiltin(const BuiltinType *BT) {
   case BuiltinType::Bool:
     ID = PREDEF_TYPE_BOOL_ID;
     break;
+  case BuiltinType::MCS251Bit:
+    ID = PREDEF_TYPE_MCS251_BIT_ID;
+    break;
   case BuiltinType::Char_U:
     ID = PREDEF_TYPE_CHAR_U_ID;
     break;

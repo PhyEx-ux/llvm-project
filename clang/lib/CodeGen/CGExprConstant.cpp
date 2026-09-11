@@ -23,6 +23,10 @@
 #include "clang/AST/Attr.h"
 #include "clang/AST/MatrixUtils.h"
 #include "clang/AST/NSAPI.h"
+#include "clang/AST/OpenACCClause.h"
+#include "clang/AST/OpenMPClause.h"
+#include "clang/AST/StmtOpenACC.h"
+#include "clang/AST/StmtOpenMP.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/Builtins.h"
@@ -44,6 +48,284 @@ using namespace CodeGen;
 
 namespace {
 class ConstExprEmitter;
+
+/// Does the variable-declaration statement \p DS declare or initialize any
+/// MCS-251 bit object (bit type or a fixed-address `sbit` reference)? Such a
+/// declaration is itself a bit object; if it is folded away inside a constant
+/// initializer (a statement expression), the ordinary EmitVarDecl gate never
+/// runs, so the scan must catch it.
+static bool declStmtHasMCS251BitObject(const DeclStmt *DS) {
+  for (const Decl *D : DS->decls()) {
+    const auto *VD = dyn_cast<VarDecl>(D);
+    if (!VD)
+      continue;
+    if (VD->getType().getUnqualifiedType()->isMCS251BitType() ||
+        VD->hasAttr<MCS251BitAddressAttr>())
+      return true;
+  }
+  return false;
+}
+
+/// Recursively scan a *statement* for an evaluated MCS-251 bit object (a bit
+/// compound literal or a folded bit declaration). Used by the constant-
+/// initializer guard, which must traverse statement expressions fully.
+static bool stmtContainsMCS251BitObject(const Stmt *S, ASTContext &Ctx);
+
+/// Is \p E a call to a builtin whose arguments are unevaluated?
+static bool isUnevaluatedBuiltinCall(const Expr *E, ASTContext &Ctx) {
+  const auto *CE = dyn_cast<CallExpr>(E);
+  if (!CE)
+    return false;
+  const FunctionDecl *FD = CE->getDirectCallee();
+  if (!FD)
+    return false;
+  unsigned ID = FD->getBuiltinID();
+  return ID != 0 && Ctx.BuiltinInfo.isUnevaluated(ID);
+}
+
+/// Does \p E contain a compound literal of MCS-251 `bit` type (or a folded bit
+/// declaration) anywhere in its *evaluated* sub-expressions? Used to fail closed
+/// before a bit object can be constant-folded into an ordinary value.
+///
+/// Unevaluated operands (sizeof/alignof operands, unselected `_Generic`
+/// associations, the non-chosen branches of `__builtin_choose_expr` and `?:`,
+/// the RHS of a short-circuited `&&`/`||`, the false branch of a GNU `c ?: x`
+/// with constant non-zero `c`, the dead branch of `if (0)`/`while (0)`/
+/// `for (; 0;)`, and the operands of builtins marked `UnevaluatedArguments`,
+/// e.g. `__builtin_constant_p`) are skipped: a bit compound literal there has
+/// no storage and must not be rejected.
+///
+/// Boundaries this deliberately does not cover (documented, not claimed as
+/// uniformly rejected): constant-expression positions that fold a bit compound
+/// literal to a plain integer value without creating bit storage — enum
+/// initializers, `case` labels (including GNU `case a ... b` ranges),
+/// `_Static_assert`, and bit-field widths — are folded before this emitter
+/// runs and remain accepted. Object/storage initializers (global/local/static/
+/// aggregate, including through statement expressions) are covered.
+static bool containsMCS251BitCompoundLiteral(const Expr *E, ASTContext &Ctx) {
+  if (!E)
+    return false;
+
+  if (const auto *CLE = dyn_cast<CompoundLiteralExpr>(E)) {
+    if (CLE->getType().getUnqualifiedType()->isMCS251BitType())
+      return true;
+    return containsMCS251BitCompoundLiteral(CLE->getInitializer(), Ctx);
+  }
+
+  // Unevaluated operand: no bit object is created here.
+  if (isa<UnaryExprOrTypeTraitExpr>(E))
+    return false;
+  if (isUnevaluatedBuiltinCall(E, Ctx))
+    return false;
+
+  // _Generic: only the selected association is evaluated.
+  if (const auto *GSE = dyn_cast<GenericSelectionExpr>(E)) {
+    if (GSE->isResultDependent()) {
+      for (const Expr *Assoc : GSE->getAssocExprs())
+        if (containsMCS251BitCompoundLiteral(Assoc, Ctx))
+          return true;
+      return false;
+    }
+    return containsMCS251BitCompoundLiteral(GSE->getResultExpr(), Ctx);
+  }
+
+  // __builtin_choose_expr: only the chosen branch is evaluated.
+  if (const auto *CE = dyn_cast<ChooseExpr>(E))
+    return containsMCS251BitCompoundLiteral(CE->getChosenSubExpr(), Ctx);
+
+  // Short-circuit operators: the RHS is evaluated only conditionally. A
+  // constant LHS that short-circuits makes the RHS dead.
+  if (const auto *BO = dyn_cast<BinaryOperator>(E)) {
+    if (BO->getOpcode() == BO_LAnd || BO->getOpcode() == BO_LOr) {
+      if (containsMCS251BitCompoundLiteral(BO->getLHS(), Ctx))
+        return true;
+      if (std::optional<llvm::APSInt> LV =
+              BO->getLHS()->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx)) {
+        bool True = !LV->isZero();
+        bool ShortCircuits = (BO->getOpcode() == BO_LAnd) ? !True : True;
+        if (ShortCircuits)
+          return false;
+      }
+      return containsMCS251BitCompoundLiteral(BO->getRHS(), Ctx);
+    }
+  }
+  if (const auto *CO = dyn_cast<ConditionalOperator>(E)) {
+    if (containsMCS251BitCompoundLiteral(CO->getCond(), Ctx))
+      return true;
+    if (std::optional<llvm::APSInt> CV =
+            CO->getCond()->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx))
+      return containsMCS251BitCompoundLiteral(
+          CV->isZero() ? CO->getFalseExpr() : CO->getTrueExpr(), Ctx);
+    return containsMCS251BitCompoundLiteral(CO->getTrueExpr(), Ctx) ||
+           containsMCS251BitCompoundLiteral(CO->getFalseExpr(), Ctx);
+  }
+
+  // GNU `c ?: x`: the common expression is always evaluated; a constant
+  // non-zero common expression makes the false expression dead code. The true
+  // expression is an opaque duplicate of the common expression and needs no
+  // separate scan.
+  if (const auto *BCO = dyn_cast<BinaryConditionalOperator>(E)) {
+    if (containsMCS251BitCompoundLiteral(BCO->getCommon(), Ctx))
+      return true;
+    if (std::optional<llvm::APSInt> CV =
+            BCO->getCommon()->IgnoreParenImpCasts()->getIntegerConstantExpr(
+                Ctx))
+      if (!CV->isZero())
+        return false;
+    return containsMCS251BitCompoundLiteral(BCO->getFalseExpr(), Ctx);
+  }
+
+  // Statement expression: scan its statements (covering nested blocks,
+  // declarations, control flow, ...). Do NOT additionally scan the raw children
+  // here: that would re-enter unevaluated operands already skipped above.
+  if (const auto *SE = dyn_cast<StmtExpr>(E))
+    return stmtContainsMCS251BitObject(SE->getSubStmt(), Ctx);
+
+  for (const Stmt *Child : E->children())
+    if (const auto *Sub = dyn_cast_or_null<Expr>(Child))
+      if (containsMCS251BitCompoundLiteral(Sub, Ctx))
+        return true;
+  return false;
+}
+
+static bool stmtContainsMCS251BitObject(const Stmt *S, ASTContext &Ctx) {
+  if (!S)
+    return false;
+  if (const auto *E = dyn_cast<Expr>(S))
+    return containsMCS251BitCompoundLiteral(E, Ctx);
+  if (const auto *DS = dyn_cast<DeclStmt>(S)) {
+    if (declStmtHasMCS251BitObject(DS))
+      return true;
+    for (const Decl *D : DS->decls())
+      if (const auto *VD = dyn_cast<VarDecl>(D))
+        if (const Expr *Init = VD->getInit())
+          if (containsMCS251BitCompoundLiteral(Init, Ctx))
+            return true;
+    return false;
+  }
+
+  // case/default label expressions are integer constant expressions folded to
+  // plain values before this guard runs: they create no bit storage and must
+  // not be rejected (the registered constant-expression boundary). Only the
+  // sub-statement is scanned.
+  if (const auto *CS = dyn_cast<CaseStmt>(S))
+    return stmtContainsMCS251BitObject(CS->getSubStmt(), Ctx);
+  if (const auto *DfS = dyn_cast<DefaultStmt>(S))
+    return stmtContainsMCS251BitObject(DfS->getSubStmt(), Ctx);
+
+  // An OpenMP/OpenACC directive hides its clauses from Stmt::children() (the
+  // OMP children() are only the associated statement, the OpenACC base
+  // children() is empty), so the clause operands are scanned explicitly. A
+  // bit object in any clause operand (evaluated operand or variable
+  // reference alike) is still an object creation and must fail closed; the
+  // associated statement continues through the generic fallback below.
+  if (const auto *Dir = dyn_cast<OMPExecutableDirective>(S)) {
+    for (const OMPClause *C : Dir->clauses()) {
+      // Captured operand computations (pre-init) and post-update expressions
+      // are evaluated parts of the clause outside children().
+      if (const OMPClauseWithPreInit *PInit = OMPClauseWithPreInit::get(C))
+        if (const Stmt *PreInit = PInit->getPreInitStmt())
+          if (stmtContainsMCS251BitObject(PreInit, Ctx))
+            return true;
+      if (const OMPClauseWithPostUpdate *PUpd =
+              OMPClauseWithPostUpdate::get(C))
+        if (const Expr *PostUpdate = PUpd->getPostUpdateExpr())
+          if (containsMCS251BitCompoundLiteral(PostUpdate, Ctx))
+            return true;
+      // allocate: the allocator and alignment expressions are evaluated but
+      // stored outside children() (OMPAllocateClause::children() is only the
+      // variable list), so they are visited explicitly.
+      if (const auto *AC = dyn_cast<OMPAllocateClause>(C)) {
+        if (const Expr *Allocator = AC->getAllocator())
+          if (containsMCS251BitCompoundLiteral(Allocator, Ctx))
+            return true;
+        if (const Expr *Alignment = AC->getAlignment())
+          if (containsMCS251BitCompoundLiteral(Alignment, Ctx))
+            return true;
+      }
+      for (const Stmt *Node : C->children())
+        if (const auto *Operand = dyn_cast_or_null<Expr>(Node))
+          if (containsMCS251BitCompoundLiteral(Operand, Ctx))
+            return true;
+    }
+  } else if (const auto *Dir = dyn_cast<OpenACCConstructStmt>(S)) {
+    for (const OpenACCClause *C : Dir->clauses())
+      for (const Stmt *Node : C->children())
+        if (const auto *Operand = dyn_cast_or_null<Expr>(Node))
+          if (containsMCS251BitCompoundLiteral(Operand, Ctx))
+            return true;
+  }
+
+  // A captured region (OpenMP/OpenACC structured block) hides its body from
+  // children(); the capture initializers that ARE the children() are evaluated
+  // copies and are scanned, then the body is recursed into explicitly.
+  if (const auto *CapS = dyn_cast<CapturedStmt>(S)) {
+    for (const Stmt *Child : CapS->children())
+      if (const auto *Init = dyn_cast_or_null<Expr>(Child))
+        if (containsMCS251BitCompoundLiteral(Init, Ctx))
+          return true;
+    return stmtContainsMCS251BitObject(CapS->getCapturedStmt(), Ctx);
+  }
+
+  // Statement-level dead-branch folding, mirroring the expression-level folds
+  // above: the dead branch of a constant `if (0)` / `while (0)` / `for (; 0;)`
+  // is eliminated by the constant evaluator and creates no bit storage.
+  if (const auto *IS = dyn_cast<IfStmt>(S)) {
+    if (const Stmt *Init = IS->getInit())
+      if (stmtContainsMCS251BitObject(Init, Ctx))
+        return true;
+    std::optional<bool> CondTrue;
+    if (const Expr *Cond = IS->getCond()) {
+      if (containsMCS251BitCompoundLiteral(Cond, Ctx))
+        return true;
+      if (std::optional<llvm::APSInt> CV =
+              Cond->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx))
+        CondTrue = !CV->isZero();
+    }
+    if (CondTrue) {
+      const Stmt *Live = *CondTrue ? IS->getThen() : IS->getElse();
+      return Live && stmtContainsMCS251BitObject(Live, Ctx);
+    }
+    return stmtContainsMCS251BitObject(IS->getThen(), Ctx) ||
+           (IS->getElse() &&
+            stmtContainsMCS251BitObject(IS->getElse(), Ctx));
+  }
+  if (const auto *WS = dyn_cast<WhileStmt>(S)) {
+    if (const Expr *Cond = WS->getCond()) {
+      if (containsMCS251BitCompoundLiteral(Cond, Ctx))
+        return true;
+      if (std::optional<llvm::APSInt> CV =
+              Cond->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx))
+        if (CV->isZero())
+          return false;
+    }
+    return stmtContainsMCS251BitObject(WS->getBody(), Ctx);
+  }
+  if (const auto *FS = dyn_cast<ForStmt>(S)) {
+    if (const Stmt *Init = FS->getInit())
+      if (stmtContainsMCS251BitObject(Init, Ctx))
+        return true;
+    bool BodyDead = false;
+    if (const Expr *Cond = FS->getCond()) {
+      if (containsMCS251BitCompoundLiteral(Cond, Ctx))
+        return true;
+      if (std::optional<llvm::APSInt> CV =
+              Cond->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx))
+        BodyDead = CV->isZero();
+    }
+    if (BodyDead)
+      return false;
+    if (const Expr *Inc = FS->getInc())
+      if (containsMCS251BitCompoundLiteral(Inc, Ctx))
+        return true;
+    return stmtContainsMCS251BitObject(FS->getBody(), Ctx);
+  }
+
+  for (const Stmt *Child : S->children())
+    if (stmtContainsMCS251BitObject(Child, Ctx))
+      return true;
+  return false;
+}
 
 llvm::Constant *getPadding(const CodeGenModule &CGM, CharUnits PadSize) {
   llvm::Type *Ty = CGM.CharTy;
@@ -1219,6 +1501,15 @@ public:
 
   llvm::Constant *VisitCompoundLiteralExpr(const CompoundLiteralExpr *E,
                                            QualType T) {
+    // An MCS-251 bit compound literal is a real bit object whose storage is not
+    // lowered yet (M2). Fail closed rather than constant-folding it away to a
+    // plain integer (which would silently create an ordinary object, e.g.
+    // `int x = (__bit){1};`). Returning nullptr stops the constant path; the
+    // diagnostic makes the failure explicit.
+    if (E->getType().getUnqualifiedType()->isMCS251BitType()) {
+      CGM.ErrorUnsupported(E, "MCS251 bit compound literal");
+      return nullptr;
+    }
     return Visit(E->getInitializer(), T);
   }
 
@@ -1636,6 +1927,17 @@ public:
 
 }  // end anonymous namespace.
 
+/// Shared with CGBuiltin.cpp (declared in CodeGenFunction.h): the object size
+/// builtins must not materialize an MCS-251 bit object while evaluating their
+/// pointer argument.
+namespace clang {
+namespace CodeGen {
+bool exprContainsMCS251BitObject(const Expr *E, ASTContext &Ctx) {
+  return containsMCS251BitCompoundLiteral(E, Ctx);
+}
+} // namespace CodeGen
+} // namespace clang
+
 llvm::Constant *ConstantEmitter::validateAndPopAbstract(llvm::Constant *C,
                                                         AbstractState saved) {
   Abstract = saved.OldValue;
@@ -1942,6 +2244,16 @@ llvm::Constant *ConstantEmitter::tryEmitPrivateForVarInit(const VarDecl &D) {
   QualType destType = D.getType();
   const Expr *E = D.getInit();
   assert(E && "No initializer to emit");
+
+  // MCS-251 bit compound literals are real bit objects and must not be folded
+  // into an ordinary constant (e.g. `int x = (__bit){1};`). The ConstExprEmitter
+  // visitor diagnoses this, but it returns nullptr so the APValue fallback below
+  // could still fold the value away. Guard the whole variable-initializer path
+  // so the failure is not silently swallowed.
+  if (containsMCS251BitCompoundLiteral(E, CGM.getContext())) {
+    CGM.ErrorUnsupported(E, "MCS251 bit compound literal");
+    return nullptr;
+  }
 
   if (!destType->isReferenceType()) {
     QualType nonMemoryDestType = getNonMemoryType(CGM, destType);

@@ -25,6 +25,7 @@
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/Overload.h"
 #include "clang/Sema/Sema.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "clang/Sema/SemaHLSL.h"
 #include "llvm/ADT/STLExtras.h"
 
@@ -1576,6 +1577,15 @@ ExprResult Sema::ActOnTypeTrait(TypeTrait Kind, SourceLocation KWLoc,
     QualType T = GetTypeFromParser(Args[I], &TInfo);
     if (!TInfo)
       TInfo = Context.getTrivialTypeSourceInfo(T, KWLoc);
+
+    // MCS251 (final rework F7): a type-trait argument is pure type input of
+    // the construct; __builtin_types_compatible_p(__bit, int) and any other
+    // trait naming a bit (or bit-carrying) type is rejected inside
+    // OpenMP/OpenACC constructs, evaluation-blind.
+    if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+      MCS251Ptr->CheckTypeInputInDirectiveRestriction(
+          TInfo->getType(), TInfo->getTypeLoc().getBeginLoc(),
+          TInfo->getTypeLoc().getSourceRange());
 
     ConvertedArgs.push_back(TInfo);
   }

@@ -1158,6 +1158,10 @@ enum PredefinedTypeIDs {
 #define SPIRV_TYPE(Name, Id, SingletonId) PREDEF_TYPE_##Id##_ID,
 #include "clang/Basic/SPIRVTypes.def"
 
+  /// \brief The MCS-251 'bit'/'__bit' target scalar type. Declared after the
+  /// auto-numbered target types so existing predefined type IDs are stable.
+  PREDEF_TYPE_MCS251_BIT_ID,
+
   /// The placeholder type for unresolved templates.
   PREDEF_TYPE_UNRESOLVED_TEMPLATE,
   // Sentinel value. Considered a predefined type but not useable as one.
@@ -1169,7 +1173,7 @@ enum PredefinedTypeIDs {
 ///
 /// Type IDs for non-predefined types will start at
 /// NUM_PREDEF_TYPE_IDs.
-const unsigned NUM_PREDEF_TYPE_IDS = 530;
+const unsigned NUM_PREDEF_TYPE_IDS = 531;
 
 // Ensure we do not overrun the predefined types we reserved
 // in the enum PredefinedTypeIDs above.

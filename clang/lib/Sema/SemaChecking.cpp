@@ -69,6 +69,7 @@
 #include "clang/Sema/SemaHLSL.h"
 #include "clang/Sema/SemaHexagon.h"
 #include "clang/Sema/SemaLoongArch.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "clang/Sema/SemaMIPS.h"
 #include "clang/Sema/SemaNVPTX.h"
 #include "clang/Sema/SemaObjC.h"
@@ -2297,6 +2298,8 @@ bool Sema::CheckTSBuiltinFunctionCall(const TargetInfo &TI, unsigned BuiltinID,
   case llvm::Triple::mips64:
   case llvm::Triple::mips64el:
     return MIPS().CheckMipsBuiltinFunctionCall(TI, BuiltinID, TheCall);
+  case llvm::Triple::mcs251:
+    return MCS251().CheckMCS251BuiltinFunctionCall(BuiltinID, TheCall);
   case llvm::Triple::spirv:
   case llvm::Triple::spirv32:
   case llvm::Triple::spirv64:
@@ -13793,7 +13796,10 @@ void Sema::CheckImplicitConversion(Expr *E, QualType T, SourceLocation CC,
 
   // TODO: remove this early return once the false positives for constant->bool
   // in templates, macros, etc, are reduced or removed.
-  if (Target->isSpecificBuiltinType(BuiltinType::Bool))
+  // MCS-251 'bit' shares the boolean conversion semantics: any non-zero integer
+  // becomes 1, so the constant-value-loss warning does not apply to it either.
+  if (Target->isSpecificBuiltinType(BuiltinType::Bool) ||
+      Target->isMCS251BitType())
     return;
 
   if (ObjC().isSignedCharBool(T) && !Source->isCharType() &&

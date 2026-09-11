@@ -1929,6 +1929,13 @@ Parser::DeclGroupPtrTy Parser::ParseDeclaration(DeclaratorContext Context,
   case tok::kw_tbuffer:
     SingleDecl = ParseHLSLBuffer(DeclEnd, DeclAttrs);
     break;
+  case tok::kw___mcs251_sbit:
+    // Old-style MCS-251 Keil 'sbit' declaration at block/selection scope. Sema
+    // rejects block-scope declarations; this path exists so the diagnostic is
+    // the controlled one rather than "unknown identifier".
+    ProhibitAttributes(DeclAttrs);
+    ProhibitAttributes(DeclSpecAttrs);
+    return ParseMCS251SbitDeclaration(Context);
   case tok::kw_namespace:
     ProhibitAttributes(DeclAttrs);
     ProhibitAttributes(DeclSpecAttrs);
@@ -4447,6 +4454,14 @@ void Parser::ParseDeclarationSpecifiers(
                                        DiagID, Policy);
       }
       break;
+    case tok::kw___mcs251_bit:
+      // The MCS251 'bit'/'__bit' target scalar type. Registration of the token
+      // is already gated on LangOptions::MCS251Bit / MCS251Keil (see
+      // IdentifierTable::AddKeywords), so reaching here implies the dialect is
+      // active.
+      isInvalid = DS.SetTypeSpecType(DeclSpec::TST_mcs251_bit, Loc, PrevSpec,
+                                     DiagID, Policy);
+      break;
     case tok::kw__Decimal32:
       isInvalid = DS.SetTypeSpecType(DeclSpec::TST_decimal32, Loc, PrevSpec,
                                      DiagID, Policy);
@@ -5613,6 +5628,7 @@ bool Parser::isKnownToBeTypeSpecifier(const Token &Tok) const {
   case tok::kw___ibm128:
   case tok::kw_bool:
   case tok::kw__Bool:
+  case tok::kw___mcs251_bit:
   case tok::kw__Decimal32:
   case tok::kw__Decimal64:
   case tok::kw__Decimal128:
@@ -5703,6 +5719,7 @@ bool Parser::isTypeSpecifierQualifier(const Token &Tok) {
   case tok::kw___ibm128:
   case tok::kw_bool:
   case tok::kw__Bool:
+  case tok::kw___mcs251_bit:
   case tok::kw__Decimal32:
   case tok::kw__Decimal64:
   case tok::kw__Decimal128:
@@ -5924,6 +5941,10 @@ bool Parser::isDeclarationSpecifier(
   case tok::kw___ibm128:
   case tok::kw_bool:
   case tok::kw__Bool:
+  case tok::kw___mcs251_bit:
+  // MCS-251 'sbit': an old-style fixed bit declaration introducer, registered
+  // only under -fmcs251-keil. Block-scope use is diagnosed by Sema.
+  case tok::kw___mcs251_sbit:
   case tok::kw__Decimal32:
   case tok::kw__Decimal64:
   case tok::kw__Decimal128:
@@ -6792,6 +6813,87 @@ void Parser::ParseMCS251KeilInterruptSuffix(Declarator &D) {
     else if (Tok.is(tok::l_paren))
       SkipMCS251InterruptOperand(/*DiagnoseMissingRParen=*/true);
   }
+}
+
+Parser::DeclGroupPtrTy
+Parser::ParseMCS251SbitDeclaration(DeclaratorContext Context) {
+  assert(Tok.is(tok::kw___mcs251_sbit) &&
+         "Not an MCS251 Keil 'sbit' declaration");
+  assert(getLangOpts().MCS251Keil &&
+         "'sbit' declaration parsed without -fmcs251-keil");
+
+  SourceLocation SbitLoc = ConsumeToken();
+
+  // Only a plain identifier declarator is supported: `sbit name = ...;`.
+  // Arrays, pointers, functions and parenthesized forms are rejected.
+  IdentifierInfo *Name = nullptr;
+  SourceLocation NameLoc;
+  bool DeclaratorInvalid = false;
+  if (Tok.is(tok::identifier)) {
+    Name = Tok.getIdentifierInfo();
+    NameLoc = ConsumeToken();
+    // Only a plain identifier is a valid declarator: trailing '[' or '('
+    // (array / function declarator) is rejected with the dedicated diagnostic.
+    if (Tok.is(tok::l_square) || Tok.is(tok::l_paren)) {
+      Diag(Tok.getLocation(), diag::err_mcs251_sbit_declarator);
+      DeclaratorInvalid = true;
+    }
+  } else {
+    Diag(Tok.getLocation(), diag::err_mcs251_sbit_declarator);
+    DeclaratorInvalid = true;
+  }
+  if (DeclaratorInvalid) {
+    SkipUntil(tok::semi, StopBeforeMatch);
+    if (Tok.is(tok::semi))
+      ConsumeToken();
+    return nullptr;
+  }
+
+  // Bounded recovery: if there is no '=', diagnose and stop at ';'.
+  if (!Tok.is(tok::equal)) {
+    Diag(Tok.getLocation(), diag::err_mcs251_sbit_missing_initializer);
+    SkipUntil(tok::semi, StopBeforeMatch);
+    if (Tok.is(tok::semi))
+      ConsumeToken();
+    return nullptr;
+  }
+  ConsumeToken(); // '='
+
+  // Parse the initializer as a full constant expression. A conditional-
+  // expression already includes `^`, so the positioning BASE ^ INDEX form is
+  // parsed here as an ordinary BinaryOperator('^'), not by a second parse.
+  // Sema::ActOnMCS251SbitDecl inspects the top-level `^` of this initializer and
+  // treats it as the positioning operation; `^` elsewhere in the program keeps
+  // its ordinary C XOR meaning. The operands are never evaluated for hardware
+  // reads -- Sema only folds them.
+  ExprResult Init = ParseConstantExpression();
+
+  if (Init.isInvalid()) {
+    SkipUntil(tok::semi, StopBeforeMatch);
+    if (Tok.is(tok::semi))
+      ConsumeToken();
+    return nullptr;
+  }
+
+  SourceLocation EndLoc = Tok.getLocation();
+  bool Redeclaration = false;
+  // The declared name denotes a controlled fixed bit location, not storage.
+  // Sema validates and folds the address.
+  VarDecl *VD = Actions.ActOnMCS251SbitDecl(getCurScope(), Name, NameLoc,
+                                            Init.get(), SbitLoc, EndLoc,
+                                            Redeclaration);
+
+  if (ExpectAndConsumeSemi(diag::err_expected_semi_declaration)) {
+    SkipUntil(tok::semi, StopBeforeMatch);
+    if (Tok.is(tok::semi))
+      ConsumeToken();
+  }
+  // The context is only used for the diagnostic when Sema rejects the
+  // declaration; keep the parameter meaningful at call sites.
+  (void)Context;
+  if (!VD || Redeclaration)
+    return nullptr;
+  return Actions.ConvertDeclToDeclGroup(VD);
 }
 
 void Parser::ParseDirectDeclarator(Declarator &D) {

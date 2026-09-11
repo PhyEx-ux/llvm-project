@@ -1112,6 +1112,20 @@ def AVRSignal : InheritableAttr, TargetSpecificAttr<TargetAVR> {
   let Documentation = [AVRSignalDocs];
 }
 
+// The controlled fixed bit-address identity of an old-style MCS-251 `sbit`
+// declaration (`sbit NAME = BIT_ADDR;` or `sbit NAME = BASE ^ INDEX;`). It is
+// created implicitly by the frontend when parsing the dialect declaration; it
+// has no source spelling. The single argument is the resolved bit address
+// (0-255), already validated for base alignment / index range by the parser and
+// Sema. See Parser::ParseMCS251SbitDeclaration.
+def MCS251BitAddress : InheritableAttr {
+  let Spellings = [];
+  let Args = [ExprArgument<"Address">];
+  let SemaHandler = 0;
+  let Subjects = SubjectList<[Var], ErrorDiag>;
+  let Documentation = [InternalOnly];
+}
+
 def AsmLabel : InheritableAttr {
   let Spellings = [CustomKeyword<"asm">, CustomKeyword<"__asm">, CustomKeyword<"__asm__">];
   let Args = [

@@ -18,6 +18,7 @@
 #include "clang/AST/TypeBase.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/Lookup.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "clang/Sema/Overload.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/ScopeInfo.h"
@@ -835,6 +836,13 @@ MemberExpr *Sema::BuildMemberExpr(
     const TemplateArgumentListInfo *TemplateArgs) {
   assert((!IsArrow || Base->isPRValue()) &&
          "-> base must be a pointer prvalue");
+  // MCS251 (final rework F1): a member reference naming a field whose type
+  // carries the bit capability (e.g. a pointer to a signature returning
+  // __bit) is construct input, exactly like a plain DeclRefExpr; member
+  // expressions do not pass through BuildDeclRefExpr.
+  if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+    MCS251Ptr->CheckDeclRefInDirectiveRestriction(Member,
+                                                  MemberNameInfo.getLoc());
   MemberExpr *E =
       MemberExpr::Create(Context, Base, IsArrow, OpLoc, NNS, TemplateKWLoc,
                          Member, FoundDecl, MemberNameInfo, TemplateArgs, Ty,

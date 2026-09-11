@@ -786,6 +786,21 @@ llvm::Value *CodeGenFunction::EmitBlockLiteral(const CGBlockInfo &blockInfo) {
   LangAS GenVoidPtrAddr = IsOpenCL ? LangAS::opencl_generic : LangAS::Default;
   auto GenVoidPtrSize = CharUnits::fromQuantity(
       CGM.getTarget().getPointerWidth(GenVoidPtrAddr) / 8);
+
+  // MCS-251 bit objects have no lowered storage yet (M2). A block that captures
+  // one -- in particular by reference (`__block`), where the capture copy below
+  // would look up a LocalDeclMap entry that EmitVarDecl deliberately did not
+  // create -- must fail closed with a diagnostic instead of crashing on the
+  // missing byref storage. Emit an undef pointer so the surrounding code still
+  // has a value to work with after the error.
+  for (const auto &CI : blockInfo.getBlockDecl()->captures()) {
+    const VarDecl *Captured = CI.getVariable();
+    if (Captured->getType().getUnqualifiedType()->isMCS251BitType()) {
+      CGM.ErrorUnsupported(blockInfo.getBlockDecl(), "MCS251 bit block capture");
+      return llvm::UndefValue::get(GenVoidPtrTy);
+    }
+  }
+
   // Using the computed layout, generate the actual block function.
   bool isLambdaConv = blockInfo.getBlockDecl()->isConversionFromLambda();
   CodeGenFunction BlockCGF{CGM, true};

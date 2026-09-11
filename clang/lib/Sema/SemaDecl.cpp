@@ -47,6 +47,7 @@
 #include "clang/Sema/ParsedTemplate.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/ScopeInfo.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "clang/Sema/SemaAMDGPU.h"
 #include "clang/Sema/SemaARM.h"
 #include "clang/Sema/SemaCUDA.h"
@@ -4746,6 +4747,22 @@ void Sema::MergeVarDecl(VarDecl *New, LookupResult &Previous) {
   // declaration was qualified, update the DeclContext to match.
   adjustDeclContextForDeclaratorDecl(New, Old);
 
+  // Symmetric controlled-bit redeclaration rule: an old-style `sbit` fixed bit
+  // reference establishes a controlled identity. A later *ordinary* declaration
+  // of the same name must not silently redefine it as an ordinary object with
+  // storage and (worse) a normal initializer -- the reverse direction is
+  // already rejected in ActOnMCS251SbitDecl, but this direction would otherwise
+  // accept the ordinary initializer and inherit the fixed-address attribute.
+  // An ordinary declaration cannot express the same fixed-reference identity,
+  // so reject it outright.
+  if (Old->hasAttr<MCS251BitAddressAttr>() &&
+      !New->hasAttr<MCS251BitAddressAttr>()) {
+    Diag(New->getLocation(), diag::err_mcs251_sbit_ordinary_redecl)
+        << New->getDeclName();
+    notePreviousDefinition(Old, New->getLocation());
+    return New->setInvalidDecl();
+  }
+
   // Ensure the template parameters are compatible.
   if (NewTemplate &&
       !TemplateParameterListsAreEqual(NewTemplate->getTemplateParameters(),
@@ -6329,9 +6346,164 @@ void Sema::warnOnReservedIdentifier(const NamedDecl *D) {
   }
 }
 
+/// Validate the folded bit-address initializer of an old-style MCS-251 sbit
+/// declaration and return it in [0, 255]. Handles both accepted source forms:
+///   * `sbit NAME = BIT_ADDR;`          -- the whole value is the bit address;
+///   * `sbit NAME = SFR_BASE ^ INDEX;`  -- base is a bit-addressable SFR byte
+///     (0x80-0xFF, low 3 bits zero) and index is 0-7; address = base + index.
+/// The `^` is positioning syntax only. Returns false (after diagnosing) on any
+/// error.
+static bool CheckMCS251SbitAddress(Sema &S, Expr *Init, unsigned &BitAddr,
+                                   SourceLocation Loc) {
+  // A top-level BinaryOperator '^' is the legacy BASE^INDEX form. Any other
+  // expression (including a parenthesized one) is interpreted as the plain
+  // bit-address form. Note that the parser only creates that BinaryOperator
+  // from the initializer's own '^', so this cannot capture ordinary XOR code.
+  const Expr *BaseExpr = Init;
+  const Expr *IndexExpr = nullptr;
+  if (const auto *BO = dyn_cast<BinaryOperator>(Init->IgnoreParens())) {
+    if (BO->getOpcode() == BO_Xor) {
+      BaseExpr = BO->getLHS();
+      IndexExpr = BO->getRHS();
+    }
+  }
+
+  std::optional<llvm::APSInt> BaseOpt = BaseExpr->getIntegerConstantExpr(S.Context);
+  if (!BaseOpt) {
+    S.Diag(Loc, diag::err_mcs251_sbit_not_constant);
+    return false;
+  }
+  llvm::APSInt Base = *BaseOpt;
+
+  if (!IndexExpr) {
+    // Plain bit-address form: the entire value is the address.
+    if ((Base.isSigned() && Base.isNegative()) || Base.getActiveBits() > 8 ||
+        Base.getZExtValue() > 0xFF) {
+      SmallString<24> Buf;
+      Base.toString(Buf, 10);
+      S.Diag(Loc, diag::err_mcs251_sbit_bad_address) << Buf;
+      return false;
+    }
+    BitAddr = static_cast<unsigned>(Base.getZExtValue());
+    return true;
+  }
+
+  // Old-style BASE ^ INDEX form. All checks are performed on the full APSInt
+  // before narrowing: a base or index that does not fit in its 8-/3-bit field
+  // (for example `(unsigned __int128)1 << 64` plus a small offset) must be
+  // rejected, not truncated by getZExtValue().
+  if ((Base.isSigned() && Base.isNegative()) || Base.getActiveBits() > 8) {
+    S.Diag(Loc, diag::err_mcs251_sbit_bad_base);
+    return false;
+  }
+  uint64_t BaseValue = Base.getZExtValue();
+  // The base must be an SFR byte that is bit-addressable: in 0x80-0xFF with
+  // its low three bits zero.
+  if (BaseValue < 0x80 || BaseValue > 0xFF || (BaseValue & 0x7) != 0) {
+    S.Diag(Loc, diag::err_mcs251_sbit_bad_base);
+    return false;
+  }
+
+  std::optional<llvm::APSInt> IndexOpt = IndexExpr->getIntegerConstantExpr(S.Context);
+  if (!IndexOpt) {
+    S.Diag(Loc, diag::err_mcs251_sbit_not_constant);
+    return false;
+  }
+  llvm::APSInt Index = *IndexOpt;
+  if ((Index.isSigned() && Index.isNegative()) || Index.getActiveBits() > 8) {
+    S.Diag(Loc, diag::err_mcs251_sbit_bad_index);
+    return false;
+  }
+  uint64_t IndexValue = Index.getZExtValue();
+  if (IndexValue > 7) {
+    S.Diag(Loc, diag::err_mcs251_sbit_bad_index);
+    return false;
+  }
+
+  BitAddr = static_cast<unsigned>(BaseValue + IndexValue);
+  return true;
+}
+
+VarDecl *Sema::ActOnMCS251SbitDecl(Scope *S, IdentifierInfo *Name,
+                                   SourceLocation NameLoc, Expr *BitAddr,
+                                   SourceLocation StartLoc,
+                                   SourceLocation EndLoc,
+                                   bool &Redeclaration) {
+  assert(LangOpts.MCS251Keil && "'sbit' declaration outside the Keil dialect");
+  assert(Name && "sbit declaration without an identifier");
+
+  // MCS251 (P08 revision, plan B): an sbit declaration establishes a
+  // fixed-address bit identity and is rejected inside OpenMP/OpenACC
+  // constructs (notably a declare-target region) at this, its dedicated
+  // declaration entry.
+  if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+    MCS251Ptr->CheckSbitDeclInDirectiveRestriction(
+        StartLoc, SourceRange(StartLoc, EndLoc));
+
+  unsigned Address = 0;
+  if (!CheckMCS251SbitAddress(*this, BitAddr, Address, NameLoc))
+    return nullptr;
+
+  // The declared name has the controlled fixed bit identity: type is the
+  // MCS-251 'bit' scalar, and the address is carried on an implicit attribute.
+  QualType BitTy = Context.MCS251BitTy;
+  TypeSourceInfo *TInfo = Context.getTrivialTypeSourceInfo(BitTy, NameLoc);
+
+  // sbit declarations are program-wide program state with static storage; the
+  // identity is the (name, address) pair. Only file scope is supported in the
+  // first slice (see P08); block-scope declarations are rejected.
+  if (S->getParent() != nullptr) {
+    Diag(StartLoc, diag::err_mcs251_sbit_requires_static);
+    return nullptr;
+  }
+
+  VarDecl *VD = VarDecl::Create(Context, CurContext, StartLoc, NameLoc, Name,
+                                BitTy, TInfo, SC_None);
+  // Controlled fixed bit references are implicitly volatile: their value can
+  // change asynchronously through the backing byte (see P02).
+  VD->setType(Context.getVolatileType(BitTy));
+  VD->addAttr(MCS251BitAddressAttr::CreateImplicit(
+      Context, BitAddr, SourceRange(StartLoc, EndLoc)));
+
+  // Merge with a prior declaration of the same name: the address must match.
+  LookupResult Prev(*this, DeclarationName(Name), NameLoc,
+                    Sema::LookupOrdinaryName,
+                    RedeclarationKind::ForVisibleRedeclaration);
+  LookupName(Prev, S);
+  NamedDecl *PrevDecl = nullptr;
+  for (NamedDecl *D : Prev) {
+    if (D->getDeclContext() == CurContext) {
+      PrevDecl = D;
+      break;
+    }
+  }
+  Redeclaration = false;
+  if (auto *PrevVD = dyn_cast_or_null<VarDecl>(PrevDecl)) {
+    const auto *PrevAttr = PrevVD->getAttr<MCS251BitAddressAttr>();
+    if (!PrevAttr) {
+      Diag(NameLoc, diag::err_mcs251_sbit_redecl) << Name;
+      return nullptr;
+    }
+    std::optional<llvm::APSInt> PrevAddr =
+        PrevAttr->getAddress()->getIntegerConstantExpr(Context);
+    if (!PrevAddr || PrevAddr->getZExtValue() != Address) {
+      Diag(NameLoc, diag::err_mcs251_sbit_redecl) << Name;
+      return nullptr;
+    }
+    Redeclaration = true;
+    return PrevVD;
+  }
+  if (PrevDecl) {
+    Diag(NameLoc, diag::err_mcs251_sbit_redecl) << Name;
+    return nullptr;
+  }
+
+  PushOnScopeChains(VD, S, /*AddToContext=*/true);
+  return VD;
+}
+
 Decl *Sema::ActOnDeclarator(Scope *S, Declarator &D) {
   D.setFunctionDefinitionKind(FunctionDefinitionKind::Declaration);
-
   // Check if we are in an `omp begin/end declare variant` scope. Handle this
   // declaration only if the `bind_to_declaration` extension is set.
   SmallVector<FunctionDecl *, 4> Bases;
@@ -6723,6 +6895,15 @@ NamedDecl *Sema::HandleDeclarator(Scope *S, Declarator &D,
 
   if (!New)
     return nullptr;
+
+  // MCS251 (P08 revision, plan B): a declarator that introduces the bit
+  // capability (a bit variable, a typedef of bit, or a function whose return
+  // type or parameters involve bit) is rejected while an OpenMP/OpenACC
+  // construct restriction context is active. This is the finite
+  // object/type-establishment entry point for declarations (old-style sbit
+  // has its own entry in ActOnMCS251SbitDecl).
+  if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction())
+    MCS251Ptr->CheckDeclaratorInDirectiveRestriction(New);
 
   warnOnCTypeHiddenInCPlusPlus(New);
 
@@ -19698,6 +19879,12 @@ FieldDecl *Sema::HandleField(Scope *S, RecordDecl *Record,
 
   TypeSourceInfo *TInfo = GetTypeForDeclarator(D);
   QualType T = TInfo->getType();
+  // C fields bypass HandleDeclarator. Check each newly written member type,
+  // including members of anonymous and nested records, while its enclosing
+  // directive restriction is active. Do not walk existing record interiors.
+  if (!getLangOpts().CPlusPlus && MCS251Ptr &&
+      MCS251Ptr->inDirectiveRestriction())
+    MCS251Ptr->CheckTypeInputInDirectiveRestriction(T, Loc, D.getSourceRange());
   if (getLangOpts().CPlusPlus) {
     CheckExtraCXXDefaultArguments(D);
 
@@ -19819,6 +20006,15 @@ FieldDecl *Sema::CheckFieldDecl(DeclarationName Name, QualType T,
   if (T.hasAddressSpace() || T->isDependentAddressSpaceType() ||
       T->getBaseElementTypeUnsafe()->isDependentAddressSpaceType()) {
     Diag(Loc, diag::err_field_with_address_space);
+    Record->setInvalidDecl();
+    InvalidDecl = true;
+  }
+
+  // MCS-251 'bit' has no addressable, sized representation and cannot be a
+  // struct/union field (nor a bit-field, since that would require a layout
+  // container type).
+  if (!T->isDependentType() && T->isMCS251BitType()) {
+    Diag(Loc, diag::err_mcs251_bit_field);
     Record->setInvalidDecl();
     InvalidDecl = true;
   }

@@ -39,6 +39,7 @@
 #include "clang/Basic/CodeGenOptions.h"
 #include "clang/Basic/Module.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Basic/TargetBuiltins.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringExtras.h"
@@ -3625,6 +3626,21 @@ LValue CodeGenFunction::EmitDeclRefLValue(const DeclRefExpr *E) {
          "should not emit an unevaluated operand");
 
   if (const auto *VD = dyn_cast<VarDecl>(ND)) {
+    // MCS-251 bit lvalues (old-style `sbit` fixed references and bit objects)
+    // are a controlled capability not yet lowered (M2). Fail closed instead of
+    // emitting an ordinary address for them; the frontend otherwise produces a
+    // plain i8 load/store that loses the fixed-bit semantics.
+    if (VD->getType().getUnqualifiedType()->isMCS251BitType() ||
+        VD->hasAttr<MCS251BitAddressAttr>()) {
+      CGM.ErrorUnsupported(E, VD->hasAttr<MCS251BitAddressAttr>()
+                                  ? "MCS251 fixed bit reference"
+                                  : "MCS251 bit object");
+      return MakeAddrLValue(
+          Address(llvm::UndefValue::get(DefaultPtrTy),
+                  ConvertType(E->getType()), CharUnits::One()),
+          E->getType());
+    }
+
     // Global Named registers access via intrinsics only
     if (VD->getStorageClass() == SC_Register &&
         VD->hasAttr<AsmLabelAttr>() && !VD->isLocalVarDecl())
@@ -5993,6 +6009,16 @@ CodeGenFunction::EmitLValueForFieldInitialization(LValue Base,
 }
 
 LValue CodeGenFunction::EmitCompoundLiteralLValue(const CompoundLiteralExpr *E){
+  // An MCS-251 bit compound literal is a real object whose lowering is M2.
+  // Fail closed rather than allocating an i8 temporary with a byte store.
+  if (E->getType().getUnqualifiedType()->isMCS251BitType()) {
+    CGM.ErrorUnsupported(E, "MCS251 bit compound literal");
+    return MakeAddrLValue(
+        Address(llvm::UndefValue::get(DefaultPtrTy),
+                ConvertType(E->getType()), CharUnits::One()),
+        E->getType());
+  }
+
   if (E->isFileScope()) {
     ConstantAddress GlobalPtr = CGM.GetAddrOfConstantCompoundLiteral(E);
     return MakeAddrLValue(GlobalPtr, E->getType(), AlignmentSource::Decl);
@@ -6836,6 +6862,17 @@ LValue CodeGenFunction::EmitHLSLArrayAssignLValue(const BinaryOperator *E) {
 
 LValue CodeGenFunction::EmitCallExprLValue(const CallExpr *E,
                                            llvm::CallBase **CallOrInvoke) {
+  // __builtin_mcs251_bit_lvalue is a controlled fixed bit lvalue; its lowering
+  // is M2. Fail closed rather than attempting an ordinary call/reference.
+  if (const FunctionDecl *FD = E->getDirectCallee())
+    if (FD->getBuiltinID() == clang::MCS251::BI__builtin_mcs251_bit_lvalue) {
+      CGM.ErrorUnsupported(E, "MCS251 controlled bit lvalue");
+      return MakeAddrLValue(
+          Address(llvm::UndefValue::get(DefaultPtrTy),
+                  ConvertType(E->getType()), CharUnits::One()),
+          E->getType());
+    }
+
   RValue RV = EmitCallExpr(E, ReturnValueSlot(), CallOrInvoke);
 
   if (!RV.isScalar())

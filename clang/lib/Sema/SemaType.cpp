@@ -1205,6 +1205,12 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
   case DeclSpec::TST_bool:
     Result = Context.BoolTy; // _Bool or bool
     break;
+  case DeclSpec::TST_mcs251_bit:
+    // MCS-251 'bit'/'__bit': a distinct target boolean scalar type, not a
+    // typedef of _Bool. The token is only registered on the MCS-251 target
+    // with the dialect enabled, so no extra gating is required here.
+    Result = Context.MCS251BitTy;
+    break;
   case DeclSpec::TST_decimal32:    // _Decimal32
   case DeclSpec::TST_decimal64:    // _Decimal64
   case DeclSpec::TST_decimal128:   // _Decimal128
@@ -1839,6 +1845,15 @@ QualType Sema::BuildPointerType(QualType T,
     return QualType();
   }
 
+  // MCS-251 'bit' objects have no addressable representation: a pointer to bit
+  // (including via typedef/typeof) is rejected. This also structurally blocks
+  // derived constructions such as bit arrays-of-pointers and memcpy of bit
+  // objects, which all require a bit pointer to be formed first.
+  if (!T->isDependentType() && T->isMCS251BitType()) {
+    Diag(Loc, diag::err_mcs251_bit_pointer) << T;
+    return QualType();
+  }
+
   if (T->isFunctionType() && getLangOpts().OpenCL &&
       !getOpenCLOptions().isAvailableOption("__cl_clang_function_pointers",
                                             getLangOpts())) {
@@ -2079,6 +2094,15 @@ QualType Sema::BuildArrayType(QualType T, ArraySizeModifier ASM,
                               SourceRange Brackets, DeclarationName Entity) {
 
   SourceLocation Loc = Brackets.getBegin();
+
+  // Arrays of MCS-251 'bit' (including the array parameter form, which would
+  // decay to a bit pointer) are rejected: bit has no addressable, sized
+  // element representation.
+  if (!T->isDependentType() && T->isMCS251BitType()) {
+    Diag(Loc, diag::err_mcs251_bit_array);
+    return QualType();
+  }
+
   if (getLangOpts().CPlusPlus) {
     // C++ [dcl.array]p1:
     //   T is called the array element type; this type shall not be a reference
@@ -6568,6 +6592,15 @@ static bool BuildAddressSpaceIndex(Sema &S, LangAS &ASIdx,
 QualType Sema::BuildAddressSpaceAttr(QualType &T, LangAS ASIdx, Expr *AddrSpace,
                                      SourceLocation AttrLoc) {
   if (!AddrSpace->isValueDependent()) {
+    // MCS-251 'bit' has no address-space representation: `bit xdata`,
+    // `__attribute__((address_space(N))) bit`, etc. are rejected rather than
+    // silently ignored.
+    if (ASIdx != LangAS::Default && !T->isDependentType() &&
+        T->isMCS251BitType()) {
+      Diag(AttrLoc, diag::err_mcs251_bit_addrspace);
+      return QualType();
+    }
+
     if (DiagnoseMultipleAddrSpaceAttributes(*this, T.getAddressSpace(), ASIdx,
                                             AttrLoc))
       return QualType();
@@ -10422,6 +10455,13 @@ QualType Sema::BuildAtomicType(QualType T, SourceLocation Loc) {
 
     if (DisallowedKind != -1) {
       Diag(Loc, diag::err_atomic_specifier_bad_type) << DisallowedKind << T;
+      return QualType();
+    }
+
+    // MCS-251 'bit' is not an atomic-capable type: it has no addressable
+    // object representation for the atomic machinery to operate on.
+    if (T->isMCS251BitType()) {
+      Diag(Loc, diag::err_mcs251_bit_atomic);
       return QualType();
     }
 

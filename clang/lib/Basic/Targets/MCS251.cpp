@@ -7,12 +7,34 @@
 //===----------------------------------------------------------------------===//
 
 #include "MCS251.h"
+#include "clang/Basic/Builtins.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/MacroBuilder.h"
+#include "clang/Basic/TargetBuiltins.h"
 #include "llvm/TargetParser/MCS251TargetParser.h"
+#include <iterator>
 
 using namespace clang;
 using namespace clang::targets;
+
+static constexpr int NumBuiltins =
+    clang::MCS251::LastTSBuiltin - Builtin::FirstTSBuiltin;
+
+#define GET_BUILTIN_STR_TABLE
+#include "clang/Basic/BuiltinsMCS251.inc"
+#undef GET_BUILTIN_STR_TABLE
+
+static constexpr Builtin::Info BuiltinInfos[] = {
+#define GET_BUILTIN_INFOS
+#include "clang/Basic/BuiltinsMCS251.inc"
+#undef GET_BUILTIN_INFOS
+};
+static_assert(std::size(BuiltinInfos) == NumBuiltins);
+
+llvm::SmallVector<Builtin::InfosShard>
+MCS251TargetInfo::getTargetBuiltins() const {
+  return {{&BuiltinStrings, BuiltinInfos}};
+}
 
 bool MCS251TargetInfo::initFeatureMap(
     llvm::StringMap<bool> &Features, DiagnosticsEngine &Diags, StringRef CPU,
@@ -41,6 +63,15 @@ bool MCS251TargetInfo::handleTargetFeatures(std::vector<std::string> &Features,
   // backend feature diagnostics and meaningless per-function ISA attributes.
   Features.clear();
   return true;
+}
+
+void MCS251TargetInfo::adjust(DiagnosticsEngine &Diags, LangOptions &Opts,
+                              const TargetInfo *Aux) {
+  // The core `__bit` spelling is a property of the MCS-251 target and is
+  // available regardless of -fmcs251-keil. Keil's bare `bit`/`sbit` spellings
+  // are handled separately by LangOptions::MCS251Keil.
+  Opts.MCS251Bit = 1;
+  TargetInfo::adjust(Diags, Opts, Aux);
 }
 
 bool MCS251TargetInfo::validateTarget(DiagnosticsEngine &Diags) const {

@@ -693,6 +693,17 @@ TESTING_KEYWORD(__unknown_anytype , KEYALL)
 // from registering it unconditionally.
 TESTING_KEYWORD(__mcs251_interrupt , KEYALL)
 
+// MCS251 bit/sbit dialect keywords. The token names are frozen as
+// kw___mcs251_bit and kw___mcs251_sbit while the registered spellings are the
+// controlled names "bit"/"sbit" (only with LangOptions.MCS251Keil) plus the
+// core spelling "__bit" (available on any MCS-251 target via
+// LangOptions.MCS251Bit). They are registered conditionally by
+// IdentifierTable::AddKeywords, so they stay ordinary identifiers elsewhere.
+// TESTING_KEYWORD keeps the generic keyword loop from registering them
+// unconditionally.
+TESTING_KEYWORD(__mcs251_bit , KEYALL)
+TESTING_KEYWORD(__mcs251_sbit , KEYALL)
+
 
 //===----------------------------------------------------------------------===//
 // Objective-C @-preceded keywords.

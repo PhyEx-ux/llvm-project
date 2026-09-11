@@ -37,6 +37,7 @@
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/ScopeInfo.h"
 #include "clang/Sema/Sema.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "llvm/ADT/IndexedMap.h"
 #include "llvm/ADT/PointerEmbeddedInt.h"
 #include "llvm/ADT/STLExtras.h"
@@ -2792,12 +2793,19 @@ void SemaOpenMP::DestroyDataSharingAttributesStack() { delete DSAStack; }
 void SemaOpenMP::ActOnOpenMPBeginDeclareVariant(SourceLocation Loc,
                                                 OMPTraitInfo &TI) {
   OMPDeclareVariantScopes.push_back(OMPDeclareVariantScope(TI));
+  // P08 revision (plan B): the delimited `begin declare variant` region is a
+  // persistent declarative construct region like declare target; the
+  // associated declarations stay under the MCS251 bit restriction.
+  SemaRef.MCS251().enterDirectiveRestriction(Loc, /*IsOpenACC=*/false,
+                                             /*Persistent=*/true);
 }
 
 void SemaOpenMP::ActOnOpenMPEndDeclareVariant() {
   assert(isInOpenMPDeclareVariantScope() &&
          "Not in OpenMP declare variant scope!");
-
+  // Paired with the enterDirectiveRestriction in
+  // ActOnOpenMPBeginDeclareVariant (P08 revision, plan B).
+  SemaRef.MCS251().exitPersistentDirectiveRestriction();
   OMPDeclareVariantScopes.pop_back();
 }
 
@@ -6968,6 +6976,14 @@ StmtResult SemaOpenMP::ActOnOpenMPExecutableDirective(
     // Register target to DSA Stack.
     DSAStack->addTargetDirLocation(StartLoc);
   }
+
+  // The clause operands of the directive are not full expressions of their
+  // own for most clause kinds, so the MCS-251 controlled-bit rules are applied
+  // to them here, once, at directive completion (a directive inside a
+  // statement expression defers to the enclosing full-expression walk).
+  if (Res.isUsable() &&
+      SemaRef.MCS251().CheckMCS251ControlledBitDirectiveClauses(Res.get()))
+    return StmtError();
 
   return Res;
 }
@@ -25104,6 +25120,13 @@ bool SemaOpenMP::ActOnStartOpenMPDeclareTargetContext(
     Diag(DTCI.Loc, diag::warn_hip_omp_target_directives);
 
   DeclareTargetNesting.push_back(DTCI);
+  // P08 revision (plan B): the declare-target delimited region is a
+  // declarative *persistent* construct region -- every declaration and
+  // definition parsed up to the matching `end declare target` belongs to it
+  // and stays under the MCS251 bit restriction. Entered here (not by a
+  // parser RAII) because the region spans many top-level declarations.
+  SemaRef.MCS251().enterDirectiveRestriction(DTCI.Loc, /*IsOpenACC=*/false,
+                                             /*Persistent=*/true);
   return true;
 }
 
@@ -25111,6 +25134,9 @@ const SemaOpenMP::DeclareTargetContextInfo
 SemaOpenMP::ActOnOpenMPEndDeclareTargetDirective() {
   assert(!DeclareTargetNesting.empty() &&
          "check isInOpenMPDeclareTargetContext() first!");
+  // Paired with the enterDirectiveRestriction in
+  // ActOnStartOpenMPDeclareTargetContext (P08 revision, plan B).
+  SemaRef.MCS251().exitPersistentDirectiveRestriction();
   return DeclareTargetNesting.pop_back_val();
 }
 
@@ -25127,6 +25153,9 @@ void SemaOpenMP::DiagnoseUnterminatedOpenMPDeclareTarget() {
   llvm::omp::Version OMPVersion = getLangOpts().getOpenMPVersion();
   Diag(DTCI.Loc, diag::warn_omp_unterminated_declare_target)
       << getOpenMPDirectiveName(DTCI.Kind, OMPVersion);
+  // An unterminated region must not leak its MCS251 bit restriction context
+  // into the rest of the translation unit (P08 revision, plan B).
+  SemaRef.MCS251().drainDirectiveRestrictions();
 }
 
 NamedDecl *SemaOpenMP::lookupOpenMPDeclareTargetName(
@@ -25190,6 +25219,14 @@ void SemaOpenMP::ActOnOpenMPDeclareTargetName(
   // Report affected OpenMP target offloading behavior when in HIP lang-mode.
   if (getLangOpts().HIP)
     Diag(Loc, diag::warn_hip_omp_target_directives);
+
+  // P08 revision (plan B): a `declare target` clause argument that names a
+  // bit capability (bit object, sbit fixed reference, bit-signature function,
+  // typedef of bit) is rejected: the name is directive input, not an ordinary
+  // reference, so the construct gate checks it here instead of at
+  // BuildDeclRefExpr.
+  if (SemaRef.MCS251().inDirectiveRestriction())
+    SemaRef.MCS251().CheckNamedDeclArgumentInDirectiveRestriction(ND, Loc);
 
   // 'local' is incompatible with 'device_type(host)' because 'local'
   // variables exist only on the device.

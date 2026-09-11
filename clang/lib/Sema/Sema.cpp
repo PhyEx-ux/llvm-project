@@ -53,6 +53,7 @@
 #include "clang/Sema/SemaHexagon.h"
 #include "clang/Sema/SemaLoongArch.h"
 #include "clang/Sema/SemaM68k.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "clang/Sema/SemaMIPS.h"
 #include "clang/Sema/SemaMSP430.h"
 #include "clang/Sema/SemaNVPTX.h"
@@ -295,6 +296,7 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
       HexagonPtr(std::make_unique<SemaHexagon>(*this)),
       LoongArchPtr(std::make_unique<SemaLoongArch>(*this)),
       M68kPtr(std::make_unique<SemaM68k>(*this)),
+      MCS251Ptr(std::make_unique<SemaMCS251>(*this)),
       MIPSPtr(std::make_unique<SemaMIPS>(*this)),
       MSP430Ptr(std::make_unique<SemaMSP430>(*this)),
       NVPTXPtr(std::make_unique<SemaNVPTX>(*this)),
@@ -1335,6 +1337,12 @@ void Sema::ActOnEndOfTranslationUnit() {
   DiagnoseUnterminatedPragmaAlignPack();
   DiagnoseUnterminatedPragmaAttribute();
   OpenMP().DiagnoseUnterminatedOpenMPDeclareTarget();
+  // The MCS251 OpenMP/OpenACC restriction stack is parse-time state. The
+  // unclosed-declare-target path above drains what it owns; this drain makes
+  // the TU-end invariant unconditional, so no restriction frame (e.g. an
+  // unterminated `begin declare variant`) can outlive the TU body and affect
+  // anything that still runs afterwards (final rework, statement fix).
+  MCS251().drainDirectiveRestrictions();
   DiagnosePrecisionLossInComplexDivision();
   DiagnoseUnusedAPINotesSelectors();
 

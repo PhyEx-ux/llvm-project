@@ -2268,6 +2268,20 @@ private:
   /// a zero-parameter prototype.
   void ParseMCS251KeilInterruptSuffix(Declarator &D);
 
+  /// ParseMCS251SbitDeclaration - Parse an old-style controlled fixed bit
+  /// declaration enabled by -fmcs251-keil:
+  ///
+  ///   sbit NAME = BIT_ADDR ;
+  ///   sbit NAME = SFR_BASE ^ INDEX ;
+  ///
+  /// Only the initializer's `^` is positioning syntax (never ordinary C XOR and
+  /// never a hardware read); the forms are reduced to a single bit address in
+  /// [0, 255] and handed to Sema, which attaches it to the declared name as an
+  /// implicit MCS251BitAddress attribute. Called with Tok at the `sbit` keyword
+  /// (tok::kw___mcs251_sbit) in a declaration position. \p Context documents
+  /// whether this is a file-scope or block-scope occurrence.
+  DeclGroupPtrTy ParseMCS251SbitDeclaration(DeclaratorContext Context);
+
   /// SkipMCS251InterruptOperand - Bounded recovery for a malformed MCS251
   /// Keil suffix operand: nested parentheses are balanced, the scan stops
   /// (without consuming) at ';', '{', '}', or end-of-file, and a ')' that

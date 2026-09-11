@@ -1291,6 +1291,10 @@ void ASTContext::InitBuiltinTypes(const TargetInfo &Target,
 
   // C99 6.2.5p2.
   InitBuiltinType(BoolTy,              BuiltinType::Bool);
+  // MCS-251 'bit'/'__bit': an independent target boolean scalar type. It is a
+  // normally-initialized singleton even off-target so the AST is well-formed;
+  // the spelling is only accepted when LangOptions::MCS251Bit is set.
+  InitBuiltinType(MCS251BitTy,         BuiltinType::MCS251Bit);
   // C99 6.2.5p3.
   if (LangOpts.CharIsSigned)
     InitBuiltinType(CharTy,            BuiltinType::Char_S);
@@ -2023,6 +2027,7 @@ bool ASTContext::isPromotableIntegerType(QualType T) const {
   if (const auto *BT = T->getAs<BuiltinType>())
     switch (BT->getKind()) {
     case BuiltinType::Bool:
+    case BuiltinType::MCS251Bit:
     case BuiltinType::Char_S:
     case BuiltinType::Char_U:
     case BuiltinType::SChar:
@@ -2211,6 +2216,13 @@ TypeInfo ASTContext::getTypeInfoImpl(const Type *T) const {
       Align = 8;
       break;
     case BuiltinType::Bool:
+      Width = Target->getBoolWidth();
+      Align = Target->getBoolAlign();
+      break;
+    case BuiltinType::MCS251Bit:
+      // Internal object payload is a normalized 1-byte value (0/1), matching
+      // the byte-value ABI. Source-level sizeof/alignof on bit is rejected in
+      // Sema; this only describes the internal/ABI carrier.
       Width = Target->getBoolWidth();
       Align = Target->getBoolAlign();
       break;
@@ -8292,6 +8304,11 @@ unsigned ASTContext::getIntegerRank(const Type *T) const {
   default: llvm_unreachable("getIntegerRank(): not a built-in integer");
   case BuiltinType::Bool:
     return 1 + (getIntWidth(BoolTy) << 3);
+  case BuiltinType::MCS251Bit:
+    // Between _Bool and char, consistent with a 1-bit unsigned type; the
+    // distinction is irrelevant for promotion (both fit in int) but keeps the
+    // rank table complete for the new kind.
+    return 1 + (getIntWidth(MCS251BitTy) << 3);
   case BuiltinType::Char_S:
   case BuiltinType::Char_U:
   case BuiltinType::SChar:
@@ -9235,6 +9252,8 @@ static char getObjCEncodingForPrimitiveType(const ASTContext *C,
     switch (kind) {
     case BuiltinType::Void:       return 'v';
     case BuiltinType::Bool:       return 'B';
+    // MCS-251 bit has boolean value representation; encode like _Bool.
+    case BuiltinType::MCS251Bit:  return 'B';
     case BuiltinType::Char8:
     case BuiltinType::Char_U:
     case BuiltinType::UChar:      return 'C';
@@ -12458,6 +12477,10 @@ unsigned ASTContext::getIntWidth(QualType T) const {
     T = ED->getIntegerType();
   if (T->isBooleanType())
     return 1;
+  // The MCS-251 bit type carries a 1-bit value even though its internal
+  // carrier object is one byte.
+  if (T->isMCS251BitType())
+    return 1;
   if (const auto *EIT = T->getAs<BitIntType>())
     return EIT->getNumBits();
   // For builtin types, just use the standard type sizing method
@@ -12829,6 +12852,10 @@ static QualType DecodeTypeFromStr(const char *&Str, const ASTContext &Context,
   case 'b': // boolean
     assert(HowLong == 0 && !Signed && !Unsigned && "Bad modifiers for 'b'!");
     Type = Context.BoolTy;
+    break;
+  case 'j': // MCS-251 'bit'/'__bit' target boolean scalar.
+    assert(HowLong == 0 && !Signed && !Unsigned && "Bad modifiers for 'j'!");
+    Type = Context.MCS251BitTy;
     break;
   case 'z':  // size_t.
     assert(HowLong == 0 && !Signed && !Unsigned && "Bad modifiers for 'z'!");

@@ -2732,6 +2732,10 @@ void MicrosoftCXXNameMangler::mangleType(const BuiltinType *T, Qualifiers,
   case BuiltinType::Bool:
     Out << "_N";
     break;
+  case BuiltinType::MCS251Bit:
+    // C-only target type; never reaches MSVC mangling on MCS-251.
+    Out << "bit";
+    break;
   case BuiltinType::Char8:
     Out << "_Q";
     break;
