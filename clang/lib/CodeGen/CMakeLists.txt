@@ -80,6 +80,7 @@ add_clang_library(clangCodeGen
   CGExprAgg.cpp
   CGExprCXX.cpp
   CGExprComplex.cpp
+  CGMCS251Bit.cpp
   CGExprConstant.cpp
   CGExprScalar.cpp
   CGGPUBuiltin.cpp

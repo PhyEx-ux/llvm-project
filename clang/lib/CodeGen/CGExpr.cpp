@@ -2541,6 +2541,11 @@ RValue CodeGenFunction::EmitLoadOfAnyValue(LValue LV, AggValueSlot Slot,
 /// method emits the address of the lvalue, then loads the result as an rvalue,
 /// returning the rvalue.
 RValue CodeGenFunction::EmitLoadOfLValue(LValue LV, SourceLocation Loc) {
+  // MCS-251 controlled bit l-value: a single sample through the bit intrinsic
+  // (BIT BT04, design §7.5). It has no ordinary byte address.
+  if (LV.isMCS251Bit())
+    return EmitLoadOfMCS251BitLValue(LV, Loc);
+
   // Load from __ptrauth.
   if (PointerAuthQualifier PtrAuth = LV.getQuals().getPointerAuth()) {
     LV.getQuals().removePointerAuth();
@@ -2793,6 +2798,14 @@ RValue CodeGenFunction::EmitLoadOfGlobalRegLValue(LValue LV) {
 /// is 'Ty'.
 void CodeGenFunction::EmitStoreThroughLValue(RValue Src, LValue Dst,
                                              bool isInit) {
+  // MCS-251 controlled bit l-value: a single set/clear (constant) or a
+  // value-form branch write (M2 / BIT BT04, design §7.5). No ordinary byte
+  // store, and no byte address exists.
+  if (Dst.isMCS251Bit()) {
+    EmitStoreThroughMCS251BitLValue(Src, Dst);
+    return;
+  }
+
   if (!Dst.isSimple()) {
     if (Dst.isVectorElt()) {
       if (getLangOpts().HLSL) {
@@ -3626,15 +3639,17 @@ LValue CodeGenFunction::EmitDeclRefLValue(const DeclRefExpr *E) {
          "should not emit an unevaluated operand");
 
   if (const auto *VD = dyn_cast<VarDecl>(ND)) {
-    // MCS-251 bit lvalues (old-style `sbit` fixed references and bit objects)
-    // are a controlled capability not yet lowered (M2). Fail closed instead of
-    // emitting an ordinary address for them; the frontend otherwise produces a
-    // plain i8 load/store that loses the fixed-bit semantics.
-    if (VD->getType().getUnqualifiedType()->isMCS251BitType() ||
-        VD->hasAttr<MCS251BitAddressAttr>()) {
-      CGM.ErrorUnsupported(E, VD->hasAttr<MCS251BitAddressAttr>()
-                                  ? "MCS251 fixed bit reference"
-                                  : "MCS251 bit object");
+    // MCS-251 controlled bit lvalue (old-style `sbit` fixed reference): lower
+    // to the target bit intrinsics rather than an ordinary byte address
+    // (M2 / BIT BT04-BT05).
+    if (VD->hasAttr<MCS251BitAddressAttr>())
+      return EmitMCS251ControlledBitLValue(E);
+
+    // A persistent/static `bit` object has no fixed address; its P09 handle
+    // lowering is a later M2 slice, so fail closed rather than degrade to an
+    // ordinary i8 object.
+    if (VD->getType().getUnqualifiedType()->isMCS251BitType()) {
+      CGM.ErrorUnsupported(E, "MCS251 bit object");
       return MakeAddrLValue(
           Address(llvm::UndefValue::get(DefaultPtrTy),
                   ConvertType(E->getType()), CharUnits::One()),
@@ -6862,16 +6877,12 @@ LValue CodeGenFunction::EmitHLSLArrayAssignLValue(const BinaryOperator *E) {
 
 LValue CodeGenFunction::EmitCallExprLValue(const CallExpr *E,
                                            llvm::CallBase **CallOrInvoke) {
-  // __builtin_mcs251_bit_lvalue is a controlled fixed bit lvalue; its lowering
-  // is M2. Fail closed rather than attempting an ordinary call/reference.
+  // __builtin_mcs251_bit_lvalue is a controlled fixed bit lvalue (M2 / BT04):
+  // lower it to the target bit intrinsics, never an ordinary call or byte
+  // reference.
   if (const FunctionDecl *FD = E->getDirectCallee())
-    if (FD->getBuiltinID() == clang::MCS251::BI__builtin_mcs251_bit_lvalue) {
-      CGM.ErrorUnsupported(E, "MCS251 controlled bit lvalue");
-      return MakeAddrLValue(
-          Address(llvm::UndefValue::get(DefaultPtrTy),
-                  ConvertType(E->getType()), CharUnits::One()),
-          E->getType());
-    }
+    if (FD->getBuiltinID() == clang::MCS251::BI__builtin_mcs251_bit_lvalue)
+      return EmitMCS251ControlledBitLValue(E);
 
   RValue RV = EmitCallExpr(E, ReturnValueSlot(), CallOrInvoke);
 

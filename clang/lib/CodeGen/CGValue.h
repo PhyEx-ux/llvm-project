@@ -231,6 +231,11 @@ class LValue {
   // Lvalue is a global reference of an objective-c object
   bool GlobalObjCRef : 1;
 
+  // Lvalue is an MCS-251 controlled bit l-value whose address operand is a
+  // symbolic bit-object handle (a relocation) rather than a constant bit
+  // address. Only meaningful when LVType == MCS251Bit.
+  bool MCS251BitSymbolic : 1;
+
   // Lvalue is a thread local reference
   bool ThreadLocalRef : 1;
 
@@ -254,7 +259,8 @@ private:
     this->Quals = Quals;
     const unsigned MaxAlign = 1U << 31;
     CharUnits Alignment = Addr.getAlignment();
-    assert((isGlobalReg() || !Alignment.isZero() || Type->isIncompleteType()) &&
+    assert((isGlobalReg() || isMCS251Bit() || !Alignment.isZero() ||
+            Type->isIncompleteType()) &&
            "initializing l-value with zero alignment!");
     if (Alignment.getQuantity() > MaxAlign) {
       assert(false && "Alignment exceeds allowed max!");
@@ -288,6 +294,7 @@ public:
   bool isBitField() const { return LVType == BitField; }
   bool isExtVectorElt() const { return LVType == ExtVectorElt; }
   bool isGlobalReg() const { return LVType == GlobalReg; }
+  bool isMCS251Bit() const { return LVType == MCS251Bit; }
   bool isMatrixElt() const { return LVType == MatrixElt; }
   bool isMatrixRow() const { return LVType == MatrixRow; }
   bool isMatrixRowSwizzle() const {
@@ -451,6 +458,19 @@ public:
   // global register lvalue
   llvm::Value *getGlobalReg() const { assert(isGlobalReg()); return V; }
 
+  // MCS-251 controlled bit lvalue: the bit-address operand. For a fixed
+  // address (old-style `sbit` or __builtin_mcs251_bit_lvalue) this is an i32
+  // constant; for a persistent bit object it is a pointer-sized symbolic
+  // handle consumed by the bit intrinsics' immediate operand.
+  llvm::Value *getMCS251BitAddress() const {
+    assert(isMCS251Bit());
+    return V;
+  }
+  bool isMCS251BitSymbolic() const {
+    assert(isMCS251Bit());
+    return MCS251BitSymbolic;
+  }
+
   static LValue MakeAddr(Address Addr, QualType type, ASTContext &Context,
                          LValueBaseInfo BaseInfo, TBAAAccessInfo TBAAInfo) {
     LValue R;
@@ -504,6 +524,26 @@ public:
     R.Initialize(type, type.getQualifiers(), Address::invalid(),
                  LValueBaseInfo(AlignmentSource::Decl), TBAAAccessInfo());
     R.V = V;
+    return R;
+  }
+
+  /// Create a new object to represent an MCS-251 controlled bit l-value.
+  ///
+  /// \p AddrOperand is the i32 bit-address operand fed to
+  /// llvm.mcs251.bit.*: a constant address for an old-style `sbit` or a
+  /// __builtin_mcs251_bit_lvalue(N) reference, or a bit-object handle symbol
+  /// for a persistent/static `bit` object (\p Symbolic then true). A controlled
+  /// bit l-value has no ordinary byte address and is never loadable/storable
+  /// through the generic paths; EmitLoadOfLValue/EmitStoreThroughLValue route
+  /// it to the bit intrinsics.
+  static LValue MakeMCS251Bit(llvm::Value *AddrOperand, bool Symbolic,
+                              QualType type) {
+    LValue R;
+    R.LVType = MCS251Bit;
+    R.Initialize(type, type.getQualifiers(), Address::invalid(),
+                 LValueBaseInfo(AlignmentSource::Decl), TBAAAccessInfo());
+    R.V = AddrOperand;
+    R.MCS251BitSymbolic = Symbolic;
     return R;
   }
 

@@ -932,6 +932,13 @@ public:
   Value *EmitCompoundAssign(const CompoundAssignOperator *E,
                             Value *(ScalarExprEmitter::*F)(const BinOpInfo &));
 
+  /// If \p E is an MCS-251 controlled-bit toggle form that must lower to a
+  /// single target CPL (BIT §7.5: a discarded `X ^= 1` or `X = !X` on the same
+  /// controlled reference), emit llvm.mcs251.bit.toggle and return true. The
+  /// L1 CPL is atomic at the bit-instruction level and must not be split into a
+  /// read followed by a byte/bit store.
+  bool tryEmitMCS251BitToggle(const Expr *E);
+
   QualType getPromotionType(QualType Ty) {
     const auto &Ctx = CGF.getContext();
     if (auto *CT = Ty->getAs<ComplexType>()) {
@@ -4267,6 +4274,13 @@ LValue ScalarExprEmitter::EmitCompoundAssignLValue(
 Value *ScalarExprEmitter::EmitCompoundAssign(const CompoundAssignOperator *E,
                       Value *(ScalarExprEmitter::*Func)(const BinOpInfo &)) {
   bool Ignore = TestAndClearIgnoreResultAssign();
+
+  // MCS-251 `X ^= 1` on a controlled bit reference is a single atomic CPL
+  // (BIT §7.5). Emit it directly; the generic compound-assign path would read
+  // the bit and rewrite it.
+  if (tryEmitMCS251BitToggle(E))
+    return nullptr;
+
   Value *RHS = nullptr;
   LValue LHS = EmitCompoundAssignLValue(E, Func, RHS);
 
@@ -5467,9 +5481,76 @@ llvm::Value *CodeGenFunction::EmitWithOriginalRHSBitfieldAssignment(
   return EmitScalarExpr(E->getRHS());
 }
 
+/// Is \p E the MCS-251 controlled-bit toggle form on a single controlled
+/// fixed bit reference? The §7.5 forms are `X ^= 1` (RHS exactly the integer
+/// constant 1) and `X = !X` (RHS the logical not of the same controlled
+/// reference). Identity is by resolved constant bit address, matching Sema.
+static bool isMCS251BitToggleRHS(const BinaryOperator *E, const Expr *LHS,
+                                 ASTContext &Ctx) {
+  // X ^= 1
+  if (const auto *CAO = dyn_cast<CompoundAssignOperator>(E)) {
+    if (CAO->getOpcode() != BO_XorAssign)
+      return false;
+    std::optional<llvm::APSInt> V =
+        E->getRHS()->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx);
+    if (!V)
+      return false;
+    if (V->isSigned() && V->isNegative())
+      return false;
+    if (V->getActiveBits() > 1)
+      return false;
+    return V->getZExtValue() == 1;
+  }
+  // X = !X
+  if (E->getOpcode() != BO_Assign)
+    return false;
+  const auto *UO = dyn_cast<UnaryOperator>(E->getRHS()->IgnoreParenImpCasts());
+  if (!UO || UO->getOpcode() != UO_LNot)
+    return false;
+  // Same controlled reference on both sides: compare the resolved bit address
+  // through the CodeGen-side identity helper (a DeclRef to an sbit or a
+  // __builtin_mcs251_bit_lvalue call).
+  return true;
+}
+
+bool ScalarExprEmitter::tryEmitMCS251BitToggle(const Expr *E) {
+  const auto *BO = dyn_cast<BinaryOperator>(E);
+  if (!BO)
+    return false;
+  // The LHS must be a controlled fixed bit reference; the persistent/static
+  // `bit` object toggle is a later M2 slice and stays on the generic path.
+  LValue LHSLV = CGF.EmitMCS251ControlledBitLValue(BO->getLHS());
+  if (!LHSLV.isMCS251Bit())
+    return false;
+  if (!isMCS251BitToggleRHS(BO, BO->getLHS(), CGF.getContext()))
+    return false;
+  // `X = !X`: the RHS must denote the same controlled reference, otherwise it
+  // is an ordinary copy (handled as read+write, not a toggle).
+  if (BO->getOpcode() == BO_Assign) {
+    const auto *UO = cast<UnaryOperator>(BO->getRHS()->IgnoreParenImpCasts());
+    LValue RHSLV = CGF.EmitMCS251ControlledBitLValue(UO->getSubExpr());
+    if (!RHSLV.isMCS251Bit())
+      return false;
+    llvm::Value *A = LHSLV.getMCS251BitAddress();
+    llvm::Value *B = RHSLV.getMCS251BitAddress();
+    auto *CA = dyn_cast<llvm::ConstantInt>(A);
+    auto *CB = dyn_cast<llvm::ConstantInt>(B);
+    if (!CA || !CB || CA->getZExtValue() != CB->getZExtValue())
+      return false;
+  }
+  CGF.EmitToggleMCS251BitLValue(LHSLV);
+  return true;
+}
+
 Value *ScalarExprEmitter::VisitBinAssign(const BinaryOperator *E) {
   ApplyAtomGroup Grp(CGF.getDebugInfo());
   bool Ignore = TestAndClearIgnoreResultAssign();
+
+  // MCS-251 `X = !X` on a controlled bit reference is a single atomic CPL
+  // (BIT §7.5), not a read-modify-write. Handled before the generic path so no
+  // read of the target bit is emitted first.
+  if (tryEmitMCS251BitToggle(E))
+    return nullptr;
 
   Value *RHS;
   LValue LHS;

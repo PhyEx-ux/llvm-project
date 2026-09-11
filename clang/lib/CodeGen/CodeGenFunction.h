@@ -4472,6 +4472,35 @@ public:
   RValue EmitLoadOfBitfieldLValue(LValue LV, SourceLocation Loc);
   RValue EmitLoadOfGlobalRegLValue(LValue LV);
 
+  //===--------------------------------------------------------------------===//
+  // MCS-251 controlled bit lvalues (BIT task breakdown BT04/BT05; P01/P02/P09)
+  //===--------------------------------------------------------------------===//
+
+  /// Return the controlled bit l-value denoted by \p E, or an invalid LValue
+  /// (isSimple() false and not isMCS251Bit()) if \p E is not a controlled
+  /// MCS-251 bit reference. Handles both routes: a reference to an old-style
+  /// `sbit` declaration (MCS251BitAddressAttr) and a
+  /// __builtin_mcs251_bit_lvalue(ICE) call. A persistent/static `bit` object
+  /// reference has no fixed address and is a later M2 slice (P09 handle).
+  LValue EmitMCS251ControlledBitLValue(const Expr *E);
+
+  /// Read a controlled bit l-value (a single sample). Emits
+  /// llvm.mcs251.bit.read and materialises a 0/1 value of the l-value's type.
+  RValue EmitLoadOfMCS251BitLValue(LValue LV, SourceLocation Loc);
+
+  /// Store \p Src into a controlled bit l-value. A constant 0/1 folds to a
+  /// single clear/set; any other value is evaluated once and written through
+  /// the value-form path (branch to set/clear).
+  void EmitStoreThroughMCS251BitLValue(RValue Src, LValue Dst);
+
+  /// Atomic toggle of a controlled bit l-value (a single CPL), for the §7.5
+  /// `X ^= 1` / `X = !X` discarded-value forms.
+  void EmitToggleMCS251BitLValue(LValue Dst);
+
+  /// The unique bit-address operand of an MCS-251 bit l-value, as an i32 value
+  /// suitable for the llvm.mcs251.bit.* intrinsic's immediate operand.
+  llvm::Value *EmitMCS251BitAddressOperand(LValue LV);
+
   /// Like EmitLoadOfLValue but also handles complex and aggregate types.
   RValue EmitLoadOfAnyValue(LValue V,
                             AggValueSlot Slot = AggValueSlot::ignored(),
