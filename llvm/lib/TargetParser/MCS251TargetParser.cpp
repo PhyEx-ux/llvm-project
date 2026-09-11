@@ -3,6 +3,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
 
+#include <algorithm>
+
 using namespace llvm;
 using namespace llvm::MCS251;
 
@@ -100,6 +102,20 @@ std::string llvm::MCS251::formatMemoryContract(
           Twine(Contract.DefaultPlacement) + "," +
           Twine(Contract.ExecutionContract))
       .str();
+}
+
+// P12-3: this spelling and the formatter below live in the TargetParser
+// library (always linked, including into builds without the MCS251 backend)
+// because clang's BackendUtil references the formatter unconditionally.
+StringRef llvm::MCS251::getMCS251ContractFeaturePrefix() {
+  return "+mcs251-memory-contract=";
+}
+
+std::string llvm::MCS251::formatMemoryContractFeature(
+    const MemoryContract &Contract) {
+  std::string Numeric = formatMemoryContract(Contract);
+  std::replace(Numeric.begin(), Numeric.end(), ',', '-');
+  return (Twine(getMCS251ContractFeaturePrefix()) + Numeric).str();
 }
 
 bool llvm::MCS251::isSupportedLayout(StringRef DataLayout) {

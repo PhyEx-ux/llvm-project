@@ -64,6 +64,21 @@ in a source name never suppresses decoration. Explicit C asm labels retain
 their exact spelling through LLVM's ``\01`` no-mangle marker. Private LLVM
 symbols use the ``.L_`` prefix.
 
+.. warning::
+
+   ``m:s`` is an MCS-251 fork extension (see the ``UPSTREAM-DIFF(MCS251)``
+   markers on the ``MM_ASXXXX`` mangling mode in
+   ``llvm/include/llvm/IR/DataLayout.h`` and its parser in
+   ``llvm/lib/IR/DataLayout.cpp``). Upstream LLVM has no ``m:s`` specifier and
+   rejects a data layout containing it as malformed, so IR -- and, because the
+   data layout string is embedded in the module, **bitcode** -- produced by
+   this fork for the MCS-251 target **cannot be consumed by upstream LLVM**
+   (``llvm-as``/``llvm-dis``/``opt``/LTO of a stock build will refuse the
+   module). Exchange with upstream tools happens at the textual assembly or
+   object-file level, not at the IR/bitcode level. Keeping ``m:s`` was a
+   deliberate P1-2 accounting decision over reusing an upstream mode: it
+   preserves the frozen ASxxxx physical-name contract.
+
 Handwritten IR that previously spelled a physical symbol directly, such as
 ``@_foo``, must now spell the language-level ``@foo`` to keep the physical name
 ``_foo``. Alternatively, an intentionally exact physical name can use LLVM's

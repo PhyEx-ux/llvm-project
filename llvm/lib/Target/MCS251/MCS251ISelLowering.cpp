@@ -2,15 +2,19 @@
 
 #include "MCS251ISelLowering.h"
 #include "MCS251.h"
+#include "MCS251LocalInterp.h"
 #include "MCS251Subtarget.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsMCS251.h"
 #include "llvm/IR/Mangler.h"
@@ -501,6 +505,327 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
 // to constant-fold the node here. If all operands are constants and folding
 // succeeds, replace the result with the folded constant. If folding fails or
 // operands are not all constants, reject loudly with report_fatal_error.
+//
+// P1-2 optnone consumers. MCS251LoweringPrep folds constants and erases dead
+// wide/float computations for every function EXCEPT optnone ones, whose IR
+// must reach instruction selection untouched. The read-only MCS251ContractCheck
+// still passes those shapes (it judges them with MCS251LocalInterp), so
+// instruction selection locally substitutes the two shapes that can appear
+// in an optnone function:
+//
+//   1. A wide result that is provably unobservable: every user is a simple
+//      (non-volatile, non-atomic) store into a stack slot that is never
+//      read anywhere in the FUNCTION. Substituting any value (zero) is
+//      sound.
+//   2. A wide operation whose operands are provably constants parked in
+//      stack slots by the -O0 frontend: a load whose stack slot has exactly
+//      one storing user, that store has provably executed first, and the
+//      stored value is a constant of the exact loaded width. Both proofs
+//      are conservative; anything they cannot prove keeps the loud
+//      rejection below (fail-closed, never a silent miscompile).
+//
+// P12-1 (Alice review round 3): a SelectionDAG covers exactly one basic
+// block, so a slot-reading LOAD, CALL, PHI/select copy or address escape
+// living in a successor block is invisible to any DAG-local scan -- the
+// zero-substitution below then erased results that were still observable
+// (crossblock_live: udiv 100/4 stored in one block, loaded in the next,
+// returned 0 instead of 25). Every slot-shaped proof below is therefore
+// FUNCTION-level: the frame index is mapped back to its IR alloca
+// (FunctionLoweringInfo records it in MachineFrameInfo) and the verdict
+// comes from the shared MCS251LocalInterp oracle over the whole function.
+namespace {
+
+// The IR alloca a frame index was created for, or null (spill slots and
+// other synthesized objects carry none -- nothing can be proven there).
+static const AllocaInst *mcs251FIAlloca(const SDNode *N, SelectionDAG &DAG) {
+  auto *FI = dyn_cast<FrameIndexSDNode>(N);
+  if (!FI)
+    return nullptr;
+  return DAG.getMachineFunction().getFrameInfo().getObjectAllocation(
+      FI->getIndex());
+}
+
+// True when the slot is never read over the whole function: every user of
+// its IR alloca is a plain store through the slot pointer, so any value
+// stored there is unobservable. P12-1: the old DAG-local FI->uses() scan
+// could not see readers in other blocks.
+static bool mcs251FrameSlotIsNeverRead(const SDNode *Ptr,
+                                       SelectionDAG &DAG) {
+  const AllocaInst *AI = mcs251FIAlloca(Ptr, DAG);
+  if (!AI)
+    return false;
+  return llvm::MCS251::allocaIsNeverRead(AI);
+}
+
+// True when every user of V is a simple store of V into a never-read stack
+// slot (possibly after the type legalizer split it into truncating halves,
+// which stay equally dead).
+bool mcs251IsUnobservableWideResult(const SDValue V, SelectionDAG &DAG) {
+  if (V.use_empty())
+    return true;
+  for (const SDUse &Use : V.getNode()->uses()) {
+    if (Use.getResNo() != V.getResNo())
+      continue; // consumes another result of a multi-result node
+    const SDNode *U = Use.getUser();
+    if (const auto *ST = dyn_cast<StoreSDNode>(U)) {
+      if (ST->isVolatile() || ST->isAtomic() ||
+          ST->getValue() != V)
+        return false;
+      const SDNode *Ptr = ST->getBasePtr().getNode();
+      if (!isa<FrameIndexSDNode>(Ptr) ||
+          !mcs251FrameSlotIsNeverRead(Ptr, DAG))
+        return false;
+      continue;
+    }
+    // The value-legalizer inserts plain truncates when it splits a wide
+    // store; a truncate whose only role is feeding such a store keeps the
+    // result dead.
+    if (U->getOpcode() == ISD::TRUNCATE) {
+      for (const SDUse &TUse : U->uses()) {
+        const auto *ST = dyn_cast<StoreSDNode>(TUse.getUser());
+        if (!ST || ST->isVolatile() || ST->isAtomic())
+          return false;
+        const SDNode *Ptr = ST->getBasePtr().getNode();
+        if (!isa<FrameIndexSDNode>(Ptr) ||
+            !mcs251FrameSlotIsNeverRead(Ptr, DAG))
+          return false;
+      }
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+// Resolve \p V to a ConstantSDNode/ConstantFPSDNode, or return a null
+// SDValue. Recognizes extends, integer arithmetic over resolved values,
+// BUILD_PAIR halves and loads of whole-function-proven constant stack
+// slots (P12-5: slot loads are resolved exclusively through the shared
+// getProvenSlotConstant oracle below -- there is deliberately no
+// DAG-local fallback).
+// The APInt/APFloat work is exact; divisions by zero and oversized shifts
+// do not resolve (they are UB, and folding UB would be a silent verdict).
+SDValue mcs251ResolveDAGConstant(SDValue V, SelectionDAG &DAG,
+                                 unsigned Depth) {
+  if (Depth > 64)
+    return SDValue();
+  if (auto *CN = dyn_cast<ConstantSDNode>(V.getNode()))
+    if (V.getResNo() == 0 && !CN->isUndef())
+      return V;
+  if (auto *CF = dyn_cast<ConstantFPSDNode>(V.getNode()))
+    if (V.getResNo() == 0)
+      return V;
+
+  SDLoc DL(V);
+  EVT VT = V.getValueType();
+  auto IntOf = [&](SDValue R) -> std::optional<APInt> {
+    if (!R || !R.getValueType().isInteger() || R.getResNo() != 0)
+      return std::nullopt;
+    if (auto *CN = dyn_cast<ConstantSDNode>(R.getNode()))
+      if (!CN->isUndef())
+        return CN->getAPIntValue();
+    return std::nullopt;
+  };
+  auto MakeInt = [&](const APInt &Val) -> SDValue {
+    return DAG.getConstant(Val.trunc(VT.getSizeInBits()), DL, VT);
+  };
+
+  switch (V.getOpcode()) {
+  case ISD::ZERO_EXTEND:
+  case ISD::ANY_EXTEND:
+    if (std::optional<APInt> C = IntOf(mcs251ResolveDAGConstant(
+            V.getOperand(0), DAG, Depth + 1)))
+      return MakeInt(C->zext(VT.getSizeInBits()));
+    return SDValue();
+  case ISD::SIGN_EXTEND:
+    if (std::optional<APInt> C = IntOf(mcs251ResolveDAGConstant(
+            V.getOperand(0), DAG, Depth + 1)))
+      return MakeInt(C->sext(VT.getSizeInBits()));
+    return SDValue();
+  case ISD::TRUNCATE:
+    if (std::optional<APInt> C = IntOf(mcs251ResolveDAGConstant(
+            V.getOperand(0), DAG, Depth + 1)))
+      return MakeInt(*C);
+    return SDValue();
+  case ISD::BUILD_PAIR: {
+    std::optional<APInt> Lo = IntOf(
+        mcs251ResolveDAGConstant(V.getOperand(0), DAG, Depth + 1));
+    std::optional<APInt> Hi = IntOf(
+        mcs251ResolveDAGConstant(V.getOperand(1), DAG, Depth + 1));
+    if (!Lo || !Hi)
+      return SDValue();
+    unsigned Half = VT.getSizeInBits() / 2;
+    APInt Combined = Hi->zext(VT.getSizeInBits()) << Half;
+    Combined |= Lo->zext(VT.getSizeInBits());
+    return MakeInt(Combined);
+  }
+  case ISD::ADD:
+  case ISD::SUB:
+  case ISD::MUL:
+  case ISD::UDIV:
+  case ISD::SDIV:
+  case ISD::UREM:
+  case ISD::SREM:
+  case ISD::AND:
+  case ISD::OR:
+  case ISD::XOR:
+  case ISD::SHL:
+  case ISD::SRL:
+  case ISD::SRA: {
+    std::optional<APInt> L = IntOf(
+        mcs251ResolveDAGConstant(V.getOperand(0), DAG, Depth + 1));
+    std::optional<APInt> R = IntOf(
+        mcs251ResolveDAGConstant(V.getOperand(1), DAG, Depth + 1));
+    if (!L || !R)
+      return SDValue();
+    unsigned W = VT.getSizeInBits();
+    APInt A = L->zext(W), B = R->zext(W);
+    APInt Res(W, 0);
+    switch (V.getOpcode()) {
+    case ISD::ADD: Res = A + B; break;
+    case ISD::SUB: Res = A - B; break;
+    case ISD::MUL: Res = A * B; break;
+    case ISD::UDIV:
+      if (B.isZero())
+        return SDValue();
+      Res = A.udiv(B);
+      break;
+    case ISD::SDIV:
+      if (B.isZero())
+        return SDValue();
+      Res = A.sdiv(B);
+      break;
+    case ISD::UREM:
+      if (B.isZero())
+        return SDValue();
+      Res = A.urem(B);
+      break;
+    case ISD::SREM:
+      if (B.isZero())
+        return SDValue();
+      Res = A.srem(B);
+      break;
+    case ISD::AND: Res = A & B; break;
+    case ISD::OR:  Res = A | B; break;
+    case ISD::XOR: Res = A ^ B; break;
+    case ISD::SHL:
+      if (B.uge(W))
+        return SDValue();
+      Res = A << B;
+      break;
+    case ISD::SRL:
+      if (B.uge(W))
+        return SDValue();
+      Res = A.lshr(B);
+      break;
+    case ISD::SRA:
+      if (B.uge(W))
+        return SDValue();
+      Res = A.ashr(B);
+      break;
+    default:
+      llvm_unreachable("covered above");
+    }
+    return MakeInt(Res);
+  }
+  case ISD::LOAD: {
+    const auto *LD = cast<LoadSDNode>(V.getNode());
+    if (V.getResNo() != 0 || LD->isVolatile() || LD->isAtomic())
+      return SDValue();
+    // The base must be a stack slot, possibly reached through one constant
+    // offset add (the value legalizer splits wide slots into FI+0/FI+4).
+    int64_t LoadOff = 0;
+    const SDNode *Base = LD->getBasePtr().getNode();
+    if (Base->getOpcode() == ISD::ADD && Base->getNumOperands() == 2) {
+      auto *C = dyn_cast<ConstantSDNode>(Base->getOperand(1).getNode());
+      if (!C || Base->getOperand(0).getValueType() != MVT::i32)
+        return SDValue();
+      LoadOff = C->getSExtValue();
+      Base = Base->getOperand(0).getNode();
+    }
+    auto *FI = dyn_cast<FrameIndexSDNode>(Base);
+    if (!FI)
+      return SDValue();
+    const unsigned Width = LD->getMemoryVT().getFixedSizeInBits() / 8;
+    const bool BigEndian = DAG.getDataLayout().isBigEndian();
+    // P12-2: rebuild the raw memory image first, then apply the extending
+    // load's own semantics when widening to the result type. SEXTLOAD
+    // replicates the sign bit; ZEXTLOAD zero-fills; EXTLOAD leaves the upper
+    // bits unspecified, for which zero is the canonical materialization.
+    // Ignoring getExtensionType() here rebuilt `sext i8 -100` as +156 and
+    // folded the i64 sdiv to 39 instead of -25.
+    auto AsExtended = [&](APInt Raw) -> SDValue {
+      unsigned ResW = VT.getSizeInBits();
+      if (VT.isFloatingPoint()) {
+        // Softened float loads surface here with their integer-promoted
+        // type; a still-float VT takes the bit pattern via a bitcast.
+        // Extending float loads do not exist on this target; fail closed
+        // if one ever appears.
+        if (Raw.getBitWidth() != ResW)
+          return SDValue();
+        return DAG.getBitcast(
+            VT, DAG.getConstant(Raw, DL, MVT::getIntegerVT(ResW)));
+      }
+      if (Raw.getBitWidth() < ResW) {
+        if (LD->getExtensionType() == ISD::SEXTLOAD)
+          Raw = Raw.sext(ResW);
+        else
+          Raw = Raw.zext(ResW);
+      }
+      return DAG.getConstant(Raw, DL, VT);
+    };
+    // P12-1: function-level parked-constant proof. The parking store may
+    // live in a block outside this DAG (-O0 parks constants in the entry
+    // block and reloads them in successors), which no same-block chain walk
+    // can observe; the shared oracle proves the single dominating constant
+    // store over the whole function instead.
+    if (const AllocaInst *AI = mcs251FIAlloca(FI, DAG)) {
+      if (Constant *C = llvm::MCS251::getProvenSlotConstant(AI)) {
+        APInt Bits;
+        if (auto *CI = dyn_cast<ConstantInt>(C))
+          Bits = CI->getValue();
+        else if (auto *CF = dyn_cast<ConstantFP>(C))
+          Bits = CF->getValueAPF().bitcastToAPInt();
+        else
+          return SDValue(); // aggregate/vector parked value: not handled
+        const unsigned StoredBytes = Bits.getBitWidth() / 8;
+        if (LoadOff >= 0 && LoadOff + (int64_t)Width <= (int64_t)StoredBytes) {
+          APInt Raw(Width * 8, 0);
+          for (unsigned J = 0; J < Width; ++J) {
+            // Object byte at offset LoadOff+J, most significant object byte
+            // first in the big-endian layout.
+            unsigned StoredShift =
+                8 * (BigEndian ? (StoredBytes - 1 - (LoadOff + J))
+                               : (LoadOff + J));
+            APInt Byte = Bits.lshr(StoredShift) & APInt(Bits.getBitWidth(), 0xff);
+            Raw |= Byte.zext(Width * 8)
+                   << (8 * (BigEndian ? (Width - 1 - J) : J));
+          }
+          return AsExtended(Raw);
+        }
+      }
+    }
+    // P12-5 (Alice review round 4): the former DAG-local fallback is
+    // deleted. It scanned this DAG's FI->uses() and walked the chain past
+    // calls to reconstruct slot bytes locally, but a SelectionDAG covers a
+    // single basic block: an address escape stored in a predecessor
+    // (save(&p) feeding a mutate() call) and any second store living in
+    // another block were invisible to it, so it kept returning a constant
+    // after the whole-function proof above had correctly returned null
+    // (the "alias" counterexample: local verdict 100, proof verdict null).
+    // The gate above is now the ONLY slot-constant path: if the oracle
+    // cannot prove the loaded bytes over the whole function, the load is
+    // left unresolved and the caller fails closed (loud rejection) rather
+    // than substituting an unproven constant.
+    return SDValue();
+  }
+  default:
+    return SDValue();
+  }
+}
+
+} // namespace
+
 void MCS251TargetLowering::ReplaceNodeResults(
     SDNode *N, SmallVectorImpl<SDValue> &Results, SelectionDAG &DAG) const {
   EVT VT = N->getValueType(0);
@@ -522,6 +847,41 @@ void MCS251TargetLowering::ReplaceNodeResults(
         DAG.FoldConstantArithmetic(N->getOpcode(), DL, VT, Ops, N->getFlags());
     if (Folded) {
       Results.push_back(Folded);
+      return;
+    }
+    // P1-2 optnone shape 2: the operands are constants parked in stack slots
+    // by the -O0 frontend (MCS251LoweringPrep must not touch optnone IR).
+    // Resolve them through the conservative DAG-local proof and retry the
+    // shared folder.
+    SmallVector<SDValue, 4> Resolved;
+    bool AllResolved = true;
+    for (const SDValue &Op : Ops) {
+      SDValue R = mcs251ResolveDAGConstant(Op, DAG, 0);
+      if (!R) {
+        AllResolved = false;
+        break;
+      }
+      Resolved.push_back(R);
+    }
+    if (AllResolved) {
+      SDValue LocallyFolded = DAG.FoldConstantArithmetic(
+          N->getOpcode(), DL, VT, Resolved, N->getFlags());
+      if (LocallyFolded) {
+        Results.push_back(LocallyFolded);
+        return;
+      }
+    }
+    // P1-2 optnone shape 1: a wide/float result whose only users are stores
+    // into never-read stack slots is unobservable; any substitute value
+    // (zero) preserves the program. This is the DAG-side twin of the
+    // targeted DCE MCS251LoweringPrep performs for non-optnone functions.
+    // P12-1: the never-read verdict is proven over the whole function, not
+    // just this DAG, so readers in successor blocks keep the result live.
+    if (mcs251IsUnobservableWideResult(SDValue(N, 0), DAG)) {
+      if (VT == MVT::i64)
+        Results.push_back(DAG.getConstant(0, DL, VT));
+      else
+        Results.push_back(DAG.getConstantFP(0.0, DL, VT));
       return;
     }
     // Folding failed -- either operands are not all constants or the opcode

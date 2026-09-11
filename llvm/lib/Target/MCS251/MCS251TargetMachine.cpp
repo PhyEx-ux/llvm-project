@@ -8,15 +8,15 @@
 
 #include "MCS251TargetMachine.h"
 #include "MCS251.h"
+#include "MCS251ContractCheck.h"
+#include "MCS251LoweringPrep.h"
 #include "MCS251TargetObjectFile.h"
 #include "MCTargetDesc/MCS251MCTargetDesc.h"
 #include "MCTargetDesc/MCS251RELObjectWriter.h"
 #include "TargetInfo/MCS251TargetInfo.h"
-#include "llvm/Analysis/ConstantFolding.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
-#include "llvm/CodeGen/MCS251ContractVerifier.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
@@ -32,27 +32,172 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/TargetParser/MCS251TargetParser.h"
 
+#include <algorithm>
+
 using namespace llvm;
 
 static Reloc::Model getEffectiveRelocModel(std::optional<Reloc::Model> RM) {
   return RM.value_or(Reloc::Static);
 }
 
-static StringRef getMCS251DataLayout(const TargetOptions &Options) {
-  const MCS251::MemoryContract &Contract = Options.MCS251Memory;
-  if (!Contract.isSpecified())
+//===----------------------------------------------------------------------===//
+// P1-2: MCS-251 storage-model contract resolution.
+//
+// The numeric contract used to ride the generic llvm::TargetOptions
+// (Options.MCS251Memory), leaking the target into lib/CodeGen. It is now
+// resolved here, target-side, from exactly two inputs, and every consumer
+// (layout selection, streamer gate, object compatibility, the read-only
+// contract check) reads the value stored in this target machine:
+//
+//   1. The target-feature string: "+mcs251-memory-contract=v-t-as0-p-e"
+//      (dash-separated, because the feature string itself is comma-split).
+//      This is the transport clang uses (BackendUtil appends it from the
+//      frontend TargetOptions) and is authoritative when present.
+//   2. The two llc command-line options, moved verbatim from
+//      lib/CodeGen/CommandFlags.cpp; their spelling is unchanged.
+//
+// The parsers are the shared llvm::MCS251TargetParser entry points on both
+// sides, so the frontend, the tools and this resolution can never drift.
+//===----------------------------------------------------------------------===//
+
+static cl::opt<std::string> MCS251MemoryContract(
+    "mcs251-memory-contract", cl::Hidden,
+    cl::desc("Numeric MCS-251 memory contract"), cl::init(""));
+
+static cl::opt<std::string> MCS251MemoryModel(
+    "mcs251-memory-model",
+    cl::desc("MCS-251 storage model (tiny, xtiny, small, xsmall, large)"),
+    cl::value_desc("model"), cl::init(""));
+
+// Translate a user-facing -mcs251-memory-model name into the numeric
+// transport contract. This command-line translation layer is one of the two
+// places (with the clang driver) where model names may appear; everything
+// downstream consumes the numeric fields only.
+static bool translateMCS251MemoryModel(StringRef Model,
+                                       MCS251::MemoryContract &Contract) {
+  unsigned AS0Bits = 0, Placement = 0;
+  if (Model == "tiny") {
+    AS0Bits = 16;
+    Placement = 1;
+  } else if (Model == "xtiny") {
+    AS0Bits = 16;
+    Placement = 8;
+  } else if (Model == "small") {
+    AS0Bits = 32;
+    Placement = 1;
+  } else if (Model == "xsmall") {
+    AS0Bits = 32;
+    Placement = 8;
+  } else if (Model == "large") {
+    AS0Bits = 32;
+    Placement = 3;
+  } else {
+    return false;
+  }
+  Contract = MCS251::MemoryContract{/*TransportVersion=*/1,
+                                    /*ASLayoutVersion=*/2, AS0Bits, Placement,
+                                    /*ExecutionContract=*/1};
+  return true;
+}
+
+// P12-3: the feature-string prefix spelling and its formatter
+// (formatMemoryContractFeature) live in the always-linked TargetParser
+// library. clang's BackendUtil references the formatter unconditionally, so
+// a build without the MCS251 backend must not depend on this translation
+// unit for it.
+
+// Scan the feature string for the contract feature. Returns false on a
+// malformed or duplicated entry (fatal at the caller, matching the loud
+// behavior of every other malformed selection).
+static bool getMCS251ContractFeature(
+    StringRef FS, std::optional<MCS251::MemoryContract> &Contract) {
+  bool Seen = false;
+  for (StringRef Entry : llvm::split(FS, ',')) {
+    if (Entry.starts_with("-mcs251-memory-contract"))
+      report_fatal_error("MCS251: the memory contract feature cannot be "
+                            "disabled");
+    if (!Entry.starts_with(MCS251::getMCS251ContractFeaturePrefix()))
+      continue;
+    if (Seen)
+      return false;
+    Seen = true;
+    std::string Numeric(Entry.drop_front(
+        MCS251::getMCS251ContractFeaturePrefix().size()));
+    std::replace(Numeric.begin(), Numeric.end(), '-', ',');
+    MCS251::MemoryContract Parsed;
+    if (!MCS251::parseMemoryContract(Numeric, Parsed) ||
+        !MCS251::isValidMemoryContract(Parsed))
+      return false;
+    Contract = Parsed;
+  }
+  return true;
+}
+
+// Resolve the contract for one target machine creation. Priority: explicit
+// feature string, then the two command-line options (mutually exclusive,
+// as before), then the xsmall default that llc-class tools always
+// materialized for this triple.
+static std::optional<MCS251::MemoryContract>
+resolveMCS251MemoryContract(StringRef FS) {
+  std::optional<MCS251::MemoryContract> Contract;
+  if (!getMCS251ContractFeature(FS, Contract)) {
+    report_fatal_error(
+        "MCS251: invalid '+mcs251-memory-contract=' target feature");
+  }
+  if (Contract) {
+    // The feature transport (clang) and the command-line transport (llc)
+    // must not both select a contract; a silent winner would hide a
+    // frontend/backend layout disagreement.
+    if (MCS251MemoryModel.getNumOccurrences() != 0 ||
+        MCS251MemoryContract.getNumOccurrences() != 0)
+      report_fatal_error(
+          "-mcs251-memory-model/-mcs251-memory-contract conflict with the "
+          "'+mcs251-memory-contract=' target feature");
+    return Contract;
+  }
+
+  const bool HasModel = MCS251MemoryModel.getNumOccurrences() != 0;
+  const bool HasContractOpt =
+      MCS251MemoryContract.getNumOccurrences() != 0;
+  if (HasModel && HasContractOpt)
+    report_fatal_error("-mcs251-memory-model and -mcs251-memory-contract "
+                          "are mutually exclusive");
+  if (HasModel) {
+    MCS251::MemoryContract MC;
+    // Presence and value are distinct: an explicitly empty model name is
+    // malformed, like an explicitly empty wire contract.
+    if (!translateMCS251MemoryModel(MCS251MemoryModel, MC))
+      report_fatal_error("invalid -mcs251-memory-model");
+    return MC;
+  }
+  if (HasContractOpt) {
+    MCS251::MemoryContract MC;
+    if (!MCS251::parseMemoryContract(MCS251MemoryContract, MC) ||
+        !MCS251::isValidMemoryContract(MC))
+      report_fatal_error("invalid -mcs251-memory-contract");
+    return MC;
+  }
+  // No user selection: materialize the same xsmall contract the clang cc1
+  // default and the old llc path materialized, so clang-produced IR and a
+  // bare llc invocation agree on the data layout instead of conflicting.
+  return MCS251::MemoryContract{1, 2, 32, 8, 1};
+}
+
+static StringRef
+getMCS251DataLayout(const std::optional<MCS251::MemoryContract> &Contract) {
+  if (!Contract || !Contract->isSpecified())
     return MCS251::getCompatibilityDataLayout();
 
-  if (!MCS251::isValidMemoryContract(Contract))
-    reportFatalUsageError("MCS251: invalid numeric memory contract");
+  if (!MCS251::isValidMemoryContract(*Contract))
+    report_fatal_error("MCS251: invalid numeric memory contract");
 
   const auto Version =
-      static_cast<MCS251::ASLayoutVersion>(Contract.ASLayoutVersion);
+      static_cast<MCS251::ASLayoutVersion>(Contract->ASLayoutVersion);
   const auto AS0Bits =
-      static_cast<MCS251::AS0PointerBits>(Contract.AS0PointerBits);
+      static_cast<MCS251::AS0PointerBits>(Contract->AS0PointerBits);
   auto Desc = MCS251::getLayoutDesc(Version, AS0Bits);
   if (!Desc)
-    reportFatalUsageError(
+    report_fatal_error(
         "MCS251: numeric memory contract has no data layout");
   return Desc->DataLayout;
 }
@@ -61,12 +206,16 @@ MCS251TargetMachine::MCS251TargetMachine(
     const Target &T, const Triple &TT, StringRef CPU, StringRef FS,
     const TargetOptions &Options, std::optional<Reloc::Model> RM,
     std::optional<CodeModel::Model> CM, CodeGenOptLevel OL, bool JIT)
-    : CodeGenTargetMachineImpl(T, getMCS251DataLayout(Options), TT, CPU, FS,
+    : CodeGenTargetMachineImpl(T,
+                               getMCS251DataLayout(
+                                   resolveMCS251MemoryContract(FS)),
+                               TT, CPU, FS,
                                Options, getEffectiveRelocModel(RM),
                                getEffectiveCodeModel(CM, CodeModel::Small), OL),
       TLOF(std::make_unique<MCS251TargetObjectFile>()),
       Subtarget(TT, std::string(CPU), std::string(FS), *this),
-      ELFObjectOutput(MCS251::getObjectFormat() == MCS251::ObjectFormat::ELF) {
+      ELFObjectOutput(MCS251::getObjectFormat() == MCS251::ObjectFormat::ELF),
+      MemoryContract(resolveMCS251MemoryContract(FS)) {
   // Neither the REL path nor ELF ABI v1 uses address-significance tables.
   // Preserve the established no-op behavior of -addrsig.
   this->Options.EmitAddrsig = false;
@@ -85,8 +234,9 @@ Expected<std::unique_ptr<MCStreamer>> MCS251TargetMachine::createMCStreamer(
     return make_error<StringError>(
         "MCS251 ELF output requires -filetype=obj", inconvertibleErrorCode());
   ObjectFileOutput = FileType == CodeGenFileType::ObjectFile;
-  if (ObjectFileOutput && Options.MCS251Memory.isSpecified() &&
-      Options.MCS251Memory.AS0PointerBits == 16)
+  if (ObjectFileOutput && MemoryContract &&
+      MemoryContract->isSpecified() &&
+      MemoryContract->AS0PointerBits == 16)
     return make_error<StringError>(
         "MCS251 16-bit pointer ABI cannot emit relocatable objects until the "
         "v2 ABI attributes and linker compatibility gate are implemented",
@@ -147,20 +297,28 @@ public:
     // RC-6: only structural checks (types, address spaces) run here. The
     // arithmetic checks (i64/f32/f64 ops) run post-optimization in addPreISel
     // so that foldable or dead wide/float operations are not falsely rejected.
-    addPass(MCS251::createMCS251ContractVerifierPass(
-        &getTM<MCS251TargetMachine>().Options, /*CheckArithmetic=*/false));
+    // The check itself is read-only: it never folds or erases IR.
+    addPass(MCS251::createMCS251ContractCheckPass(
+        getTM<MCS251TargetMachine>().getMemoryContract(),
+        /*CheckArithmetic=*/false));
+    // P1-2: the only IR-mutating preparation (alloca constant propagation,
+    // constant folding, targeted wide/float DCE), mounted early and skipping
+    // optnone functions entirely. Non-optnone functions must be prepared
+    // before the arithmetic check below judges them.
+    addPass(MCS251::createMCS251LoweringPrepPass());
     TargetPassConfig::addIRPasses();
   }
 
   bool addPreISel() override {
-    // RC-6: After IR optimization, check that no unsupported i64/f32/f64
-    // arithmetic survives to the backend. Foldable constants and dead code
-    // have been eliminated by this point, so only genuinely live operations
-    // that would reach instruction selection are rejected. The verifier also
-    // performs minimal constant propagation (ignoring optnone) so that
-    // foldable i64 operations at -O0 are eliminated before checking.
-    addPass(MCS251::createMCS251ContractVerifierPass(
-        &getTM<MCS251TargetMachine>().Options, /*CheckArithmetic=*/true));
+    // RC-6: After IR preparation/optimization, check that no unsupported
+    // i64/f32/f64 arithmetic survives to the backend. Foldable constants and
+    // dead code have been eliminated (MCS251LoweringPrep for non-optnone
+    // functions, local interpretation inside this check for optnone ones),
+    // so only genuinely live operations that would reach instruction
+    // selection are rejected.
+    addPass(MCS251::createMCS251ContractCheckPass(
+        getTM<MCS251TargetMachine>().getMemoryContract(),
+        /*CheckArithmetic=*/true));
     return false;
   }
 
@@ -173,19 +331,21 @@ public:
 
 void MCS251TargetMachine::registerPassBuilderCallbacks(PassBuilder &PB) {
   // RC-6: Structural checks (types, address spaces) run at pipeline start,
-  // before optimization can erase unused illegal declarations or payloads.
+  // before optimization can erase unused illegal declarations or payloads;
+  // the IR-mutating preparation follows immediately after.
   PB.registerPipelineStartEPCallback(
       [this](ModulePassManager &MPM, OptimizationLevel) {
-        MPM.addPass(
-            MCS251::MCS251ContractVerifierPass(&Options, /*CheckArithmetic=*/false));
+        MPM.addPass(MCS251::MCS251ContractCheckPass(
+            getMemoryContract(), /*CheckArithmetic=*/false));
+        MPM.addPass(MCS251::MCS251LoweringPrepPass());
       });
   // RC-6: Arithmetic checks run after optimization so that foldable or dead
   // i64/f32/f64 operations are not falsely rejected.
   PB.registerOptimizerLastEPCallback(
       [this](ModulePassManager &MPM, OptimizationLevel,
              ThinOrFullLTOPhase) {
-        MPM.addPass(
-            MCS251::MCS251ContractVerifierPass(&Options, /*CheckArithmetic=*/true));
+        MPM.addPass(MCS251::MCS251ContractCheckPass(
+            getMemoryContract(), /*CheckArithmetic=*/true));
       });
 }
 
@@ -201,4 +361,5 @@ LLVMInitializeMCS251Target() {
   initializeMCS251AsmPrinterPass(PR);
   initializeMCS251BranchRelaxationPass(PR);
   initializeMCS251DAGToDAGISelLegacyPass(PR);
+  initializeMCS251LoweringPrepLegacyPass(PR);
 }

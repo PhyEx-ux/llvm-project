@@ -58,8 +58,12 @@ entry:
 ;--- folded-control.ll
 ; The safety gate must not over-reach: a plain (non-volatile, same-width)
 ; store still propagates, so the return value is the folded constant and no
-; frame byte is ever read back.
-define i32 @f() noinline optnone {
+; frame byte is ever read back. Since P1-2 the propagation lives in
+; MCS251LoweringPrep, which (unlike the old verifier) honors optnone: this
+; control therefore runs on a plain function. The optnone variants above
+; now keep their loads by design -- their IR must reach instruction
+; selection untouched (see lowering-prep-optnone-untouched.ll).
+define i32 @f() noinline {
 entry:
   %p = alloca i32, align 1
   store i32 7, ptr %p, align 1

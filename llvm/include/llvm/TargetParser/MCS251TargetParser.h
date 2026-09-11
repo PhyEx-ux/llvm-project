@@ -55,6 +55,18 @@ bool isValidMemoryContract(const MemoryContract &Contract);
 /// Return the canonical wire representation of a contract.
 std::string formatMemoryContract(const MemoryContract &Contract);
 
+/// The target-feature key spelling "+mcs251-memory-contract=" (P12-3: the
+/// single spelling lives in the always-linked TargetParser library, so
+/// builds without the MCS251 backend -- which still link clang's
+/// unconditional BackendUtil reference -- resolve it).
+StringRef getMCS251ContractFeaturePrefix();
+
+/// Format a contract as the target-feature transport spelling
+/// "+mcs251-memory-contract=v-t-as0-p-e" (dash separated, because feature
+/// strings are comma-split). Single source of this spelling: clang's
+/// BackendUtil emits it and the MCS251 target machine parses it.
+std::string formatMemoryContractFeature(const MemoryContract &Contract);
+
 /// Return the canonical MCS-251 data-layout description for the requested
 /// numeric layout. Both 16-bit and 32-bit AS0 v2 variants are executable.
 std::optional<LayoutDesc> getLayoutDesc(ASLayoutVersion Version,

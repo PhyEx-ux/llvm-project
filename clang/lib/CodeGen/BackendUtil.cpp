@@ -420,7 +420,11 @@ static bool initTargetOptions(const CompilerInstance &CI,
   Options.EABIVersion = TargetOpts.EABIVersion;
 
   // Forward the numeric MCS-251 storage-model contract to the backend.
-  Options.MCS251Memory = TargetOpts.MCS251Memory;
+  // P1-2: llvm::TargetOptions no longer carries an MCS251Memory field (the
+  // target must not leak into the generic CodeGen layer); the contract now
+  // travels through the target-feature string using the shared
+  // llvm::MCS251::formatMemoryContractFeature spelling, which the MCS251
+  // target machine resolves with the same llvm::MCS251 parsers.
 
   if (CodeGenOpts.hasSjLjExceptions())
     Options.ExceptionModel = llvm::ExceptionHandling::SjLj;
@@ -626,6 +630,11 @@ void EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
   std::optional<llvm::CodeModel::Model> CM = getCodeModel(CodeGenOpts);
   std::string FeaturesStr =
       llvm::join(TargetOpts.Features.begin(), TargetOpts.Features.end(), ",");
+  if (Triple.getArch() == llvm::Triple::mcs251 &&
+      TargetOpts.MCS251Memory.isSpecified())
+    FeaturesStr = FeaturesStr + (FeaturesStr.empty() ? "" : ",") +
+                   llvm::MCS251::formatMemoryContractFeature(
+                       TargetOpts.MCS251Memory);
   llvm::Reloc::Model RM = CodeGenOpts.RelocationModel;
   std::optional<CodeGenOptLevel> OptLevelOrNone =
       CodeGenOpt::getLevel(CodeGenOpts.OptimizationLevel);

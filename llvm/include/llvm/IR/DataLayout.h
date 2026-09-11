@@ -130,6 +130,10 @@ private:
     MM_GOFF,
     MM_Mips,
     MM_XCOFF,
+    // UPSTREAM-DIFF(MCS251): fork-only ASxxxx mangling mode ('m:s'); see the
+    // 's' case in DataLayout.cpp parseSpecifier and docs/MCS251.rst. Bitcode
+    // or textual IR carrying m:s in its data layout is not consumable by
+    // upstream LLVM.
     MM_ASXXXX
   };
   ManglingModeT ManglingMode = MM_None;

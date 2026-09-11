@@ -314,9 +314,13 @@ class MCS251AsmPrinter final : public AsmPrinter {
   }
 
   bool isV1ObjectCompatible(const Module &M) const {
-    const auto &Contract = getMCS251TM().Options.MCS251Memory;
-    if (!Contract.isSpecified() || Contract.ASLayoutVersion == 1)
+    // P1-2: the contract is resolved target-side (feature string or the
+    // llc command-line options), no longer through generic TargetOptions.
+    const std::optional<MCS251::MemoryContract> &Resolved =
+        getMCS251TM().getMemoryContract();
+    if (!Resolved || !Resolved->isSpecified() || Resolved->ASLayoutVersion == 1)
       return true;
+    const MCS251::MemoryContract &Contract = *Resolved;
     // Of the layout-v2 requests, only the 32-bit/InternalExtended profile can
     // be downgraded to the implemented v1 placement and pointer ABI. Tiny,
     // Small/InternalMovable and Large/ExternalData require v2 identity even if

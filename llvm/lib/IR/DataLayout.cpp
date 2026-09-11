@@ -674,6 +674,11 @@ Error DataLayout::parseSpecification(
       ManglingMode = MM_XCOFF;
       break;
     case 's':
+      // UPSTREAM-DIFF(MCS251): 'm:s' (MM_ASXXXX) is an MCS-251 fork
+      // extension for the ASxxxx symbol syntax (global '_', private '.L_',
+      // '\1' exact-name escape). No upstream target uses it, so upstream
+      // LLVM rejects it as an unknown specifier: any IR/bitcode whose data
+      // layout contains m:s cannot be consumed by upstream LLVM.
       ManglingMode = MM_ASXXXX;
       break;
     }

@@ -22,6 +22,7 @@ MachineFunctionPass *createMCS251BranchRelaxationPass();
 void initializeMCS251AsmPrinterPass(PassRegistry &);
 void initializeMCS251BranchRelaxationPass(PassRegistry &);
 void initializeMCS251DAGToDAGISelLegacyPass(PassRegistry &);
+void initializeMCS251LoweringPrepLegacyPass(PassRegistry &);
 } // namespace llvm
 
 #endif

@@ -12,6 +12,7 @@
 #include "MCS251Subtarget.h"
 #include "llvm/CodeGen/CodeGenTargetMachineImpl.h"
 #include "llvm/Support/Error.h"
+#include "llvm/TargetParser/MCS251TargetParser.h"
 #include <optional>
 
 namespace llvm {
@@ -20,6 +21,11 @@ class MCS251TargetMachine final : public CodeGenTargetMachineImpl {
   MCS251Subtarget Subtarget;
   const bool ELFObjectOutput;
   bool ObjectFileOutput = false;
+  // P1-2: the numeric storage-model contract no longer lives in the generic
+  // TargetOptions; it arrives through the target-feature string
+  // (+mcs251-memory-contract=v1-v2-v32-v8-v1) or, for direct llc-style
+  // users, the two command-line options below, and is resolved once here.
+  std::optional<MCS251::MemoryContract> MemoryContract;
 
 public:
   MCS251TargetMachine(const Target &T, const Triple &TT, StringRef CPU,
@@ -36,6 +42,10 @@ public:
 
   bool usesELFObjects() const { return ELFObjectOutput; }
   bool emitsObjectFile() const { return ObjectFileOutput; }
+
+  const std::optional<MCS251::MemoryContract> &getMemoryContract() const {
+    return MemoryContract;
+  }
 
   void registerPassBuilderCallbacks(PassBuilder &PB) override;
   TargetPassConfig *createPassConfig(PassManagerBase &PM) override;
