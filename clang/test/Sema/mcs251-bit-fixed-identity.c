@@ -41,10 +41,12 @@ volatile __bit Y = 1;
 sbit Y = 0x24; // expected-error {{conflicting redeclaration of 'sbit' 'Y' at a different bit address}}
 
 //--- codegen-sbit.c
-// A controlled fixed bit reference used in an expression must fail closed
-// rather than emit an ordinary byte global/store.
+// codegen-no-diagnostics
+// A controlled fixed bit reference now lowers to the target bit intrinsics
+// (BIT M2): uses no longer fail closed and no ordinary byte global/store is
+// emitted. The instruction-level assertions live in
+// clang/test/CodeGen/mcs251-bit-fixed-ref.c.
 sbit Z = 0x88 ^ 3;
-// codegen-error@+1 {{cannot compile this MCS251 fixed bit reference yet}}
 void use_z(void) { Z = 1; }
 
 //--- codegen-global.c

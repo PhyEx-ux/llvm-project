@@ -5283,6 +5283,15 @@ void CodeGenFunction::EmitCallArg(CallArgList &args, const Expr *E,
     return;
   }
 
+  // An MCS-251 bit actual argument crosses the P01 explicit-i8 ABI boundary,
+  // which is a later slice. Fail closed rather than emitting a zeroext i1
+  // argument (the message matches the other MCS-251 bit CodeGen gates).
+  if (type.getUnqualifiedType()->isMCS251BitType()) {
+    CGM.ErrorUnsupported(E, "MCS251 bit argument");
+    return args.add(RValue::get(llvm::UndefValue::get(ConvertType(type))),
+                    type);
+  }
+
   assert(type->isReferenceType() == E->isGLValue() &&
          "reference binding to unmaterialized r-value!");
 

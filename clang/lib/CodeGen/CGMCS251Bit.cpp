@@ -33,6 +33,7 @@
 #include "llvm/ADT/APSInt.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsMCS251.h"
 #include <optional>
 
 using namespace clang;
@@ -77,7 +78,12 @@ std::optional<llvm::APSInt> getMCS251FixedBitAddress(const Expr *E,
   }
   if (const auto *CE = dyn_cast<CallExpr>(E)) {
     const FunctionDecl *FD = CE->getDirectCallee();
-    if (!FD || FD->getBuiltinID() != MCS251::BI__builtin_mcs251_bit_lvalue)
+    // Double-guarded by the target triple: target builtin enums all start at
+    // Builtin::FirstTSBuiltin, so the bare ID comparison would also match a
+    // foreign builtin on another target (X86's _AddressOfReturnAddress
+    // numerically collides with __builtin_mcs251_bit_lvalue).
+    if (!FD || !CodeGenFunction::isMCS251Target(Ctx) ||
+        FD->getBuiltinID() != MCS251::BI__builtin_mcs251_bit_lvalue)
       return std::nullopt;
     if (CE->getNumArgs() != 1)
       return std::nullopt;
@@ -146,9 +152,14 @@ void CodeGenFunction::EmitStoreThroughMCS251BitLValue(RValue Src, LValue Dst) {
           ? Val
           : Builder.CreateICmpNE(
                 Val, llvm::Constant::getNullValue(Val->getType()), "bit.nz");
-  llvm::BasicBlock *SetBB = createBasicBlock("mcs251.bit.set");
-  llvm::BasicBlock *ClrBB = createBasicBlock("mcs251.bit.clear");
-  llvm::BasicBlock *ContBB = createBasicBlock("mcs251.bit.cont");
+  // The three blocks must be attached to the current function (a bare
+  // createBasicBlock() leaves them parentless and the module verifier rejects
+  // the dangling CFG). The condition above already sampled the RHS once; each
+  // arm then performs exactly one bit write, per §7.5.
+  llvm::Function *Fn = Builder.GetInsertBlock()->getParent();
+  llvm::BasicBlock *SetBB = createBasicBlock("mcs251.bit.set", Fn);
+  llvm::BasicBlock *ClrBB = createBasicBlock("mcs251.bit.clear", Fn);
+  llvm::BasicBlock *ContBB = createBasicBlock("mcs251.bit.cont", Fn);
   Builder.CreateCondBr(Bit, SetBB, ClrBB);
   Builder.SetInsertPoint(SetBB);
   Builder.CreateCall(CGM.getIntrinsic(llvm::Intrinsic::mcs251_bit_set), Addr);

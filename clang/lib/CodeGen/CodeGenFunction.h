@@ -4476,6 +4476,18 @@ public:
   // MCS-251 controlled bit lvalues (BIT task breakdown BT04/BT05; P01/P02/P09)
   //===--------------------------------------------------------------------===//
 
+  /// True when \p Ctx belongs to the MCS-251 target. Every CodeGen path that
+  /// dispatches on an MCS251:: builtin enum must check this first: target
+  /// builtin IDs are per-target enumerations that all start at
+  /// clang::Builtin::FirstTSBuiltin, so the same numeric ID names a different
+  /// builtin on every other target (X86's _AddressOfReturnAddress numerically
+  /// collides with __builtin_mcs251_bit_lvalue, for instance). This mirrors
+  /// the target isolation CGBuiltin::EmitTargetBuiltinExpr performs by
+  /// dispatching on getTriple().getArch().
+  static bool isMCS251Target(const ASTContext &Ctx) {
+    return Ctx.getTargetInfo().getTriple().getArch() == llvm::Triple::mcs251;
+  }
+
   /// Return the controlled bit l-value denoted by \p E, or an invalid LValue
   /// (isSimple() false and not isMCS251Bit()) if \p E is not a controlled
   /// MCS-251 bit reference. Handles both routes: a reference to an old-style

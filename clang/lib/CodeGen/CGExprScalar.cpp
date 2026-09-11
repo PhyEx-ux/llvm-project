@@ -33,6 +33,7 @@
 #include "clang/Basic/CodeGenOptions.h"
 #include "clang/Basic/DiagnosticTrap.h"
 #include "clang/Basic/TargetInfo.h"
+#include "clang/Basic/TargetBuiltins.h"
 #include "llvm/ADT/APFixedPoint.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/IR/Argument.h"
@@ -679,6 +680,19 @@ public:
   Value *VisitCastExpr(CastExpr *E);
 
   Value *VisitCallExpr(const CallExpr *E) {
+    // An MCS-251 controlled fixed bit lvalue read
+    // (__builtin_mcs251_bit_lvalue(N) used as a value) loads through the bit
+    // intrinsics (EmitCallExprLValue intercepts the lvalue); it must not fall
+    // through to the unhandled-builtin path (M2 / BIT BT04). The ID check is
+    // double-guarded by the target triple: every target's TS builtin enum
+    // starts at Builtin::FirstTSBuiltin, so the bare numeric comparison also
+    // matches foreign builtins on other targets (X86's
+    // _AddressOfReturnAddress) and must not fire there.
+    if (const FunctionDecl *FD = E->getDirectCallee())
+      if (CodeGenFunction::isMCS251Target(CGF.getContext()) &&
+          FD->getBuiltinID() == MCS251::BI__builtin_mcs251_bit_lvalue)
+        return EmitLoadOfLValue(E);
+
     if (E->getCallReturnType(CGF.getContext())->isReferenceType())
       return EmitLoadOfLValue(E);
 

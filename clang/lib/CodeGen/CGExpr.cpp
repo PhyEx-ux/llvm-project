@@ -6540,6 +6540,17 @@ RValue CodeGenFunction::EmitCallExpr(const CallExpr *E,
   if (E->getCallee()->getType()->isBlockPointerType())
     return EmitBlockCallExpr(E, ReturnValue, CallOrInvoke);
 
+  // An MCS-251 bit return type through an indirect callee never passes
+  // CodeGenModule::GetOrCreateLLVMFunction, so the ABI gate there would be
+  // bypassed; fail closed here with the same message instead of emitting a
+  // zeroext i1 call. The controlled fixed-bit lvalue builtin is exempt (it
+  // is intercepted as an lvalue, never a real call).
+  if (!E->getDirectCallee() &&
+      E->getType().getUnqualifiedType()->isMCS251BitType()) {
+    CGM.ErrorUnsupported(E, "MCS251 bit return type");
+    return GetUndefRValue(E->getType());
+  }
+
   if (const auto *CE = dyn_cast<CXXMemberCallExpr>(E))
     return EmitCXXMemberCallExpr(CE, ReturnValue, CallOrInvoke);
 
@@ -6879,9 +6890,13 @@ LValue CodeGenFunction::EmitCallExprLValue(const CallExpr *E,
                                            llvm::CallBase **CallOrInvoke) {
   // __builtin_mcs251_bit_lvalue is a controlled fixed bit lvalue (M2 / BT04):
   // lower it to the target bit intrinsics, never an ordinary call or byte
-  // reference.
+  // reference. The ID check is double-guarded by the target triple: every
+  // target's TS builtin enum starts at Builtin::FirstTSBuiltin, so the bare
+  // numeric comparison also matches foreign builtins on other targets (X86's
+  // _AddressOfReturnAddress) and must not fire there.
   if (const FunctionDecl *FD = E->getDirectCallee())
-    if (FD->getBuiltinID() == clang::MCS251::BI__builtin_mcs251_bit_lvalue)
+    if (isMCS251Target(getContext()) &&
+        FD->getBuiltinID() == clang::MCS251::BI__builtin_mcs251_bit_lvalue)
       return EmitMCS251ControlledBitLValue(E);
 
   RValue RV = EmitCallExpr(E, ReturnValueSlot(), CallOrInvoke);

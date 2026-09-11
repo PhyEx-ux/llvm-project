@@ -5620,6 +5620,15 @@ llvm::Constant *CodeGenModule::GetOrCreateLLVMFunction(
 
   std::string NameWithoutMultiVersionMangling;
   if (const FunctionDecl *FD = cast_or_null<FunctionDecl>(D)) {
+    // An MCS-251 bit return type crosses the P01 explicit-i8 ABI boundary,
+    // which is a later slice. Fail closed rather than emitting a zeroext i1
+    // return (the message matches the other MCS-251 bit CodeGen gates).
+    // Builtins are exempt: the controlled fixed-bit lvalue builtin itself is
+    // declared `__bit(...)` and is intercepted before a real call exists.
+    if (FD->getBuiltinID() == 0 &&
+        FD->getReturnType().getUnqualifiedType()->isMCS251BitType())
+      ErrorUnsupported(FD, "MCS251 bit return type");
+
     // For the device mark the function as one that should be emitted.
     if (getLangOpts().OpenMPIsTargetDevice && OpenMPRuntime &&
         !OpenMPRuntime->markAsGlobalTarget(GD) && FD->isDefined() &&

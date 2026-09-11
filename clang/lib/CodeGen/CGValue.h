@@ -188,7 +188,8 @@ class LValue {
     ExtVectorElt, // This is an extended vector subset, use getExtVectorComp
     GlobalReg,    // This is a register l-value, use getGlobalReg()
     MatrixElt,    // This is a matrix element, use getVector*
-    MatrixRow     // This is a matrix vector subset, use getVector*
+    MatrixRow,    // This is a matrix vector subset, use getVector*
+    MCS251Bit     // This is an MCS-251 controlled bit l-value, use getMCS251Bit*
   } LVType;
 
   union {
