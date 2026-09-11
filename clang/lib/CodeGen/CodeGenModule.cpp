@@ -7692,15 +7692,14 @@ CodeGenModule::GetConstantArrayFromStringLiteral(const StringLiteral *E) {
 static llvm::GlobalVariable *
 GenerateStringLiteral(llvm::Constant *C, llvm::GlobalValue::LinkageTypes LT,
                       CodeGenModule &CGM, StringRef GlobalName,
-                      CharUnits Alignment) {
-  unsigned AddrSpace = CGM.getContext().getTargetAddressSpace(
-      CGM.GetGlobalConstantAddressSpace());
+                      CharUnits Alignment, LangAS AddrSpace) {
+  unsigned ASTargetAS = CGM.getContext().getTargetAddressSpace(AddrSpace);
 
   llvm::Module &M = CGM.getModule();
   // Create a global variable for this string
   auto *GV = new llvm::GlobalVariable(
       M, C->getType(), !CGM.getLangOpts().WritableStrings, LT, C, GlobalName,
-      nullptr, llvm::GlobalVariable::NotThreadLocal, AddrSpace);
+      nullptr, llvm::GlobalVariable::NotThreadLocal, ASTargetAS);
   GV->setAlignment(Alignment.getAsAlign());
   GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   if (GV->isWeakForLinker()) {
@@ -7721,8 +7720,15 @@ CodeGenModule::GetAddrOfConstantStringFromLiteral(const StringLiteral *S,
       getContext().getAlignOfGlobalVarInChars(S->getType(), /*VD=*/nullptr);
 
   llvm::Constant *C = GetConstantArrayFromStringLiteral(S);
+  // A literal whose AST type carries a target address space (MCS-251 X1: a
+  // string constant denoting an object in the CODE space) is emitted in that
+  // space. It is not merged with same-content literals of the default space
+  // and is handed out without a cast back to the default space.
+  LangAS LiteralAS = S->getType().getAddressSpace();
+  bool SpaceQualifiedLiteral =
+      LiteralAS != LangAS::Default && LiteralAS != GetGlobalConstantAddressSpace();
   llvm::GlobalVariable **Entry = nullptr;
-  if (!LangOpts.WritableStrings) {
+  if (!LangOpts.WritableStrings && !SpaceQualifiedLiteral) {
     Entry = &ConstantStringMap[C];
     if (auto GV = *Entry) {
       if (Alignment.getAsAlign() > GV->getAlign().valueOrOne())
@@ -7750,7 +7756,9 @@ CodeGenModule::GetAddrOfConstantStringFromLiteral(const StringLiteral *S,
     GlobalVariableName = Name;
   }
 
-  auto GV = GenerateStringLiteral(C, LT, *this, GlobalVariableName, Alignment);
+  auto GV = GenerateStringLiteral(
+      C, LT, *this, GlobalVariableName, Alignment,
+      SpaceQualifiedLiteral ? LiteralAS : GetGlobalConstantAddressSpace());
 
   CGDebugInfo *DI = getModuleDebugInfo();
   if (DI && getCodeGenOpts().hasReducedDebugInfo())
@@ -7758,6 +7766,9 @@ CodeGenModule::GetAddrOfConstantStringFromLiteral(const StringLiteral *S,
 
   if (Entry)
     *Entry = GV;
+
+  if (SpaceQualifiedLiteral)
+    return ConstantAddress(GV, GV->getValueType(), Alignment);
 
   SanitizerMD->reportGlobal(GV, S->getStrTokenLoc(0), "<string literal>");
 
@@ -7801,7 +7812,8 @@ ConstantAddress CodeGenModule::GetAddrOfConstantCString(const std::string &Str,
 
   // Create a global variable for this.
   auto GV = GenerateStringLiteral(C, llvm::GlobalValue::PrivateLinkage, *this,
-                                  GlobalName, Alignment);
+                                  GlobalName, Alignment,
+                                  GetGlobalConstantAddressSpace());
   if (Entry)
     *Entry = GV;
 

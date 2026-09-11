@@ -29,6 +29,28 @@ public:
 
   bool CheckMCS251BuiltinFunctionCall(unsigned BuiltinID, CallExpr *TheCall);
 
+  /// MCS-251 X1 (DESIGN.md B.1/B.2): CODE (target address space 4) is
+  /// read-only, so every store through an `__code`-qualified lvalue --
+  /// assignment, compound assignment, and ++/-- targets alike -- is diagnosed
+  /// in Sema rather than left to the backend's fail-closed gate. \p LHS is the
+  /// write target of the operation. Returns true if a diagnostic was emitted.
+  bool CheckCodeStore(Expr *LHS, SourceLocation Loc);
+
+  /// MCS-251 X1: diagnose builtin calls that store through their first
+  /// (pointer) argument -- the memcpy/memmove/memset/strcpy destination
+  /// family and the atomic store/exchange/RMW builtins -- when that argument
+  /// points into the read-only CODE space. Returns true if a diagnostic was
+  /// emitted.
+  bool CheckMCS251CodeSpaceBuiltinCall(unsigned BuiltinID, CallExpr *TheCall);
+
+  /// MCS-251 X1: a string literal that initializes a pointer into the CODE
+  /// space denotes a constant object *in that space*, not in the default one
+  /// (official `uint8 code *tab[] = {"a", "b"}` shape). Re-types the literal
+  /// before the ordinary array-to-pointer decay so the conversion checks and
+  /// CodeGen see matching address spaces. Returns true if \p RHS was
+  /// adjusted.
+  bool AdjustMCS251StringLiteralPointerInit(QualType LHSType, ExprResult &RHS);
+
   /// Enforce the DIALECT-FRONTEND-DESIGN §7.5 forced-operation restrictions on
   /// controlled fixed bit lvalues reached from the full expression \p E: the
   /// CPL toggle (`X ^= 1`, `X = !X`) is only valid as a discarded-value

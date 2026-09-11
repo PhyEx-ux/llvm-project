@@ -345,6 +345,12 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
                                              /*DiscardedValue=*/false))
       return StmtError();
 
+    // MCS-251 X1: an asm output operand is a store to the operand when the
+    // instruction runs, so an operand in the read-only CODE space is
+    // rejected here (read-write `+r` outputs included).
+    if (MCS251().CheckCodeStore(OutputExpr, OutputExpr->getBeginLoc()))
+      return StmtError();
+
     // Check that the output expression is compatible with memory constraint.
     if (Info.allowsMemory() &&
         checkExprMemoryConstraintCompat(*this, OutputExpr, Info, false))

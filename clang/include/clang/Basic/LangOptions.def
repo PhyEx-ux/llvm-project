@@ -309,6 +309,7 @@ LANGOPT(NewInfallible , 1, 0, NotCompatible, "Treats throwing global C++ operato
 LANGOPT(ParseUnknownAnytype, 1, 0, Benign, "__unknown_anytype")
 LANGOPT(MCS251Keil , 1, 0, Benign, "MCS251 Keil C51 dialect: 'interrupt N' function-declarator suffix")
 LANGOPT(MCS251Bit , 1, 0, Benign, "MCS251 core bit type: '__bit' spelling is a type specifier")
+LANGOPT(MCS251AddrSpaces , 1, 0, Benign, "MCS251 core address-space qualifiers: '__xdata'/'__code' spellings are keywords")
 LANGOPT(DebuggerSupport , 1, 0, Benign, "debugger support")
 LANGOPT(DebuggerCastResultToId, 1, 0, Benign, "for 'po' in the debugger, cast the result to id if it is of unknown type")
 LANGOPT(DebuggerObjCLiteral , 1, 0, Benign, "debugger Objective-C literals and subscripting support")

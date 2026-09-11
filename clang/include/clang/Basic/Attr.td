@@ -1877,6 +1877,16 @@ def OpenCLGenericAddressSpace : TypeAttr {
   let Documentation = [OpenCLAddressSpaceGenericDocs];
 }
 
+def MCS251XDataAddressSpace : TypeAttr {
+  let Spellings = [CustomKeyword<"__xdata">, CustomKeyword<"xdata">];
+  let Documentation = [MCS251XDataAddressSpaceDocs];
+}
+
+def MCS251CodeAddressSpace : TypeAttr {
+  let Spellings = [CustomKeyword<"__code">, CustomKeyword<"code">];
+  let Documentation = [MCS251CodeAddressSpaceDocs];
+}
+
 def OpenCLNoSVM : Attr {
   let Spellings = [GNU<"nosvm">];
   let Subjects = SubjectList<[Var]>;

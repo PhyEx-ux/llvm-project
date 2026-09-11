@@ -12738,6 +12738,15 @@ def err_mcs251_bit_atomic
     : Error<"atomic MCS251 'bit' type is not allowed">;
 def err_mcs251_bit_addrspace
     : Error<"MCS251 'bit' cannot be declared in a non-default address space">;
+// MCS251 __xdata/__code address space qualifiers (X1 slice, DESIGN.md B.1/B.2):
+// CODE (AS4) is read-only, and only pointers into the named spaces have a
+// signature ABI, so a return type qualified with the space itself is rejected.
+def err_mcs251_code_store
+    : Error<"cannot store to an MCS251 '__code' object; "
+            "the CODE address space is read-only">;
+def err_mcs251_space_return_type
+    : Error<"function return type may not be qualified with an "
+            "MCS251 '__xdata' or '__code' address space">;
 def err_mcs251_sbit_requires_static
     : Error<"'sbit' declaration must be at file scope with static storage">;
 def err_mcs251_sbit_missing_initializer

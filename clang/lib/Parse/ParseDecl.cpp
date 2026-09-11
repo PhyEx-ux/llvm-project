@@ -1092,6 +1092,15 @@ void Parser::ParseOpenCLQualifiers(ParsedAttributes &Attrs) {
                Tok.getKind());
 }
 
+void Parser::ParseMCS251Qualifiers(ParsedAttributes &Attrs) {
+  // MCS251 __xdata/__code (and Keil xdata/code) address space qualifiers. The
+  // caller consumes the qualifier token, mirroring ParseOpenCLQualifiers.
+  IdentifierInfo *AttrName = Tok.getIdentifierInfo();
+  SourceLocation AttrNameLoc = Tok.getLocation();
+  Attrs.addNew(AttrName, AttrNameLoc, AttributeScopeInfo(), nullptr, 0,
+               Tok.getKind());
+}
+
 bool Parser::isHLSLQualifier(const Token &Tok) const {
   return Tok.is(tok::kw_groupshared) || Tok.is(tok::kw_row_major) ||
          Tok.is(tok::kw_column_major);
@@ -4672,6 +4681,16 @@ void Parser::ParseDeclarationSpecifiers(
     case tok::kw___read_write:
       ParseOpenCLQualifiers(DS.getAttributes());
       break;
+    // MCS251 __xdata/__code (and Keil xdata/code) address space qualifiers:
+    // the tokens are only registered on the MCS-251 target in C, so no
+    // additional language gate is required here. The qualifier applies to the
+    // object type being declared (`char code tab[]`) or, when the declarator
+    // declares a pointer, to the type that pointer designates
+    // (`BYTE xdata *p`).
+    case tok::kw___mcs251_xdata:
+    case tok::kw___mcs251_code:
+      ParseMCS251Qualifiers(DS.getAttributes());
+      break;
     case tok::kw_row_major:
     case tok::kw_column_major:
     case tok::kw_groupshared:
@@ -5785,6 +5804,11 @@ bool Parser::isTypeSpecifierQualifier(const Token &Tok) {
   case tok::kw___read_write:
   case tok::kw___write_only:
   case tok::kw___funcref:
+
+  // MCS251 __xdata/__code (and Keil xdata/code) address space qualifiers;
+  // the tokens are only registered on the MCS-251 target in C.
+  case tok::kw___mcs251_xdata:
+  case tok::kw___mcs251_code:
     return true;
 
   case tok::kw_private:
@@ -5965,6 +5989,11 @@ bool Parser::isDeclarationSpecifier(
   case tok::kw___ob_wrap:
   case tok::kw___ob_trap:
   case tok::kw__Sat:
+
+    // MCS251 __xdata/__code (and Keil xdata/code) address space qualifiers;
+    // the tokens are only registered on the MCS-251 target in C.
+  case tok::kw___mcs251_xdata:
+  case tok::kw___mcs251_code:
 
     // function-specifier
   case tok::kw_inline:
@@ -6323,6 +6352,18 @@ void Parser::ParseTypeQualifierListOpt(
     case tok::kw___write_only:
     case tok::kw___read_write:
       ParseOpenCLQualifiers(DS.getAttributes());
+      break;
+
+    // MCS251 __xdata/__code (and Keil xdata/code) in the post-'*' position
+    // (X1-3, Keil `char * xdata p`): here the qualifier names the storage of
+    // the *pointer object itself*, in contrast to the specifier position
+    // which qualifies what the pointer designates. As a type attribute
+    // attached to the pointer declarator chunk it is processed by SemaType at
+    // the pointer position -- the same placement the equivalent
+    // `char * __attribute__((address_space(3))) p` gets.
+    case tok::kw___mcs251_xdata:
+    case tok::kw___mcs251_code:
+      ParseMCS251Qualifiers(DS.getAttributes());
       break;
 
     case tok::kw_groupshared:

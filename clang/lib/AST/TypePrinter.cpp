@@ -2049,6 +2049,10 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
   case attr::OpenCLConstantAddressSpace:
   case attr::OpenCLGenericAddressSpace:
   case attr::HLSLGroupSharedAddressSpace:
+  // The MCS251 keyword qualifiers live in the Qualifiers address space, which
+  // was already printed from the modified type above; nothing to add here.
+  case attr::MCS251XDataAddressSpace:
+  case attr::MCS251CodeAddressSpace:
     // FIXME: Update printAttributedBefore to print these once we generate
     // AttributedType nodes for them.
     break;

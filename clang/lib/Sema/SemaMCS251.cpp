@@ -20,6 +20,7 @@
 #include "clang/AST/Stmt.h"
 #include "clang/AST/StmtOpenACC.h"
 #include "clang/AST/StmtOpenMP.h"
+#include "clang/Basic/AddressSpaces.h"
 #include "clang/Basic/DiagnosticSema.h"
 #include "clang/Basic/TargetBuiltins.h"
 #include "clang/Basic/TargetInfo.h"
@@ -141,6 +142,433 @@ static std::optional<bool> getFoldedCondition(const Expr *E, ASTContext &Ctx) {
           E->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx))
     return !V->isZero();
   return std::nullopt;
+}
+
+/// Is the current translation unit being compiled for the MCS-251 target?
+/// Every MCS-251-specific check is gated on this: target address space 4 is
+/// the MCS-251 CODE space only on this target, and other targets may use the
+/// same number (`address_space(4)` on x86, ...) for their own purposes.
+static bool isMCS251Target(const ASTContext &Ctx) {
+  return Ctx.getTargetInfo().getTriple().getArch() == llvm::Triple::mcs251;
+}
+
+bool SemaMCS251::CheckCodeStore(Expr *LHS, SourceLocation Loc) {
+  if (!LHS)
+    return false;
+  // X1-1: gate the check on the target. A legal `address_space(4)` variable
+  // on any other target must keep its ordinary assignment/inc-dec behavior.
+  if (!isMCS251Target(getASTContext()))
+    return false;
+  QualType T = LHS->getType();
+  // Fast path: the overwhelmingly common case has no address space at all.
+  if (T.getAddressSpace() == LangAS::Default)
+    return false;
+  if (!isMCS251CodeAddressSpace(T.getAddressSpace()))
+    return false;
+  Diag(Loc, diag::err_mcs251_code_store) << LHS->getSourceRange();
+  return true;
+}
+
+//===----------------------------------------------------------------------===//
+// Builtins that write through a pointer argument (X1-2, X1-5, X1-6)
+//===----------------------------------------------------------------------===//
+
+namespace {
+/// Bit N of a write mask: call argument N is a write destination.
+constexpr unsigned M251ArgBit(unsigned N) { return 1u << N; }
+
+/// One row per builtin family that writes through a pointer argument.
+/// \p Name is the builtin spelling with "__builtin_" and any remaining
+/// leading underscores removed (`__builtin___memcpy_chk` becomes
+/// "memcpy_chk"; `__c11_atomic_`/`__opencl_atomic_` are normalized to
+/// `atomic_`). A row matches any spelling starting with it and the first
+/// matching row wins, so rows are ordered most-specific-first ("load_n"
+/// before "load"). Bit N of \p WriteArgs set means argument N is a write
+/// destination; the diagnostic only fires on arguments that are actually
+/// pointers, so a bit on a value/memory-order slot is over-wide bookkeeping
+/// and harmless.
+///
+/// CODE (AS4) is read-only, so writing through an argument that points into
+/// it is invalid. Adding a builtin to the model later means adding one row
+/// here. Absence from this table is not proof of a read-only operation.
+/// Unmodeled calls follow the documented call contract; the backend can
+/// reject a surviving AS4 store, but cannot infer arbitrary callee effects.
+struct MCS251BuiltinWriteSpec {
+  StringRef Name;
+  unsigned WriteArgs;
+};
+
+// The fortified `_chk` variants append the object-size argument last, so
+// their destination slots are those of the base family and the base rows
+// already cover them (prefix match after the leading-underscore strip).
+// Verified against clang/include/clang/Basic/Builtins.td:
+// __memcpy_chk, __memmove_chk, __mempcpy_chk, __memset_chk, __stpcpy_chk,
+// __strcat_chk, __strcpy_chk, __strncat_chk, __strncpy_chk and __stpncpy_chk
+// are all `(dest, ..., ..., size_t)` with the destination first.
+// X1-8 note: "object size last" does not extend to the printf family --
+// __builtin___snprintf_chk is (s, maxlen, flag, object-size, format, ...)
+// and __builtin___sprintf_chk is (s, flag, object-size, format, ...), i.e.
+// the trailing arguments are flag/format/varargs, not the object size. The
+// destination is still argument 0, so the shared sprintf/snprintf rows stay
+// slot-correct without a row of their own.
+//
+// stpncpy/stpcpy return the destination (which may be chained), so treating
+// their destination argument as a write is conservative in the safe
+// direction; there is no model in which a destination write to CODE is legal.
+//
+// X1-7: the core family above did not cover every fixed-slot writer, so a
+// builtin with a __code destination could still be emitted as a plain
+// external call the backend cannot attribute a store to (__builtin___strlcpy_chk,
+// __builtin___memccpy_chk). The table below is the result of a systematic
+// review of generic and target builtin registrations. The original 1692-row
+// type-string classification was an audit index, not a semantic proof: custom
+// signatures and CodeGen helpers required the follow-up reviews below. Writers whose
+// slots are not fixed (scanf-family varargs), stream handles (fprintf) and
+// allocators (malloc/free/strdup) intentionally have no row: a __code pointer
+// passed there falls under the external-call contract, not this check.
+// Rows stay exact-family prefixes: the only prefix shared with a const
+// spelling is stdc_memreverse8 vs. the value-returning stdc_memreverse8uN,
+// which has no pointer argument, so the shared row cannot misfire.
+//
+// X1-8: the X1-7 sweep classified rows by type string, but for a
+// CustomTypeChecking ("t") or IgnoreSignature ("T") builtin the type string is
+// a placeholder -- the real argument checking lives in SemaChecking.cpp -- so
+// "no pointer in the type string" proves nothing. Attribute-driven re-sweep of
+// the generated registration table for this target (1691 generic + 1 MCS251
+// rows): 406 CustomTypeChecking, 20 IgnoreSignature, 28 with reference/jmp_buf
+// type encodings, 96 registered for ALL_MS_LANGUAGES. Per-family conclusions
+// from the SemaChecking custom checkers:
+//   * writers with a fixed slot -> rows below (checked-arithmetic result ptr,
+//     __atomic/__scoped_atomic/__hip_atomic max/min-fetch and the scoped/hip
+//     spellings, C23/K&R/MS/z/OS va_start, ms_va_copy, the MS-gated
+//     _bittestand*/_Interlocked* stores, sigsetjmp/savectx env, os_log_format
+//     buffer, masked store/scatter and matrix store, nontemporal_store);
+//   * pure reads (confirmed, no row): align_up/align_down/assume_aligned/
+//     is_aligned, annotation, arithmetic_fence, the *g value builtins
+//     (bswapg/clzg/ctzg/popcountg/bitreverseg, stdc_*), classify_type,
+//     constant_p, complex, convertvector, shufflevector, reduce_*/elementwise_*,
+//     fpclassify/is* comparisons/signbit/isfpclass, addressof/function_start,
+//     launder, allow_sanitize_check, counted_by_ref, nondeterministic_value,
+//     is_within_lifetime, get_vtable_pointer, ptrauth_*, preserve_access_index,
+//     va_end/ms_va_end, masked_load/expand_load/gather, matrix transpose and
+//     column_major_load (returns the matrix; no out pointer), nontemporal_load,
+//     longjmp/_longjmp/siglongjmp (read the jmp_buf), vfork, umask;
+//   * no fixed write slot -> external-call contract, no row: dump_struct
+//     (writes via the user-supplied callback), invoke, operator_new/delete
+//     (allocator domain);
+//   * language-specific families require registration and emitter checks for
+//     the selected LangOpts. In particular OpenCL C can be selected here;
+//     its fixed-slot half stores are modeled below (X1-11).
+//
+// X1-9: language gating is not unreachability. Extension-gated builtins
+// (ALL_MS_LANGUAGES: _bittestandset, _Interlocked*, __iso_volatile_store, ...)
+// register the moment the enabling LangOpts (MsExtensions, MatrixTypes, ...)
+// are set, so reachability under the *current* LangOpts is exactly "the call
+// resolves to this builtin ID". The rows are therefore keyed on the builtin ID
+// at call-check time and are inert while the gate is off. Inclusion in the
+// table was chosen over rejecting -fms-extensions at the entry: a wholesale
+// rejection would also outlaw every MS extension use that never touches CODE,
+// and the write-slot table stays the single source of truth for source-level
+// write semantics.
+//
+// X1-10..12: audited entry points include builtin declarations, Sema's custom
+// signature checks, and CodeGen's custom emitters. None alone defines all
+// effects, and counting switch labels is not a proof of completeness. The
+// emitter review found zos_va_end's slot-zero store, zos_va_copy's copy, and
+// objc_memmove_collectable's delegated runtime call. OpenCL half stores also
+// remain reachable when that language is selected.
+//
+// The review follows the switch-external paths as well: libcall emission
+// (known fixed destinations use this table; arbitrary callees follow the call
+// contract), intrinsic mapping, Objective-C runtime delegation (MCS251 non-GC
+// memmove preserves address spaces), and AtomicExpr -> CGAtomic dispatch.
+// Per-architecture emitters return null for the mcs251 triple; that does not
+// exclude generic or language-selected emitters. Configuration coverage and
+// exclusions are documented in XDATA-CODE-DESIGN-SUPPLEMENT.md section 6.
+// New builtin registrations, language modes, and emitter changes require a
+// fresh write-effect review and positive/negative tests, not a type-string
+// or naming-only inference.
+constexpr MCS251BuiltinWriteSpec MCS251BuiltinWriteTable[] = {
+    // Memory/string family: destination argument 0.
+    {"memcpy", M251ArgBit(0)},
+    {"memmove", M251ArgBit(0)},
+    {"mempcpy", M251ArgBit(0)},
+    {"memset", M251ArgBit(0)},
+    {"strcpy", M251ArgBit(0)},
+    {"strncpy", M251ArgBit(0)},
+    {"stpcpy", M251ArgBit(0)},
+    {"stpncpy", M251ArgBit(0)}, // X1-5
+    {"strcat", M251ArgBit(0)},
+    {"strncat", M251ArgBit(0)},
+    // POSIX legacy forms whose destination slot differs (X1-5).
+    {"bcopy", M251ArgBit(1)}, // bcopy(src, dst, len): dst is argument 1
+    {"bzero", M251ArgBit(0)}, // bzero(dst, len)
+    // Atomic family (spelling normalized to "atomic_"): not "load" is a pure
+    // load, and fences/lock-free queries have no row at all.
+    {"atomic_load_n", 0},            // value returned, nothing stored
+    {"atomic_load", M251ArgBit(1)},  // load(A, B, M): value stored to *B (X1-6)
+    {"atomic_store", M251ArgBit(0)}, // store/store_n(/_explicit)
+    {"atomic_exchange_n", M251ArgBit(0)}, // old value returned
+    {"atomic_exchange", M251ArgBit(0) | M251ArgBit(2)}, // old value to *C
+    // *B (expected) is written on the failure path (X1-6): a conditional
+    // write is still a store into the CODE object and is diagnosed.
+    {"atomic_compare_exchange", M251ArgBit(0) | M251ArgBit(1)},
+    {"atomic_fetch_", M251ArgBit(0)},
+    {"atomic_add_fetch", M251ArgBit(0)},
+    {"atomic_sub_fetch", M251ArgBit(0)},
+    {"atomic_and_fetch", M251ArgBit(0)},
+    {"atomic_or_fetch", M251ArgBit(0)},
+    {"atomic_xor_fetch", M251ArgBit(0)},
+    {"atomic_nand_fetch", M251ArgBit(0)},
+    {"atomic_test_and_set", M251ArgBit(0)},
+    {"atomic_clear", M251ArgBit(0)},
+    {"atomic_init", M251ArgBit(0)},
+    // X1-8: the max/min-fetch RMWs were missed by the X1-7 type-string sweep
+    // because CustomTypeChecking builtins carry placeholder type strings
+    // ("void(...)"). Their SemaChecking checking stores through the object
+    // pointer, argument 0.
+    {"atomic_max_fetch", M251ArgBit(0)},
+    {"atomic_min_fetch", M251ArgBit(0)},
+    // __sync family: every form except the pure barrier writes argument 0.
+    {"sync_synchronize", 0},
+    {"sync_", M251ArgBit(0)},
+    // X1-7 sweep: string/memory writers outside the core family. Each base
+    // row also covers its fortified `_chk` spelling (destination first).
+    {"strlcpy", M251ArgBit(0)},
+    {"strlcat", M251ArgBit(0)},
+    {"memccpy", M251ArgBit(0)},
+    {"strtok", M251ArgBit(0)}, // writes s on the first call; conservative
+    {"strxfrm", M251ArgBit(0)},
+    {"wmemcpy", M251ArgBit(0)},
+    {"wmemmove", M251ArgBit(0)},
+    {"fread", M251ArgBit(0)},
+    // C23 stdbit.h: `void stdc_memreverse8(size_t n, unsigned char *p)`, so
+    // the in-place reversal target is argument 1.
+    {"stdc_memreverse8", M251ArgBit(1)},
+    // X1-7 sweep: fixed-buffer printf-family destinations. The format-lead
+    // printf/fprintf/v*printf forms write no user data slot and have no row.
+    {"sprintf", M251ArgBit(0)},
+    {"snprintf", M251ArgBit(0)},
+    {"vsprintf", M251ArgBit(0)},
+    {"vsnprintf", M251ArgBit(0)},
+    // X1-7 sweep: math out-slots.
+    {"frexp", M251ArgBit(1)},  // frexp(x, int *exp), incl. f16/f128/l spellings
+    {"modf", M251ArgBit(1)},   // modf(x, T *iptr), incl. f/l/f128 spellings
+    {"remquo", M251ArgBit(2)}, // remquo(x, y, int *quo)
+    {"sincos", M251ArgBit(1) | M251ArgBit(2)}, // sincos(x, *sin, *cos)
+    // Checked arithmetic: T __builtin_{s,u}{add,sub,mul}_overflow(a, b, T *res)
+    // with the width letter before the underscore, so one short prefix per
+    // family covers the plain/l/ll spellings.
+    {"sadd", M251ArgBit(2)},
+    {"ssub", M251ArgBit(2)},
+    {"smul", M251ArgBit(2)},
+    {"uadd", M251ArgBit(2)},
+    {"usub", M251ArgBit(2)},
+    {"umul", M251ArgBit(2)},
+    // X1-8: the width-generic forms T __builtin_{add,sub,mul}_overflow(a, b,
+    // T *res) use CustomTypeChecking (SemaChecking picks the common type and
+    // requires a pointer to a non-const integer as the third argument), so
+    // their "bool(...)" type string hid the write slot from the X1-7 sweep.
+    // No prefix overlap with the lettered forms above ("add_overflow" does not
+    // start with "addc" or "uadd").
+    {"add_overflow", M251ArgBit(2)},
+    {"sub_overflow", M251ArgBit(2)},
+    {"mul_overflow", M251ArgBit(2)},
+    // Carry builtins: T __builtin_{add,sub}c(x, y, cin, T *carry_out), the
+    // width suffix included in the prefix.
+    {"addc", M251ArgBit(3)},
+    {"subc", M251ArgBit(3)},
+    // strtod family stores the end pointer through `char **endptr` (arg 1);
+    // the "strtol"/"strtoul" prefixes also carry strtold/strtoll/strtoull,
+    // which share the slot (first-match is safe: identical masks).
+    {"strtod", M251ArgBit(1)},
+    {"strtof", M251ArgBit(1)},
+    {"strtol", M251ArgBit(1)},
+    {"strtoul", M251ArgBit(1)},
+    // X1-7 sweep: state objects written in place.
+    {"setjmp", M251ArgBit(0)}, // saves registers into the jmp_buf
+    {"va_start", M251ArgBit(0)}, // va_list storage; a __code va_list is caught
+    {"va_copy", M251ArgBit(0)},  // destination va_list
+    {"clear_padding", M251ArgBit(0)},
+    {"trivially_relocate", M251ArgBit(0)},
+    {"getcontext", M251ArgBit(0)},
+    {"init_dwarf_reg_size_table", M251ArgBit(0)},
+    // MS-gated volatile stores; the volatile loads stay unmodeled reads.
+    {"iso_volatile_store", M251ArgBit(0)},
+    // X1-8: the va_start/va_copy writers whose spellings do not share the
+    // plain rows' prefixes. All are checked by SemaChecking::BuiltinVAStart /
+    // the va_copy path and store into the va_list named by argument 0.
+    // ms_va_end/va_end are pure (the ABI teardown is a no-op in our lowering).
+    {"c23_va_start", M251ArgBit(0)},
+    {"stdarg_start", M251ArgBit(0)},
+    {"ms_va_start", M251ArgBit(0)},
+    {"ms_va_copy", M251ArgBit(0)},
+    {"zos_va_start", M251ArgBit(0)},
+    // X1-10: the z/OS spellings whose writes are defined only in the
+    // CGBuiltin custom emitters, invisible to the type-string and
+    // SemaChecking sweeps (plain NoThrow signatures, no custom checker).
+    // zos_va_end stores a null pointer into slot 0 ("curr") of the va_list
+    // named by argument 0, and zos_va_copy memcpies the whole va_list into
+    // argument 0 -- unlike va_end/ms_va_end, zos_va_end is *not* pure. Both
+    // were callable with a __code va_list with no diagnostic; same
+    // argument-0 treatment as their zos_va_start/va_copy siblings.
+    {"zos_va_end", M251ArgBit(0)},
+    {"zos_va_copy", M251ArgBit(0)},
+    // X1-10 sweep residue: __builtin_objc_memmove_collectable registers for
+    // all languages (plain Builtin, not ObjC-gated) and its custom emitter
+    // routes argument 0 to the GC write-barrier memmove -- a memmove-form
+    // destination on every target. The row is conservative-safe: like
+    // stpncpy, there is no model in which a destination write to CODE is
+    // legal.
+    {"objc_memmove_collectable", M251ArgBit(0)},
+    // X1-11: OpenCL C is selectable on MCS251. Both store_half and
+    // store_halff write argument 1; registration is conditional on the
+    // language, not proof that the operation is unreachable on this target.
+    {"store_half", M251ArgBit(1)},
+    // X1-9: MS-extension-gated memory writers. While the extension is off the
+    // names never resolve to builtin IDs and these rows are inert; with
+    // -fms-extensions the target-restricted 64/_acq/_rel/_nf forms and the
+    // x86-64/aarch64-only __builtin_ms_va_* are rejected by SemaChecking's
+    // target checks, so the reachable writers are the base forms -- all of
+    // which store through argument 0 (the T volatile* target, see the
+    // MSLangBuiltin prototypes in Builtins.td). One prefix per family:
+    // _bittestand{set,reset,complement}{,64}, _interlockedbittestand* (lower
+    // case), and the _Interlocked* RMW family (capital I -- the leading
+    // underscore is stripped before the match, the case is not).
+    // _bittest/_bittest64 (const pointer) and __iso_volatile_load* stay reads.
+    {"bittestand", M251ArgBit(0)},
+    {"interlocked", M251ArgBit(0)},
+    {"Interlocked", M251ArgBit(0)},
+    // X1-8: IgnoreSignature/special-encoding setjmp family. sigsetjmp and
+    // savectx save register state into the buffer named by argument 0, like
+    // the setjmp/_setjmp/_setjmpex spellings already covered by the "setjmp"
+    // prefix (the leading underscore of _setjmpex is stripped before the
+    // match).
+    {"sigsetjmp", M251ArgBit(0)},
+    {"savectx", M251ArgBit(0)},
+    // X1-8: fixed-slot writers from the vector/matrix/log custom-checking
+    // families, kept fail-closed (their SemaChecking argument checkers reject
+    // them without the matching type support, which leaves the rows inert,
+    // but nothing keeps a future target from accepting the types):
+    // masked_store/masked_compress_store write the pointer argument 2 and
+    // masked_scatter the pointer-vector argument 3 (SemaChecking
+    // BuiltinMaskedStore/BuiltinMaskedScatter); matrix_column_major_store
+    // writes argument 1 (the load returns the matrix and reads argument 0);
+    // nontemporal_store writes argument 1 (nontemporal_load reads argument
+    // 0); os_log_format fills the buffer in argument 0. The exact-size query
+    // __builtin_os_log_format_buffer_size only *reads* its format string, so
+    // its zero row must stay ordered before the shared prefix below.
+    {"masked_compress_store", M251ArgBit(2)},
+    {"masked_store", M251ArgBit(2)},
+    {"masked_scatter", M251ArgBit(3)},
+    {"matrix_column_major_store", M251ArgBit(1)},
+    {"nontemporal_store", M251ArgBit(1)},
+    {"os_log_format_buffer_size", 0},
+    {"os_log_format", M251ArgBit(0)},
+};
+
+/// Bitmask of the call arguments through which builtin \p BuiltinID writes,
+/// or 0 when the builtin has no modeled write (pure loads, fences, lock-free
+/// queries, and everything outside the modeled families).
+unsigned mcs251BuiltinWriteArgMask(unsigned BuiltinID, ASTContext &Ctx) {
+  if (!BuiltinID)
+    return 0;
+  // getName returns an owned string (it may merge target-registered spellings).
+  std::string NameStr = Ctx.BuiltinInfo.getName(BuiltinID);
+  StringRef Name = NameStr;
+  Name.consume_front("__builtin_");
+  // The fortified spellings carry extra leading underscores
+  // (`__builtin___memcpy_chk`); the memory/string family never legitimately
+  // starts with one, so strip them all for the table match below.
+  while (Name.starts_with("_"))
+    Name = Name.drop_front();
+  // Normalize the atomic dialect prefixes onto the shared atomic rows. The
+  // __scoped_atomic_*/__hip_atomic_* families (X1-8: CustomTypeChecking, so
+  // their "void(...)" type strings hid them from the type-string sweep) have
+  // the same argument layout as the __atomic_*/__c11_atomic_*/__opencl_atomic_
+  // forms they were modeled on: the object/destination is argument 0, the
+  // load out-pointer argument 1, compare_exchange's expected pointer
+  // argument 1.
+  Name.consume_front("c11_");
+  Name.consume_front("opencl_");
+  // Only strip a scoped/hip prefix that names an atomic builtin, so an
+  // unrelated "scoped_"/"hip_" spelling can never land on an atomic row.
+  if (Name.starts_with("scoped_atomic_") || Name.starts_with("hip_atomic_"))
+    Name.consume_front("scoped_");
+  Name.consume_front("hip_");
+  for (const MCS251BuiltinWriteSpec &Spec : MCS251BuiltinWriteTable)
+    if (Name.starts_with(Spec.Name))
+      return Spec.WriteArgs;
+  return 0;
+}
+} // namespace
+
+bool SemaMCS251::CheckMCS251CodeSpaceBuiltinCall(unsigned BuiltinID,
+                                                 CallExpr *TheCall) {
+  ASTContext &Ctx = getASTContext();
+  if (!isMCS251Target(Ctx))
+    return false;
+  unsigned WriteMask = mcs251BuiltinWriteArgMask(BuiltinID, Ctx);
+  if (!WriteMask)
+    return false;
+  if (TheCall->getNumArgs() < 1)
+    return false;
+  bool Diagnosed = false;
+  for (unsigned I = 0; WriteMask != 0; ++I, WriteMask >>= 1) {
+    if ((WriteMask & 1u) == 0)
+      continue;
+    if (I >= TheCall->getNumArgs())
+      break;
+    // A write destination's pointee (after the ordinary array decay, and
+    // after stripping the implicit conversions applied for the builtin
+    // prototype -- they never change the address space) must not be the CODE
+    // space. Non-pointer arguments (values, memory orders, sizes) are
+    // skipped.
+    const Expr *Dest = TheCall->getArg(I)->IgnoreParenImpCasts();
+    QualType T = Dest->getType();
+    QualType Pointee;
+    if (const auto *PT = T->getAs<PointerType>())
+      Pointee = PT->getPointeeType();
+    else if (const ArrayType *AT = Ctx.getAsArrayType(T))
+      Pointee = AT->getElementType();
+    else
+      continue;
+    if (isMCS251CodeAddressSpace(Pointee.getAddressSpace())) {
+      Diag(TheCall->getArg(I)->getBeginLoc(), diag::err_mcs251_code_store)
+          << TheCall->getArg(I)->getSourceRange();
+      Diagnosed = true;
+    }
+  }
+  return Diagnosed;
+}
+
+//===----------------------------------------------------------------------===//
+// String literals as CODE-resident constants (X1-4)
+//===----------------------------------------------------------------------===//
+
+bool SemaMCS251::AdjustMCS251StringLiteralPointerInit(QualType LHSType,
+                                                      ExprResult &RHS) {
+  if (!isMCS251Target(getASTContext()))
+    return false;
+  const auto *PT = dyn_cast<PointerType>(LHSType.getCanonicalType());
+  if (!PT)
+    return false;
+  QualType Pointee = PT->getPointeeType();
+  if (!isMCS251CodeAddressSpace(Pointee.getAddressSpace()))
+    return false;
+  auto *SL = dyn_cast<StringLiteral>(RHS.get()->IgnoreParens());
+  if (!SL)
+    return false;
+  QualType StrTy = SL->getType();
+  if (StrTy.getAddressSpace() != LangAS::Default)
+    return false;
+  // The literal denotes the CODE-resident constant object: qualify its array
+  // type with the target space, so the decay produces a pointer into AS4 and
+  // CodeGen places the anonymous global in AS4. The node is unique per source
+  // occurrence, so adjusting it in place cannot leak to other uses.
+  SL->setType(getASTContext().getAddrSpaceQualType(
+      StrTy, Pointee.getAddressSpace()));
+  return true;
 }
 
 bool SemaMCS251::CheckMCS251BuiltinFunctionCall(unsigned BuiltinID,
@@ -1080,12 +1508,10 @@ bool SemaMCS251::CheckMCS251ControlledBitDirectiveClauses(Stmt *Directive) {
 // OpenMP/OpenACC construct restriction context (P08 revision, plan B)
 //===----------------------------------------------------------------------===//
 
-/// The restriction context only exists on the MCS251 target: everywhere else
-/// the `bit`/`sbit` capability does not exist and entering would be dead
-/// weight.
-static bool isMCS251Target(const ASTContext &Ctx) {
-  return Ctx.getTargetInfo().getTriple().getArch() == llvm::Triple::mcs251;
-}
+// The restriction context only exists on the MCS251 target: everywhere else
+// the `bit`/`sbit` capability does not exist and entering would be dead
+// weight. (isMCS251Target is defined next to the X1 address-space checks at
+// the top of this file and shared with them.)
 
 void SemaMCS251::enterDirectiveRestriction(SourceLocation DirectiveLoc,
                                            bool IsOpenACC, bool Persistent) {

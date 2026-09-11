@@ -118,6 +118,30 @@ inline bool isPtrSizeAddressSpace(LangAS AS) {
           AS == LangAS::ptr64);
 }
 
+/// The MCS-251 stable target address space numbers carried by the
+/// `__xdata` / `__code` type qualifiers (validation/mcs251-models DESIGN.md
+/// B.2: AS3 = external data with a 24-bit effective address, AS4 = read-only
+/// CODE data and the function address space). The DataLayout strings on the
+/// target fix the pointer width of both spaces at 32 bits.
+constexpr unsigned MCS251XDataTargetAddressSpace = 3;
+constexpr unsigned MCS251CodeTargetAddressSpace = 4;
+
+/// Is \p AS the MCS-251 `__code` space? CODE is read-only: Sema rejects every
+/// store through an AS4-qualified lvalue (the backend keeps its own
+/// fail-closed gate for hand-written IR).
+inline bool isMCS251CodeAddressSpace(LangAS AS) {
+  return isTargetAddressSpace(AS) &&
+         toTargetAddressSpace(AS) == MCS251CodeTargetAddressSpace;
+}
+
+/// Is \p AS one of the MCS-251 `__xdata` / `__code` spaces written by the
+/// target qualifiers?
+inline bool isMCS251NamedDataAddressSpace(LangAS AS) {
+  return isTargetAddressSpace(AS) &&
+         (toTargetAddressSpace(AS) == MCS251XDataTargetAddressSpace ||
+          toTargetAddressSpace(AS) == MCS251CodeTargetAddressSpace);
+}
+
 } // namespace clang
 
 #endif // LLVM_CLANG_BASIC_ADDRESSSPACES_H

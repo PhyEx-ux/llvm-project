@@ -3053,6 +3053,15 @@ Sema::CheckBuiltinFunctionCall(FunctionDecl *FDecl, unsigned BuiltinID,
                                CallExpr *TheCall) {
   ExprResult TheCallResult(TheCall);
 
+  // MCS-251 X1: builtin calls that write through a modeled argument slot
+  // (the memcpy/memset family by its destinations, atomic stores/RMWs and
+  // their out/expected slots, __sync RMWs) are diagnosed at the source level
+  // when that slot points into the read-only CODE space. The check gates
+  // itself on the target and on the per-builtin write-slot table, so this is
+  // a no-op everywhere else.
+  if (MCS251().CheckMCS251CodeSpaceBuiltinCall(BuiltinID, TheCall))
+    return ExprError();
+
   // Find out if any arguments are required to be integer constant expressions.
   unsigned ICEArguments = 0;
   ASTContext::GetBuiltinTypeError Error;

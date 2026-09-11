@@ -704,6 +704,17 @@ TESTING_KEYWORD(__mcs251_interrupt , KEYALL)
 TESTING_KEYWORD(__mcs251_bit , KEYALL)
 TESTING_KEYWORD(__mcs251_sbit , KEYALL)
 
+// MCS251 xdata/code address space qualifiers. The token names are frozen as
+// kw___mcs251_xdata and kw___mcs251_code while the registered spellings are
+// the core names "__xdata"/"__code" (available on any MCS-251 target in C via
+// LangOptions.MCS251AddrSpaces, set by TargetInfo::adjust) plus the bare Keil
+// names "xdata"/"code" (only with LangOptions.MCS251Keil). They are registered
+// conditionally by IdentifierTable::AddKeywords, so they stay ordinary
+// identifiers elsewhere; TESTING_KEYWORD keeps the generic keyword loop from
+// registering them unconditionally.
+TESTING_KEYWORD(__mcs251_xdata , KEYALL)
+TESTING_KEYWORD(__mcs251_code , KEYALL)
+
 
 //===----------------------------------------------------------------------===//
 // Objective-C @-preceded keywords.

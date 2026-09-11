@@ -327,6 +327,26 @@ void IdentifierTable::AddKeywords(const LangOptions &LangOpts) {
     }
   }
 
+  // MCS251 xdata/code address space qualifiers. The core spellings "__xdata"
+  // and "__code" are available on the MCS-251 target whenever the language
+  // option is set (TargetInfo::adjust sets LangOptions::MCS251AddrSpaces),
+  // even without -fmcs251-keil; they map onto target address spaces 3 and 4
+  // (DESIGN.md B.2). The bare Keil spellings "xdata" and "code" are registered
+  // only under -fmcs251-keil so they never shadow ordinary identifiers
+  // elsewhere. See TESTING_KEYWORD(__mcs251_xdata/__mcs251_code) in
+  // TokenKinds.def. Like the bit dialect above they are C-only for this
+  // slice: in C++ the tokens stay ordinary identifiers.
+  if (!LangOpts.CPlusPlus) {
+    if (LangOpts.MCS251AddrSpaces) {
+      AddKeyword("__xdata", tok::kw___mcs251_xdata, KEYALL, LangOpts, *this);
+      AddKeyword("__code", tok::kw___mcs251_code, KEYALL, LangOpts, *this);
+    }
+    if (LangOpts.MCS251Keil) {
+      AddKeyword("xdata", tok::kw___mcs251_xdata, KEYALL, LangOpts, *this);
+      AddKeyword("code", tok::kw___mcs251_code, KEYALL, LangOpts, *this);
+    }
+  }
+
   // Add the 'import' and 'module' contextual keywords.
   get("import").setKeywordImport(true);
   get("module").setModuleKeyword(true);

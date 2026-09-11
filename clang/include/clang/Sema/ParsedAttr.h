@@ -16,6 +16,7 @@
 
 #include "clang/Basic/AttrSubjectMatchRules.h"
 #include "clang/Basic/AttributeCommonInfo.h"
+#include "clang/Basic/AddressSpaces.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/ParsedAttrInfo.h"
 #include "clang/Basic/SourceLocation.h"
@@ -605,6 +606,26 @@ public:
     default:
       return LangAS::Default;
     }
+  }
+
+  /// If this is an MCS-251 address space attribute, returns its
+  /// representation in LangAS (target AS 3 = __xdata, 4 = __code,
+  /// DESIGN.md B.2), otherwise returns default address space.
+  LangAS asMCS251LangAS() const {
+    switch (getParsedKind()) {
+    case ParsedAttr::AT_MCS251XDataAddressSpace:
+      return getLangASFromTargetAS(MCS251XDataTargetAddressSpace);
+    case ParsedAttr::AT_MCS251CodeAddressSpace:
+      return getLangASFromTargetAS(MCS251CodeTargetAddressSpace);
+    default:
+      return LangAS::Default;
+    }
+  }
+
+  /// Is this one of the MCS-251 `__xdata` / `__code` keyword qualifiers?
+  bool isMCS251AddressSpaceAttr() const {
+    return getParsedKind() == ParsedAttr::AT_MCS251XDataAddressSpace ||
+           getParsedKind() == ParsedAttr::AT_MCS251CodeAddressSpace;
   }
 
   AttributeCommonInfo::Kind getKind() const {

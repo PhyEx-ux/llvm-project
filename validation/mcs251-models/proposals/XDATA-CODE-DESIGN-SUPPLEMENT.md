@@ -59,3 +59,31 @@ movx a,@dptr / movx @dptr,a
 - XDATA 访问的**动态可达性**（指针可能指向未分配单元）由后端语义负责（按字节寻址如实生成），放置/重叠检查仍属 X3 链接器契约。
 - 尺寸代价（实测，sdas251 汇编字节计）：常量 bank 访问每字节 +2 指令 +6 字节（`mov r,#bank`+`mov 0x84,r`）；运行期无偏移访问每字节 +1 指令 +3 字节（bank 即指针 lane）；运行期带常量偏移另加 DR 常量装载 + `add dr,dr`（+4~7 指令）。Alice 反例 `_runtime`（volatile i8 @p+65536）整函数 9→14 指令、22→37 字节（含旧版被截断而省去的 2 条 ABI lane 装载）。
 - 新增指令：MOV8dpxl（编码锚 `xdata-code-bytes.mir::dpxl.mir`）；新保留寄存器 DPXL（HWEncoding 占位 60，bits<6> 上限内，不入任何分配类）。
+
+## 6. 表外调用的 CODE 写边界（首期声明，X1-7 裁定；X1-8/X1-9/X1-10 修订，2026-09-11）
+
+本节为 X1-7 裁定新增，**首期边界声明，不是永久方案**。r7 自修订（2026-09-11）撤回“有且只有三个权威/按构造完备”的结论，保留三层责任边界。下面记录已审计入口、测试配置和排除依据，不宣称对所有语言、运行时及未来 builtin 的穷尽证明。
+
+**成文边界**：凡 `SemaMCS251.cpp` `MCS251BuiltinWriteTable` 之外的调用——无写行的 builtin 与一切非 builtin 外部函数（X1-8 修订：原"非 builtin 外部调用"标题以偏概全）——若实参为 `__code` 指针，即成立 C-const 式契约，**被调方不得经该指针写**。三层各管各的，不得混谈：
+
+**已审计入口与配置（r7，2026-09-11）**：审计输入包括 Builtins.td/目标注册记录、SemaChecking 的自定义签名检查、CGBuiltin 的自定义发射及其下游助手。类型串只描述接口，不完整描述写效果；CustomTypeChecking/IgnoreSignature 占位串不能证明无指针参数。此前的标签/分组计数仅为索引（含嵌套 switch），不是独立 handler 数或覆盖证明。无写行也不证明无写效果；已知固定槽位遗漏须修复，不能用契约层豁免。
+
+- **配置范围**：MCS251 C11/C23（现代限定符、Keil 方言）、可选 MS 扩展/矩阵类型，以及 OpenCL C 1.2/2.0/3.0 的 half 读写对照。OpenCL C 实际可选，`store_half/store_halff` 第 1 参入写位表；不得以 OCL 注册条件推导目标不可达。C++ 保持关键词未注册，host 不启用 MCS251 CODE 检查。这里不承诺完整 OpenCL/HLSL/CUDA/ObjC 应用或运行时支持。half 读允许通过 Sema 并生成有效的未优化 IR，但后端 half→f32 转换尚可能按浮点能力契约拒绝；zos_va_copy 的 i64 长度 intrinsic 也仍受已有后端限制。这些后端限制不作为 CODE 写检查的替代。
+- **libcall 发射**：EmitBuiltinExpr 的 libcall 回退与普通 EmitCall 路径已核对。已建模固定目的在 Sema 拒绝 AS4 写；普通外调及变参/分配器状态按下表契约层处理。外部函数体与链接库效果不由 switch 枚举证明。
+- **intrinsic 映射**：核对 EmitBuiltinExpr 的 Clang/MS builtin 到 intrinsic 映射、实参转换及目标派发。MCS251 当前架构发射器走 default 返回空；这只排除相应架构助手，不排除通用或语言选定的 emitter。新增目标 intrinsic 映射须重新审计。
+- **ObjC 委派**：`objc_memmove_collectable` 为全语言 builtin。MCS251 非 GC 模式按 memmove 语义直接发射保留双方 AS 的 LLVM memmove，不经只接受 AS0 指针的 ObjC 运行时；CODE 仅作源合法，CODE 目的在 Sema 拒绝。内置仍返回声明中的 AS0 `void *`，非默认目的地址的返回转换在 IR 显式使用 addrspacecast。GC 模式不采用该替代，调用明确报告不支持；其它目标仍走原 ObjC runtime。这不是新增 GC ABI。
+- **CGAtomic 委派**：AtomicExpr 经 CGExprScalar 进入 CGAtomic，不在 CGBuiltin case 计数内。写表分别检查对象、load/exchange 输出和 compare-exchange expected 回写；GNU/C11/OpenCL/scoped/HIP 家族按实际参数位置复核。纯 load_n、fence/查询不写用户目的。
+- **其他助手与边界**：memcpy/memmove 展开、zos 生命周期、MS 原子助手、os_log 及向量/矩阵存储纳入已审计调用链；语言运行时、协程帧、GC、目标专用 emitter 不能仅凭名字归为纯读。未测试语言/运行时配置不在本轮覆盖声明中。新 builtin、LangOpt 或发射助手变更必须重新核查注册、Sema、下游写效果并增加读写正负例。
+
+| 层 | 覆盖 | 手段 |
+|---|---|---|
+| 源级写检查 | 已建模固定写槽位的 builtin（含 X1-11 half 写） | Sema 诊断，调用点拒绝；发现遗漏须补测试和模型 |
+| 契约层（本节） | 表外一切调用（变参写、流句柄、分配器域、外部 callee） | 无诊断；被调方违约即用户责任 |
+| 后端访存检查 | 本仓 IR 中保留 AS4 类型的 store | ISel 拒绝（fatal） |
+
+- **审计轨迹**：r1 发现目标 gate、CODE 写入口、post-`*` 与字符串表缺口；r2/r3 扩展写内置及多目的参数；r4/r5 修正占位类型串和扩展门控误判；r6 验证 zos 修复并发现 OpenCL half 写及 ObjC 源 AS 委派缺口；r7 自修并进行正负回归。写位表结合注册、Sema 和实际发射路径维护，纯读对照必须同时检查不误拒及 IR 有效性，而非仅看语法返回码。
+- **无固定槽位的写**（scanf 族变参槽、fprintf/fopen 流句柄、malloc/free/strdup 分配器域）：不建模，归入契约——被调方写即违约。
+- **契约违约的后果（X1-8 修订：收窄）**：只有当违约写**保留 AS4 类型、未显式转换掉地址空间**的路径才落为 ISel 可见的 AS4 store 并被拒绝（fatal）；显式转到通用空间再写或手写汇编被调方写 CODE，后端不设防，属用户责任。
+- **与 §3 ISR DPXL 义务的关系**：C-const 契约约束"谁可以写 CODE 对象"；§3 的 ISR 保存恢复 DPXL 义务约束"窗口寄存器跨异步抢占的保持"。两者对象不同，互不推导、互不豁免、互不冲突。
+
+后续若引入全程序写效果分析或 ABI 级 AS4 写检查，本节由新裁定替换。

@@ -2412,6 +2412,10 @@ private:
   void ParseCUDAFunctionAttributes(ParsedAttributes &attrs);
   bool isHLSLQualifier(const Token &Tok) const;
   void ParseHLSLQualifiers(ParsedAttributes &Attrs);
+  /// Parse the MCS251 `__xdata`/`__code` (and Keil `xdata`/`code`) address
+  /// space qualifiers into \p Attrs. The caller consumes the qualifier token,
+  /// mirroring ParseOpenCLQualifiers.
+  void ParseMCS251Qualifiers(ParsedAttributes &Attrs);
 
   /// Parse a version number.
   ///

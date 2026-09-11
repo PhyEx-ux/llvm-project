@@ -5342,6 +5342,47 @@ cannot point to the private address space.
   }];
 }
 
+def DocMCS251AddressSpaces : DocumentationCategory<"MCS-251 Address Spaces"> {
+  let Content = [{
+The MCS-251 target provides memory space qualifiers that map the declared
+object (or the object a pointer designates) onto the stable target address
+spaces of the MCS-251 memory model. The core spellings ``__xdata`` and
+``__code`` are available on the MCS-251 target in C; the bare spellings
+``xdata`` and ``code`` follow the Keil C51 dialect and are only enabled with
+``-fmcs251-keil``.
+
+```c
+__xdata char buf[256];          /* object in external data memory */
+char __code *p;                 /* pointer into read-only code memory */
+```
+  }];
+}
+
+def MCS251XDataAddressSpaceDocs : Documentation {
+  let Category = DocMCS251AddressSpaces;
+  let Heading = "__xdata, xdata";
+  let Content = [{
+The ``__xdata`` qualifier (Keil spelling ``xdata``) places the qualified
+object in external data memory (XDATA, target address space 3) and keeps the
+full 24-bit effective address in a 32-bit pointer container. Pointers into
+``__xdata`` may be used as parameters, returns, and aggregate members. Objects
+with automatic storage duration cannot be qualified with ``__xdata``.
+  }];
+}
+
+def MCS251CodeAddressSpaceDocs : Documentation {
+  let Category = DocMCS251AddressSpaces;
+  let Heading = "__code, code";
+  let Content = [{
+The ``__code`` qualifier (Keil spelling ``code``) places the qualified object
+in read-only code memory (CODE, target address space 4) and keeps the full
+24-bit effective address in a 32-bit pointer container; this is also the
+address space of function addresses. Storing through a ``__code`` lvalue is a
+compile-time error. Objects with automatic storage duration cannot be
+qualified with ``__code``.
+  }];
+}
+
 def OpenCLNoSVMDocs : Documentation {
   let Category = DocCatVariable;
   let Content = [{

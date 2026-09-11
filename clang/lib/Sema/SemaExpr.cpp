@@ -10274,6 +10274,12 @@ AssignConvertType Sema::CheckSingleAssignmentConstraints(QualType LHSType,
   ExprResult LocalRHS = CallerRHS;
   ExprResult &RHS = ConvertRHS ? CallerRHS : LocalRHS;
 
+  // MCS-251 X1: a string literal that initializes a pointer into the CODE
+  // space denotes a constant object in that space. Adjust the literal before
+  // the ordinary array-to-pointer decay below so the conversion checks see
+  // matching address spaces (no-op on every other target and shape).
+  MCS251().AdjustMCS251StringLiteralPointerInit(LHSType, RHS);
+
   if (const auto *LHSPtrType = LHSType->getAs<PointerType>()) {
     if (const auto *RHSPtrType = RHS.get()->getType()->getAs<PointerType>()) {
       if (RHSPtrType->getPointeeType()->hasAttr(attr::NoDeref) &&
@@ -14646,6 +14652,11 @@ QualType Sema::CheckAssignmentOperands(Expr *LHSExpr, ExprResult &RHS,
   if (CheckForModifiableLvalue(LHSExpr, Loc, *this))
     return QualType();
 
+  // MCS-251 X1: CODE (target address space 4) is read-only; assignment and
+  // compound assignment through an '__code' lvalue are diagnosed here.
+  if (MCS251().CheckCodeStore(LHSExpr, Loc))
+    return QualType();
+
   QualType LHSType = LHSExpr->getType();
   QualType RHSType = CompoundType.isNull() ? RHS.get()->getType() :
                                              CompoundType;
@@ -14903,6 +14914,11 @@ static QualType CheckIncrementDecrementOperand(Sema &S, Expr *Op,
   // checking.
   if (const AtomicType *ResAtomicType = ResType->getAs<AtomicType>())
     ResType = ResAtomicType->getValueType();
+
+  // MCS-251 X1: ++/-- on an '__code' lvalue would read and write read-only
+  // CODE storage; diagnose it with the other CODE stores.
+  if (S.MCS251().CheckCodeStore(Op, OpLoc))
+    return QualType();
 
   assert(!ResType.isNull() && "no type for increment/decrement expression");
 

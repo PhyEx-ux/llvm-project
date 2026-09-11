@@ -4938,8 +4938,25 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     Address DestAddr = EmitPointerWithAlignment(E->getArg(0));
     Address SrcAddr = EmitPointerWithAlignment(E->getArg(1));
     Value *SizeVal = EmitScalarExpr(E->getArg(2));
-    CGM.getObjCRuntime().EmitGCMemmoveCollectable(*this,
-                                                  DestAddr, SrcAddr, SizeVal);
+    // MCS251 has no Objective-C GC runtime. In non-GC mode this operation
+    // is a memmove, including when its source is CODE or its destination is
+    // XDATA. Preserve both address spaces instead of routing them through a
+    // runtime declaration taking only default-space pointers (X1-12).
+    if (getTarget().getTriple().getArch() == llvm::Triple::mcs251) {
+      if (getLangOpts().getGC() != LangOptions::NonGC) {
+        ErrorUnsupported(E, "Objective-C garbage-collected memmove on MCS251");
+        return GetUndefRValue(E->getType());
+      }
+      auto *I = Builder.CreateMemMove(DestAddr, SrcAddr, SizeVal, false);
+      addInstToNewSourceAtom(I, nullptr);
+      // The builtin's declared result is default-space void *, even if the
+      // destination operand retained a non-default space. Make that result
+      // conversion explicit rather than laundering it through an AS0 slot.
+      return RValue::get(performAddrSpaceCast(DestAddr.emitRawPointer(*this),
+                                            ConvertType(E->getType())));
+    }
+    CGM.getObjCRuntime().EmitGCMemmoveCollectable(*this, DestAddr, SrcAddr,
+                                              SizeVal);
     return RValue::get(DestAddr, *this);
   }
 

@@ -6734,6 +6734,26 @@ static void HandleAddressSpaceTypeAttribute(QualType &Type,
     if (S.getLangOpts().HLSL)
       ASIdx = Attr.asHLSLLangAS();
 
+    // The MCS-251 `__xdata`/`__code` qualifiers map onto the stable target
+    // address spaces 3 and 4 (DESIGN.md B.2). 'bit' has no address-space
+    // representation, so `__xdata __bit` / `__code __bit` are rejected here
+    // rather than silently qualified.
+    if (Attr.isMCS251AddressSpaceAttr()) {
+      // X1-1: the keywords only register on the MCS-251 target; a stale
+      // serialized attribute must not map target AS 3/4 onto another target.
+      if (S.Context.getTargetInfo().getTriple().getArch() !=
+          llvm::Triple::mcs251) {
+        Attr.setInvalid();
+        return;
+      }
+      if (!Type->isDependentType() && Type->isMCS251BitType()) {
+        S.Diag(Attr.getLoc(), diag::err_mcs251_bit_addrspace);
+        Attr.setInvalid();
+        return;
+      }
+      ASIdx = Attr.asMCS251LangAS();
+    }
+
     if (ASIdx == LangAS::Default)
       llvm_unreachable("Invalid address space");
 
@@ -9158,6 +9178,8 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
     case ParsedAttr::AT_OpenCLLocalAddressSpace:
     case ParsedAttr::AT_OpenCLConstantAddressSpace:
     case ParsedAttr::AT_OpenCLGenericAddressSpace:
+    case ParsedAttr::AT_MCS251XDataAddressSpace:
+    case ParsedAttr::AT_MCS251CodeAddressSpace:
     case ParsedAttr::AT_AddressSpace:
       HandleAddressSpaceTypeAttribute(type, attr, state);
       attr.setUsedAsTypeAttr();

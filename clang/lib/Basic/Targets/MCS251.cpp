@@ -71,6 +71,10 @@ void MCS251TargetInfo::adjust(DiagnosticsEngine &Diags, LangOptions &Opts,
   // available regardless of -fmcs251-keil. Keil's bare `bit`/`sbit` spellings
   // are handled separately by LangOptions::MCS251Keil.
   Opts.MCS251Bit = 1;
+  // The core `__xdata`/`__code` address-space qualifiers (target AS 3 / AS 4,
+  // DESIGN.md B.2) are likewise a property of the MCS-251 target. Keil's bare
+  // `xdata`/`code` spellings are handled separately by LangOptions::MCS251Keil.
+  Opts.MCS251AddrSpaces = 1;
   TargetInfo::adjust(Diags, Opts, Aux);
 }
 

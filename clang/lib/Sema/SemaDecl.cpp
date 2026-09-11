@@ -11018,6 +11018,16 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
     }
   }
 
+  // MCS-251 X1 (DESIGN.md B.2/D.2): only pointers into the `__xdata`/`__code`
+  // spaces are meaningful in a signature. A return type qualified with the
+  // space itself has no ABI and CodeGen would silently drop the qualifier, so
+  // reject it fail-closed.
+  if (Context.getTargetInfo().getTriple().getArch() == llvm::Triple::mcs251 &&
+      isMCS251NamedDataAddressSpace(NewFD->getReturnType().getAddressSpace())) {
+    Diag(NewFD->getLocation(), diag::err_mcs251_space_return_type);
+    NewFD->setInvalidDecl();
+  }
+
   if (!getLangOpts().CPlusPlus) {
     // Perform semantic checking on the function declaration.
     if (!NewFD->isInvalidDecl() && NewFD->isMain())
@@ -16523,7 +16533,14 @@ ParmVarDecl *Sema::CheckParameter(DeclContext *DC, SourceLocation StartLoc,
       // HLSL allows function arguments to be qualified with an address space
       // if the groupshared annotation is used.
       !(getLangOpts().HLSL &&
-        T.getAddressSpace() == LangAS::hlsl_groupshared)) {
+        T.getAddressSpace() == LangAS::hlsl_groupshared) &&
+      // MCS-251 X1: an array parameter qualified into the __xdata/__code
+      // spaces decays to a pointer into that space, which is a supported
+      // signature form (`void f(char xdata buf[])` == `char xdata *`).
+      !(Context.getTargetInfo().getTriple().getArch() ==
+            llvm::Triple::mcs251 &&
+        T->isArrayType() &&
+        isMCS251NamedDataAddressSpace(T.getAddressSpace()))) {
     Diag(NameLoc, diag::err_arg_with_address_space);
     New->setInvalidDecl();
   }
