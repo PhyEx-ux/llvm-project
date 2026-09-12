@@ -11,11 +11,12 @@
 // out-slot writers (checked arithmetic, addc carry, frexp/sincos), and
 // wide-char copies. Loads and pure queries stay legal.
 //
-// First-phase boundary (not a permanent answer): a NON-builtin external
-// call that receives a __code pointer is governed by a C-const-style
-// contract, not by this check -- the callee must not write through it. If
-// such a callee is compiled here and does write, the backend rejects the
-// AS4 store fatally; hand-written assembly is the user's responsibility.
+// A2 boundary: a NON-builtin external call is not checked by this builtin
+// gate. CODE pointees are implicitly const; conversion to a non-const AS0
+// parameter must diagnose discarded qualifiers. An AS4 store in the callee
+// is still rejected, but an AS0 alias has lost its source address space:
+// the backend cannot promise to recover it. Modifying the const CODE object
+// through an explicitly de-qualified AS0 alias is undefined behavior.
 // Library functions reachable only through a header declaration ('f'
 // builtins such as fread/strtok/strtod have no __builtin_ spelling on this
 // headerless target) fall under the same contract; their table rows in
@@ -30,22 +31,22 @@ __code int x;
 char *p;
 
 void memcpy_dst(char *s) {
-  __builtin_memcpy(a, s, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_memcpy(a, s, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void memmove_dst(char *s) {
-  __builtin_memmove(a, s, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_memmove(a, s, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void memset_array(void) {
-  __builtin_memset(a, 0, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_memset(a, 0, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void memset_pointer(void) {
-  __builtin_memset(&x, 0, 4); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_memset(&x, 0, 4); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void strcpy_dst(char *s) {
-  __builtin_strcpy(a, s); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_strcpy(a, s); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void fortified_dst(char *s) {
-  __builtin___memcpy_chk(a, s, 8, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin___memcpy_chk(a, s, 8, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 
 void atomic_store(void) {
@@ -79,19 +80,19 @@ void asm_input_only(void) { __asm__("" :: "r"(x)); }
 // fortified variant) was missing from the family list. stpncpy/stpcpy return
 // the destination, so the write treatment is the conservative reading.
 void bcopy_dst(char *s) {
-  __builtin_bcopy(s, a, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_bcopy(s, a, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void bzero_dst(void) {
-  __builtin_bzero(a, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_bzero(a, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void stpncpy_dst(char *s) {
-  __builtin_stpncpy(a, s, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_stpncpy(a, s, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void stpncpy_chk_dst(char *s) {
-  __builtin___stpncpy_chk(a, s, 8, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin___stpncpy_chk(a, s, 8, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void strncpy_dst(char *s) {
-  __builtin_strncpy(a, s, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_strncpy(a, s, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 // The CODE object is only the read source: legal.
 void bcopy_from_code(char *d) { __builtin_bcopy(a, d, 8); }
@@ -137,41 +138,43 @@ __code double cs, cc;
 __code char *ccharp;
 
 void strlcpy_chk_dst(char *s) {
-  __builtin___strlcpy_chk(ca, s, 8, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin___strlcpy_chk(ca, s, 8, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void memccpy_chk_dst(char *s) {
-  __builtin___memccpy_chk(ca, s, 0, 8, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin___memccpy_chk(ca, s, 0, 8, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void strlcat_chk_dst(char *s) {
-  __builtin___strlcat_chk(ca, s, 8, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin___strlcat_chk(ca, s, 8, 8); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void sprintf_dst(int n) {
-  __builtin_sprintf(ca, "%d", n); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_sprintf(ca, "%d", n); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void snprintf_dst(int n) {
-  __builtin_snprintf(ca, 8, "%d", n); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_snprintf(ca, 8, "%d", n); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void sprintf_chk_dst(int n) {
-  __builtin___sprintf_chk(ca, 1, 8, "%d", n); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin___sprintf_chk(ca, 1, 8, "%d", n); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void wmemcpy_dst(void) {
-  __builtin_wmemcpy(cwa, g_w, 4); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_wmemcpy(cwa, g_w, 4); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void wmemmove_dst(void) {
-  __builtin_wmemmove(cwa, g_w, 4); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_wmemmove(cwa, g_w, 4); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void addc_carry_out(void) {
-  __builtin_addcb(1, 2, 0, &cub); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_addcb(1, 2, 0, &cub); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void checked_add_out(void) {
-  __builtin_sadd_overflow(1, 2, &ci); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_sadd_overflow(1, 2, &ci); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void frexp_exp_out(void) {
-  __builtin_frexp(0.5, &ci); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_frexp(0.5, &ci); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void sincos_out(void) {
   __builtin_sincos(0.5, &cs, &cc); // expected-error {{cannot store to an MCS251 '__code' object}} \
-                                   // expected-error {{cannot store to an MCS251 '__code' object}}
+                                   // expected-error {{cannot store to an MCS251 '__code' object}} \
+                                   // expected-warning {{discards qualifiers}} \
+                                   // expected-warning {{discards qualifiers}}
 }
 // __builtin_setjmp's env slot is also a modeled write, but a __code jmp_buf
 // is already rejected earlier by the pointer-conversion check ("changes

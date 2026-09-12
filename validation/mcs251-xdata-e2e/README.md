@@ -43,6 +43,9 @@ ASLayoutVersion 1 / AS0 32 位 / InternalExtended / ExecutionContract 1）。在
 | qemu-fw.c + qemu-ext.c | 官方形态固件（走 QEMU） | 运行时 | OK1 遍历器应用 payload 记录；OK2 仅清零记录；OK3 MOVX 写路径往返；OK4 CODE 读（和 0x0257/异或 0x57）；OK5 跨 TU 记录；哨兵 `XDATA-E2E-PASS` |
 | stub-main.c | 字节链镜像的链接锚（CRT 恒 ecall _main） | — | — |
 | defect-repro.c（-O2） | `store3` 三连存 | **X2 缺陷修复钉子**（见下节） | check-bytes 断言 -O2 绿色形态（每条 MOVX 紧随各自的 DPXL/DPL/DPH 车道写） |
+| a3-layout-fw.c + a3-layout-tab.c | A3 布局/数据流 e2e（R4/R9） | 转换地址 = 原地址、逐字节等价、动态 a0→a4→a0、i16 双视图 | QEMU 串口 `OK1..OK5 A3-LAYOUT-PASS`；CODE 表在**独立 TU**，经 `lay_base()` 不透明访问，-O2 IR 必须保留动态 `addrspacecast` 与 AS0 load（折叠成常量比较即 FAIL） |
+| a3-libc-bytes.py | 字节断言器（stdlib） | AS0/CODE payload、间接指针重定位、map 范围 | 严格解析 map（非法行 FAIL、半开区间全查）、指针符号 size ≥ 4、`read_bytes` 不得越段；self-test 覆盖 malformed/cross-window/size=1 |
+| a3-as-launder-check.py | AS4→AS0 路径门禁（R10-4） | 整数往返、裸 AS4 实参、bitcast | 每个 AS4 全局引用必须落在 `addrspacecast` 内；`ptrtoint ptr addrspace(4)` 与 inttoptr 洗白直接 FAIL；self-test 三形态 |
 
 构建产物在 `build/`（`.gitignore` 规则 `validation/**/build/` 覆盖，不进 git）。
 

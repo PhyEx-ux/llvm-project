@@ -521,9 +521,19 @@ bool SemaMCS251::CheckMCS251CodeSpaceBuiltinCall(unsigned BuiltinID,
       break;
     // A write destination's pointee (after the ordinary array decay, and
     // after stripping the implicit conversions applied for the builtin
-    // prototype -- they never change the address space) must not be the CODE
-    // space. Non-pointer arguments (values, memory orders, sizes) are
-    // skipped.
+    // prototype) must not be the CODE space. Non-pointer arguments (values,
+    // memory orders, sizes) are skipped.
+    //
+    // A2 note (RUNTIME-AS-PTR-DESIGN-A.md §3-A2): it is *not* true that
+    // "implicit conversions never change the address space" any more -- the
+    // approved 32-bit AS0/AS4 superset hook (A1) lets an AS4 source convert to
+    // AS0, so IgnoreParenImpCasts() can strip a CK_AddressSpaceConversion
+    // here. That is exactly why the check below still reads the *original*
+    // destination expression's address space: for a direct CODE destination
+    // the argument type is already AS4 (array decay keeps the element's AS),
+    // so the check keeps firing. It never could and still cannot track an
+    // arbitrary alias already stored in a plain AS0 variable -- that boundary
+    // is documented in DESIGN.md B.2.1.1.
     const Expr *Dest = TheCall->getArg(I)->IgnoreParenImpCasts();
     QualType T = Dest->getType();
     QualType Pointee;

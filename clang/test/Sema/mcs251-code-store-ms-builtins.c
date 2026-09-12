@@ -13,14 +13,14 @@ long __code cl;
 long g_l;
 char __code cb;
 
-void bittestandset(void) { _bittestandset(&cl, 0); } // expected-error {{cannot store to an MCS251 '__code' object}}
-void bittestandreset(void) { _bittestandreset(&cl, 0); } // expected-error {{cannot store to an MCS251 '__code' object}}
-void bittestandcomplement(void) { _bittestandcomplement(&cl, 0); } // expected-error {{cannot store to an MCS251 '__code' object}}
-void interlockedbittestandset(void) { _interlockedbittestandset(&cl, 0); } // expected-error {{cannot store to an MCS251 '__code' object}}
-void interlocked_exchange(void) { _InterlockedExchange(&cl, 1); } // expected-error {{cannot store to an MCS251 '__code' object}}
-void interlocked_increment(void) { _InterlockedIncrement(&cl); } // expected-error {{cannot store to an MCS251 '__code' object}}
-void interlocked_compare_exchange(void) { _InterlockedCompareExchange(&cl, 1, 0); } // expected-error {{cannot store to an MCS251 '__code' object}}
-void iso_volatile_store(void) { __iso_volatile_store8(&cb, 1); } // expected-error {{cannot store to an MCS251 '__code' object}}
+void bittestandset(void) { _bittestandset(&cl, 0); } // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
+void bittestandreset(void) { _bittestandreset(&cl, 0); } // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
+void bittestandcomplement(void) { _bittestandcomplement(&cl, 0); } // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
+void interlockedbittestandset(void) { _interlockedbittestandset(&cl, 0); } // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
+void interlocked_exchange(void) { _InterlockedExchange(&cl, 1); } // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
+void interlocked_increment(void) { _InterlockedIncrement(&cl); } // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
+void interlocked_compare_exchange(void) { _InterlockedCompareExchange(&cl, 1, 0); } // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
+void iso_volatile_store(void) { __iso_volatile_store8(&cb, 1); } // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 // The ms_va family is target-restricted to x86-64/aarch64 in SemaChecking
 // (and __builtin_ms_va_list does not exist on this ABI), so its rows are
 // inert here; the availability error pins that audit conclusion.

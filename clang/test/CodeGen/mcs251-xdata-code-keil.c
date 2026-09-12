@@ -19,13 +19,16 @@ BYTE xdata *pdat;
 char code DEVICEDESC[18] = {0x12, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
                             0x34, 0x12, 0xEF, 0xCD, 0x01, 0x01, 0x00, 0x00,
                             0x00, 0x00};
-// CHECK-DAG: @DEVICEDESC = addrspace(4) global [18 x i8] c"\12\01\00\00\00\00\00@4\12\EF\CD\01\01\00\00\00\00", align 1
+// A2a: the bare `code` word builds the same implicitly-const AS4 type as
+// `__code`, so the object is emitted as a read-only LLVM global.
+// CHECK-DAG: @DEVICEDESC = addrspace(4) constant [18 x i8] c"\12\01\00\00\00\00\00@4\12\EF\CD\01\01\00\00\00\00", align 1
 
 // Qualifier position and declspec position must agree.
 WORD xdata xword;
 // CHECK-DAG: @xword = addrspace(3) global i16 0, align 1
 char code cscalar = 'a';
-// CHECK-DAG: @cscalar = addrspace(4) global i8 97, align 1
+// A2a: implicit const applies to the scalar spelling too.
+// CHECK-DAG: @cscalar = addrspace(4) constant i8 97, align 1
 
 BYTE xdata *xdata_pick(BYTE xdata *p) { return p; }
 // CHECK-LABEL: define dso_local ptr addrspace(3) @xdata_pick(

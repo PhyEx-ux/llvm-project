@@ -16,16 +16,16 @@
 
 // AS4 (CODE) va_list destinations are diagnosed at the call site.
 void zos_end_code(char * __code *p) {
-  __builtin_zos_va_end(p); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_zos_va_end(p); // expected-error {{cannot store to an MCS251 '__code' object}} // expected-warning {{discards qualifiers}}
 }
 void zos_copy_code(char * __code *dst, char **src) {
-  __builtin_zos_va_copy(dst, src); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_zos_va_copy(dst, src); // expected-error {{cannot store to an MCS251 '__code' object}} // expected-warning {{discards qualifiers}}
 }
 void objc_collectable_code(char * __code *dst, char **src) {
-  __builtin_objc_memmove_collectable(dst, src, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_objc_memmove_collectable(dst, src, 8); // expected-error {{cannot store to an MCS251 '__code' object}} // expected-warning {{discards qualifiers}}
 }
 void objc_collectable_both_code(char __code *dst, const char __code *src) {
-  __builtin_objc_memmove_collectable(dst, src, 8); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_objc_memmove_collectable(dst, src, 8); // expected-error {{cannot store to an MCS251 '__code' object}} // expected-warning {{discards qualifiers}}
 }
 void objc_collectable_read_code(char __xdata *dst, const char __code *src) {
   __builtin_objc_memmove_collectable(dst, src, 8);
@@ -47,7 +47,7 @@ void objc_collectable_generic(char **dst, char **src) {
 // The CODE va_list as the read-side operand stays legal: zos_va_copy only
 // writes argument 0.
 void zos_copy_from_code(char **dst, char * __code *src) {
-  __builtin_zos_va_copy(dst, src);
+  __builtin_zos_va_copy(dst, src); // expected-warning {{discards qualifiers}}
 }
 
 // The z/OS lifecycle for a generic va_list (array of two char*, decaying to

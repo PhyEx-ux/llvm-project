@@ -1051,6 +1051,38 @@ SDValue MCS251TargetLowering::LowerAddrSpaceCast(SDValue Op,
   EVT SrcVT = Src.getValueType();
   EVT DstVT = Op.getValueType();
   SDLoc DL(Op);
+  // A3 (RUNTIME-AS-PTR-DESIGN-A.md §3-A3; DESIGN.md B.1.1/B.2.1.2/D.4): the
+  // approved runtime pointer plan creates a *restricted, equal-width* AS4<->32
+  // bit AS0 conversion. This is an independent CODE branch placed before the
+  // original RAM rules on purpose -- AS4 is deliberately NOT added to
+  // IsFarRAM, because that set also participates in i32 equal-width
+  // interconversion, i16->i32 extension and i32->i16 constant narrowing, and
+  // joining it would silently open AS4<->AS3/AS9, Near->CODE and low-address
+  // CODE constant narrowing, none of which are approved.
+  //
+  // AS4 and a 32-bit AS0 have the same 32/8 pointer representation and the
+  // same canonical 24-bit effective address, and AS4 loads already read
+  // through the unified DR channel (parseAddress), so the value passes
+  // through unchanged: no tag, no lookup table, no truncation. The reverse
+  // (AS0->AS4) explicit conversion is the same representation pass-through;
+  // its non-null value is only a valid CODE pointer under the validity
+  // contract, and this does not make an implicit AS0->AS4 assignment legal
+  // (the frontend keeps rejecting that) nor authorize an AS4 store.
+  auto IsCode = [](unsigned AS) { return AS == 4; };
+  auto IsAS0 = [](unsigned AS) { return AS == 0; };
+  if (SrcVT == MVT::i32 && DstVT == MVT::i32 &&
+      ((IsAS0(SrcAS) && IsCode(DstAS)) ||
+       (IsCode(SrcAS) && IsAS0(DstAS))))
+    return Src;
+  // Every other conversion involving AS4 -- i32->i16 (a 16-bit AS0 model
+  // cannot hold the CODE bank), i16->i32, AS4<->AS1/AS2/AS3/AS8/AS9 -- stays
+  // rejected in this slice. The message names CODE so this can never be
+  // mistaken for an unassigned-space failure.
+  if (IsCode(SrcAS) || IsCode(DstAS))
+    report_fatal_error(
+        "MCS251: unsupported address-space cast involving CODE (address "
+        "space 4); only the equal-width 32-bit AS4<->AS0 conversion is "
+        "permitted");
   // RC-2: AS1 is strict direct RAM with range [0,0x80). A cast from a wider
   // address space (e.g. AS0, AS8) to AS1 cannot be proven safe at compile time
   // for a dynamic (non-constant) source -- the value may fall outside the

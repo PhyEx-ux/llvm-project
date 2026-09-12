@@ -14,7 +14,9 @@ BYTE __xdata UsbBuffer[256];
 char __code DEVICEDESC[18] = {0x12, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
                               0x34, 0x12, 0xEF, 0xCD, 0x01, 0x01, 0x00, 0x00,
                               0x00, 0x00};
-// CHECK-DAG: @DEVICEDESC = addrspace(4) global [18 x i8] c"\12\01\00\00\00\00\00@4\12\EF\CD\01\01\00\00\00\00", align 1
+// A2a: `__code` implies const for object types, so the CODE global is
+// emitted as a read-only LLVM global while keeping AS4.
+// CHECK-DAG: @DEVICEDESC = addrspace(4) constant [18 x i8] c"\12\01\00\00\00\00\00@4\12\EF\CD\01\01\00\00\00\00", align 1
 
 static char __xdata slocal;
 char slocal_read(void) { return slocal; }

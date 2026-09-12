@@ -6589,6 +6589,32 @@ static bool BuildAddressSpaceIndex(Sema &S, LangAS &ASIdx,
   return true;
 }
 
+// MCS-251 runtime AS pointer plan A2a (RUNTIME-AS-PTR-DESIGN-A.md §3-A2,
+// DESIGN.md B.2.1.1): `__code` really implies `const` for *object* types.
+//
+// One shared constructor is used by every spelling (the `__code` keyword, the
+// -fmcs251-keil bare `code` word -- both reach here as
+// ParsedAttr::AT_MCS251CodeAddressSpace -- and the numeric
+// address_space(4) attribute) so the qualifier level can never drift between
+// spellings. Object/pointer-object distinction is preserved because this
+// helper only ever qualifies the type the attribute was written on:
+//   char __code *p;   -> pointee (char) gets AS4+const  => ptr to const AS4 char
+//   char * __code p;  -> the pointer object type gets AS4+const
+// It never reaches into a pointee from here, and function types are excluded
+// both by the caller (err_attribute_address_function_type) and by this guard.
+static QualType buildMCS251CodeQualifiedType(ASTContext &Ctx, QualType T) {
+  if (!T->isFunctionType() && !T->isDependentType())
+    T = Ctx.getConstType(T);
+  return Ctx.getAddrSpaceQualType(T, getLangASFromTargetAS(
+                                         MCS251CodeTargetAddressSpace));
+}
+
+/// Is \p AS the MCS-251 CODE (AS4) space *and* the target an MCS-251 target?
+static bool isMCS251CodeSpaceOnTarget(const ASTContext &Ctx, LangAS AS) {
+  return Ctx.getTargetInfo().getTriple().getArch() == llvm::Triple::mcs251 &&
+         isMCS251CodeAddressSpace(AS);
+}
+
 QualType Sema::BuildAddressSpaceAttr(QualType &T, LangAS ASIdx, Expr *AddrSpace,
                                      SourceLocation AttrLoc) {
   if (!AddrSpace->isValueDependent()) {
@@ -6604,6 +6630,11 @@ QualType Sema::BuildAddressSpaceAttr(QualType &T, LangAS ASIdx, Expr *AddrSpace,
     if (DiagnoseMultipleAddrSpaceAttributes(*this, T.getAddressSpace(), ASIdx,
                                             AttrLoc))
       return QualType();
+
+    // A2a: the numeric attribute spelling must build the same CODE type as
+    // the keywords, including the implicit `const` object discipline.
+    if (isMCS251CodeSpaceOnTarget(Context, ASIdx))
+      return buildMCS251CodeQualifiedType(Context, T);
 
     return Context.getAddrSpaceQualType(T, ASIdx);
   }
@@ -6763,7 +6794,15 @@ static void HandleAddressSpaceTypeAttribute(QualType &Type,
       return;
     }
 
-    Type = S.Context.getAddrSpaceQualType(Type, ASIdx);
+    // A2a: `__code` (and the bare `code` word under -fmcs251-keil, which
+    // parses to the same attribute) builds the CODE type through the shared
+    // constructor, so the keyword and numeric spellings cannot drift. The
+    // function-type rejection above already ran; the helper keeps its own
+    // guard for non-object sugar.
+    if (isMCS251CodeSpaceOnTarget(S.Context, ASIdx))
+      Type = buildMCS251CodeQualifiedType(S.Context, Type);
+    else
+      Type = S.Context.getAddrSpaceQualType(Type, ASIdx);
   }
 }
 

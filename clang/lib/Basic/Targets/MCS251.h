@@ -68,6 +68,38 @@ public:
 
   uint64_t getMaxPointerWidth() const override { return 32; }
 
+  // Runtime AS pointer plan (RUNTIME-AS-PTR-DESIGN-A.md §1.3, A1; DESIGN.md
+  // B.1.1/B.2.1.2): the implementation declares that a *32-bit* AS0 generic
+  // data pointer can represent the address of an AS4 CODE data object and
+  // read it through the unified DR channel. The relation is one-way
+  // (AS4 -> AS0), only for AS4 (AS3 is NOT carried along), and only when the
+  // model's default pointer is 32 bits wide (Tiny/XTiny keep rejecting, since
+  // truncating the CODE bank is never acceptable).
+  //
+  // Deliberately not done here:
+  //  * no numeric `4` cast to LangAS -- target spaces carry an enum offset;
+  //  * no reading of -fmcs251-keil -- the bare `code` word is a spelling
+  //    entry point, not a conversion permission switch;
+  //  * no CVR decision -- const/volatile checking stays with the standard
+  //    type-compatibility machinery, and this hook has no pointee type.
+  bool isAddressSpaceSupersetOf(LangAS A, LangAS B) const override {
+    if (A == B)
+      return true;
+
+    const auto IsAS0 = [](LangAS AS) {
+      return AS == LangAS::Default ||
+             (isTargetAddressSpace(AS) &&
+              toTargetAddressSpace(AS) == 0);
+    };
+
+    if (IsAS0(A) && IsAS0(B))
+      return true;
+
+    return IsAS0(A) &&
+           getPointerWidth(LangAS::Default) == 32 &&
+           isMCS251CodeAddressSpace(B);
+  }
+
   // _BitInt(N) maps onto the backend's integer registers: widths up to 32
   // bits legalize through the existing promotion paths (iN -> i8/i16/i32),
   // while the backend has no storage or arithmetic beyond the 32-bit DR

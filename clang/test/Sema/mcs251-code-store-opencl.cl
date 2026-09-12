@@ -4,10 +4,14 @@
 
 // OpenCL registration is a language gate, not target unreachability (X1-11).
 // Both spellings write argument 1, including typedef/attribute spellings.
+//
+// A2a: `__code` now implies const on the pointee, so the argument conversion
+// to the builtin's non-const half* additionally reports the ordinary C
+// discarded-qualifier warning. The CODE-store error remains the hard failure.
 typedef half __code CodeHalf;
 void forbidden(CodeHalf *p, half __attribute__((address_space(4))) *q) {
-  __builtin_store_half(1.0f, p); // expected-error {{cannot store to an MCS251 '__code' object}}
-  __builtin_store_halff(1.0f, q); // expected-error {{cannot store to an MCS251 '__code' object}}
+  __builtin_store_half(1.0f, p); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
+  __builtin_store_halff(1.0f, q); // expected-error {{cannot store to an MCS251 '__code' object}} expected-warning {{discards qualifiers}}
 }
 void allowed(half __xdata *p, half *q) {
   __builtin_store_half(1.0f, p);
