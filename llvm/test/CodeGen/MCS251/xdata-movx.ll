@@ -26,10 +26,12 @@
 
 define i8 @ld8_const() {
 ; CHECK-LABEL: _ld8_const:
-; 0x1234 = bank 0x00, window 0x1234: the folded bank byte goes to DPXL first.
+; 0x1234 = bank 0x00, window 0x1234: the folded bank byte goes to DPXL first
+; (the window materialisation floats freely -- it feeds vreg lanes, only the
+; SFR writes are pinned; see the X2-fix note atop xdata-o2-order.ll).
+; CHECK:         mov wr{{[0-9]+}}, #0x1234
 ; CHECK:         mov r{{[0-9]+}}, #0x00
 ; CHECK-NEXT:    mov 0x84, r{{[0-9]+}}
-; CHECK:         mov wr{{[0-9]+}}, #0x1234
 ; CHECK:         mov dpl, r{{[0-9]+}}
 ; CHECK:         mov dph, r{{[0-9]+}}
 ; CHECK:         movx a, @dptr
@@ -144,8 +146,9 @@ define i16 @ld16_ptr(ptr addrspace(3) %p) {
 
 define void @st8_const() {
 ; CHECK-LABEL: _st8_const:
+; CHECK:         mov wr{{[0-9]+}}, #0x1234
 ; CHECK:         mov r{{[0-9]+}}, #0x00
-; CHECK-NEXT:    mov 0x84, r{{[0-9]+}}
+; CHECK:         mov 0x84, r{{[0-9]+}}
 ; CHECK:         mov dpl, r{{[0-9]+}}
 ; CHECK:         mov dph, r{{[0-9]+}}
 ; CHECK:         mov a, r{{[0-9]+}}

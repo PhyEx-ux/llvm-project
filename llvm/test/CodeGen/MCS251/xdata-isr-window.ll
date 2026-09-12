@@ -61,7 +61,7 @@ define mcs251_intrcc void @irq() addrspace(4) #0 {
 ; CHECK-NEXT:    push dr28
 ; CHECK-NEXT:    push dpx
 ; CHECK:         mov r[[IB:[0-9]+]], #0x02
-; CHECK-NEXT:    mov 0x84, r[[IB]]
+; CHECK:         mov 0x84, r[[IB]]
 ; CHECK:         movx @dptr, a
 ; CHECK:         mov 0x84, r{{[0-9]+}}
 ; CHECK:         movx @dptr, a

@@ -14,9 +14,9 @@
 ; Constant inside the classic 64K window: bank 00h, window 0x1234.
 define i8 @ld_bank00() {
 ; CHECK-LABEL: _ld_bank00:
+; CHECK:         mov wr{{[0-9]+}}, #0x1234
 ; CHECK:         mov r{{[0-9]+}}, #0x00
 ; CHECK-NEXT:    mov 0x84, r{{[0-9]+}}
-; CHECK:         mov wr{{[0-9]+}}, #0x1234
 ; CHECK:         movx a, @dptr
   %p = inttoptr i32 4660 to ptr addrspace(3)
   %v = load volatile i8, ptr addrspace(3) %p
@@ -26,9 +26,9 @@ define i8 @ld_bank00() {
 ; 0x11234: bank 01h -- the DPXL reset value is still written, not assumed.
 define i8 @ld_bank01() {
 ; CHECK-LABEL: _ld_bank01:
+; CHECK:         mov wr{{[0-9]+}}, #0x1234
 ; CHECK:         mov r{{[0-9]+}}, #0x01
 ; CHECK-NEXT:    mov 0x84, r{{[0-9]+}}
-; CHECK:         mov wr{{[0-9]+}}, #0x1234
 ; CHECK:         movx a, @dptr
   %p = inttoptr i32 70196 to ptr addrspace(3)
   %v = load volatile i8, ptr addrspace(3) %p
@@ -38,9 +38,9 @@ define i8 @ld_bank01() {
 ; 0x21234: bank 02h.
 define i8 @ld_bank02() {
 ; CHECK-LABEL: _ld_bank02:
+; CHECK:         mov wr{{[0-9]+}}, #0x1234
 ; CHECK:         mov r{{[0-9]+}}, #0x02
 ; CHECK-NEXT:    mov 0x84, r{{[0-9]+}}
-; CHECK:         mov wr{{[0-9]+}}, #0x1234
 ; CHECK:         movx a, @dptr
   %p = inttoptr i32 135732 to ptr addrspace(3)
   %v = load volatile i8, ptr addrspace(3) %p
@@ -50,9 +50,9 @@ define i8 @ld_bank02() {
 ; 0xff0000: bank FFh boundary.
 define i8 @ld_bankff() {
 ; CHECK-LABEL: _ld_bankff:
+; CHECK:         mov wr{{[0-9]+}}, #0x0000
 ; CHECK:         mov r{{[0-9]+}}, #0xff
 ; CHECK-NEXT:    mov 0x84, r{{[0-9]+}}
-; CHECK:         mov wr{{[0-9]+}}, #0x0000
 ; CHECK:         movx a, @dptr
   %p = inttoptr i32 16711680 to ptr addrspace(3)
   %v = load volatile i8, ptr addrspace(3) %p
@@ -62,9 +62,9 @@ define i8 @ld_bankff() {
 ; Window-top boundary 0x00ffff: bank 00h, window 0xffff.
 define i8 @ld_window_top() {
 ; CHECK-LABEL: _ld_window_top:
+; CHECK:         mov wr{{[0-9]+}}, #0xffff
 ; CHECK:         mov r{{[0-9]+}}, #0x00
 ; CHECK-NEXT:    mov 0x84, r{{[0-9]+}}
-; CHECK:         mov wr{{[0-9]+}}, #0xffff
 ; CHECK:         movx a, @dptr
   %p = inttoptr i32 65535 to ptr addrspace(3)
   %v = load volatile i8, ptr addrspace(3) %p
@@ -78,14 +78,14 @@ define i8 @ld_window_top() {
 ; address.
 define i16 @ld_straddle() {
 ; CHECK-LABEL: _ld_straddle:
+; CHECK:         mov wr{{[0-9]+}}, #0xffff
 ; CHECK:         mov r[[B0:[0-9]+]], #0x00
 ; CHECK-NEXT:    mov 0x84, r[[B0]]
-; CHECK:         mov wr{{[0-9]+}}, #0xffff
 ; CHECK:         movx a, @dptr
 ; CHECK-NEXT:    mov r{{[0-9]+}}, a
+; CHECK:         mov wr{{[0-9]+}}, #0x0000
 ; CHECK:         mov r[[B1:[0-9]+]], #0x01
 ; CHECK-NEXT:    mov 0x84, r[[B1]]
-; CHECK:         mov wr{{[0-9]+}}, #0x0000
 ; CHECK:         movx a, @dptr
 ; CHECK-NEXT:    mov r{{[0-9]+}}, a
 ; CHECK:         mov dpl, r{{[0-9]+}}
@@ -100,14 +100,14 @@ define i16 @ld_straddle() {
 ; still explicitly banked.
 define i16 @ld_top_straddle() {
 ; CHECK-LABEL: _ld_top_straddle:
+; CHECK:         mov wr{{[0-9]+}}, #0xffff
 ; CHECK:         mov r[[T0:[0-9]+]], #0xff
 ; CHECK-NEXT:    mov 0x84, r[[T0]]
-; CHECK:         mov wr{{[0-9]+}}, #0xffff
 ; CHECK:         movx a, @dptr
 ; CHECK-NEXT:    mov r{{[0-9]+}}, a
+; CHECK:         mov wr{{[0-9]+}}, #0x0000
 ; CHECK:         mov r[[T1:[0-9]+]], #0x00
 ; CHECK-NEXT:    mov 0x84, r[[T1]]
-; CHECK:         mov wr{{[0-9]+}}, #0x0000
 ; CHECK:         movx a, @dptr
   %p = inttoptr i32 16777215 to ptr addrspace(3)
   %v = load volatile i16, ptr addrspace(3) %p
@@ -117,9 +117,9 @@ define i16 @ld_top_straddle() {
 ; Constant bank store: same folded pair on the write side.
 define void @st_bank01() {
 ; CHECK-LABEL: _st_bank01:
-; CHECK:         mov r{{[0-9]+}}, #0x01
-; CHECK-NEXT:    mov 0x84, r{{[0-9]+}}
 ; CHECK:         mov wr{{[0-9]+}}, #0x1234
+; CHECK:         mov r{{[0-9]+}}, #0x01
+; CHECK:         mov 0x84, r{{[0-9]+}}
 ; CHECK:         movx @dptr, a
   %p = inttoptr i32 70196 to ptr addrspace(3)
   store volatile i8 7, ptr addrspace(3) %p

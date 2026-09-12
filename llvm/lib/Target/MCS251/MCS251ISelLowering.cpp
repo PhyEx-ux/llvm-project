@@ -2236,10 +2236,14 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
 // the X2-4 retention protocol only: the frames the backend generates for
 // async entries PRESERVE DPXL (ISR_PUSH/POP_DPX read/write it), while
 // ordinary calls may clobber it freely (the next access re-points it) and
-// the CRT has no initial-value obligation.  Defs=[DPXL] on MOV8dpxl and
-// Uses=[DPXL] on both MOVX ops make the region switch a scheduling
-// dependence, so two independent AS3 chains in one block can never interleave
-// a bank write across another chain's movx.  The retention protocol
+// the CRT has no initial-value obligation.  The DPL/DPH/DPXL/A
+// implicit-def/use pins order the sequence against the MIR-level passes;
+// against the SelectionDAG scheduler (which cannot see MCInstrDesc implicit
+// operands and faces TokenFactor-parallel access chains at -O1+) each byte
+// sequence is welded with Glue in buildMOVXByteLoad/Store below -- the X2
+// fix for the X4 e2e defect where the lane writes streamed by register
+// across parallelised accesses and every MOVX hit the LAST written pointer.
+// The retention protocol
 // (CRT/ISR/call boundaries, user SFR 0x84 writes) is documented in the
 // XDATA-CODE design supplement
 // (validation/mcs251-models/proposals/XDATA-CODE-DESIGN-SUPPLEMENT.md); a
@@ -2349,22 +2353,44 @@ static void buildXDATAAddress(SDValue Ptr, int64_t ByteOff, const SDLoc &DL,
 // identical problem for its A-valued RRCA/MOV8ra tail with a Glue edge; the
 // same Glue result rides MOVXALD into MOV8ra here, pinning the access into
 // the selected stream.
+//
+// X2-fix (X4 e2e defect, -O1+ miscompile): the Glue chain must cover the
+// WHOLE byte sequence, not just the MOV8ra tail. At -O1+ the DAG combiner
+// legitimately parallelises disjoint non-volatile memory ops
+// (parallelizeChainedStores / FindBetterChain), so the chain inputs of two
+// AS3 accesses in one block become TokenFactor-parallel; the DPL/DPH/DPXL/A
+// pins live only in the MCInstrDesc implicit operand lists, and the
+// SelectionDAG schedulers do not see those (AddSchedEdges only follows
+// SDValue operands), so the pre-RA list scheduler streamed the lane writes
+// by register across the parallel accesses and every MOVX addressed through
+// the LAST written pointer. Glue merges one access into a single scheduling
+// unit; independent accesses stay separate units and may still be
+// inter-ordered as wholes. The glue chain also feeds InstrEmitter's
+// setPhysRegsDeadExcept scan (the glued MOVX implicit uses count as uses),
+// so the lane writes' implicit defs are emitted live instead of dead and
+// the pre/post-RA machine schedulers keep the real physical-register
+// dependencies.
 static SDValue buildMOVXByteLoad(SDValue Bank, SDValue Addr16,
                                  const SDLoc &DL, SelectionDAG &DAG,
                                  SDValue Chain, MachineMemOperand *MMO,
                                  SDValue &Byte) {
   // Self-healing region switch first: DPXL always matches this byte's bank,
   // whatever any earlier access, ISR or user write left behind.
-  Chain = SDValue(
-      DAG.getMachineNode(MCS251::MOV8dpxl, DL, MVT::Other, {Bank, Chain}), 0);
+  SDVTList ChainGlue = DAG.getVTList(MVT::Other, MVT::Glue);
+  SDNode *N =
+      DAG.getMachineNode(MCS251::MOV8dpxl, DL, ChainGlue, {Bank, Chain});
+  Chain = SDValue(N, 0);
+  SDValue Glue = SDValue(N, 1);
   SDValue Lo = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, Addr16);
   SDValue Hi = DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8, Addr16);
-  Chain = SDValue(
-      DAG.getMachineNode(MCS251::MOV8dpl, DL, MVT::Other, {Lo, Chain}), 0);
-  Chain = SDValue(
-      DAG.getMachineNode(MCS251::MOV8dph, DL, MVT::Other, {Hi, Chain}), 0);
+  N = DAG.getMachineNode(MCS251::MOV8dpl, DL, ChainGlue, {Lo, Chain, Glue});
+  Chain = SDValue(N, 0);
+  Glue = SDValue(N, 1);
+  N = DAG.getMachineNode(MCS251::MOV8dph, DL, ChainGlue, {Hi, Chain, Glue});
+  Chain = SDValue(N, 0);
+  Glue = SDValue(N, 1);
   SDVTList ResTys = DAG.getVTList(MVT::i8, MVT::Other, MVT::Glue);
-  SDNode *N = DAG.getMachineNode(MCS251::MOVXALD, DL, ResTys, Chain);
+  N = DAG.getMachineNode(MCS251::MOVXALD, DL, ResTys, {Chain, Glue});
   DAG.setNodeMemRefs(cast<MachineSDNode>(N), {MMO});
   Byte = SDValue(
       DAG.getMachineNode(MCS251::MOV8ra, DL, MVT::i8, SDValue(N, 2)), 0);
@@ -2373,21 +2399,30 @@ static SDValue buildMOVXByteLoad(SDValue Bank, SDValue Addr16,
 
 // One MOVX byte store: re-point DPXL, set dptr, move the value byte into A,
 // movx @dptr,a. The chain is threaded through every setup move, mirroring
-// the load side.
+// the load side, and the same X2-fix Glue chain (see buildMOVXByteLoad)
+// welds the five nodes into one scheduling unit so the MOVX always follows
+// its own lane writes and its own A value, however the DAG combiner
+// parallelised the surrounding stores.
 static SDValue buildMOVXByteStore(SDValue Bank, SDValue Addr16, SDValue Val,
                                   const SDLoc &DL, SelectionDAG &DAG,
                                   SDValue Chain, MachineMemOperand *MMO) {
-  Chain = SDValue(
-      DAG.getMachineNode(MCS251::MOV8dpxl, DL, MVT::Other, {Bank, Chain}), 0);
+  SDVTList ChainGlue = DAG.getVTList(MVT::Other, MVT::Glue);
+  SDNode *N =
+      DAG.getMachineNode(MCS251::MOV8dpxl, DL, ChainGlue, {Bank, Chain});
+  Chain = SDValue(N, 0);
+  SDValue Glue = SDValue(N, 1);
   SDValue Lo = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, Addr16);
   SDValue Hi = DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8, Addr16);
-  Chain = SDValue(
-      DAG.getMachineNode(MCS251::MOV8dpl, DL, MVT::Other, {Lo, Chain}), 0);
-  Chain = SDValue(
-      DAG.getMachineNode(MCS251::MOV8dph, DL, MVT::Other, {Hi, Chain}), 0);
-  Chain = SDValue(
-      DAG.getMachineNode(MCS251::MOV8a, DL, MVT::Other, {Val, Chain}), 0);
-  SDNode *N = DAG.getMachineNode(MCS251::MOVXAST, DL, MVT::Other, Chain);
+  N = DAG.getMachineNode(MCS251::MOV8dpl, DL, ChainGlue, {Lo, Chain, Glue});
+  Chain = SDValue(N, 0);
+  Glue = SDValue(N, 1);
+  N = DAG.getMachineNode(MCS251::MOV8dph, DL, ChainGlue, {Hi, Chain, Glue});
+  Chain = SDValue(N, 0);
+  Glue = SDValue(N, 1);
+  N = DAG.getMachineNode(MCS251::MOV8a, DL, ChainGlue, {Val, Chain, Glue});
+  Chain = SDValue(N, 0);
+  Glue = SDValue(N, 1);
+  N = DAG.getMachineNode(MCS251::MOVXAST, DL, MVT::Other, {Chain, Glue});
   DAG.setNodeMemRefs(cast<MachineSDNode>(N), {MMO});
   return SDValue(N, 0);
 }

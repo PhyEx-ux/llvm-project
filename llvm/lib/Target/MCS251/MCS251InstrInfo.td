@@ -419,8 +419,15 @@ let mayStore = 1 in {
 // generates for async entries PRESERVE DPXL (ISR_PUSH/POP_DPX read/write
 // it), so an interrupt cannot leak its re-point into the interrupted
 // context.
-// Uses=[DPXL] on both MOVX ops plus Defs=[DPXL] on MOV8dpxl make the region
-// switch a scheduling dependence, so bank writes can never cross a movx.
+// Uses=[DPXL] on both MOVX ops plus Defs=[DPXL] on MOV8dpxl declare the
+// region switch as a physical-register dependence -- but only at the MIR
+// level (pre/post-RA machine schedulers, CSE, RA liveness). The
+// SelectionDAG schedulers do not see MCInstrDesc implicit operands at all,
+// and at -O1+ the DAG combiner parallelises disjoint non-volatile memory
+// ops, so the lowering welds each MOVX byte sequence (lane writes + MOVX)
+// with Glue into one scheduling unit (see buildMOVXByteLoad/Store in
+// MCS251ISelLowering.cpp); that glue chain is also what makes InstrEmitter
+// emit the lane writes' implicit defs live (not dead) in the first place.
 //
 // DPTR (dpl/dph) is the fixed reserved address register and A the fixed
 // transfer register: MOVXALD writes A, MOVXAST reads it, both address through
