@@ -88,11 +88,25 @@ public:
   // 9 directly. No target fixup mode exists for it (zero write width, no
   // address arithmetic, exact symbol association only). BT12 adds the
   // zero-width bit-object association (type 10) by the same route.
+  //
+  // X3: the data-record relocations are spelled by their ELF names so the
+  // AsmPrinter can emit address fields (the `.mcs251.xdata_init` bank and
+  // window bytes, pointer initializer leaves) through the same target fixup
+  // modes the code emitter uses, instead of FK_Data_* widths that have no
+  // 1/3-byte ELF mapping.
   std::optional<MCFixupKind> getFixupKind(StringRef Name) const override {
     if (Name == "R_MCS251_ISR_REF")
       return MCFixupKind(FirstLiteralRelocationKind + ELF::R_MCS251_ISR_REF);
     if (Name == "R_MCS251_BIT_REF")
       return MCFixupKind(FirstLiteralRelocationKind + ELF::R_MCS251_BIT_REF);
+    if (Name == "R_MCS251_24")
+      return MCFixupKind(MCS251::fixup_mcs251_24);
+    if (Name == "R_MCS251_LO8")
+      return MCFixupKind(MCS251::fixup_mcs251_lo8);
+    if (Name == "R_MCS251_MID8")
+      return MCFixupKind(MCS251::fixup_mcs251_mid8);
+    if (Name == "R_MCS251_HI8")
+      return MCFixupKind(MCS251::fixup_mcs251_hi8);
     return MCAsmBackend::getFixupKind(Name);
   }
 

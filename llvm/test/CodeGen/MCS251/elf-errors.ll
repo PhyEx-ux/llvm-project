@@ -4,6 +4,8 @@
 ; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/align.ll -o %t/align.o 2>&1 | FileCheck %s --check-prefix=ALIGN
 ;
 ; A new container does not silently widen the supported data/expression ABI.
+; (X3 widened the pointer INITIALIZER leaf -- &global + addend and null --
+; into ELF objects; pointer expression algebra like inttoptr still fails.)
 ; DIFF: MCS251 ELF: symbol-difference relocations are not supported
 ; MUTABLE: LLVM ERROR: MCS251: defined global data requires byte-aligned default-address-space
 ; ALIGN: LLVM ERROR: MCS251: defined global data requires a byte-aligned read-only
@@ -15,7 +17,7 @@ define void @difference() prefix i16 trunc (i32 sub (i32 ptrtoint (ptr @a to i32
   ret void
 }
 ;--- mutable.ll
-@g = global ptr null, align 1
+@g = global ptr inttoptr (i32 4096 to ptr), align 1
 define void @f() {
   ret void
 }

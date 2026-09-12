@@ -6,7 +6,7 @@
 ; Reaching the unrelated object-writer relocation gate afterwards proves the
 ; walk terminated through the visited set.
 ; RUN: not --crash llc -mtriple=mcs251 -O0 %t/rc6-3-const-recursion.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESC3
-; ESC3: LLVM ERROR: MCS251: defined global data requires byte-aligned default-address-space
+; ESC3: LLVM ERROR: MCS251: global 'node': a pointer initializer requires ELF object output
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/rc6-4-volatile-load.ll -o - | FileCheck %s --check-prefix=ESC4
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/rc6-5-mixed-store.ll -o - | FileCheck %s --check-prefix=ESC5
 ; RUN: not --crash llc -mtriple=mcs251 -O0 %t/rc6-6-dce-global-escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESC6

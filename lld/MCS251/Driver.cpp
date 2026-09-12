@@ -397,6 +397,14 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
       if (!N)
         return fail(Err, "invalid --stack-size");
       O.Core.StackSize = *N;
+    } else if (auto V = take("--xdata-size")) {
+      // X3: board-level XDATA capacity in bytes; 1..0x1000000 keeps
+      // base+size inside the 24-bit space.  The default (absent) keeps the
+      // always-on 24-bit range check only.
+      auto N = number(*V);
+      if (!N || *N == 0 || uint64_t(*N) > 0x1000000)
+        return fail(Err, "invalid --xdata-size (expected 1..0x1000000)");
+      O.Core.XdataSize = *N;
     } else if (auto V = take("--flash-base")) {
       // Flash window start, a plain 24-bit address. No board-model knowledge
       // lives here; the build layer supplies the number (E.5 red line).
@@ -423,7 +431,7 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
       // SPEC §5.1: validate the area name and reject duplicate/conflicting
       // settings.  CODE/XDATA areas use 24-bit addresses, DATA areas 16-bit.
       static const char *CodeAreas[] = {"HOME", "VECS", "BOOT", "CSEG",
-                                        "XINIT"};
+                                        "XINIT", "XDATA_INIT"};
       static const char *DataAreas[] = {"DSEG", "ISEG"};
       bool IsCode = false, IsData = false, IsDataAbs = false;
       for (const char *A2 : CodeAreas)
@@ -438,6 +446,10 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
         }
       if (AreaName == "XSEG")
         IsCode = true; // XDATA uses 24-bit address space
+      // X3: per-object XSEG sections may be pinned individually by their own
+      // section name (the core allocator honors a per-section start).
+      if (AreaName.starts_with(".mcs251.XSEG"))
+        IsCode = true;
       if (AreaName.starts_with(".mcs251.DATA."))
         IsDataAbs = true;
       if (!IsCode && !IsData && !IsDataAbs)

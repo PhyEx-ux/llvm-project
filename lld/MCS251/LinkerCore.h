@@ -41,6 +41,11 @@ struct LinkerConfig {
   bool FlashGate = false;
   uint32_t FlashBase = 0;
   uint32_t FlashSize = 0;
+  // X3: optional board-level XDATA capacity in bytes.  0 (the default) means
+  // "not configured": only the always-on 24-bit range check applies, which
+  // keeps legacy layouts linkable.  When set, every allocated XSEG range must
+  // lie inside [area-start(XSEG), area-start(XSEG)+N).
+  uint32_t XdataSize = 0;
   std::vector<std::pair<std::string, uint32_t>> AreaStarts;
   std::vector<Range> ReservedData;
   std::vector<std::string> Inputs;

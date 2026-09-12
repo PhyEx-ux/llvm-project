@@ -95,10 +95,11 @@
 ;RUN: not --crash llc -mtriple=mcs251 -O2 -filetype=obj -mcs251-object-format=elf %t/aggregate-return.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
 ;RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/aggregate-return.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
 ;RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/aggregate-export.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
-; The addrspacecast form is rejected even earlier, by the v1 object gate.
-;RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/cast-shared.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CASTSH
+; Use the compatibility layout to reach the bit-handle verifier rather than
+; stopping at the earlier v2 object-identity gate for addrspacecast.
+;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cast-shared.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CASTSH
 ;AGGRET: MCS251 contract violation: MCS251 bit object 'flag': handle must not escape through a constant expression or initializer
-;CASTSH: LLVM ERROR: MCS251:
+;CASTSH: LLVM ERROR: MCS251 contract violation: MCS251 bit object 'flag': handle must not escape through a constant expression or initializer
 
 ; A call or operand-bundle use is never a legitimate consumer: no intrinsic
 ; consumes a bit-object handle yet, and a name-prefix test is not an intrinsic

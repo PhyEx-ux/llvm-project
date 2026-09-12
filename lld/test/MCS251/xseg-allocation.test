@@ -1,0 +1,348 @@
+#
+# X3: XSEG allocation matrix.
+#  - last-byte success: [0x010000,0x010100) fits --xdata-size=0x100 exactly
+#  - capacity failure: [0x010000,0x010101) exceeds --xdata-size=0x100
+#  - 24-bit rangeFits stays on (architectural overflow, no option involved)
+#  - wrong bank: a record destination outside every allocated XSEG slice
+#  - overlap: two per-section --area-start pins hitting one interval
+#  - 64K window rulings: exact fit at a window end succeeds; a one-byte
+#    shortfall jumps to the next bank start; a section larger than 64K and
+#    an explicit per-section start that straddles are hard errors
+#  - post-jump matrix: the bank-jump hole counts toward the l_XSEG span
+#    and toward --xdata-size measured from the XSEG area start (an exact
+#    0x111 fit links; one byte less is a capacity error)
+#  - XSEG storage never enters DSEG and never moves the stack high-water
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj fit.yaml -o fit.o
+# RUN: yaml2obj over.yaml -o over.o
+# RUN: yaml2obj range.yaml -o range.o
+# RUN: yaml2obj wrongbank.yaml -o wrongbank.o
+# RUN: yaml2obj two.yaml -o two.o
+# RUN: yaml2obj huge.yaml -o huge.o
+
+# --- last byte success: object exactly fills the capacity window ---
+# RUN: mcs251-lld fit.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --xdata-size=0x100 \
+# RUN:   --map=%t/fit.map -o %t/fit.elf && test -f %t/fit.elf
+# RUN: grep 's_XSEG = 0x10000' %t/fit.map
+# RUN: grep 'l_XSEG = 0x0100' %t/fit.map
+
+# --- one byte over: capacity hard error names the section and interval ---
+# RUN: not mcs251-lld over.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --xdata-size=0x100 \
+# RUN:   -o %t/over.elf 2>&1 | FileCheck %s --check-prefix=CAP
+# RUN: test ! -e %t/over.elf
+# CAP: XDATA capacity [0x10000,0x10101) exceeds --xdata-size=256 in .mcs251.XSEG.obj
+
+# --- same object without --xdata-size links (only the 24-bit check applies) ---
+# RUN: mcs251-lld over.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --map=%t/noconf.map -o %t/noconf.elf \
+# RUN:   && test -f %t/noconf.elf
+
+# --- 24-bit rangeFits: an object that runs past 0xffffff is always rejected ---
+# RUN: not mcs251-lld range.o --area-start=CSEG=0xff0200 --area-start=XSEG=0xfffff0 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o %t/range.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=RANGE
+# RANGE: XDATA address overflow in .mcs251.XSEG.obj
+
+# --- wrong bank: XSEG lives at 0x020000 but the record targets 0x010000 ---
+# RUN: not mcs251-lld wrongbank.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x020000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o %t/wb.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=WB
+# WB: XDATA_INIT destination is not within one XSEG slice: [0x10000,0x10010) in .mcs251.xdata_init
+
+# --- overlap: two per-section pins collide ---
+# RUN: not mcs251-lld two.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 \
+# RUN:   --area-start=.mcs251.XSEG.a=0x010000 \
+# RUN:   --area-start=.mcs251.XSEG.b=0x010004 \
+# RUN:   -o %t/ov.elf 2>&1 | FileCheck %s --check-prefix=OVL
+# OVL: XDATA overlap for .mcs251.XSEG.b
+
+# --- exact fit at a 64K window end: last byte 0x01ffff succeeds ---
+# RUN: mcs251-lld two.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x01fff0 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 \
+# RUN:   --area-start=.mcs251.XSEG.a=0x01fff0 --area-start=.mcs251.XSEG.b=0x01fff8 \
+# RUN:   --map=%t/edge.map -o %t/edge.elf && test -f %t/edge.elf
+# RUN: grep 'l_XSEG = 0x0010' %t/edge.map
+
+# --- one byte short: the allocator jumps to the next bank start ---
+# The record names the post-jump destination [0x020000,0x020101): a link
+# that placed the object anywhere else fails the record validation, so the
+# positive link is itself the address assertion.
+# RUN: yaml2obj jump.yaml -o jump.o
+# RUN: mcs251-lld jump.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x01fff0 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --map=%t/jump.map -o %t/jump.elf \
+# RUN:   && test -f %t/jump.elf
+# RUN: grep 'XSEG.obj 0x20000 +0x101' %t/jump.map
+
+# --- post-jump span: the bank-jump hole counts toward l_XSEG ---
+# l_XSEG = 0x020101 - 0x01fff0 = 0x111 (the 0x10-byte hole plus the object).
+# RUN: grep 'l_XSEG = 0x0111' %t/jump.map
+
+# --- jump + capacity combination: --xdata-size is measured from the XSEG
+# --- area start, hole included, so the post-jump object
+# --- [0x020000,0x020101) needs exactly 0x111 bytes from 0x01fff0 ---
+# RUN: mcs251-lld jump.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x01fff0 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --xdata-size=0x111 \
+# RUN:   --map=%t/jc.map -o %t/jc.elf && test -f %t/jc.elf
+# --- one byte less (0x110) and the same object exceeds the capacity ---
+# RUN: not mcs251-lld jump.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x01fff0 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --xdata-size=0x110 \
+# RUN:   -o %t/jc2.elf 2>&1 | FileCheck %s --check-prefix=JCAP
+# RUN: test ! -e %t/jc2.elf
+# JCAP: XDATA capacity [0x20000,0x20101) exceeds --xdata-size=272 in .mcs251.XSEG.obj
+
+# --- explicit per-section start may not straddle a window ---
+# RUN: not mcs251-lld over.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 \
+# RUN:   --area-start=.mcs251.XSEG.obj=0x01fff0 \
+# RUN:   -o %t/strad.elf 2>&1 | FileCheck %s --check-prefix=STRAD
+# STRAD: places the section across a 64K window boundary: [0x1fff0,0x200f1)
+
+# --- a single object larger than the 64K record limit is rejected ---
+# RUN: not mcs251-lld huge.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o %t/huge.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=HUGE
+# HUGE: exceeds the 64K window: XDATA objects are limited to 65535 bytes
+
+# --- XSEG never enters DSEG nor moves the stack high-water mark ---
+# RUN: mcs251-lld fit.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --xdata-size=0x100 \
+# RUN:   --map=%t/dseg.map -o %t/dseg.elf
+# RUN: grep 'l_DSEG = 0x0000' %t/dseg.map
+# RUN: not grep 'stack H=' %t/dseg.map
+
+#--- fit.yaml
+# 0x100-byte object at 0x010000, record destination exactly [0x010000,0x010100)
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG.obj
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0x100
+  - Name: .mcs251.xdata_init
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '01000001000000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- over.yaml
+# 0x101-byte object: one byte over the --xdata-size=0x100 capacity
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG.obj
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0x101
+  - Name: .mcs251.xdata_init
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '01000001010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- range.yaml
+# 0x11-byte object at 0xfffff0 runs past the 24-bit top
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG.obj
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0x11
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- wrongbank.yaml
+# XSEG will be placed at 0x020000, but the record targets 0x010000
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG.obj
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0x10
+  - Name: .mcs251.xdata_init
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '01000000100000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- two.yaml
+# Two 8-byte XSEG sections, individually pinnable
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG.a
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.XSEG.b
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.xdata_init
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '01FFF000080000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- huge.yaml
+# One 0x10000-byte section: over the u16 record limit
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG.obj
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0x10000
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- jump.yaml
+# Same 0x101-byte object; the record names the post-jump destination bank 02
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG.obj
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0x101
+  - Name: .mcs251.xdata_init
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '02000001010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []

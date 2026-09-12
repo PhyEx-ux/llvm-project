@@ -16,6 +16,8 @@ namespace llvm {
 class MCS251TargetObjectFile final : public TargetLoweringObjectFileELF {
   MCSection *DSEGSection = nullptr;
   MCSection *XINITSection = nullptr;
+  MCSection *XSEGSection = nullptr;
+  MCSection *XDATAInitSection = nullptr;
 
 public:
   void Initialize(MCContext &Ctx, const TargetMachine &TM) override;
@@ -25,6 +27,8 @@ public:
 
   MCSection *getDSEGSection() const { return DSEGSection; }
   MCSection *getXINITSection() const { return XINITSection; }
+  MCSection *getXSEGSection() const { return XSEGSection; }
+  MCSection *getXDATAInitSection() const { return XDATAInitSection; }
 };
 
 } // end namespace llvm

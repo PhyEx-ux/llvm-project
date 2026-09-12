@@ -5,6 +5,7 @@ add_llvm_component_library(LLVMBinaryFormat
   DXContainer.cpp
   ELF.cpp
   MachO.cpp
+  MCS251Attributes.cpp
   Magic.cpp
   MsgPackDocument.cpp
   MsgPackDocumentYAML.cpp

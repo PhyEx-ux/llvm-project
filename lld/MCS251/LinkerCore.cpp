@@ -448,6 +448,15 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
     S.Region = "XINIT";
     return true;
   }
+  // X3: the XDATA initialization records.  A CODE-class ROM area exactly like
+  // XINIT (same allocation, same boundary-symbol and flash-gate class), never
+  // synthesized by the linker -- it only places, parses and validates.
+  if (N == ".mcs251.xdata_init" || N.starts_with(".mcs251.xdata_init.")) {
+    if (S.Type != ELF::SHT_PROGBITS || S.Flags != ELF::SHF_ALLOC)
+      return fail(Err, "invalid XDATA_INIT section " + N);
+    S.Region = "XDATA_INIT";
+    return true;
+  }
   auto CodeFragment = [&](StringRef Region) {
     if (S.Flags != (ELF::SHF_ALLOC | ELF::SHF_EXECINSTR) ||
         (S.Type != ELF::SHT_PROGBITS && S.Type != ELF::SHT_NOBITS))
@@ -1172,6 +1181,7 @@ private:
   bool applyVectorJumps();
   bool validateIRQFinalAssets();
   bool validateXInit();
+  bool validateXDATAInit();
   void diagnoseIsrReentrancy(LinkerResult &Result);
   void buildMap(raw_ostream &Out) const;
   void collectSymbols(std::vector<OutputSymbol> &Out) const;
@@ -1222,8 +1232,9 @@ static bool isReservedBoundarySymbol(StringRef Name) {
     static const char *Areas[] = {
         "DSEG",       "OSEG",       "ISEG",        "SSEG",
         "HOME",       "VECS",       "BOOT",        "CSEG",
-        "XINIT",      "BSEG_BYTES", "BIT_BANK",    "XSEG",
-        "REG_BANK_0", "REG_BANK_1", "REG_BANK_2",  "REG_BANK_3"};
+        "XINIT",      "XDATA_INIT", "BSEG_BYTES",  "BIT_BANK",
+        "XSEG",       "REG_BANK_0", "REG_BANK_1",  "REG_BANK_2",
+        "REG_BANK_3"};
     for (const char *A : Areas)
       if (Area == A)
         return true;
@@ -1647,14 +1658,17 @@ bool Linker::layoutCode() {
   C["BOOT"].V = areaStart("BOOT", 0);
   C["CSEG"].V = areaStart("CSEG", 0);
   C["XINIT"].V = areaStart("XINIT", 0);
+  C["XDATA_INIT"].V = areaStart("XDATA_INIT", 0);
   for (InputSection *S : AllSections)
     if ((S->Region == "HOME" || S->Region == "VECS" ||
          S->Region == "BOOT" || S->Region == "CSEG" ||
-         S->Region == "XINIT") && !hasAreaStart(S->Region))
+         S->Region == "XINIT" || S->Region == "XDATA_INIT") &&
+        !hasAreaStart(S->Region))
       return fail(Err, "missing --area-start=" + S->Region);
   for (InputSection *S : AllSections) {
     if (S->Region != "HOME" && S->Region != "VECS" &&
-        S->Region != "BOOT" && S->Region != "CSEG" && S->Region != "XINIT")
+        S->Region != "BOOT" && S->Region != "CSEG" && S->Region != "XINIT" &&
+        S->Region != "XDATA_INIT")
       continue;
     uint32_t &V = C[S->Region].V;
     if (S->Align > 1)
@@ -2129,19 +2143,75 @@ bool Linker::layoutData() {
   uint32_t XsegCursor = areaStart("XSEG", 0);
   for (InputSection *S : AllSections)
     if (S->Region == "XSEG") {
-      if (hasAreaStart(S->Name))
-        XsegCursor = areaStart(S->Name, 0);
-      if (!rangeFits(XsegCursor, S->Size))
+      // X3 ruling: one XSEG section is one object, and an XDATA object never
+      // straddles a 64K window (the record format has a single bank byte,
+      // and the XINIT v1 copier walks one contiguous range).  A single
+      // object is therefore capped at 16 bits -- larger objects exceed the
+      // corpus and the boards and cannot be described by any record.
+      if (S->Size > 0xffff) {
+        std::string Msg;
+        raw_string_ostream OS(Msg);
+        OS << "XSEG section " << S->Name << " (" << S->Size
+           << " bytes) exceeds the 64K window: XDATA objects are limited to "
+              "65535 bytes and never straddle a 64K window boundary";
+        return fail(Err, Msg);
+      }
+      uint64_t Place = XsegCursor;
+      if (hasAreaStart(S->Name)) {
+        Place = areaStart(S->Name, 0);
+        // An explicit per-section start is honored verbatim: a start that
+        // would straddle a window is a layout error, never silently jumped.
+        if (S->Size &&
+            ((Place ^ (Place + S->Size - 1)) & 0xff0000ULL) != 0) {
+          std::string Msg;
+          raw_string_ostream OS(Msg);
+          OS << "explicit --area-start=" << S->Name << " places the section across a 64K window boundary: ["
+             << format_hex(Place, 6, false) << ","
+             << format_hex(Place + S->Size, 6, false) << ")";
+          return fail(Err, Msg);
+        }
+      } else if (S->Size) {
+        // Sequential placement keeps each object inside one 64K window: when
+        // the tail of the current window cannot hold the whole object, the
+        // cursor jumps to the next bank start.  The hole this leaves counts
+        // toward the l_XSEG span (the existing span semantics) and touches
+        // neither DSEG nor the stack.
+        const uint64_t WindowEnd = (XsegCursor & 0xff0000ULL) + 0x10000;
+        if (uint64_t(S->Size) > WindowEnd - XsegCursor)
+          Place = WindowEnd;
+      }
+      if (!rangeFits(Place, S->Size))
         return fail(Err, "XDATA address overflow in " + S->Name);
-      Range R{XsegCursor, XsegCursor + static_cast<uint32_t>(S->Size)};
+      Range R{static_cast<uint32_t>(Place),
+              static_cast<uint32_t>(Place + S->Size)};
       for (const Range &U : XDataUsed)
         if (R.Start < U.End && U.Start < R.End)
           return fail(Err, "XDATA overlap for " + S->Name);
-      S->Address = XsegCursor;
+      S->Address = R.Start;
       if (S->Size)
         XDataUsed.push_back(R);
-      XsegCursor += S->Size;
+      XsegCursor = R.End;
     }
+  // X3 capacity gate (--xdata-size): every allocated XSEG range must lie
+  // inside [area-start(XSEG), area-start(XSEG)+N).  Checked per section with
+  // 64-bit arithmetic; the always-on 24-bit rangeFits above still governs
+  // the architectural limit when the option is absent.
+  if (Config.XdataSize) {
+    const uint64_t Base = areaStart("XSEG", 0);
+    const uint64_t Limit = Base + uint64_t(Config.XdataSize);
+    for (InputSection *S : AllSections)
+      if (S->Region == "XSEG" && S->Size) {
+        const uint64_t Lo = S->Address, Hi = Lo + S->Size;
+        if (Lo < Base || Hi > Limit) {
+          std::string Msg;
+          raw_string_ostream OS(Msg);
+          OS << "XDATA capacity [" << format_hex(Lo, 6, false) << ","
+             << format_hex(Hi, 6, false) << ") exceeds --xdata-size="
+             << Config.XdataSize << " in " << S->Name;
+          return fail(Err, Msg);
+        }
+      }
+  }
 
   Synth["s_DSEG"] = 0;
   uint32_t LowUsed = 0;
@@ -2154,7 +2224,7 @@ bool Linker::layoutData() {
   Synth["l_DSEG"] = LowUsed;
   Synth["l_IRAM"] = (Config.IramSize > 0 && Config.IramSize <= 0x100)
                         ? Config.IramSize : 0x100;
-  for (const char *R : {"HOME", "VECS", "BOOT", "CSEG", "XINIT"}) {
+  for (const char *R : {"HOME", "VECS", "BOOT", "CSEG", "XINIT", "XDATA_INIT"}) {
     uint32_t Start = areaStart(R, 0), End = Start;
     for (InputSection *S : AllSections)
       if (S->Region == R)
@@ -2388,7 +2458,7 @@ bool Linker::checkFlashGate() {
   auto Hex = [](uint64_t V) { return "0x" + Twine::utohexstr(V); };
   auto IsCodeArea = [](StringRef N) {
     return N == "HOME" || N == "VECS" || N == "BOOT" || N == "CSEG" ||
-           N == "XINIT";
+           N == "XINIT" || N == "XDATA_INIT";
   };
   // A configured CODE-class area start must itself sit inside the window,
   // even when the area turns out to hold no bytes at all.
@@ -2466,6 +2536,23 @@ bool Linker::applyRelocations() {
             Target->Sec == Target->File->BitSection)
           return fail(Err, "MCS251 bit: ordinary relocation in " + S->Name +
                                " targets bit object " + Target->Name);
+        // X3: a 16-bit relocation field cannot carry an XDATA address. XSEG
+        // symbols hold a 24-bit canonical address (bank DPXL + window); a
+        // 16-bit field would silently truncate it. HI8/MID8/LO8 and the
+        // full R_MCS251_24 are the sanctioned channels. This covers named
+        // symbols and section-symbol folds alike (both resolve to the XSEG
+        // InputSection). Fail closed; there is no escape switch.
+        if ((R.Type == ELF::R_MCS251_16 || R.Type == ELF::R_MCS251_J16) &&
+            Target->Sec && Target->Sec->Region == "XSEG") {
+          StringRef TargetName =
+              Target->Name.empty()
+                  ? StringRef(Target->Sec->Name)
+                  : StringRef(Target->Name);
+          return fail(Err, "XDATA symbol " + TargetName +
+                               " truncated to 16 bits (use the 24-bit "
+                               "relocation channel) in " +
+                               S->Name);
+        }
         // T07 step 15 / R3: an ordinary ALLOC relocation may never use a
         // known registered ISR or the default entry as a plain address/call
         // target. The synthesized vector jumps are the single sanctioned
@@ -2509,6 +2596,55 @@ bool Linker::applyRelocations() {
                      : Synth.count(IS->Name) ? Synth[IS->Name]
                      : 0;
         int64_t Value = static_cast<int64_t>(V) + R.Addend;
+        // X3-R3/X3-R8: a stored pointer initializer must resolve inside its
+        // target object.  The channel is identified by the resolved target's
+        // final belonging, never by the referenced symbol's STT type:
+        // STT_NOTYPE definitions, same-address aliases and cross-TU
+        // resolutions are all legal XSEG reference forms (loadFile accepts
+        // STT_NOTYPE), so the old "STT_OBJECT/STT_SECTION target" test left
+        // the read-only image channel ungated and a NOTYPE-targeted pointer
+        // serialized as 00 00 00 00 with exit 0 (X3-R8).
+        //
+        // An R_MCS251_24 whose target resolves to an XSEG-defined symbol is
+        // a stored data pointer in every legal program: XSEG is NOBITS XDATA,
+        // so no call/EJMP/jump-table slot can target it (the 16-bit channel
+        // already fails closed against XSEG symbols above), while the
+        // pointer-initializer containers live in XINIT/XDATA_INIT record
+        // payloads, in non-executable read-only images (.rodata), and -- as
+        // the backend actually emits them, MCS251AsmPrinter places read-only
+        // globals in .text -- in executable read-only images alike.  A code
+        // R_MCS251_24 (target STT_FUNC or a code-section symbol) never
+        // resolves to an XSEG section and keeps the plain range checks.  The
+        // X2 code address materialization uses the HI8/MID8/LO8 byte
+        // channels, which keep the plain range checks.
+        //
+        // The gate: an XDATA object is one XSEG slice, so the final value
+        // (symbol + addend) must land in [slice, slice+size].  One-past-end
+        // is allowed (frozen ruling: a pointer may address the byte after
+        // the object's last byte -- e.g. a loop end sentinel; it is not
+        // dereferenceable but is a legal value); anything outside the
+        // half-open-plus-one interval is a dangling or wrong-bank pointer
+        // and fails the link.  Fail closed; no escape switch.
+        if (R.Type == ELF::R_MCS251_24 && Target->Sec &&
+            Target->Sec->Region == "XSEG") {
+          const uint64_t Lo = Target->Sec->Address;
+          const uint64_t Hi = Lo + Target->Sec->Size; // one-past-end allowed
+          if (Value < static_cast<int64_t>(Lo) ||
+              Value > static_cast<int64_t>(Hi)) {
+            StringRef TargetName =
+                Target->Name.empty()
+                    ? StringRef(Target->Sec->Name)
+                    : StringRef(Target->Name);
+            std::string Msg;
+            raw_string_ostream OS(Msg);
+            OS << "stored XDATA pointer in " << S->Name
+               << " resolves outside the target object " << TargetName
+               << ": " << format_hex(uint64_t(Value), 6, false) << " not in ["
+               << format_hex(Lo, 6, false) << "," << format_hex(Hi, 6, false)
+               << "] (one-past-end is the last legal value)";
+            return fail(Err, Msg);
+          }
+        }
         uint32_t Width = (R.Type == ELF::R_MCS251_16 ||
                           R.Type == ELF::R_MCS251_J16 ||
                           R.Type == ELF::R_MCS251_J11) ? 2
@@ -2796,6 +2932,91 @@ bool Linker::validateXInit() {
       Offset += 6 + PayloadSize;
     }
   }
+  return true;
+}
+
+// X3: parse and validate every `.mcs251.xdata_init` record after layout and
+// relocation application (the bank/window fields are relocation-written, so
+// the values checked here are the final ones).  Record v1 (frozen):
+//   u8 bank, u16 window (BE), u16 object_size, u16 payload_size, payload
+// with payload_size == 0 meaning "clear only".  For every record:
+//   * structure must parse (header whole, payload inside the section),
+//   * the destination [bank:window, bank:window+object_size) must stay in
+//     the 24-bit space and inside ONE 64K window (belt-and-braces: the
+//     allocator already refuses to straddle; a hand-made record that does
+//     is a hard error, never silently wrapped),
+//   * the destination must lie entirely inside one allocated XSEG slice
+//     (last byte included; crossing out of the slice is an error),
+//   * no two records may overlap in their destinations.
+// The linker never synthesizes XDATA_INIT bytes; the CRT consumer loop is
+// the X4 slice.
+bool Linker::validateXDATAInit() {
+  struct DestUse {
+    uint64_t Lo, Hi;
+    std::string Sec;
+  };
+  std::vector<DestUse> Dests;
+  for (InputSection *S : AllSections) {
+    if (S->Region != "XDATA_INIT")
+      continue;
+    size_t Offset = 0;
+    while (Offset != S->Data.size()) {
+      if (S->Data.size() - Offset < 7)
+        return fail(Err, "truncated XDATA_INIT record in " + S->Name);
+      ArrayRef<uint8_t> Record(S->Data);
+      const uint32_t Bank = Record[Offset];
+      const uint32_t Window = (uint32_t(Record[Offset + 1]) << 8) |
+                              Record[Offset + 2];
+      const uint32_t ObjectSize = (uint32_t(Record[Offset + 3]) << 8) |
+                                  Record[Offset + 4];
+      const uint32_t PayloadSize = (uint32_t(Record[Offset + 5]) << 8) |
+                                   Record[Offset + 6];
+      if (!ObjectSize || (PayloadSize != 0 && PayloadSize != ObjectSize) ||
+          PayloadSize > S->Data.size() - Offset - 7)
+        return fail(Err, "invalid XDATA_INIT record in " + S->Name);
+      const uint64_t Dest = (uint64_t(Bank) << 16) | Window;
+      const uint64_t DestEnd = Dest + ObjectSize;
+      auto Hex = [](uint64_t V) { return "0x" + Twine::utohexstr(V); };
+      if (DestEnd > 0x1000000)
+        return fail(Err, "XDATA_INIT destination overflows the 24-bit XDATA "
+                         "space: [" +
+                             Hex(Dest) + "," + Hex(DestEnd) + ") in " +
+                             S->Name);
+      if ((Dest ^ (DestEnd - 1)) & 0xff0000ULL)
+        return fail(Err, "XDATA_INIT record in " + S->Name +
+                             " spans a 64K window boundary: [" + Hex(Dest) +
+                             "," + Hex(DestEnd) +
+                             ") -- an XDATA object never straddles a bank");
+      bool WithinOneSlice = false;
+      for (InputSection *D : AllSections)
+        if (D->Region == "XSEG" && D->Size != 0 && Dest >= D->Address &&
+            DestEnd <= D->Address + D->Size) {
+          WithinOneSlice = true;
+          break;
+        }
+      if (!WithinOneSlice)
+        return fail(Err, "XDATA_INIT destination is not within one XSEG "
+                         "slice: [" +
+                             Hex(Dest) + "," + Hex(DestEnd) + ") in " +
+                             S->Name);
+      Dests.push_back({Dest, DestEnd, S->Name});
+      Offset += 7 + PayloadSize;
+    }
+  }
+  if (Dests.size() < 2)
+    return true;
+  llvm::sort(Dests, [](const DestUse &A, const DestUse &B) {
+    return A.Lo != B.Lo ? A.Lo < B.Lo : A.Hi < B.Hi;
+  });
+  for (size_t I = 1; I != Dests.size(); ++I)
+    if (Dests[I].Lo < Dests[I - 1].Hi) {
+      auto Hex = [](uint64_t V) { return "0x" + Twine::utohexstr(V); };
+      return fail(Err, "XDATA_INIT record destinations overlap: [" +
+                           Hex(Dests[I - 1].Lo) + "," + Hex(Dests[I - 1].Hi) +
+                           ") from " + Dests[I - 1].Sec + " and [" +
+                           Hex(Dests[I].Lo) + "," + Hex(Dests[I].Hi) +
+                           ") from " + Dests[I].Sec);
+    }
   return true;
 }
 
@@ -3450,7 +3671,8 @@ bool Linker::run(LinkerResult &Result) {
   // rejected image never reaches a firmware file or a map.
   if (!checkFlashGate())
     return false;
-  if (!errorUndefined() || !applyRelocations() || !validateXInit())
+  if (!errorUndefined() || !applyRelocations() || !validateXInit() ||
+      !validateXDATAInit())
     return false;
   // E2: static parameter-slot reentrancy diagnosis (COMPILER-ASSESSMENT
   // 2026-09-10 section 5).  Runs after layout and relocation application so

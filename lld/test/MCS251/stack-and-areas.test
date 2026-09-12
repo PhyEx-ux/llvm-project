@@ -86,6 +86,17 @@
 # RUN:   --map=%t/hole32.map -o %t/hole32.elf && test -f %t/hole32.elf
 # RUN: grep 'l_SSEG = 0x0020' %t/hole32.map
 
+# --- X3: XSEG storage is independent of DSEG and the stack high-water mark.
+# A large XDATA object neither enters the DATA ledger nor changes the SSEG
+# auto-size/l_DSEG results of the same module shape without it.
+# RUN: yaml2obj xseg-stack.yaml -o xseg-stack.o
+# RUN: mcs251-lld xseg-stack.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --xdata-size=0x2000 --stack-size=16 --map=%t/xs.map -o %t/xs.elf \
+# RUN:   && test -f %t/xs.elf
+# RUN: grep 'l_DSEG = 0x0010' %t/xs.map
+# RUN: grep 'l_SSEG = 0x0010' %t/xs.map
+# RUN: grep 'l_XSEG = 0x1000' %t/xs.map
+
 #--- base.yaml
 --- !ELF
 FileHeader:
@@ -188,6 +199,42 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
     Content: '00'
+  - Name: .mcs251.SSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols: []
+
+#--- xseg-stack.yaml
+# A 0x1000-byte XDATA object plus an SSEG slice: the XSEG bytes must not
+# influence the DATA ledger (l_DSEG stays 0, no DSEG section) nor the stack
+# reservation.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG.buf
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0x1000
   - Name: .mcs251.SSEG
     Type: SHT_NOBITS
     Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]

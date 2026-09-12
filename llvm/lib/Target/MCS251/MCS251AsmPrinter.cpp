@@ -45,6 +45,7 @@
 #include "MCS251TargetObjectFile.h"
 #include "MCTargetDesc/MCS251ABISignature.h"
 #include "TargetInfo/MCS251TargetInfo.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
@@ -63,6 +64,7 @@
 #include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
@@ -163,6 +165,12 @@ class MCS251AsmPrinter final : public AsmPrinter {
     // Check a pointer before consulting Seen.  An unsupported pointer type is
     // rejected on every encounter, rather than becoming acceptable merely
     // because a previous walk inserted it before returning false.
+    //
+    // X3: this walk still governs every pointer OUTSIDE global storage
+    // (signatures, instruction operands, arbitrary constants), where an
+    // AS3/AS4 pointer capability remains v2-only.  AS3/AS4 pointer
+    // CONSTANTS that are the exact emittable initializer leaf are admitted
+    // separately by hasV1PlacementInitializer().
     if (auto *PT = dyn_cast<PointerType>(Ty))
       return PT->getAddressSpace() == 0;
     if (!Seen.insert(Ty).second)
@@ -222,6 +230,126 @@ class MCS251AsmPrinter final : public AsmPrinter {
       if (const auto *Child = dyn_cast<Constant>(U.get()))
         if (!hasV1ObjectCompatibleConstant(Child, SeenTypes, SeenConstants))
           return false;
+    }
+    return true;
+  }
+
+  //===--------------------------------------------------------------------===//
+  // X3 placement support: pointer initializer leaves and the AS3/AS4
+  // global-storage v1 representability walk.
+  //===--------------------------------------------------------------------===//
+
+  // The supported pointer leaf: exactly &global (a GlobalVariable or Function
+  // in one of the placed storage address spaces 0/3/4) with one folded
+  // constant addend -- either the legacy ConstantExpr Add form or, since
+  // legal IR expresses pointer-plus-constant as a GEP, a getelementptr whose
+  // base is a GlobalVariable and whose indices all fold to constants under
+  // the DataLayout -- or a null pointer (a fully defined zero image that
+  // serializes no capability). GEP null, non-constant indices, inttoptr,
+  // ptrtoint, addrspacecast and all other expression algebra stay rejected,
+  // in the style of the existing conservative support checks. \return the
+  // base symbol and the folded addend on success.
+  static bool isSupportedPointerLeaf(const Constant *C, const DataLayout &DL,
+                                     const GlobalValue *&Base,
+                                     int64_t &Addend) {
+    Base = nullptr;
+    Addend = 0;
+    if (isa<ConstantPointerNull>(C))
+      return DL.getTypeStoreSize(C->getType()) == 4;
+    const Value *BaseV = nullptr;
+    if (isa<GlobalValue>(C)) {
+      BaseV = C;
+    } else if (const auto *CE = dyn_cast<ConstantExpr>(C);
+               CE && CE->getOpcode() == Instruction::Add &&
+               CE->getNumOperands() == 2) {
+      const Value *L = CE->getOperand(0);
+      const Value *R = CE->getOperand(1);
+      if (isa<GlobalValue>(L) && isa<ConstantInt>(R)) {
+        BaseV = L;
+        Addend = cast<ConstantInt>(R)->getSExtValue();
+      } else if (isa<ConstantInt>(L) && isa<GlobalValue>(R)) {
+        BaseV = R;
+        Addend = cast<ConstantInt>(L)->getSExtValue();
+      }
+    } else if (const auto *GEP = dyn_cast<GEPOperator>(C)) {
+      // X3-R4: the sanctioned form of "&global + constant". Only a GEP
+      // directly over a GlobalVariable with fully constant indices folds; a
+      // GEP over null, over any cast (which could launder an address space),
+      // or with a non-constant index is not an object identity and keeps
+      // the rejection. The folded offset must stay inside the 24-bit
+      // effective-address discipline (any base plus such an addend that
+      // would resolve into [0,0xffffff] needs an addend in
+      // [-0xffffff,+0xffffff]; anything wider can never link legally, and
+      // the linker's pointer-interval gate re-validates the final value).
+      BaseV = GEP->getPointerOperand();
+      if (!isa<GlobalVariable>(BaseV))
+        return false;
+      const unsigned AS = GEP->getPointerAddressSpace();
+      APInt Offset(DL.getIndexSizeInBits(AS), 0);
+      if (!GEP->accumulateConstantOffset(DL, Offset))
+        return false; // non-constant index: a runtime pointer, not a leaf
+      if (!Offset.isSignedIntN(32) ||
+          Offset.sgt(0xffffff) || Offset.slt(int64_t(-0xffffff)))
+        return false; // outside the 24-bit effective-address discipline
+      Addend = Offset.getSExtValue();
+    }
+    if (!BaseV)
+      return false;
+    if (auto *F = dyn_cast<Function>(BaseV)) {
+      Base = F;
+    } else if (auto *GV = dyn_cast<GlobalVariable>(BaseV)) {
+      unsigned AS = GV->getAddressSpace();
+      if (AS != 0 && AS != 3 && AS != 4)
+        return false; // target object has no placed storage class
+      Base = GV;
+    } else {
+      return false;
+    }
+    // The 24-bit relocation channel needs the full 32/8 pointer container.
+    return DL.getTypeStoreSize(C->getType()) == 4;
+  }
+
+  // v1 representability of a global INITIALIZER (X3). Admits aggregates of
+  // the emittable leaves: integers, zero images, and pointer leaves of the
+  // exact form above. The operand trees of arbitrary ConstantExprs are
+  // deliberately NOT walked for leaf admission: a cast or arithmetic
+  // expression that merely ends in a plain pointer type must not launder an
+  // AS3/AS4 capability into a v1 object (the isr-object ESCAPE cases pin
+  // exactly this). The callers use this walk only as a widening superset of
+  // hasV1ObjectCompatibleConstant, never as a replacement; it keeps its own
+  // seen-set so a constant rejected by the first walk can never look
+  // "already verified" here.
+  static bool hasV1PlacementInitializer(const Constant *C, const DataLayout &DL) {
+    SmallPtrSet<const Constant *, 32> Seen;
+    return hasV1PlacementInitializerImpl(C, DL, Seen);
+  }
+
+  static bool hasV1PlacementInitializerImpl(
+      const Constant *C, const DataLayout &DL,
+      SmallPtrSetImpl<const Constant *> &Seen) {
+    if (!Seen.insert(C).second)
+      return true;
+    if (isa<ConstantAggregateZero>(C) || isa<ConstantInt>(C))
+      return true;
+    Type *Ty = C->getType();
+    if (isa<PointerType>(Ty)) {
+      const GlobalValue *Base;
+      int64_t Addend;
+      return isSupportedPointerLeaf(C, DL, Base, Addend);
+    }
+    unsigned Elements = 0;
+    if (auto *AT = dyn_cast<ArrayType>(Ty))
+      Elements = AT->getNumElements();
+    else if (auto *ST = dyn_cast<StructType>(Ty))
+      Elements = ST->isOpaque() ? 0 : ST->getNumElements();
+    else
+      return false; // casts, ptrtoint, undef, ...: not an emittable leaf
+    if (!Elements)
+      return false;
+    for (unsigned I = 0; I != Elements; ++I) {
+      const Constant *Element = C->getAggregateElement(I);
+      if (!Element || !hasV1PlacementInitializerImpl(Element, DL, Seen))
+        return false;
     }
     return true;
   }
@@ -332,6 +460,7 @@ class MCS251AsmPrinter final : public AsmPrinter {
 
     SmallPtrSet<Type *, 32> SeenTypes;
     SmallPtrSet<const Constant *, 32> SeenConstants;
+    const DataLayout &DL = M.getDataLayout();
     for (const GlobalVariable &GV : M.globals()) {
       // T06 step 8(i): the only AS4-pointer exemption is a per-member path
       // check of a structurally verified llvm.used keepalive container (A2.2
@@ -357,12 +486,25 @@ class MCS251AsmPrinter final : public AsmPrinter {
         }
         continue;
       }
-      if (GV.getAddressSpace() != 0 ||
-          !hasV1PointerTypes(GV.getValueType(), SeenTypes))
+      // X3: AS3 (__xdata) and AS4 (__code) globals are placed storage with
+      // a v1 object protocol (per-object .mcs251.XSEG.* NOBITS sections plus
+      // .mcs251.xdata_init records; CODE-space read-only images), so they no
+      // longer make the module v2-only by themselves. Their value type must
+      // be emittable storage, and an initializer is admitted only through
+      // the original containment walk or the exact placement-leaf walk.
+      // Pointer capabilities everywhere else keep the v2-only verdict.
+      const unsigned GAS = GV.getAddressSpace();
+      if (GAS != 0 && GAS != 3 && GAS != 4)
         return false;
-      if (GV.hasInitializer() && !hasV1ObjectCompatibleConstant(
-                                     GV.getInitializer(), SeenTypes,
-                                     SeenConstants))
+      if (GAS != 0 && !isSupportedMutableType(GV.getValueType(), DL))
+        return false;
+      if (!hasV1PointerTypes(GV.getValueType(), SeenTypes) &&
+          !isSupportedMutableType(GV.getValueType(), DL))
+        return false;
+      if (GV.hasInitializer() &&
+          !hasV1ObjectCompatibleConstant(GV.getInitializer(), SeenTypes,
+                                         SeenConstants) &&
+          !hasV1PlacementInitializer(GV.getInitializer(), DL))
         return false;
     }
     for (const Function &F : M) {
@@ -398,34 +540,58 @@ class MCS251AsmPrinter final : public AsmPrinter {
     return true;
   }
 
+  // X3-R1: no v2 identity payload is built or installed here.  DESIGN.md
+  // N.9 keeps the complete v2 identity value domain open (call ABI,
+  // register variant, init/placement/stack/function protocols, capability
+  // words, ABI options, code profile), so no candidate value set may be
+  // emitted as a production object identity; the `.mcs251.attributes`
+  // codec remains a structure codec validated by its own unit tests, with
+  // no production caller.  A module outside the v1 object identity is
+  // rejected by classifyModule() below.
+
   void emitASxxxxText(const Twine &Text) {
     if (!usesELFObjects())
       OutStreamer->emitRawText(Text);
   }
 
-  static bool isSupportedMutableType(Type *Ty) {
+  static bool isSupportedMutableType(Type *Ty, const DataLayout &DL) {
     if (Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32))
       return true;
+    if (auto *PT = dyn_cast<PointerType>(Ty))
+      // X3: pointer leaves are supported in 4-byte containers only -- the
+      // initializer channel writes a big-endian 32-bit container whose low
+      // 24 bits are the canonical address (zero most-significant byte at
+      // container offset 0, 3-byte R_MCS251_24 field at offsets 1..3; the
+      // 32/8 pointer ABI; the 16-bit contracts keep rejecting).
+      return DL.getTypeStoreSize(PT) == 4;
     if (auto *AT = dyn_cast<ArrayType>(Ty)) {
       return AT->getNumElements() &&
-             isSupportedMutableType(AT->getElementType());
+             isSupportedMutableType(AT->getElementType(), DL);
     }
     if (auto *ST = dyn_cast<StructType>(Ty)) {
       if (ST->isOpaque() || ST->getNumElements() == 0)
         return false;
-      return llvm::all_of(ST->elements(), isSupportedMutableType);
+      return llvm::all_of(ST->elements(), [&](Type *E) {
+        return isSupportedMutableType(E, DL);
+      });
     }
     return false;
   }
 
-  static bool isSupportedMutableInitializer(const Constant *C) {
+  static bool isSupportedMutableInitializer(const Constant *C,
+                                            const DataLayout &DL) {
     Type *Ty = C->getType();
-    if (!isSupportedMutableType(Ty))
+    if (!isSupportedMutableType(Ty, DL))
       return false;
     if (isa<ConstantAggregateZero>(C))
       return true;
     if (isa<ConstantInt>(C))
       return true;
+    if (isa<PointerType>(Ty)) {
+      const GlobalValue *Base;
+      int64_t Addend;
+      return isSupportedPointerLeaf(C, DL, Base, Addend);
+    }
     if (!isa<ArrayType>(Ty) && !isa<StructType>(Ty))
       return false;
     unsigned Elements = Ty->isArrayTy()
@@ -433,7 +599,7 @@ class MCS251AsmPrinter final : public AsmPrinter {
                             : cast<StructType>(Ty)->getNumElements();
     for (unsigned I = 0; I != Elements; ++I) {
       const Constant *Element = C->getAggregateElement(I);
-      if (!Element || !isSupportedMutableInitializer(Element))
+      if (!Element || !isSupportedMutableInitializer(Element, DL))
         return false;
     }
     return true;
@@ -457,6 +623,16 @@ class MCS251AsmPrinter final : public AsmPrinter {
                                DL.getTypeStoreSize(Ty));
       return;
     }
+    if (isa<PointerType>(Ty)) {
+      // X3: pointer leaf -- the 24-bit relocation channel.
+      const GlobalValue *Base;
+      int64_t Addend;
+      bool Supported = isSupportedPointerLeaf(C, DL, Base, Addend);
+      assert(Supported && "initializer rejected by the support check");
+      (void)Supported;
+      emitPointerInitializer(Base, Addend);
+      return;
+    }
     if (auto *AT = dyn_cast<ArrayType>(Ty)) {
       uint64_t StoreSize = DL.getTypeStoreSize(AT->getElementType());
       uint64_t Stride = DL.getTypeAllocSize(AT->getElementType());
@@ -478,22 +654,128 @@ class MCS251AsmPrinter final : public AsmPrinter {
     emitInitializerZeros(DL.getTypeStoreSize(ST) - Pos);
   }
 
+  // One relocated address byte: a zero placeholder plus a `.reloc`
+  // association spelling the ELF relocation name (mapped to the target
+  // fixup by the asm backend). The field resolves after the linker's full
+  // symbol+addend sum; byte-of-24 associations never truncate.
+  void emitRelocByte(StringRef Reloc, const MCSymbol *Sym) {
+    MCSymbol *Field = OutContext.createTempSymbol();
+    OutStreamer->emitLabel(Field);
+    OutStreamer->emitIntValue(0, 1);
+    OutStreamer->emitRelocDirective(*MCSymbolRefExpr::create(Field, OutContext),
+                                    Reloc,
+                                    MCSymbolRefExpr::create(Sym, OutContext));
+  }
+
+  // The 24-bit destination field of one `.mcs251.xdata_init` record: bank =
+  // canonical bits [23:16] (exactly the value DPXL loads), window = canonical
+  // bits [15:0], big-endian like every XINIT v1 u16 field. The three bytes
+  // are the HI8/MID8/LO8 byte-of-24 channel of the object symbol -- never a
+  // 16-bit truncation (the linker hard-errors R_MCS251_16/J16 against XSEG
+  // symbols).
+  void emitXDATAInitAddress(const MCSymbol *Sym) {
+    emitRelocByte("R_MCS251_HI8", Sym);
+    emitRelocByte("R_MCS251_MID8", Sym);
+    emitRelocByte("R_MCS251_LO8", Sym);
+  }
+
+  // One 4-byte pointer container initialized to &global[+addend] (or null).
+  // The container is a BIG-ENDIAN 32-bit image whose low 24 bits are the
+  // canonical effective address (the X2 load sequence reads all four bytes
+  // big-endian and routes bits [23:16] to DPXL, [15:8] to DPH, [7:0] to
+  // DPL; bits [31:24] are not part of the address).  The layout is
+  // therefore unambiguous: a literal zero byte (the always-zero most
+  // significant byte) at container offset 0, then the R_MCS251_24 field
+  // occupying container offsets 1..3 in the frozen big-endian order
+  // (hi/bank at 1, mid at 2, lo at 3 -- the applyVectorJumps EJMP byte
+  // order is the frozen truth).  After linking, a symbol at 0x011234
+  // serializes as 00 01 12 34, never as 01 12 34 00.
+  // A null leaf needs no relocation and is legal in every output mode; a
+  // symbol leaf is reserved to the ELF object protocol (see
+  // requiresELFPointerInitializers).
+  void emitPointerInitializer(const GlobalValue *Base, int64_t Addend) {
+    if (!Base) { // null pointer leaf: a fully defined zero image
+      emitInitializerZeros(4);
+      return;
+    }
+    // Bits [31:24] of the container are not part of the 24-bit effective
+    // address: the most significant byte is a literal zero at offset 0.
+    OutStreamer->emitIntValue(0, 1);
+    MCSymbol *Field = OutContext.createTempSymbol();
+    OutStreamer->emitLabel(Field);
+    OutStreamer->emitIntValue(0, 3);
+    const MCExpr *E = MCSymbolRefExpr::create(getSymbol(Base), OutContext);
+    if (Addend)
+      E = MCBinaryExpr::createAdd(E,
+                                  MCConstantExpr::create(Addend, OutContext),
+                                  OutContext);
+    OutStreamer->emitRelocDirective(*MCSymbolRefExpr::create(Field, OutContext),
+                                    "R_MCS251_24", E);
+  }
+
+  // X3: a pointer initializer whose base is a symbol serializes a 24-bit
+  // relocation through the `.reloc` protocol, which exists only in ELF
+  // objects (the REL writer and the assembly text have no such record).
+  // Null leaves carry no relocation and stay legal everywhere.
+  static bool hasSymbolPointerLeaf(const Constant *C, const DataLayout &DL) {
+    if (isa<PointerType>(C->getType())) {
+      const GlobalValue *Base;
+      int64_t Addend;
+      return isSupportedPointerLeaf(C, DL, Base, Addend) && Base != nullptr;
+    }
+    unsigned Elements = 0;
+    if (auto *AT = dyn_cast<ArrayType>(C->getType()))
+      Elements = AT->getNumElements();
+    else if (auto *ST = dyn_cast<StructType>(C->getType()))
+      Elements = ST->isOpaque() ? 0 : ST->getNumElements();
+    else
+      return false;
+    for (unsigned I = 0; I != Elements; ++I) {
+      const Constant *Element = C->getAggregateElement(I);
+      if (Element && hasSymbolPointerLeaf(Element, DL))
+        return true;
+    }
+    return false;
+  }
+
+  void requireELFPointerInitializers(const GlobalVariable *GV,
+                                     const Constant *Init,
+                                     const DataLayout &DL) const {
+    if ((getMCS251TM().emitsObjectFile() && usesELFObjects()) ||
+        !hasSymbolPointerLeaf(Init, DL))
+      return;
+    report_fatal_error("MCS251: global '" + GV->getName() +
+                       "': a pointer initializer requires ELF object output "
+                       "(-filetype=obj -mcs251-object-format=elf)");
+  }
+
   // Read-only CSEG data: i8/i16/i32 scalars and (possibly nested) arrays of
-  // them, nonempty at every level, every leaf a ConstantInt.  Struct
-  // aggregates, zeroinitializers, undef elements and initializer relocations
-  // (pointer tables) are all rejected here and reported by the caller's
-  // policy message.
-  static bool isSupportedROInitializer(const Constant *C) {
+  // them, nonempty at every level, every leaf a ConstantInt.  X3 extends the
+  // accepted leaf set with pointer initializers (&global leaves through the
+  // 24-bit relocation channel) and, for CODE-space objects, the ROM zero
+  // image (legal in CODE space; X3 ruling: uninitialized/tentative __code
+  // definitions become a zero image).  Struct aggregates, undef elements and
+  // all other initializer expression relocations are rejected here and
+  // reported by the caller's policy message.
+  static bool isSupportedROInitializer(const Constant *C, const DataLayout &DL,
+                                       bool AllowZeroImage) {
     Type *Ty = C->getType();
     if (isa<ConstantInt>(C))
       return Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32);
+    if (isa<ConstantAggregateZero>(C))
+      return AllowZeroImage;
+    if (isa<PointerType>(Ty)) {
+      const GlobalValue *Base;
+      int64_t Addend;
+      return isSupportedPointerLeaf(C, DL, Base, Addend);
+    }
     auto *AT = dyn_cast<ArrayType>(Ty);
     if (!AT || !AT->getNumElements() ||
         (!isa<ConstantDataArray>(C) && !isa<ConstantArray>(C)))
       return false;
     for (unsigned I = 0; I != AT->getNumElements(); ++I) {
       const Constant *Element = C->getAggregateElement(I);
-      if (!Element || !isSupportedROInitializer(Element))
+      if (!Element || !isSupportedROInitializer(Element, DL, AllowZeroImage))
         return false;
     }
     return true;
@@ -502,13 +784,30 @@ class MCS251AsmPrinter final : public AsmPrinter {
   // Emits the CSEG byte image of a read-only initializer: scalars in the
   // established target (big-endian) memory order, nested arrays element by
   // element with stride padding (zero for the packed integer layouts this
-  // path accepts).  The image is always byte-aligned: any IR-level alignment
-  // above 1 on the global is deliberately demoted, because MCS-251 needs no
-  // address alignment for word accesses (QEMU + real hardware verified).
+  // path accepts), pointer leaves through the 24-bit relocation channel,
+  // and the CODE-space zero image where the support check allowed one.
+  // The image is always byte-aligned: any IR-level alignment above 1 on the
+  // global is deliberately demoted, because MCS-251 needs no address
+  // alignment for word accesses (QEMU + real hardware verified).
   void emitROInitializer(const DataLayout &DL, const Constant *C) {
     if (auto *CI = dyn_cast<ConstantInt>(C)) {
       OutStreamer->emitIntValue(CI->getZExtValue(),
                                 DL.getTypeStoreSize(C->getType()));
+      return;
+    }
+    if (isa<ConstantAggregateZero>(C)) {
+      // Reachable only when the caller's support check allowed the zero
+      // image (CODE-space objects).
+      emitInitializerZeros(DL.getTypeStoreSize(C->getType()));
+      return;
+    }
+    if (isa<PointerType>(C->getType())) {
+      const GlobalValue *Base;
+      int64_t Addend;
+      bool Supported = isSupportedPointerLeaf(C, DL, Base, Addend);
+      assert(Supported && "initializer rejected by the support check");
+      (void)Supported;
+      emitPointerInitializer(Base, Addend);
       return;
     }
     auto *AT = cast<ArrayType>(C->getType());
@@ -930,11 +1229,27 @@ public:
     EmitToStreamer(*OutStreamer, TmpInst);
   }
 
-  void emitStartOfAsmFile(Module &M) override {
-    // ASxxxx module prologue.  ".source" is emitted bare, exactly like the
-    // validated specimen and the smoke crt0 template (sdas251 accepts it
-    // without a file argument; a filename argument was never exercised).
-    const std::string ModuleName = getMCS251ModuleName(M);
+  /// Classify the module: decide whether it is representable by the v1
+  /// relocatable-object identity.
+  ///
+  /// X3-R1: a module that uses a capability outside the v1 object identity
+  /// is NEVER emitted as an object.  DESIGN.md N.9 keeps the complete v2
+  /// identity value domain open (call ABI, register variant, object minor,
+  /// AS layout adoption, the init/placement/stack/function subprotocols,
+  /// code model profile, capability words, ABI options), and this slice's
+  /// initialization records are v1, so no candidate identity payload may be
+  /// published as a production object (the `.mcs251.attributes` codec is a
+  /// structure codec with no production caller; see its unit tests).  The
+  /// object path therefore fails loudly, fail-closed, with no escape
+  /// switch; the gate may only be reopened after the fields and
+  /// subprotocols are approved.
+  ///
+  /// The routine is idempotent: emitStartOfAsmFile re-asserts the same facts,
+  /// which matters because a MIR entry point (-start-after...) reaches the
+  /// AsmPrinter without going through doInitialization.
+  ///
+  /// Returns true when the module is representable by the v1 object identity.
+  bool classifyModule(Module &M) {
     // ISR identity of the module decides where the A2.2 keepalive exemption
     // applies (object gate, storage-reservation scan, global emission).
     ModuleHasISRDefinitions =
@@ -943,6 +1258,27 @@ public:
     ModuleHasBitObjects = llvm::any_of(M.globals(), [](const GlobalVariable &GV) {
       return MCS251::isBitObjectGlobal(GV);
     });
+
+    const bool V1Compatible = isV1ObjectCompatible(M);
+    if (!V1Compatible && getMCS251TM().emitsObjectFile()) {
+      report_fatal_error(
+          "MCS251: module uses an ABI capability that cannot be represented "
+          "by the v1 relocatable-object identity; v2 object output is not "
+          "implemented (the complete identity and subprotocols are not approved)");
+    }
+    return V1Compatible;
+  }
+
+  void emitStartOfAsmFile(Module &M) override {
+    // ASxxxx module prologue.  ".source" is emitted bare, exactly like the
+    // validated specimen and the smoke crt0 template (sdas251 accepts it
+    // without a file argument; a filename argument was never exercised).
+    const std::string ModuleName = getMCS251ModuleName(M);
+    // Re-assert the module classification.  doInitialization already ran it
+    // before initSections; this second call keeps the MIR entry path
+    // (-start-after..., which bypasses doInitialization) correct, and
+    // classifyModule is idempotent.
+    classifyModule(M);
     // Build the symbol-identity table every later boundary check resolves
     // through: one entry per placeholder, keyed by its MC symbol. `&flag` in
     // MIR mangles to the same MCContext symbol, so the ExternalSymbol and
@@ -982,12 +1318,7 @@ public:
                              GA.getName() + "')");
       }
     }
-    bool V1Compatible = isV1ObjectCompatible(M);
-    if (getMCS251TM().emitsObjectFile() && !V1Compatible)
-      report_fatal_error(
-          "MCS251: module uses an ABI capability that cannot be represented "
-          "by the v1 relocatable-object identity; v2 object output is not "
-          "implemented");
+    const bool V1Compatible = isV1ObjectCompatible(M);
     emitASxxxxText("\t.module " + ModuleName);
     emitASxxxxText("\t.source");
     if (V1Compatible)
@@ -1064,6 +1395,15 @@ public:
       emitBitObjectRecords(M);
   }
 
+  bool doInitialization(Module &M) override {
+    // Run the v1/v2 classification *before* the base implementation: a
+    // module outside the v1 object identity must fail before any section or
+    // identity carrier byte is emitted (the ELF streamer always emits the
+    // v1 note; there is no v2 carrier, see X3-R1).
+    classifyModule(M);
+    return AsmPrinter::doInitialization(M);
+  }
+
   void emitGlobalVariable(const GlobalVariable *GV) override {
     // BT12: a persistent bit object is identity, not storage. It was already
     // turned into a kind-1 `.mcs251.bit` record (definition) or left as an
@@ -1100,6 +1440,15 @@ public:
       return;
     }
 
+    const DataLayout &DL = GV->getDataLayout();
+    // X3: AS3 (__xdata, including `const __xdata`) and AS4 (__code) objects
+    // are placed storage with their own emitters. A declaration (the
+    // extern-only TU case above) emits nothing.
+    if (unsigned GAS = GV->getAddressSpace(); GAS == 3 || GAS == 4) {
+      emitAddressSpacedGlobal(GV, DL, GAS);
+      return;
+    }
+
     auto Reject = [GV]() {
       if (GV->isConstant())
         report_fatal_error(
@@ -1114,7 +1463,6 @@ public:
           "defined integer initializer; custom sections, TLS, weak/COMDAT, "
           "empty aggregates and initializer relocations are not supported");
     };
-    const DataLayout &DL = GV->getDataLayout();
     if (GV->isConstant() && GV->getAddressSpace() == 0 &&
         DL.getPointerSizeInBits(0) == 16)
       report_fatal_error(
@@ -1145,8 +1493,11 @@ public:
           Sym, MCConstantExpr::create(DL.getTypeAllocSize(GV->getValueType()),
                                       OutContext));
     }
+    // X3: pointer initializer leaves (XINIT payload and RO tables alike) go
+    // through the ELF-only 24-bit relocation channel.
+    requireELFPointerInitializers(GV, Init, DL);
     if (!GV->isConstant()) {
-      if (!isSupportedMutableInitializer(Init))
+      if (!isSupportedMutableInitializer(Init, DL))
         Reject();
       uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
       if (!Size || Size > UINT16_MAX)
@@ -1181,10 +1532,120 @@ public:
       return;
     }
 
-    if (!isSupportedROInitializer(Init))
+    if (!isSupportedROInitializer(Init, DL, /*AllowZeroImage=*/false))
       Reject();
 
     // Read-only globals and string literals stay in the established CSEG path.
+    OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
+    emitLinkage(GV, Sym);
+    OutStreamer->emitLabel(Sym);
+    emitROInitializer(DL, Init);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // X3: address-space placement emitters.
+  //===--------------------------------------------------------------------===//
+
+  // AS3 (`__xdata`, including `const __xdata`) and AS4 (`__code`) objects.
+  //
+  // AS3: one `.mcs251.XSEG.<sym>` NOBITS section per object (X3 ruling: XSEG
+  // objects never straddle a 64K window; per-object sections let the linker
+  // align each object into its window) plus one `.mcs251.xdata_init` record
+  // carrying the 24-bit destination through the byte-of-24 channel. A single
+  // object is capped at 16 bits (the u16 record fields cannot describe more;
+  // >64K single objects are out of profile for the corpus and the boards).
+  //
+  // AS4: a read-only CODE-space image emitted exactly like the ordinary RO
+  // path (in place in CSEG); an uninitialized/tentative definition is the
+  // ROM zero image (legal in CODE space). Pointer leaves of both paths go
+  // through the 24-bit relocation channel. Writes were already rejected
+  // fail-closed by X2's memory-access checks; this slice does not redo them.
+  void emitAddressSpacedGlobal(const GlobalVariable *GV, const DataLayout &DL,
+                               unsigned GAS) {
+    assert((GAS == 3 || GAS == 4) && "placement address space");
+    StringRef Qual = GAS == 3 ? "__xdata" : "__code";
+    auto Bad = [&](const Twine &What) {
+      report_fatal_error("MCS251: " + Qual + " global '" + GV->getName() +
+                         "': " + What);
+    };
+    // The record format, the per-object XSEG sections and the 24-bit pointer
+    // channel exist only in the ELF object protocol (the bit records and the
+    // ISR metadata use the same boundary).
+    if (!getMCS251TM().emitsObjectFile() || !usesELFObjects())
+      Bad("storage requires ELF object output "
+          "(-filetype=obj -mcs251-object-format=elf)");
+    if (GV->isThreadLocal() || GV->hasSection() || GV->hasComdat() ||
+        (!GV->hasExternalLinkage() && !GV->hasLocalLinkage()) ||
+        GV->getVisibility() != GlobalValue::DefaultVisibility ||
+        GV->getDLLStorageClass() != GlobalValue::DefaultStorageClass)
+      Bad("unsupported placement or linkage");
+
+    const Constant *Init = GV->getInitializer();
+    uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
+    MCSymbol *Sym = getSymbol(GV);
+    if (usesELFObjects()) {
+      OutStreamer->emitSymbolAttribute(Sym, MCSA_ELF_TypeObject);
+      OutStreamer->emitELFSize(Sym,
+                               MCConstantExpr::create(Size, OutContext));
+    }
+
+    const auto &TLOF =
+        static_cast<const MCS251TargetObjectFile &>(getObjFileLowering());
+    if (GAS == 3) {
+      // Mutable XDATA storage is byte-aligned like every DSEG object.
+      if (GV->getAlign().valueOrOne() != Align(1) ||
+          DL.getABITypeAlign(GV->getValueType()) != Align(1))
+        Bad("storage must be byte-aligned");
+      if (!isSupportedMutableInitializer(Init, DL))
+        Bad("unsupported initializer (byte-aligned i8/i16/i32 scalars, "
+            "arrays and structs of integers and &global pointer leaves; "
+            "expression algebra is not supported)");
+      if (!Size || Size > UINT16_MAX)
+        Bad("object size " + Twine(Size) + " does not fit the 16-bit XDATA "
+            "record limit (65535 bytes; XSEG objects never straddle a 64K "
+            "window)");
+
+      MCSection *XSEG = OutContext.getELFSection(
+          (Twine(".mcs251.XSEG.") + Sym->getName()).str(), ELF::SHT_NOBITS,
+          ELF::SHF_ALLOC | ELF::SHF_WRITE);
+      OutStreamer->switchSection(XSEG);
+      emitLinkage(GV, Sym);
+      OutStreamer->emitLabel(Sym);
+      OutStreamer->emitZeros(Size);
+
+      // Sparse XDATA init record v1 (frozen; mirrors the DSEG XINIT v1 shape
+      // with the destination widened to 24 bits):
+      //   u8  bank        canonical bits [23:16] -- the value DPXL loads
+      //   u16 window      canonical bits [15:0], big-endian
+      //   u16 object_size, u16 payload_size (0 = "clear only"), payload.
+      // The CRT consumer loop is the X4 slice; this side only freezes the
+      // format. A `const __xdata` object keeps its record: const is a write
+      // discipline, the storage class comes from the address space.
+      OutStreamer->switchSection(TLOF.getXDATAInitSection());
+      emitXDATAInitAddress(Sym);
+      OutStreamer->emitIntValue(Size, 2);
+      bool HasPayload = !Init->isNullValue();
+      OutStreamer->emitIntValue(HasPayload ? Size : 0, 2);
+      if (HasPayload)
+        emitMutableInitializer(DL, Init);
+
+      OutStreamer->switchSection(
+          OutContext.getObjectFileInfo()->getTextSection());
+      emitASxxxxText("\t.area CSEG (CODE)");
+      return;
+    }
+
+    // AS4: the read-only CODE-space image. Arrays of any declared alignment
+    // are emitted byte-aligned (the ordinary RO rule); scalars stay
+    // byte-aligned. STT_OBJECT/size semantics are the ordinary ones above.
+    const bool AlignedArrayOK = isa<ArrayType>(GV->getValueType());
+    if (!AlignedArrayOK && (GV->getAlign().valueOrOne() != Align(1) ||
+                            DL.getABITypeAlign(GV->getValueType()) != Align(1)))
+      Bad("scalar storage must be byte-aligned (arrays of any declared "
+          "alignment are emitted byte-aligned)");
+    if (!isSupportedROInitializer(Init, DL, /*AllowZeroImage=*/true))
+      Bad("unsupported initializer (i8/i16/i32 scalars, nonempty arrays of "
+          "integers and &global pointer leaves, or the ROM zero image)");
     OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
     emitLinkage(GV, Sym);
     OutStreamer->emitLabel(Sym);
