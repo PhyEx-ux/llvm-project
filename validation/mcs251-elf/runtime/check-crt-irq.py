@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 # check-crt-irq.py - standalone acceptance checker for the T08 IRQ CRT object
-# (validation/mcs251-elf/runtime/crt-irq.yaml built by yaml2obj).
+# (validation/mcs251-elf/runtime/crt-irq.yaml built by yaml2obj), extended for
+# the X4 XDATA_INIT walker.
 #
-# Independence rules (T08 card steps 13/14):
+# Independence rules (T08 card steps 13/14, unchanged):
 #   - stdlib only; imports no LLVM/lld/MCS251 product code;
 #   - policy is decided ONLY at frozen-template instruction boundaries: BOOT is
 #     decoded against the frozen startup template (prologue + BSEG_BYTES clear
-#     + ECALLs + halt + the reused crt-selfstart walker + default entry, all
-#     boundaries taken from selfstart-smoke/build/crt-selfstart.lst), and the
+#     + ECALLs + halt + the reused crt-selfstart XINIT walker + the X4
+#     XDATA_INIT walker + default entry; XINIT boundaries taken from
+#     selfstart-smoke/build/crt-selfstart.lst, XDATA walker boundaries from
+#     crt-xdata-init-walker.asm assembled with the frozen sdas251), and the
 #     no-IP-init / no-SETB-EA / default-body checks run over the decoded
 #     instruction list. The checker never searches the whole file for raw byte
 #     patterns such as "B8".
 #   - the new CRT's 16-byte .mcs251.BSEG_BYTES reservation (T08 step 6) is
 #     verified separately: writable NOBITS shape and consistency between the
 #     [0x20,0x30) window, the 16 BOOT clears and the XINIT override order.
+#   - X4: the XDATA walker's mov-direct SFR writes (7A <reg> <direct> forms)
+#     must target exactly {DPL 0x82, DPH 0x83, DPXL 0x84}; DPXL is loaded per
+#     record and deliberately not restored (DESIGN-SUPPLEMENT section 3:
+#     CRT startup has no DPXL obligation).
 #
 # Usage: check-crt-irq.py FILE.o
 # Exit 0 with one PASS line per check; exit 1 with FAIL:<detail> otherwise.
@@ -71,8 +78,8 @@ RELOC_WIDTH = {1: 2, 2: 3, 3: 1, 4: 1, 5: 1, 7: 2}  # type9 is zero-width
 
 HOME_SIZE = 3
 HOME_BYTES = bytes.fromhex("020000")
-BOOT_SIZE = 0xA0
-DEFAULT_OFF = 0x9C
+BOOT_SIZE = 0x106
+DEFAULT_OFF = 0x102
 DEFAULT_SIZE = 4
 DEFAULT_BYTES = bytes.fromhex("C2AF80FE")
 
@@ -86,8 +93,14 @@ BSEG_BASE = 0x20
 BSEG_SIZE = 16
 BSEG_ALIGN = 1
 
-WALKER_OFF = 0x46
+WALKER_OFF = 0x4A
 WALKER_SIZE = 86
+
+# X4: the XDATA_INIT walker occupies [XWALKER_OFF, XWALKER_OFF+XWALKER_SIZE)
+# = [0xA0, 0x102), between the XINIT walker's ERET and the default entry.
+# Boundaries are the sdas251 gold listing of crt-xdata-init-walker.asm.
+XWALKER_OFF = 0xA0
+XWALKER_SIZE = 98
 
 # The two 24-byte asset records (A3.2/A3.3): IRQ_DEFAULT then IRQ_RESET.
 RECORD_SIZE = 24
@@ -148,46 +161,92 @@ for _i in range(16):
         (0x0C + 3 * _i, 3, "75%02X00" % (0x20 + _i), "mov 0x%02X,#0" % (0x20 + _i)))
 FROZEN_BOOT_TEMPLATE += [
     (0x3C, 4, "9A000000", "ecall __mcs251_globals_init"),
-    (0x40, 4, "9A000000", "ecall _main"),
-    (0x44, 2, "80FE", "sjmp __mcs251_halt"),
-    # Reused XINIT walker (86 bytes at 0x46), lst boundaries, walker-relative
+    # X4: the XDATA_INIT walker is ECALLed strictly between globals_init and
+    # _main (record consumption order: internal RAM first, XDATA second).
+    (0x40, 4, "9A000000", "ecall __mcs251_xdata_init"),
+    (0x44, 4, "9A000000", "ecall _main"),
+    (0x48, 2, "80FE", "sjmp __mcs251_halt"),
+    # Reused XINIT walker (86 bytes at 0x4A), lst boundaries, walker-relative
     # offsets translated to BOOT offsets (walker_base + rel).
-    (0x46, 4, "7E080000", "mov wr8,#<s_XINIT mid/lo>"),
-    (0x4A, 4, "7A0C0000", "mov r12,#<s_XINIT hi>"),
-    (0x4E, 4, "7E240000", "mov wr4,#l_XINIT"),
-    (0x52, 4, "BE240000", "cmp wr4,#0x0000"),
-    (0x56, 2, "6843", "je __mcs251_xinit_done"),
-    (0x58, 3, "0B0A40", "mov wr8,@dr0"),
-    (0x5B, 2, "0B0C", "inc dr0"),
-    (0x5D, 2, "0B0C", "inc dr0"),
-    (0x5F, 2, "7DA4", "mov wr20,wr8"),
-    (0x61, 3, "0B0A60", "mov wr12,@dr0"),
-    (0x64, 2, "0B0C", "inc dr0"),
-    (0x66, 2, "0B0C", "inc dr0"),
-    (0x68, 3, "0B0A80", "mov wr16,@dr0"),
-    (0x6B, 2, "0B0C", "inc dr0"),
-    (0x6D, 2, "0B0C", "inc dr0"),
-    (0x6F, 4, "9E240006", "sub wr4,#0x0006"),
-    (0x73, 3, "7EE000", "mov r14,#0x00"),
-    (0x76, 4, "BE640000", "cmp wr12,#0x0000"),
-    (0x7A, 2, "6809", "je __mcs251_xinit_copy"),
-    (0x7C, 3, "7A49E0", "mov @wr8,r14"),
-    (0x7F, 2, "0B44", "inc wr8"),
-    (0x81, 2, "1B64", "dec wr12"),
-    (0x83, 2, "80F1", "sjmp __mcs251_xinit_clear"),
-    (0x85, 4, "BE840000", "cmp wr16,#0x0000"),
-    (0x89, 2, "68C7", "je __mcs251_xinit_record"),
-    (0x8B, 3, "7E0BE0", "mov r14,@dr0"),
-    (0x8E, 2, "0B0C", "inc dr0"),
-    (0x90, 3, "7AA9E0", "mov @wr20,r14"),
-    (0x93, 2, "0BA4", "inc wr20"),
-    (0x95, 2, "1B84", "dec wr16"),
-    (0x97, 2, "1B24", "dec wr4"),
-    (0x99, 2, "80EA", "sjmp __mcs251_xinit_copy"),
-    (0x9B, 1, "AA", "eret"),
+    (0x4A, 4, "7E080000", "mov wr8,#<s_XINIT mid/lo>"),
+    (0x4E, 4, "7A0C0000", "mov r12,#<s_XINIT hi>"),
+    (0x52, 4, "7E240000", "mov wr4,#l_XINIT"),
+    (0x56, 4, "BE240000", "cmp wr4,#0x0000"),
+    (0x5A, 2, "6843", "je __mcs251_xinit_done"),
+    (0x5C, 3, "0B0A40", "mov wr8,@dr0"),
+    (0x5F, 2, "0B0C", "inc dr0"),
+    (0x61, 2, "0B0C", "inc dr0"),
+    (0x63, 2, "7DA4", "mov wr20,wr8"),
+    (0x65, 3, "0B0A60", "mov wr12,@dr0"),
+    (0x68, 2, "0B0C", "inc dr0"),
+    (0x6A, 2, "0B0C", "inc dr0"),
+    (0x6C, 3, "0B0A80", "mov wr16,@dr0"),
+    (0x6F, 2, "0B0C", "inc dr0"),
+    (0x71, 2, "0B0C", "inc dr0"),
+    (0x73, 4, "9E240006", "sub wr4,#0x0006"),
+    (0x77, 3, "7EE000", "mov r14,#0x00"),
+    (0x7A, 4, "BE640000", "cmp wr12,#0x0000"),
+    (0x7E, 2, "6809", "je __mcs251_xinit_copy"),
+    (0x80, 3, "7A49E0", "mov @wr8,r14"),
+    (0x83, 2, "0B44", "inc wr8"),
+    (0x85, 2, "1B64", "dec wr12"),
+    (0x87, 2, "80F1", "sjmp __mcs251_xinit_clear"),
+    (0x89, 4, "BE840000", "cmp wr16,#0x0000"),
+    (0x8D, 2, "68C7", "je __mcs251_xinit_record"),
+    (0x8F, 3, "7E0BE0", "mov r14,@dr0"),
+    (0x92, 2, "0B0C", "inc dr0"),
+    (0x94, 3, "7AA9E0", "mov @wr20,r14"),
+    (0x97, 2, "0BA4", "inc wr20"),
+    (0x99, 2, "1B84", "dec wr16"),
+    (0x9B, 2, "1B24", "dec wr4"),
+    (0x9D, 2, "80EA", "sjmp __mcs251_xinit_copy"),
+    (0x9F, 1, "AA", "eret"),
+    # X4 XDATA_INIT walker (98 bytes at 0xA0), boundaries from the sdas251
+    # gold listing of crt-xdata-init-walker.asm (walker-relative offsets
+    # translated to BOOT offsets, xwalker_base + rel).
+    (0xA0, 4, "7E080000", "mov dr0_lo16,#<s_XDATA_INIT window mid/lo>"),
+    (0xA4, 4, "7A0C0000", "mov dr0_hi16,#0x00<s_XDATA_INIT bank>"),
+    (0xA8, 4, "7E240000", "mov wr4,#l_XDATA_INIT"),
+    (0xAC, 4, "BE240000", "cmp wr4,#0x0000"),
+    (0xB0, 2, "684F", "je __mcs251_xdata_done"),
+    (0xB2, 3, "7E0BE0", "mov r14,@dr0 (bank)"),
+    (0xB5, 2, "0B0C", "inc dr0"),
+    (0xB7, 3, "0B0A40", "mov wr8,@dr0 (window)"),
+    (0xBA, 2, "0B0C", "inc dr0"),
+    (0xBC, 2, "0B0C", "inc dr0"),
+    (0xBE, 3, "0B0A60", "mov wr12,@dr0 (object_size)"),
+    (0xC1, 2, "0B0C", "inc dr0"),
+    (0xC3, 2, "0B0C", "inc dr0"),
+    (0xC5, 3, "0B0A80", "mov wr16,@dr0 (payload_size)"),
+    (0xC8, 2, "0B0C", "inc dr0"),
+    (0xCA, 2, "0B0C", "inc dr0"),
+    (0xCC, 4, "9E240007", "sub wr4,#0x0007"),
+    (0xD0, 3, "7AE184", "mov dpxl,r14 (DPXL <- bank)"),
+    (0xD3, 3, "7A8183", "mov dph,r8 (DPH <- window hi)"),
+    (0xD6, 3, "7A9182", "mov dpl,r9 (DPL <- window lo)"),
+    (0xD9, 4, "BE840000", "cmp wr16,#0x0000"),
+    (0xDD, 2, "6815", "je __mcs251_xdata_zero"),
+    (0xDF, 3, "7E0BE0", "mov r14,@dr0 (payload byte)"),
+    (0xE2, 2, "0B0C", "inc dr0"),
+    (0xE4, 2, "7CBE", "mov a,r14"),
+    (0xE6, 1, "F0", "movx @dptr,a"),
+    (0xE7, 1, "A3", "inc dptr"),
+    (0xE8, 2, "1B24", "dec wr4"),
+    (0xEA, 2, "1B84", "dec wr16"),
+    (0xEC, 4, "BE840000", "cmp wr16,#0x0000"),
+    (0xF0, 2, "68BA", "je __mcs251_xdata_record"),
+    (0xF2, 2, "80EB", "sjmp __mcs251_xdata_copy"),
+    (0xF4, 4, "BE640000", "cmp wr12,#0x0000"),
+    (0xF8, 2, "68B2", "je __mcs251_xdata_record"),
+    (0xFA, 1, "E4", "clr a"),
+    (0xFB, 1, "F0", "movx @dptr,a"),
+    (0xFC, 1, "A3", "inc dptr"),
+    (0xFD, 2, "1B64", "dec wr12"),
+    (0xFF, 2, "80F3", "sjmp __mcs251_xdata_zero"),
+    (0x101, 1, "AA", "eret"),
     # IRQ default fail-stop entry (A5): clr EA; sjmp self. No call/push/return.
-    (0x9C, 2, "C2AF", "clr EA"),
-    (0x9E, 2, "80FE", "sjmp self (default halt)"),
+    (0x102, 2, "C2AF", "clr EA"),
+    (0x104, 2, "80FE", "sjmp self (default halt)"),
 ]
 
 # Frozen BOOT relocations: offset -> (type, symbol). Field start = instruction
@@ -195,11 +254,16 @@ FROZEN_BOOT_TEMPLATE += [
 FROZEN_BOOT_RELOCS = {
     0x0A: (R_MCS251_16, "__mcs251_stack_base"),
     0x3D: (R_MCS251_24, "__mcs251_globals_init"),
-    0x41: (R_MCS251_24, "_main"),
-    0x48: (R_MCS251_MID8, "s_XINIT"),
-    0x49: (R_MCS251_LO8, "s_XINIT"),
-    0x4D: (R_MCS251_HI8, "s_XINIT"),
-    0x50: (R_MCS251_16, "l_XINIT"),
+    0x41: (R_MCS251_24, "__mcs251_xdata_init"),
+    0x45: (R_MCS251_24, "_main"),
+    0x4C: (R_MCS251_MID8, "s_XINIT"),
+    0x4D: (R_MCS251_LO8, "s_XINIT"),
+    0x51: (R_MCS251_HI8, "s_XINIT"),
+    0x54: (R_MCS251_16, "l_XINIT"),
+    0xA2: (R_MCS251_MID8, "s_XDATA_INIT"),
+    0xA3: (R_MCS251_LO8, "s_XDATA_INIT"),
+    0xA7: (R_MCS251_HI8, "s_XDATA_INIT"),
+    0xAA: (R_MCS251_16, "l_XDATA_INIT"),
 }
 
 FROZEN_HOME_RELOCS = {
@@ -513,6 +577,32 @@ def check_boot(data, sections):
             "walker unexpectedly contains direct writes or SETB")
     ok("XINIT walker: frozen 86 bytes at 0x%02X, ECALL-reachable, ERET return "
        "only" % WALKER_OFF)
+
+    # 5. X4: the XDATA_INIT walker block at its frozen offset, byte-exact
+    # against the sdas251 gold template above (decoded via the same template
+    # mechanism), ECALL-reachable, ERET return only.
+    xwalker = [x for x in insns
+               if XWALKER_OFF <= x[0] < XWALKER_OFF + XWALKER_SIZE]
+    require(len(xwalker) == 40 and xwalker[0][0] == XWALKER_OFF
+            and xwalker[-1][0] == XWALKER_OFF + XWALKER_SIZE - 1,
+            "xdata walker template shape mismatch")
+    require(xwalker[-1][3] == "eret", "xdata walker must end in ERET")
+    require(all(raw[0] != 0xD2 for _, _, raw, _ in xwalker),
+            "xdata walker unexpectedly contains SETB")
+    # Policy: the walker's only mov-direct SFR writes are the 7A <reg>
+    # <direct> forms loading the XDATA window registers; every direct
+    # destination must be DPL(0x82)/DPH(0x83)/DPXL(0x84). The 75-form check
+    # above (allowed direct set) does not cover 7A forms, so this is decided
+    # here over the decoded instruction boundaries.
+    for off, ln, raw, label in xwalker:
+        if raw[0] == 0x7A and len(raw) == 3:
+            require(raw[2] in (0x82, 0x83, 0x84),
+                    "xdata walker instruction at 0x%02X (%s) writes illegal "
+                    "direct 0x%02X (only DPL/DPH/DPXL are allowed)"
+                    % (off, label, raw[2]))
+    ok("XDATA_INIT walker: 98 bytes at 0x%02X, ERET return only, SFR writes "
+       "restricted to DPL/DPH/DPXL (DPXL loaded per record, never restored "
+       "-- DESIGN-SUPPLEMENT 3)" % XWALKER_OFF)
     return boot_sec
 
 
@@ -621,9 +711,10 @@ def check_relocations(data, eh, sections, symbols, boot_sec, home_sec, isr_sec):
 
     check_rela(".rela.mcs251.BOOT", boot_sec, FROZEN_BOOT_RELOCS,
                banned_type=R_MCS251_ISR_REF)
-    ok("BOOT relocations: exactly the 7 frozen offsets "
-       "(spx R16@0xA, ecall R24@0x3D/0x41, walker MID8@0x48 LO8@0x49 HI8@0x4D "
-       "R16@0x50), none inside the default entry")
+    ok("BOOT relocations: exactly the 12 frozen offsets "
+       "(spx R16@0xA; ecall R24@0x3D/0x41/0x45; XINIT walker MID8@0x4C "
+       "LO8@0x4D HI8@0x51 R16@0x54; XDATA walker MID8@0xA2 LO8@0xA3 HI8@0xA7 "
+       "R16@0xAA), none inside the default entry")
 
     relas = check_rela(".rela.mcs251.isr", isr_sec,
                        {0x0C: (R_MCS251_ISR_REF, "__mcs251_isr_unhandled"),
@@ -665,26 +756,30 @@ def check_symbols(data, eh, sections, symbols, boot_sec, home_sec):
     ok("IRQ_RESET target __mcs251_reset: named GLOBAL STT_FUNC, HOME+0, size 3")
     expect_func("__mcs251_isr_unhandled", ".mcs251.BOOT", DEFAULT_OFF, DEFAULT_SIZE)
     ok("IRQ_DEFAULT target __mcs251_isr_unhandled: named GLOBAL STT_FUNC, "
-       "BOOT+0x9C, size 4")
+       "BOOT+0x%X, size 4" % DEFAULT_OFF)
 
     for name, off in (("__mcs251_selfstart_boot", 0x0),
-                      ("__mcs251_globals_init", WALKER_OFF)):
+                      ("__mcs251_globals_init", WALKER_OFF),
+                      ("__mcs251_xdata_init", XWALKER_OFF)):
         require(name in defined, "missing defined symbol %r" % name)
         s = defined[name]
         require(s["bind"] == STB_GLOBAL and s["shndx"] == boot_sec["index"]
                 and s["value"] == off,
                 "%r must be a GLOBAL defined at BOOT+0x%X" % (name, off))
-    ok("__mcs251_selfstart_boot (BOOT+0) and __mcs251_globals_init (walker, "
-       "SPEC 6.2 trigger) defined GLOBAL")
+    ok("__mcs251_selfstart_boot (BOOT+0), __mcs251_globals_init (XINIT walker, "
+       "SPEC 6.2 trigger) and __mcs251_xdata_init (XDATA walker, X4) defined "
+       "GLOBAL")
 
     undef_names = sorted(s["name"] for s in undef)
-    require(undef_names == ["__mcs251_stack_base", "_main", "l_XINIT", "s_XINIT"],
+    require(undef_names == ["__mcs251_stack_base", "_main", "l_XDATA_INIT",
+                            "l_XINIT", "s_XDATA_INIT", "s_XINIT"],
             "undefined GLOBAL set %s mismatch (expect _main, "
-            "__mcs251_stack_base, s_XINIT, l_XINIT)" % undef_names)
+            "__mcs251_stack_base, s_XINIT, l_XINIT, s_XDATA_INIT, "
+            "l_XDATA_INIT)" % undef_names)
     for s in undef:
         require(s["bind"] == STB_GLOBAL, "undefined %r not GLOBAL" % s["name"])
     ok("undefined requests intact: _main, __mcs251_stack_base (v1 SPX gate), "
-       "s_XINIT, l_XINIT")
+       "s_XINIT, l_XINIT, s_XDATA_INIT, l_XDATA_INIT (X4)")
 
 
 def main():

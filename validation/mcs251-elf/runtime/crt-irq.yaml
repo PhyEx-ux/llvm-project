@@ -38,12 +38,30 @@
 #                       BOOT[0x14,0x6A) (ground truth:
 #                       selfstart-smoke/build/crt-selfstart.lst 0x14-0x69);
 #                       all four relocations were recomputed for the walker's
-#                       new BOOT offset 0x46: MID8@0x48, LO8@0x49, HI8@0x4D,
-#                       R_MCS251_16@0x50. Internal relative branches
+#                       BOOT offset 0x4A: MID8@0x4C, LO8@0x4D, HI8@0x51,
+#                       R_MCS251_16@0x54. Internal relative branches
 #                       (je/sjmp 0x43/0x09/0xC7/0xF1/0xEA) are position
 #                       independent and stay inside the moved block; the
 #                       trailing ERET (lst line 125) is the walker's legitimate
 #                       ECALL return, reached only via the BOOT ecall below.
+#   XDATA walker    = 98 bytes (X4) from crt-xdata-init-walker.asm (sdas251
+#                       gold listing; every instruction appears there with its
+#                       encoding). BOOT offset 0xA0, relocations MID8@0xA2,
+#                       LO8@0xA3, HI8@0xA7, R_MCS251_16@0xAA. Internal
+#                       relative branches (je/sjmp 0x4F/0x15/0xBA/0xEB/0xB2/
+#                       0xF3) are position independent. Consumes the
+#                       .mcs251.xdata_init v1 records (DESIGN-SUPPLEMENT
+#                       section 7): per record DPXL <- bank (7A E1 84, the
+#                       MOV8dpxl family), DPH:DPL <- window (7A 81 83 /
+#                       7A 91 82), payload via movx @dptr,a (F0) + inc dptr
+#                       (A3), payload_size == 0 zeroes object_size bytes via
+#                       clr a (E4) + movx. Records never straddle a 64K
+#                       window (lld gate) so there is no bank-carry handling;
+#                       the walker performs no format validation (the lld
+#                       validateXDATAInit() gate owns that). DPXL is NOT
+#                       restored afterwards: DESIGN-SUPPLEMENT section 3
+#                       rules CRT startup has no DPXL obligation (self-healing
+#                       sequences reload it before every movx).
 #   default entry   = C2 AF 80 FE      (A5 frozen: clr EA; sjmp halt;
 #                                       STT_FUNC size 4, no relocation inside,
 #                                       no call/push/return, no RETI)
@@ -55,7 +73,7 @@
 #                           halt, the default entry is the frozen 4-byte word)
 #   - the eight VECS fragments
 #
-# BOOT layout (160 = 0xA0 bytes, section-relative offsets):
+# BOOT layout (262 = 0x106 bytes, section-relative offsets):
 #   0x00 C2 AF        clr EA                       (__mcs251_selfstart_boot)
 #   0x02 75 D0 00     mov PSW,#0
 #   0x05 75 E3 00     mov DPS,#0
@@ -69,10 +87,12 @@
 #                                                     NOBITS .mcs251.BSEG_BYTES
 #                                                     section below)
 #   0x3C 9A 00 00 00  ecall __mcs251_globals_init  (R_MCS251_24 @0x3D)
-#   0x40 9A 00 00 00  ecall _main                  (R_MCS251_24 @0x41)
-#   0x44 80 FE        sjmp self                    (__mcs251_halt; no stack)
-#   0x46 [86B]        XINIT walker                 (__mcs251_globals_init)
-#   0x9C C2 AF 80 FE  IRQ default entry            (__mcs251_isr_unhandled)
+#   0x40 9A 00 00 00  ecall __mcs251_xdata_init    (R_MCS251_24 @0x41; X4)
+#   0x44 9A 00 00 00  ecall _main                  (R_MCS251_24 @0x45)
+#   0x48 80 FE        sjmp self                    (__mcs251_halt; no stack)
+#   0x4A [86B]        XINIT walker                 (__mcs251_globals_init)
+#   0xA0 [98B]        XDATA_INIT walker            (__mcs251_xdata_init; X4)
+#   0x102 C2 AF 80 FE IRQ default entry            (__mcs251_isr_unhandled)
 #
 # Normal interrupts stay masked (clr EA only, never setb EA) and NMI is left
 # untouched, matching the reset premise (T08 step 4); no IP/IPH initialization
@@ -103,12 +123,13 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
     Content: '020000'
-  # BOOT: startup flow + reusable XINIT walker + IRQ default entry, 0xA0 bytes.
+  # BOOT: startup flow + reusable XINIT walker + XDATA_INIT walker + IRQ
+  # default entry, 0x106 bytes.
   - Name: .mcs251.BOOT
     Type: SHT_PROGBITS
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
-    Content: 'C2AF75D00075E3007EF80000752000752100752200752300752400752500752600752700752800752900752A00752B00752C00752D00752E00752F009A0000009A00000080FE7E0800007A0C00007E240000BE24000068430B0A400B0C0B0C7DA40B0A600B0C0B0C0B0A800B0C0B0C9E2400067EE000BE64000068097A49E00B441B6480F1BE84000068C77E0BE00B0C7AA9E00BA41B841B2480EAAAC2AF80FE'
+    Content: 'C2AF75D00075E3007EF80000752000752100752200752300752400752500752600752700752800752900752A00752B00752C00752D00752E00752F009A0000009A0000009A00000080FE7E0800007A0C00007E240000BE24000068430B0A400B0C0B0C7DA40B0A600B0C0B0C0B0A800B0C0B0C9E2400067EE000BE64000068097A49E00B441B6480F1BE84000068C77E0BE00B0C7AA9E00BA41B841B2480EAAA7E0800007A0C00007E240000BE240000684F7E0BE00B0C0B0A400B0C0B0C0B0A600B0C0B0C0B0A800B0C0B0C9E2400077AE1847A81837A9182BE84000068157E0BE00B0C7CBEF0A31B241B84BE84000068BA80EBBE64000068B2E4F0A31B6480F3AAC2AF80FE'
   # T08 step 6 (frozen): the new CRT owns a 16-byte BSEG_BYTES reservation for
   # the bit-addressable byte window at 0x20-0x2F. Writable NOBITS per the
   # BSEG_BYTES section contract (SPEC 4.1; lld LinkerCore accepts exactly
@@ -169,29 +190,54 @@ Sections:
         Type: R_MCS251_24
         Symbol: __mcs251_globals_init
         Addend: 0
-      # ecall _main: 9A [addr24]
+      # ecall __mcs251_xdata_init (X4): 9A [addr24]
       - Offset: 0x41
+        Type: R_MCS251_24
+        Symbol: __mcs251_xdata_init
+        Addend: 0
+      # ecall _main: 9A [addr24]
+      - Offset: 0x45
         Type: R_MCS251_24
         Symbol: _main
         Addend: 0
       # walker hand-prologue: mov wr8,#<s_XINIT mid/lo>: 7E 08 [MID8] [LO8]
-      - Offset: 0x48
+      - Offset: 0x4C
         Type: R_MCS251_MID8
         Symbol: s_XINIT
         Addend: 0
-      - Offset: 0x49
+      - Offset: 0x4D
         Type: R_MCS251_LO8
         Symbol: s_XINIT
         Addend: 0
       # mov r12,#<s_XINIT hi>: 7A 0C 00 [HI8] (dr0 24-bit bank byte)
-      - Offset: 0x4D
+      - Offset: 0x51
         Type: R_MCS251_HI8
         Symbol: s_XINIT
         Addend: 0
       # mov wr4,#l_XINIT: 7E 24 [imm16]
-      - Offset: 0x50
+      - Offset: 0x54
         Type: R_MCS251_16
         Symbol: l_XINIT
+        Addend: 0
+      # XDATA_INIT walker prologue (walker at 0xA0):
+      # mov dr0[15:0],#<s_XDATA_INIT window>: 7E 08 [MID8] [LO8]
+      - Offset: 0xA2
+        Type: R_MCS251_MID8
+        Symbol: s_XDATA_INIT
+        Addend: 0
+      - Offset: 0xA3
+        Type: R_MCS251_LO8
+        Symbol: s_XDATA_INIT
+        Addend: 0
+      # mov dr0[31:16],#0x00<bank>: 7A 0C 00 [HI8]
+      - Offset: 0xA7
+        Type: R_MCS251_HI8
+        Symbol: s_XDATA_INIT
+        Addend: 0
+      # mov wr4,#l_XDATA_INIT: 7E 24 [imm16]
+      - Offset: 0xAA
+        Type: R_MCS251_16
+        Symbol: l_XDATA_INIT
         Addend: 0
   - Name: .rela.mcs251.isr
     Type: SHT_RELA
@@ -228,12 +274,12 @@ Symbols:
     Value: 0x0
     Size: 3
   # IRQ default fail-stop entry: STT_FUNC size 4 (A5); no relocation may fall
-  # inside [0x9C,0xA0); checked byte-exactly by check-crt-irq.py.
+  # inside [0x102,0x106); checked byte-exactly by check-crt-irq.py.
   - Name: __mcs251_isr_unhandled
     Type: STT_FUNC
     Binding: STB_GLOBAL
     Section: .mcs251.BOOT
-    Value: 0x9C
+    Value: 0x102
     Size: 4
   # BOOT entry (HOME J16 target) and XINIT walker (keeps the SPEC 6.2
   # __mcs251_globals_init-defined validation trigger of the v1 chain).
@@ -246,30 +292,53 @@ Symbols:
     Type: STT_NOTYPE
     Binding: STB_GLOBAL
     Section: .mcs251.BOOT
-    Value: 0x46
-  # Local labels mirroring the frozen walker asset (crt-selfstart.lst).
+    Value: 0x4A
+  # XDATA_INIT walker entry (X4), ECALLed between globals_init and _main.
+  - Name: __mcs251_xdata_init
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0xA0
+  # Local labels mirroring the frozen walker asset (crt-selfstart.lst) and
+  # the X4 walker asset (crt-xdata-init-walker.asm).
   - Name: __mcs251_halt
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x44
+    Value: 0x48
   - Name: __mcs251_xinit_record
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x52
+    Value: 0x56
   - Name: __mcs251_xinit_clear
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x76
+    Value: 0x7A
   - Name: __mcs251_xinit_copy
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x85
+    Value: 0x89
   - Name: __mcs251_xinit_done
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x9B
+    Value: 0x9F
+  - Name: __mcs251_xdata_record
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0xAC
+  - Name: __mcs251_xdata_copy
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0xDF
+  - Name: __mcs251_xdata_zero
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0xF4
+  - Name: __mcs251_xdata_done
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x101
   # Undefined globals resolved by lld: module entry, synthesized stack base,
-  # synthesized XINIT boundary symbols (SPEC 6.1/6.3).
+  # synthesized XINIT/XDATA_INIT boundary symbols (SPEC 6.1/6.3; X4).
   - Name: _main
     Type: STT_NOTYPE
     Binding: STB_GLOBAL
@@ -280,5 +349,11 @@ Symbols:
     Type: STT_NOTYPE
     Binding: STB_GLOBAL
   - Name: l_XINIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: s_XDATA_INIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: l_XDATA_INIT
     Type: STT_NOTYPE
     Binding: STB_GLOBAL

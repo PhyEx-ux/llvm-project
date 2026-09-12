@@ -47,7 +47,7 @@
 # SYM-NEXT: Binding: Global (0x1)
 # SYM-NEXT: Type: Function (0x2)
 # SYM: Name: __mcs251_isr_unhandled
-# SYM-NEXT: Value: 0xFF02AC
+# SYM-NEXT: Value: 0xFF0312
 # SYM-NEXT: Size: 4
 # SYM-NEXT: Binding: Global (0x1)
 # SYM-NEXT: Type: Function (0x2)
@@ -66,7 +66,7 @@
 # RUN: FileCheck %s --check-prefix=MAP < %t.ks.map
 # MAP: FUNC 0xff0400 +0x29 _irq1
 # MAP: FUNC 0xff0000 +0x3 __mcs251_reset
-# MAP: FUNC 0xff02ac +0x4 __mcs251_isr_unhandled
+# MAP: FUNC 0xff0312 +0x4 __mcs251_isr_unhandled
 # MAP: FUNC 0xff0429 +0x2 _main
 
 # --- NOBITS (direct-addr RAM) symbols have no loadable section: ABS ---

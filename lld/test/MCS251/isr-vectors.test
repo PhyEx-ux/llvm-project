@@ -541,19 +541,19 @@
 
 # A section symbol plus addend must not bypass DEFAULT reference protection.
 # Keep the ECALL field outside the default body so this tests the target rule.
-# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='        Symbol: _main\n        Addend: 0'; assert s.count(old)==1; extra='  - Name: boot_section\n    Type: STT_SECTION\n    Binding: STB_LOCAL\n    Section: .mcs251.BOOT\n    Value: 0\n'; pathlib.Path('%t.dftsection.yaml').write_text(s.replace(old,'        Symbol: boot_section\n        Addend: 156')+extra)"
+# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='        Symbol: _main\n        Addend: 0'; assert s.count(old)==1; extra='  - Name: boot_section\n    Type: STT_SECTION\n    Binding: STB_LOCAL\n    Section: .mcs251.BOOT\n    Value: 0\n'; pathlib.Path('%t.dftsection.yaml').write_text(s.replace(old,'        Symbol: boot_section\n        Addend: 258')+extra)"
 # RUN: yaml2obj %t.dftsection.yaml -o %t.dftsection.o
 # RUN: not mcs251-lld %t.dftsection.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.dftsection.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=DFTSECTION
 # DFTSECTION: section+addend relocation in .mcs251.BOOT lands inside the default entry
 
-# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); assert s.count(old)==1; add='      - Offset: 0x9C'+chr(10)+'        Type: R_MCS251_NONE'+chr(10)+'        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); pathlib.Path('%t.dftnone.yaml').write_text(s.replace(old, old+add))"
+# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); assert s.count(old)==1; add='      - Offset: 0x102'+chr(10)+'        Type: R_MCS251_NONE'+chr(10)+'        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); pathlib.Path('%t.dftnone.yaml').write_text(s.replace(old, old+add))"
 # RUN: yaml2obj %t.dftnone.yaml -o %t.dftnone.o
 # RUN: not mcs251-lld %t.dftnone.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.dftnone.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=DFTNONE
 # DFTNONE: relocation inside the default entry range
 
-# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); assert s.count(old)==1; add='      - Offset: 0x9F'+chr(10)+'        Type: R_MCS251_LO8'+chr(10)+'        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); pathlib.Path('%t.dftend.yaml').write_text(s.replace(old, old+add))"
+# RUN: %python -c "import pathlib; s=pathlib.Path('%S/../../../validation/mcs251-elf/runtime/crt-irq.yaml').read_text(); old='        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); assert s.count(old)==1; add='      - Offset: 0x105'+chr(10)+'        Type: R_MCS251_LO8'+chr(10)+'        Symbol: _main'+chr(10)+'        Addend: 0'+chr(10); pathlib.Path('%t.dftend.yaml').write_text(s.replace(old, old+add))"
 # RUN: yaml2obj %t.dftend.yaml -o %t.dftend.o
 # RUN: not mcs251-lld %t.dftend.o %t.p01.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 -o %t.dftend.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=DFTEND

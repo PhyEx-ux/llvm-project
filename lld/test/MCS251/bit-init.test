@@ -13,7 +13,7 @@
 # --- one record per nonzero byte; zero bits need no record ---
 # RUN: yaml2obj bits.yaml -o bits.o
 # RUN: mcs251-lld crt.o bits.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0320 \
 # RUN:   --area-start=XINIT=0xff8000 --map=%t/b.map -o %t/b.elf
 # RUN: FileCheck %s --check-prefix=MAP <%t/b.map
 # MAP: BIT d0 = 0x00 byte 0x20 index 0 init 1
@@ -35,7 +35,7 @@
 # --- all-zero initial values synthesize no section and no bytes ---
 # RUN: yaml2obj zero.yaml -o zero.o
 # RUN: mcs251-lld crt.o zero.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0320 \
 # RUN:   --area-start=XINIT=0xff8000 --map=%t/z.map -o %t/z.elf
 # RUN: FileCheck %s --check-prefix=ZERO <%t/z.map
 # ZERO: l_XINIT = 0x0000
@@ -61,7 +61,7 @@
 # RUN: yaml2obj a1.yaml -o a1.o
 # RUN: yaml2obj a2.yaml -o a2.o
 # RUN: mcs251-lld crt.o a1.o a2.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0320 \
 # RUN:   --area-start=XINIT=0xff8000 --map=%t/ag.map -o %t/ag.elf
 # RUN: FileCheck %s --check-prefix=AGG <%t/ag.map
 # AGG: BIT ba = 0x00 byte 0x20 index 0 init 1
@@ -73,7 +73,7 @@
 # --- a fixed reference byte is never initialized by the allocator ---
 # RUN: yaml2obj fixedplus.yaml -o fp.o
 # RUN: mcs251-lld crt.o fp.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0320 \
 # RUN:   --area-start=XINIT=0xff8000 --map=%t/fp.map -o %t/fp.elf
 # RUN: FileCheck %s --check-prefix=FP <%t/fp.map
 # FP: BIT f0 fixed = 0x00 byte 0x20 index 0 init none
@@ -91,7 +91,7 @@
 # not save it.  This must be a hard conflict, not an ordering accident.
 # RUN: yaml2obj zero-xinit.yaml -o zx.o
 # RUN: not mcs251-lld crt.o zx.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0320 \
 # RUN:   --area-start=XINIT=0xff8000 -o %t/zx.elf 2>&1 \
 # RUN:   | FileCheck %s --check-prefix=XCONFLICT
 # XCONFLICT: XINIT record in .mcs251.xinit initializes byte 0x20 owned by automatic bit objects
@@ -111,7 +111,7 @@
 # --- the same conflict for a byte whose declared value is already nonzero ---
 # RUN: yaml2obj one-xinit.yaml -o ox.o
 # RUN: not mcs251-lld crt.o ox.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0320 \
 # RUN:   --area-start=XINIT=0xff8000 -o %t/ox.elf 2>&1 \
 # RUN:   | FileCheck %s --check-prefix=XCONFLICT
 # --- a fixed-reference-only byte is the user's: input XINIT there is allowed ---
@@ -121,7 +121,7 @@
 # coverage reported as user-xinit rather than a bare "init 0".
 # RUN: yaml2obj fixed-only-xinit.yaml -o fx.o
 # RUN: mcs251-lld crt.o fx.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0300 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0320 \
 # RUN:   --area-start=XINIT=0xff8000 --map=%t/fx.map -o %t/fx.elf
 # RUN: FileCheck %s --check-prefix=FIXEDX <%t/fx.map
 # FIXEDX: BIT f0 fixed = 0x00 byte 0x20 index 0 init user-xinit

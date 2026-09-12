@@ -1,0 +1,681 @@
+{
+  "source": "/home/liu/LLVM_STC32/STC32G144K246-DEMO-CODE/COMM/DEF.H",
+  "sha256": "a8c2bca717631eb0a95957c96d073a1f3cbe58a5073b90e9fb290ae235a30135",
+  "entries": [
+    {
+      "name": "BOOL",
+      "kind": "typedef",
+      "line": 6,
+      "official": "bit",
+      "disposition": "rejected",
+      "expansion": null,
+      "reason": "MCS251: BOOL maps to the Keil 'bit' type; bit-object code generation is a follow-up slice (BT06 P09) -- use _Bool or unsigned char and revisit after bit objects land"
+    },
+    {
+      "name": "BYTE",
+      "kind": "typedef",
+      "line": 8,
+      "official": "unsigned char",
+      "disposition": "mapped",
+      "expansion": "unsigned char",
+      "reason": "official unsigned char"
+    },
+    {
+      "name": "WORD",
+      "kind": "typedef",
+      "line": 9,
+      "official": "unsigned int",
+      "disposition": "mapped",
+      "expansion": "unsigned short",
+      "reason": "Keil C251 int is 16-bit, this target's int is 32-bit; unsigned short preserves the 16-bit width"
+    },
+    {
+      "name": "DWORD",
+      "kind": "typedef",
+      "line": 10,
+      "official": "unsigned long",
+      "disposition": "mapped",
+      "expansion": "unsigned long",
+      "reason": "32-bit in both worlds"
+    },
+    {
+      "name": "CHAR",
+      "kind": "typedef",
+      "line": 12,
+      "official": "signed   char",
+      "disposition": "mapped",
+      "expansion": "signed char",
+      "reason": "official signed char; plain char's signedness is implementation-defined, the official type is not"
+    },
+    {
+      "name": "INT",
+      "kind": "typedef",
+      "line": 13,
+      "official": "signed   int",
+      "disposition": "mapped",
+      "expansion": "signed short",
+      "reason": "Keil C251 int is 16-bit, this target's int is 32-bit; signed short preserves the 16-bit width"
+    },
+    {
+      "name": "LONG",
+      "kind": "typedef",
+      "line": 14,
+      "official": "signed   long",
+      "disposition": "mapped",
+      "expansion": "signed long",
+      "reason": "32-bit in both worlds"
+    },
+    {
+      "name": "uint8_t",
+      "kind": "typedef",
+      "line": 16,
+      "official": "unsigned char",
+      "disposition": "external",
+      "expansion": null,
+      "reason": "C99 <stdint.h> owns this name; include <stdint.h>"
+    },
+    {
+      "name": "uint16_t",
+      "kind": "typedef",
+      "line": 17,
+      "official": "unsigned int",
+      "disposition": "external",
+      "expansion": null,
+      "reason": "C99 <stdint.h> owns this name; include <stdint.h>"
+    },
+    {
+      "name": "uint32_t",
+      "kind": "typedef",
+      "line": 18,
+      "official": "unsigned long",
+      "disposition": "external",
+      "expansion": null,
+      "reason": "C99 <stdint.h> owns this name; include <stdint.h>"
+    },
+    {
+      "name": "int8_t",
+      "kind": "typedef",
+      "line": 20,
+      "official": "signed   char",
+      "disposition": "external",
+      "expansion": null,
+      "reason": "C99 <stdint.h> owns this name; include <stdint.h>"
+    },
+    {
+      "name": "int16_t",
+      "kind": "typedef",
+      "line": 21,
+      "official": "signed   int",
+      "disposition": "external",
+      "expansion": null,
+      "reason": "C99 <stdint.h> owns this name; include <stdint.h>"
+    },
+    {
+      "name": "int32_t",
+      "kind": "typedef",
+      "line": 22,
+      "official": "signed   long",
+      "disposition": "external",
+      "expansion": null,
+      "reason": "C99 <stdint.h> owns this name; include <stdint.h>"
+    },
+    {
+      "name": "uint8",
+      "kind": "typedef",
+      "line": 24,
+      "official": "unsigned char",
+      "disposition": "mapped",
+      "expansion": "unsigned char",
+      "reason": "official exact"
+    },
+    {
+      "name": "uint16",
+      "kind": "typedef",
+      "line": 25,
+      "official": "unsigned int",
+      "disposition": "mapped",
+      "expansion": "unsigned short",
+      "reason": "16-bit width preserved (see WORD)"
+    },
+    {
+      "name": "uint32",
+      "kind": "typedef",
+      "line": 26,
+      "official": "unsigned long",
+      "disposition": "mapped",
+      "expansion": "unsigned long",
+      "reason": "official exact"
+    },
+    {
+      "name": "int8",
+      "kind": "typedef",
+      "line": 28,
+      "official": "signed   char",
+      "disposition": "mapped",
+      "expansion": "signed char",
+      "reason": "official exact"
+    },
+    {
+      "name": "int16",
+      "kind": "typedef",
+      "line": 29,
+      "official": "signed   int",
+      "disposition": "mapped",
+      "expansion": "signed short",
+      "reason": "16-bit width preserved (see INT)"
+    },
+    {
+      "name": "int32",
+      "kind": "typedef",
+      "line": 30,
+      "official": "signed   long",
+      "disposition": "mapped",
+      "expansion": "signed long",
+      "reason": "official exact"
+    },
+    {
+      "name": "u8",
+      "kind": "typedef",
+      "line": 32,
+      "official": "unsigned char",
+      "disposition": "mapped",
+      "expansion": "unsigned char",
+      "reason": "official exact"
+    },
+    {
+      "name": "u16",
+      "kind": "typedef",
+      "line": 33,
+      "official": "unsigned int",
+      "disposition": "mapped",
+      "expansion": "unsigned short",
+      "reason": "16-bit width preserved (see WORD)"
+    },
+    {
+      "name": "u32",
+      "kind": "typedef",
+      "line": 34,
+      "official": "unsigned long",
+      "disposition": "mapped",
+      "expansion": "unsigned long",
+      "reason": "official exact"
+    },
+    {
+      "name": "s8",
+      "kind": "typedef",
+      "line": 36,
+      "official": "signed   char",
+      "disposition": "mapped",
+      "expansion": "signed char",
+      "reason": "official exact"
+    },
+    {
+      "name": "s16",
+      "kind": "typedef",
+      "line": 37,
+      "official": "signed   int",
+      "disposition": "mapped",
+      "expansion": "signed short",
+      "reason": "16-bit width preserved (see INT)"
+    },
+    {
+      "name": "s32",
+      "kind": "typedef",
+      "line": 38,
+      "official": "signed   long",
+      "disposition": "mapped",
+      "expansion": "signed long",
+      "reason": "official exact"
+    },
+    {
+      "name": "NULL",
+      "kind": "macro",
+      "line": 43,
+      "official": "0",
+      "disposition": "mapped",
+      "expansion": "0",
+      "reason": "official exact"
+    },
+    {
+      "name": "LOW",
+      "kind": "macro",
+      "line": 47,
+      "official": "0",
+      "disposition": "mapped",
+      "expansion": "0",
+      "reason": "official exact"
+    },
+    {
+      "name": "HIGH",
+      "kind": "macro",
+      "line": 51,
+      "official": "1",
+      "disposition": "mapped",
+      "expansion": "1",
+      "reason": "official exact"
+    },
+    {
+      "name": "FALSE",
+      "kind": "macro",
+      "line": 55,
+      "official": "0",
+      "disposition": "mapped",
+      "expansion": "0",
+      "reason": "official exact"
+    },
+    {
+      "name": "TRUE",
+      "kind": "macro",
+      "line": 59,
+      "official": "1",
+      "disposition": "mapped",
+      "expansion": "1",
+      "reason": "official exact"
+    },
+    {
+      "name": "DISABLE",
+      "kind": "macro",
+      "line": 63,
+      "official": "0",
+      "disposition": "mapped",
+      "expansion": "0",
+      "reason": "official exact"
+    },
+    {
+      "name": "ENABLE",
+      "kind": "macro",
+      "line": 67,
+      "official": "1",
+      "disposition": "mapped",
+      "expansion": "1",
+      "reason": "official exact"
+    },
+    {
+      "name": "min",
+      "kind": "macro",
+      "line": 73,
+      "official": "(a, b) ((a) < (b) ? (a) : (b))",
+      "disposition": "mapped",
+      "expansion": "((a) < (b) ? (a) : (b))",
+      "reason": "official exact (parameter names a/b)"
+    },
+    {
+      "name": "max",
+      "kind": "macro",
+      "line": 77,
+      "official": "(a, b) ((a) > (b) ? (a) : (b))",
+      "disposition": "mapped",
+      "expansion": "((a) > (b) ? (a) : (b))",
+      "reason": "official exact (parameter names a/b)"
+    },
+    {
+      "name": "LOBYTE",
+      "kind": "macro",
+      "line": 82,
+      "official": "(n) ((BYTE)(n))",
+      "disposition": "mapped",
+      "expansion": "((BYTE)(n))",
+      "reason": "official exact"
+    },
+    {
+      "name": "HIBYTE",
+      "kind": "macro",
+      "line": 86,
+      "official": "(n) ((BYTE)(((WORD)(n) >> 8) & 0xff))",
+      "disposition": "mapped",
+      "expansion": "((BYTE)(((WORD)(n) >> 8) & 0xff))",
+      "reason": "official exact"
+    },
+    {
+      "name": "LOWORD",
+      "kind": "macro",
+      "line": 90,
+      "official": "(n) ((WORD)(n))",
+      "disposition": "mapped",
+      "expansion": "((WORD)(n))",
+      "reason": "official exact"
+    },
+    {
+      "name": "HIWORD",
+      "kind": "macro",
+      "line": 94,
+      "official": "(n) ((WORD)(((DWORD)(n) >> 16) & 0xffff))",
+      "disposition": "mapped",
+      "expansion": "((WORD)(((DWORD)(n) >> 16) & 0xffff))",
+      "reason": "official exact"
+    },
+    {
+      "name": "MAKEWORD",
+      "kind": "macro",
+      "line": 98,
+      "official": "(l, h) ((WORD)(((BYTE)(l)) | ((WORD)((BYTE)(h))) << 8))",
+      "disposition": "mapped",
+      "expansion": "((WORD)(((BYTE)(l)) | ((WORD)((BYTE)(h))) << 8))",
+      "reason": "official exact"
+    },
+    {
+      "name": "MAKELONG",
+      "kind": "macro",
+      "line": 102,
+      "official": "(l, h) ((DWORD)(((WORD)(l)) | ((DWORD)((WORD)(h))) << 16))",
+      "disposition": "mapped",
+      "expansion": "((DWORD)(((WORD)(l)) | ((DWORD)((WORD)(h))) << 16))",
+      "reason": "official exact"
+    },
+    {
+      "name": "BYTE0",
+      "kind": "macro",
+      "line": 106,
+      "official": "(n) LOBYTE(n)",
+      "disposition": "mapped",
+      "expansion": "LOBYTE(n)",
+      "reason": "official exact"
+    },
+    {
+      "name": "BYTE1",
+      "kind": "macro",
+      "line": 110,
+      "official": "(n) HIBYTE(n)",
+      "disposition": "mapped",
+      "expansion": "HIBYTE(n)",
+      "reason": "official exact"
+    },
+    {
+      "name": "BYTE2",
+      "kind": "macro",
+      "line": 114,
+      "official": "(n) LOBYTE(HIWORD(n))",
+      "disposition": "mapped",
+      "expansion": "LOBYTE(HIWORD(n))",
+      "reason": "official exact"
+    },
+    {
+      "name": "BYTE3",
+      "kind": "macro",
+      "line": 118,
+      "official": "(n) HIBYTE(HIWORD(n))",
+      "disposition": "mapped",
+      "expansion": "HIBYTE(HIWORD(n))",
+      "reason": "official exact"
+    },
+    {
+      "name": "WORD0",
+      "kind": "macro",
+      "line": 122,
+      "official": "(n) LOWORD(n)",
+      "disposition": "mapped",
+      "expansion": "LOWORD(n)",
+      "reason": "official exact"
+    },
+    {
+      "name": "WORD2",
+      "kind": "macro",
+      "line": 126,
+      "official": "(n) HIWORD(n)",
+      "disposition": "mapped",
+      "expansion": "HIWORD(n)",
+      "reason": "official exact"
+    },
+    {
+      "name": "BIT0",
+      "kind": "macro",
+      "line": 131,
+      "official": "0x01",
+      "disposition": "mapped",
+      "expansion": "0x01",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "BIT1",
+      "kind": "macro",
+      "line": 132,
+      "official": "0x02",
+      "disposition": "mapped",
+      "expansion": "0x02",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "BIT2",
+      "kind": "macro",
+      "line": 133,
+      "official": "0x04",
+      "disposition": "mapped",
+      "expansion": "0x04",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "BIT3",
+      "kind": "macro",
+      "line": 134,
+      "official": "0x08",
+      "disposition": "mapped",
+      "expansion": "0x08",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "BIT4",
+      "kind": "macro",
+      "line": 135,
+      "official": "0x10",
+      "disposition": "mapped",
+      "expansion": "0x10",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "BIT5",
+      "kind": "macro",
+      "line": 136,
+      "official": "0x20",
+      "disposition": "mapped",
+      "expansion": "0x20",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "BIT6",
+      "kind": "macro",
+      "line": 137,
+      "official": "0x40",
+      "disposition": "mapped",
+      "expansion": "0x40",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "BIT7",
+      "kind": "macro",
+      "line": 138,
+      "official": "0x80",
+      "disposition": "mapped",
+      "expansion": "0x80",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "BIT",
+      "kind": "macro",
+      "line": 139,
+      "official": "(b) (BIT##b)",
+      "disposition": "mapped",
+      "expansion": "(BIT##b)",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "BIT_LN",
+      "kind": "macro",
+      "line": 141,
+      "official": "0x0f",
+      "disposition": "mapped",
+      "expansion": "0x0f",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "BIT_HN",
+      "kind": "macro",
+      "line": 142,
+      "official": "0xf0",
+      "disposition": "mapped",
+      "expansion": "0xf0",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "BIT_ALL",
+      "kind": "macro",
+      "line": 143,
+      "official": "0xff",
+      "disposition": "mapped",
+      "expansion": "0xff",
+      "reason": "official value; guard added"
+    },
+    {
+      "name": "PIN_0",
+      "kind": "macro",
+      "line": 145,
+      "official": "BIT0",
+      "disposition": "mapped",
+      "expansion": "BIT0",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "PIN_1",
+      "kind": "macro",
+      "line": 146,
+      "official": "BIT1",
+      "disposition": "mapped",
+      "expansion": "BIT1",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "PIN_2",
+      "kind": "macro",
+      "line": 147,
+      "official": "BIT2",
+      "disposition": "mapped",
+      "expansion": "BIT2",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "PIN_3",
+      "kind": "macro",
+      "line": 148,
+      "official": "BIT3",
+      "disposition": "mapped",
+      "expansion": "BIT3",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "PIN_4",
+      "kind": "macro",
+      "line": 149,
+      "official": "BIT4",
+      "disposition": "mapped",
+      "expansion": "BIT4",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "PIN_5",
+      "kind": "macro",
+      "line": 150,
+      "official": "BIT5",
+      "disposition": "mapped",
+      "expansion": "BIT5",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "PIN_6",
+      "kind": "macro",
+      "line": 151,
+      "official": "BIT6",
+      "disposition": "mapped",
+      "expansion": "BIT6",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "PIN_7",
+      "kind": "macro",
+      "line": 152,
+      "official": "BIT7",
+      "disposition": "mapped",
+      "expansion": "BIT7",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "PIN_ALL",
+      "kind": "macro",
+      "line": 154,
+      "official": "BIT_ALL",
+      "disposition": "mapped",
+      "expansion": "BIT_ALL",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "CLR_REG_BIT",
+      "kind": "macro",
+      "line": 158,
+      "official": "(r, b) ((r) &= ~(b))",
+      "disposition": "mapped",
+      "expansion": "((r) &= ~(b))",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "SET_REG_BIT",
+      "kind": "macro",
+      "line": 159,
+      "official": "(r, b) ((r) |= (b))",
+      "disposition": "mapped",
+      "expansion": "((r) |= (b))",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "CPL_REG_BIT",
+      "kind": "macro",
+      "line": 160,
+      "official": "(r, b) ((r) ^= (b))",
+      "disposition": "mapped",
+      "expansion": "((r) ^= (b))",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "READ_REG_BIT",
+      "kind": "macro",
+      "line": 161,
+      "official": "(r, b) ((r) & (b))",
+      "disposition": "mapped",
+      "expansion": "((r) & (b))",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "READ_REG",
+      "kind": "macro",
+      "line": 163,
+      "official": "(r) (r)",
+      "disposition": "mapped",
+      "expansion": "(r)",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "WRITE_REG",
+      "kind": "macro",
+      "line": 164,
+      "official": "(r, v) ((r) = (v))",
+      "disposition": "mapped",
+      "expansion": "((r) = (v))",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "CLR_REG",
+      "kind": "macro",
+      "line": 165,
+      "official": "(r) ((r) = 0)",
+      "disposition": "mapped",
+      "expansion": "((r) = 0)",
+      "reason": "official exact; guard added"
+    },
+    {
+      "name": "MODIFY_REG",
+      "kind": "macro",
+      "line": 166,
+      "official": "(r, clr, set) ((r) = (((r) & ~(clr)) | ((set) & (clr))))",
+      "disposition": "mapped",
+      "expansion": "((r) = (((r) & ~(clr)) | ((set) & (clr))))",
+      "reason": "official exact; guard added"
+    }
+  ]
+}

@@ -17,12 +17,32 @@
 #   mov direct,#imm8 = 75 <dir> <imm> (crt .lst: WTST=0xE9, SBUF=0x99)
 #   sjmp = 80 + signed off8           (self-jumps 80 FE fully resolved, no reloc)
 #
+# X4 (xdata/code slice): an xdata_init walker was added (BOOT+0x6E, 98 bytes,
+# ECALLed between __mcs251_globals_init and _main) consuming the
+# .mcs251.xdata_init v1 records emitted for __xdata objects (format frozen in
+# XDATA-CODE-DESIGN-SUPPLEMENT.md section 7; lld validateXDATAInit() gates the
+# record shapes, destinations and non-overlap). Byte evidence: the walker is
+# sdas251-assembled from crt-xdata-init-walker.asm (this directory) - every
+# instruction below appears there with its gold encoding - and QEMU-verified
+# by the validation/mcs251-xdata-e2e firmware chain. Key encodings (sdas251
+# gold, x4rel.lst):
+#   mov dpxl,r14  = 7A E1 84   (MOV8dpxl family, supplement section 2)
+#   mov dph,r8    = 7A 81 83   mov dpl,r9 = 7A 91 82
+#   movx @dptr,a  = F0         inc dptr   = A3    clr a = E4
+#   mov a,r14     = 7C BE      sub wr4,#7 = 9E 24 00 07
+# DPXL is deliberately NOT restored to 01h before _main: DESIGN-SUPPLEMENT
+# section 3 rules CRT startup carries no DPXL obligation (self-healing
+# sequences), documented in runtime/README.md. The walker performs no record
+# validation - the lld gate owns that (fail-closed there, out of contract in
+# the CRT).
+#
 # Reloc offsets are field starts (byte after opcode), matching SPEC 7.1/7.2 and
 # the llc convention seen in main.o (e.g. 0x1 R_MCS251_24 on a 9A ecall).
 # All fields are zero placeholders; addresses come from lld at link time.
 #
-# Area bases (HOME 0xff0000, VECS 0xff0003, BOOT 0xff0100, XINIT 0xff8000) are
-# link parameters (--area-start), never encoded here (SPEC 3.1).
+# Area bases (HOME 0xff0000, VECS 0xff0003, BOOT 0xff0100, XINIT 0xff8000,
+# XDATA_INIT 0xff9000 when records exist) are link parameters (--area-start),
+# never encoded here (SPEC 3.1).
 --- !ELF
 FileHeader:
   Class: ELFCLASS32
@@ -119,12 +139,20 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
     Size: 4
-  # BOOT: startup flow + XINIT walker, 0x6F bytes, byte-for-byte the .lst image.
+  # BOOT: startup flow + XINIT walker + XDATA_INIT walker, 0xD5 bytes.
+  # Layout (section-relative offsets):
+  #   0x00 mov WTST,#0; 0x03 mov spx,#stack_base (R16 @0x05)
+  #   0x07 ecall __mcs251_globals_init (R24 @0x08)  - XINIT walker at 0x18
+  #   0x0B ecall __mcs251_xdata_init   (R24 @0x0C)  - XDATA walker at 0x6E
+  #   0x0F ecall _main (R24 @0x10); 0x13 mov SBUF,#'S'; 0x16 sjmp halt
+  #   0x18 [86B] XINIT walker (frozen .lst image, relocations shifted +4)
+  #   0x6E [98B] XDATA_INIT walker (crt-xdata-init-walker.asm gold)
+  #   0xD0 mov SBUF,#'!'; 0xD3 sjmp ispin  (__mcs251_isr_unhandled)
   - Name: .mcs251.BOOT
     Type: SHT_PROGBITS
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
-    Content: '75E9007EF800009A0000009A00000075995380FE7E0800007A0C00007E240000BE24000068430B0A400B0C0B0C7DA40B0A600B0C0B0C0B0A800B0C0B0C9E2400067EE000BE64000068097A49E00B441B6480F1BE84000068C77E0BE00B0C7AA9E00BA41B841B2480EAAA75992180FE'
+    Content: '75E9007EF800009A0000009A0000009A00000075995380FE7E0800007A0C00007E240000BE24000068430B0A400B0C0B0C7DA40B0A600B0C0B0C0B0A800B0C0B0C9E2400067EE000BE64000068097A49E00B441B6480F1BE84000068C77E0BE00B0C7AA9E00BA41B841B2480EAAA7E0800007A0C00007E240000BE240000684F7E0BE00B0C0B0A400B0C0B0C0B0A600B0C0B0C0B0A800B0C0B0C9E2400077AE1847A81837A9182BE84000068157E0BE00B0C7CBEF0A31B241B84BE84000068BA80EBBE64000068B2E4F0A31B6480F3AA75992180FE'
   - Name: .rela.mcs251.HOME
     Type: SHT_RELA
     Link: .symtab
@@ -224,29 +252,54 @@ Sections:
         Type: R_MCS251_24
         Symbol: __mcs251_globals_init
         Addend: 0
-      # ecall _main: 9A [addr24]
+      # ecall __mcs251_xdata_init (X4): 9A [addr24]
       - Offset: 0xC
+        Type: R_MCS251_24
+        Symbol: __mcs251_xdata_init
+        Addend: 0
+      # ecall _main: 9A [addr24]
+      - Offset: 0x10
         Type: R_MCS251_24
         Symbol: _main
         Addend: 0
       # mov wr8,#<s_XINIT mid/lo>: 7E 08 [MID8] [LO8] (hand-coded .db prologue)
-      - Offset: 0x16
+      - Offset: 0x1A
         Type: R_MCS251_MID8
         Symbol: s_XINIT
         Addend: 0
-      - Offset: 0x17
+      - Offset: 0x1B
         Type: R_MCS251_LO8
         Symbol: s_XINIT
         Addend: 0
       # mov r12,#<s_XINIT hi>: 7A 0C 00 [HI8] (dr0 24-bit bank byte)
-      - Offset: 0x1B
+      - Offset: 0x1F
         Type: R_MCS251_HI8
         Symbol: s_XINIT
         Addend: 0
       # mov wr4,#l_XINIT: 7E 24 [imm16]
-      - Offset: 0x1E
+      - Offset: 0x22
         Type: R_MCS251_16
         Symbol: l_XINIT
+        Addend: 0
+      # XDATA_INIT walker prologue (crt-xdata-init-walker.asm, walker at 0x6E):
+      # mov dr0[15:0],#<s_XDATA_INIT window>: 7E 08 [MID8] [LO8]
+      - Offset: 0x70
+        Type: R_MCS251_MID8
+        Symbol: s_XDATA_INIT
+        Addend: 0
+      - Offset: 0x71
+        Type: R_MCS251_LO8
+        Symbol: s_XDATA_INIT
+        Addend: 0
+      # mov dr0[31:16],#0x00<bank>: 7A 0C 00 [HI8]
+      - Offset: 0x75
+        Type: R_MCS251_HI8
+        Symbol: s_XDATA_INIT
+        Addend: 0
+      # mov wr4,#l_XDATA_INIT: 7E 24 [imm16]
+      - Offset: 0x78
+        Type: R_MCS251_16
+        Symbol: l_XDATA_INIT
         Addend: 0
   # Exactly one ABI note per object (SPEC 3.2): namesz=7 descsz=32 type=1,
   # owner "MCS251", eight BE u32 descriptor words.
@@ -266,27 +319,43 @@ Symbols:
   - Name: __mcs251_halt
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x12
+    Value: 0x16
   - Name: __mcs251_xinit_record
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x20
+    Value: 0x24
   - Name: __mcs251_xinit_clear
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x44
+    Value: 0x48
   - Name: __mcs251_xinit_copy
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x53
+    Value: 0x57
   - Name: __mcs251_xinit_done
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x69
+    Value: 0x6D
+  - Name: __mcs251_xdata_record
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x7A
+  - Name: __mcs251_xdata_copy
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0xAD
+  - Name: __mcs251_xdata_zero
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0xC2
+  - Name: __mcs251_xdata_done
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0xCF
   - Name: __mcs251_ispin
     Type: STT_NOTYPE
     Section: .mcs251.BOOT
-    Value: 0x6D
+    Value: 0xD3
   # Globals defined here (old .globl / :: labels).
   - Name: __mcs251_selfstart_boot
     Type: STT_NOTYPE
@@ -297,14 +366,19 @@ Symbols:
     Type: STT_NOTYPE
     Binding: STB_GLOBAL
     Section: .mcs251.BOOT
-    Value: 0x14
+    Value: 0x18
+  - Name: __mcs251_xdata_init
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x6E
   - Name: __mcs251_isr_unhandled
     Type: STT_NOTYPE
     Binding: STB_GLOBAL
     Section: .mcs251.BOOT
-    Value: 0x6A
+    Value: 0xD0
   # Undefined globals resolved by lld: module entry, synthesized stack base,
-  # synthesized XINIT boundary symbols (SPEC 6.1/6.3).
+  # synthesized XINIT/XDATA_INIT boundary symbols (SPEC 6.1/6.3; X4).
   - Name: _main
     Type: STT_NOTYPE
     Binding: STB_GLOBAL
@@ -315,5 +389,11 @@ Symbols:
     Type: STT_NOTYPE
     Binding: STB_GLOBAL
   - Name: l_XINIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: s_XDATA_INIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: l_XDATA_INIT
     Type: STT_NOTYPE
     Binding: STB_GLOBAL
