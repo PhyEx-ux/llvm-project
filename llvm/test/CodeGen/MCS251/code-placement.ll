@@ -3,7 +3,8 @@
 ; RUN: llvm-readobj --sections --section-data --relocations --symbols %t/defs.o | FileCheck %s --check-prefix=DEFS
 ; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/tab.ll -o %t/tab.o
 ; RUN: llvm-readobj --sections --section-data --relocations %t/tab.o | FileCheck %s --check-prefix=TAB
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/struct.ll -o %t/struct.o 2>&1 | FileCheck %s --check-prefix=STRUCT
+; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/struct.ll -o %t/struct.o
+; RUN: llvm-readobj --sections --section-data --symbols %t/struct.o | FileCheck %s --check-prefix=STRUCT
 ; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/scalar-align.ll -o %t/sc.o 2>&1 | FileCheck %s --check-prefix=SCALIGN
 ; RUN: not --crash llc -mtriple=mcs251 -filetype=obj %t/defs.ll -o %t/rel.o 2>&1 | FileCheck %s --check-prefix=REL
 ;
@@ -14,6 +15,8 @@
 ; IR-mutable global that lands in ROM here; an uninitialized/tentative
 ; definition is the ROM zero image. Writes were already rejected fail-closed
 ; by X2; this slice does not redo them.
+; AS4 struct aggregates are accepted here since the AS4-AGGREGATE slice
+; (design AS4-AGGREGATE-INIT-DESIGN §6A); AS0 stays array/scalar only.
 
 ; DEFS: Name: .text
 ; DEFS: SectionData (
@@ -56,8 +59,14 @@
 ; TAB: 0x7 R_MCS251_24 .text 0x1
 ; TAB: 0xB R_MCS251_24 .text 0x1
 
-; STRUCT: LLVM ERROR: MCS251: __code global 's': unsupported initializer
-; SCALIGN: LLVM ERROR: MCS251: __code global 'a': scalar storage must be byte-aligned
+; STRUCT: Name: .text
+; STRUCT: SectionData (
+; STRUCT-NEXT:     0000: AA010002 |....|
+; STRUCT-NEXT:   )
+; STRUCT: Name: _s
+; STRUCT-NEXT: Value: 0x1
+; STRUCT-NEXT: Size: 3
+; SCALIGN: LLVM ERROR: MCS251: __code global 'a': non-array storage must be byte-aligned (arrays of any declared alignment are emitted byte-aligned)
 ; REL: LLVM ERROR: MCS251: __code global 'devicedesc': storage requires ELF object output
 
 ;--- defs.ll

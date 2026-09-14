@@ -879,14 +879,53 @@ class MCS251AsmPrinter final : public AsmPrinter {
   // accepted leaf set with pointer initializers (&global leaves through the
   // 24-bit relocation channel) and, for CODE-space objects, the ROM zero
   // image (legal in CODE space; X3 ruling: uninitialized/tentative __code
-  // definitions become a zero image).  Struct aggregates, undef elements and
-  // all other initializer expression relocations are rejected here and
-  // reported by the caller's policy message.
+  // definitions become a zero image).  The AS4-AGGREGATE slice additionally
+  // accepts struct aggregates on the AllowStructs (AS4) call site only: the
+  // gate keeps the isSupportedMutableInitializer shape -- recursive type
+  // qualification first, then the value-shape dispatch -- so a zero image,
+  // whole-item or member at any depth, walks the same recursive type check
+  // as a nonzero form and the zero image of an empty/opaque struct is
+  // rejected here instead of leaking through a zero early-exit.  With
+  // AllowStructs=false (the frozen AS0 path) the accepted set and the
+  // caller's rejection text are unchanged.  Undef elements and all other
+  // initializer expression relocations are rejected here and reported by
+  // the caller's policy message.
+  //
+  // Type-qualification half: the isSupportedMutableType mirror, with the
+  // struct clause gated by AllowStructs (packed vs. non-packed does not
+  // affect the decision; packing is a layout attribute over an isomorphic
+  // type tree).
+  static bool isSupportedROType(Type *Ty, const DataLayout &DL,
+                                bool AllowStructs) {
+    if (Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32))
+      return true;
+    if (auto *PT = dyn_cast<PointerType>(Ty))
+      return DL.getTypeStoreSize(PT) == 4;
+    if (auto *AT = dyn_cast<ArrayType>(Ty))
+      return AT->getNumElements() &&
+             isSupportedROType(AT->getElementType(), DL, AllowStructs);
+    if (AllowStructs)
+      if (auto *ST = dyn_cast<StructType>(Ty)) {
+        if (ST->isOpaque() || ST->getNumElements() == 0)
+          return false;
+        return llvm::all_of(ST->elements(), [&](Type *E) {
+          return isSupportedROType(E, DL, AllowStructs);
+        });
+      }
+    return false;
+  }
+
   static bool isSupportedROInitializer(const Constant *C, const DataLayout &DL,
-                                       bool AllowZeroImage) {
+                                       bool AllowZeroImage,
+                                       bool AllowStructs) {
     Type *Ty = C->getType();
+    // Two halves, in the isSupportedMutableInitializer order (design
+    // AS4-AGGREGATE-INIT-DESIGN 6A.2): type qualification first, then the
+    // value dispatch -- the zero image is never exempt from the type check.
+    if (!isSupportedROType(Ty, DL, AllowStructs))
+      return false;
     if (isa<ConstantInt>(C))
-      return Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32);
+      return true;
     if (isa<ConstantAggregateZero>(C))
       return AllowZeroImage;
     if (isa<PointerType>(Ty)) {
@@ -894,23 +933,40 @@ class MCS251AsmPrinter final : public AsmPrinter {
       int64_t Addend;
       return isSupportedPointerLeaf(C, DL, Base, Addend);
     }
-    auto *AT = dyn_cast<ArrayType>(Ty);
-    if (!AT || !AT->getNumElements() ||
-        (!isa<ConstantDataArray>(C) && !isa<ConstantArray>(C)))
-      return false;
-    for (unsigned I = 0; I != AT->getNumElements(); ++I) {
-      const Constant *Element = C->getAggregateElement(I);
-      if (!Element || !isSupportedROInitializer(Element, DL, AllowZeroImage))
+    if (auto *AT = dyn_cast<ArrayType>(Ty)) {
+      if (!isa<ConstantDataArray>(C) && !isa<ConstantArray>(C))
         return false;
+      for (unsigned I = 0; I != AT->getNumElements(); ++I) {
+        const Constant *Element = C->getAggregateElement(I);
+        if (!Element || !isSupportedROInitializer(Element, DL, AllowZeroImage,
+                                                  AllowStructs))
+          return false;
+      }
+      return true;
     }
-    return true;
+    if (AllowStructs)
+      if (auto *ST = dyn_cast<StructType>(Ty)) {
+        for (unsigned I = 0; I != ST->getNumElements(); ++I) {
+          const Constant *Element = C->getAggregateElement(I);
+          if (!Element || !isSupportedROInitializer(Element, DL,
+                                                    AllowZeroImage,
+                                                    AllowStructs))
+            return false;
+        }
+        return true;
+      }
+    return false;
   }
 
   // Emits the CSEG byte image of a read-only initializer: scalars in the
   // established target (big-endian) memory order, nested arrays element by
   // element with stride padding (zero for the packed integer layouts this
-  // path accepts), pointer leaves through the 24-bit relocation channel,
-  // and the CODE-space zero image where the support check allowed one.
+  // path accepts), structs member by member over the getStructLayout offsets
+  // (the AS4-AGGREGATE mirror of emitMutableInitializer; inter-member holes
+  // and the tail pad are materialized as zero bytes -- both always zero
+  // under this contract's align-1 datalayout yet explicit in the algorithm),
+  // pointer leaves through the 24-bit relocation channel, and the CODE-space
+  // zero image where the support check allowed one.
   // The image is always byte-aligned: any IR-level alignment above 1 on the
   // global is deliberately demoted, because MCS-251 needs no address
   // alignment for word accesses (QEMU + real hardware verified).
@@ -935,13 +991,25 @@ class MCS251AsmPrinter final : public AsmPrinter {
       emitPointerInitializer(Base, Addend);
       return;
     }
-    auto *AT = cast<ArrayType>(C->getType());
-    uint64_t StoreSize = DL.getTypeStoreSize(AT->getElementType());
-    uint64_t Stride = DL.getTypeAllocSize(AT->getElementType());
-    for (unsigned I = 0; I != AT->getNumElements(); ++I) {
-      emitROInitializer(DL, C->getAggregateElement(I));
-      emitInitializerZeros(Stride - StoreSize);
+    if (auto *AT = dyn_cast<ArrayType>(C->getType())) {
+      uint64_t StoreSize = DL.getTypeStoreSize(AT->getElementType());
+      uint64_t Stride = DL.getTypeAllocSize(AT->getElementType());
+      for (unsigned I = 0; I != AT->getNumElements(); ++I) {
+        emitROInitializer(DL, C->getAggregateElement(I));
+        emitInitializerZeros(Stride - StoreSize);
+      }
+      return;
     }
+    auto *ST = cast<StructType>(C->getType());
+    const StructLayout *Layout = DL.getStructLayout(ST);
+    uint64_t Pos = 0;
+    for (unsigned I = 0; I != ST->getNumElements(); ++I) {
+      uint64_t Offset = Layout->getElementOffset(I);
+      emitInitializerZeros(Offset - Pos);
+      emitROInitializer(DL, C->getAggregateElement(I));
+      Pos = Offset + DL.getTypeStoreSize(ST->getElementType(I));
+    }
+    emitInitializerZeros(DL.getTypeStoreSize(ST) - Pos);
   }
 
 public:
@@ -1990,7 +2058,8 @@ public:
       return;
     }
 
-    if (!isSupportedROInitializer(Init, DL, /*AllowZeroImage=*/false))
+    if (!isSupportedROInitializer(Init, DL, /*AllowZeroImage=*/false,
+                                  /*AllowStructs=*/false))
       Reject();
 
     // Read-only globals and string literals stay in the established CSEG path.
@@ -2094,16 +2163,21 @@ public:
     }
 
     // AS4: the read-only CODE-space image. Arrays of any declared alignment
-    // are emitted byte-aligned (the ordinary RO rule); scalars stay
-    // byte-aligned. STT_OBJECT/size semantics are the ordinary ones above.
+    // are emitted byte-aligned (the ordinary RO rule); non-array storage
+    // (scalars and structs) stays byte-aligned. STT_OBJECT/size semantics
+    // are the ordinary ones above. Struct aggregates are accepted since the
+    // AS4-AGGREGATE slice (design AS4-AGGREGATE-INIT-DESIGN 6A); the AS0
+    // path above stays array/scalar only.
     const bool AlignedArrayOK = isa<ArrayType>(GV->getValueType());
     if (!AlignedArrayOK && (GV->getAlign().valueOrOne() != Align(1) ||
                             DL.getABITypeAlign(GV->getValueType()) != Align(1)))
-      Bad("scalar storage must be byte-aligned (arrays of any declared "
+      Bad("non-array storage must be byte-aligned (arrays of any declared "
           "alignment are emitted byte-aligned)");
-    if (!isSupportedROInitializer(Init, DL, /*AllowZeroImage=*/true))
+    if (!isSupportedROInitializer(Init, DL, /*AllowZeroImage=*/true,
+                                  /*AllowStructs=*/true))
       Bad("unsupported initializer (i8/i16/i32 scalars, nonempty arrays of "
-          "integers and &global pointer leaves, or the ROM zero image)");
+          "integers, nonempty non-opaque structs of those at any nesting, "
+          "&global pointer leaves, or the ROM zero image)");
     OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
     emitLinkage(GV, Sym);
     OutStreamer->emitLabel(Sym);
