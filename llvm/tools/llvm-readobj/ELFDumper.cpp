@@ -30,6 +30,8 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/BinaryFormat/AMDGPUMetadataVerifier.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/MCS251Attributes.h"
+#include "llvm/BinaryFormat/MCS251AttributesReader.h"
 #include "llvm/BinaryFormat/MsgPackDocument.h"
 #include "llvm/BinaryFormat/SFrame.h"
 #include "llvm/Demangle/Demangle.h"
@@ -379,6 +381,7 @@ protected:
 
   void printAttributes(unsigned, std::unique_ptr<ELFAttributeParser>,
                        llvm::endianness);
+  void printMCS251Attributes();
   void printMipsReginfo();
   void printMipsOptions();
 
@@ -2964,6 +2967,13 @@ template <class ELFT> void ELFDumper<ELFT>::printArchSpecificInfo() {
                     std::make_unique<MSP430AttributeParser>(&W),
                     llvm::endianness::little);
     break;
+  case EM_MCS251:
+    // The MCS251 v2 identity carrier reuses the ARM-attributes envelope but
+    // its scope payload is a sequence of self-describing
+    // [Tag][TypeFlags][Length][Value] records, not the ARM ULEB tag/value
+    // encoding, so it is dumped through the strict MCS251 codec.
+    printMCS251Attributes();
+    break;
   case EM_MIPS: {
     printMipsABIFlags();
     printMipsOptions();
@@ -3015,6 +3025,147 @@ void ELFDumper<ELFT>::printAttributes(
     if (Error E = AttrParser->parse(Contents, Endianness))
       reportUniqueWarning("unable to dump attributes from the " +
                           describe(Sec) + ": " + toString(std::move(E)));
+  }
+}
+
+// A4/W5 (design §8.3): dump the MCS251 v2 identity carrier
+// (`.mcs251.attributes`) record by record through the strict codec.  The
+// dump names every registered tag with its Critical bit, value type code,
+// record length and value; MIX atoms are walked and displayed the same way.
+// A section that fails decode is reported as a warning with the codec's
+// diagnostic -- the dumper never guesses a value and never silently skips a
+// record it cannot parse.
+template <class ELFT> void ELFDumper<ELFT>::printMCS251Attributes() {
+  using namespace llvm::MCS251Attributes;
+  const llvm::endianness Endianness =
+      Obj.isLE() ? llvm::endianness::little : llvm::endianness::big;
+
+  std::optional<DictScope> BA;
+  for (const Elf_Shdr &Sec : cantFail(Obj.sections())) {
+    if (Sec.sh_type != SectionType)
+      continue;
+    if (!BA)
+      BA.emplace(W, "MCS251Attributes");
+
+    ArrayRef<uint8_t> Contents;
+    if (Expected<ArrayRef<uint8_t>> ContentOrErr = Obj.getSectionContents(Sec)) {
+      Contents = *ContentOrErr;
+      if (Contents.empty()) {
+        reportUniqueWarning("the " + describe(Sec) + " is empty");
+        continue;
+      }
+    } else {
+      reportUniqueWarning("unable to read the content of the " + describe(Sec) +
+                          ": " + toString(ContentOrErr.takeError()));
+      continue;
+    }
+
+    W.printHex("FormatVersion", FormatVersion);
+    if (Contents.size() < EnvelopeSize) {
+      reportUniqueWarning("the " + describe(Sec) + " is smaller than the " +
+                          Twine(EnvelopeSize) + "-byte envelope");
+      continue;
+    }
+    {
+      const unsigned char *P = Contents.data();
+      uint32_t VendorSize = (uint32_t(P[1]) << 24) | (uint32_t(P[2]) << 16) |
+                            (uint32_t(P[3]) << 8) | uint32_t(P[4]);
+      uint32_t ScopeSize = (uint32_t(P[13]) << 24) | (uint32_t(P[14]) << 16) |
+                           (uint32_t(P[15]) << 8) | uint32_t(P[16]);
+      W.printHex("VendorSize", VendorSize);
+      W.printHex("ScopeSize", ScopeSize);
+    }
+
+    Decoded D;
+    if (Error E = decode(toStringRef(Contents), Endianness == llvm::endianness::big,
+                         D)) {
+      reportUniqueWarning("unable to decode the " + describe(Sec) + ": " +
+                          toString(std::move(E)));
+      continue;
+    }
+
+    ListScope RecordsScope(W, "Records");
+    for (const Record &R : D.Records) {
+      DictScope RecordScope(W, "Tag");
+      W.printNumber("Tag", R.Tag);
+      StringRef Name = tagName(R.Tag);
+      W.printString("Name", Name.empty() ? std::string("<unallocated>")
+                                         : Name.str());
+      W.printBoolean("Critical", R.Critical);
+      W.printString("ValueType",
+                    (Twine(valueTypeName(R.ValueType)) + " (" +
+                     Twine::utohexstr(R.ValueType) + ")").str());
+      W.printNumber("Length", R.Length);
+      // A4-FINAL-R1: only schema-validated records (known tag with a
+      // concrete type rule, fully decoded by MCS251Attributes::decode) may
+      // use the Scalar/MIX display. Unknown or rule-less optional records
+      // carry raw bytes that were never decoded -- display them verbatim
+      // instead of trusting ValueType.
+      if (!R.SchemaValidated)
+        W.printBinary(
+            "Value",
+            StringRef(reinterpret_cast<const char *>(R.Value.data()),
+                      R.Value.size()));
+      else if (R.ValueType == VT_U32)
+        W.printHex("Value", R.Scalar);
+      else if (R.ValueType == VT_MIX) {
+        // Walk the atoms. The reader validated this stream, but the walk is
+        // independently bounded: ULEB truncation/overflow, atom length
+        // within the record, and strict cursor progress.
+        ListScope AtomsScope(W, "Atoms");
+        StringRef Bytes(reinterpret_cast<const char *>(R.Value.data()),
+                        R.Value.size());
+        size_t Pos = 0;
+        while (Pos < Bytes.size()) {
+          DictScope AtomScope(W, "Atom");
+          uint8_t AtomType = uint8_t(Bytes[Pos++]);
+          W.printString("Type",
+                        (Twine(valueTypeName(AtomType)) + " (" +
+                         Twine::utohexstr(AtomType) + ")").str());
+          uint64_t AtomLen = 0;
+          unsigned Shift = 0;
+          bool Truncated = true;
+          while (Pos < Bytes.size()) {
+            uint8_t B = uint8_t(Bytes[Pos++]);
+            AtomLen |= uint64_t(B & 0x7fu) << Shift;
+            if (!(B & 0x80u)) {
+              Truncated = false;
+              break;
+            }
+            if (Shift >= 63)
+              break; // a further continuation byte would shift past 64 bits
+            Shift += 7;
+          }
+          if (Truncated) {
+            reportUniqueWarning("truncated ULEB128 atom length");
+            break;
+          }
+          if (AtomLen > Bytes.size() - Pos) {
+            reportUniqueWarning("atom length exceeds the record");
+            break;
+          }
+          W.printNumber("Length", AtomLen);
+          StringRef AtomValue = Bytes.substr(Pos, AtomLen);
+          Pos += AtomLen;
+          if (AtomType == VT_U32 && AtomValue.size() == 4) {
+            const unsigned char *P =
+                reinterpret_cast<const unsigned char *>(AtomValue.data());
+            uint32_t V = Endianness == llvm::endianness::big
+                             ? ((uint32_t(P[0]) << 24) | (uint32_t(P[1]) << 16) |
+                                (uint32_t(P[2]) << 8) | uint32_t(P[3]))
+                             : ((uint32_t(P[3]) << 24) | (uint32_t(P[2]) << 16) |
+                                (uint32_t(P[1]) << 8) | uint32_t(P[0]));
+            W.printHex("Value", V);
+          } else {
+            W.printBinary("Value", AtomValue);
+          }
+        }
+      } else
+        W.printBinary(
+            "Value",
+            StringRef(reinterpret_cast<const char *>(R.Value.data()),
+                      R.Value.size()));
+    }
   }
 }
 

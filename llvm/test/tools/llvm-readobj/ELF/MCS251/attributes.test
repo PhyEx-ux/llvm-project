@@ -1,0 +1,180 @@
+# RUN: split-file %s %t
+# RUN: yaml2obj %t/valid.yaml -o %t.valid.o
+# RUN: llvm-readobj -A %t.valid.o 2>&1 | FileCheck %s --check-prefix=VALID
+# RUN: yaml2obj %t/badvendor.yaml -o %t.badvendor.o
+# RUN: llvm-readobj -A %t.badvendor.o 2>&1 | FileCheck %s --check-prefix=BADVENDOR
+# RUN: yaml2obj %t/minor2.yaml -o %t.minor2.o
+# RUN: llvm-readobj -A %t.minor2.o 2>&1 | FileCheck %s --check-prefix=MINOR2
+# RUN: yaml2obj %t/missing27.yaml -o %t.missing.o
+# RUN: llvm-readobj -A %t.missing.o 2>&1 | FileCheck %s --check-prefix=MISSING
+#
+# A4/W5 (design §8.3): llvm-readobj dumps the `.mcs251.attributes` carrier
+# record by record -- envelope numbers, tag names, Critical bits, value
+# types, lengths and values, MIX atoms included -- through the strict codec,
+# and reports every malformed input as a warning carrying the codec's
+# diagnostic instead of guessing.
+
+# VALID:      MCS251Attributes {
+# VALID-NEXT:   FormatVersion: 0x41
+# VALID-NEXT:   VendorSize: 0xAB
+# VALID-NEXT:   ScopeSize: 0xA0
+# VALID-NEXT:   Records [
+# VALID-NEXT:     Tag {
+# VALID-NEXT:       Tag: 4
+# VALID-NEXT:       Name: object_protocol_version
+# VALID-NEXT:       Critical: Yes
+# VALID-NEXT:       ValueType: U32 (1)
+# VALID-NEXT:       Length: 4
+# VALID-NEXT:       Value: 0x2
+# VALID:           Name: call_abi_minor
+# VALID-NEXT:       Critical: Yes
+# VALID:           Value: 0x1
+# VALID:           Name: register_parameter_variant
+# VALID:           Value: 0x3
+# VALID:           Name: general_register_set
+# VALID:           Value: 0xF3FF
+# VALID:           Name: as_layout_version
+# VALID:           Value: 0x2
+# VALID:           Name: default_placement
+# VALID:           Value: 0x8
+# VALID:           Name: init_protocol_version
+# VALID:           Value: 0x2
+# VALID:           Name: placement_protocol_version
+# VALID:           Value: 0x2
+# VALID:           Name: stack_contract_version
+# VALID:           Value: 0x2
+# VALID:           Name: function_contract_version
+# VALID:           Value: 0x2
+# VALID:           Name: required_capabilities_lo
+# VALID:           Value: 0x0
+# VALID:           Name: required_capabilities_hi
+# VALID:           Value: 0x0
+# VALID:           Name: abi_options
+# VALID:           Value: 0x0
+# VALID:           Name: memory_model_profile
+# VALID:           ValueType: MIX (3)
+# VALID-NEXT:       Length: 12
+# VALID-NEXT:       Atoms [
+# VALID-NEXT:         Atom {
+# VALID-NEXT:           Type: U32 (1)
+# VALID-NEXT:           Length: 4
+# VALID-NEXT:           Value: 0x20
+# VALID-NEXT:         }
+# VALID-NEXT:         Atom {
+# VALID-NEXT:           Type: U32 (1)
+# VALID-NEXT:           Length: 4
+# VALID-NEXT:           Value: 0x8
+# VALID-NEXT:         }
+# VALID-NEXT:       ]
+# VALID:           Name: code_model_profile
+# VALID:           Value: 0x1
+# VALID:           Name: code_pointer_bits
+# VALID:           Value: 0x20
+# VALID:           Name: object_protocol_minor
+# VALID:           Value: 0x0
+
+# BADVENDOR: warning: '{{.*}}': unable to decode the {{.*}}: MCS251 attributes: vendor is not exactly 7 bytes "MCS251\0"
+
+# MINOR2: warning: '{{.*}}': unable to decode the {{.*}}: MCS251 attributes: call_abi_minor must be 1, got 2 (the A4-registered value is the only approved value)
+
+# MISSING: warning: '{{.*}}': unable to decode the {{.*}}: MCS251 attributes: required object_protocol_minor(27) is missing
+# RUN: yaml2obj %t/optu32.yaml -o %t.optu32.o
+# RUN: llvm-readobj -A %t.optu32.o 2>&1 | FileCheck %s --check-prefix=OPTU32
+# RUN: yaml2obj %t/optmix.yaml -o %t.optmix.o
+# RUN: llvm-readobj -A %t.optmix.o 2>&1 | FileCheck %s --check-prefix=OPTMIX
+#
+# A4-FINAL-R1: unknown optional records are never schema-decoded, so they are
+# displayed as raw bytes (never Scalar/MIX); the wrapping atom length in the
+# MIX variant must terminate with finite output, and lld keeps accepting the
+# object (unknown non-Critical tags stay skippable).
+
+# OPTU32:        Tag: 256
+# OPTU32-NEXT:   Name: <unallocated>
+# OPTU32-NEXT:   Critical: No
+# OPTU32-NEXT:   ValueType: U32 (1)
+# OPTU32-NEXT:   Length: 4
+# OPTU32-NEXT:   Value: (12 34 56 78)
+# OPTU32-NEXT:   }
+# OPTU32-NEXT: ]
+# OPTU32-NEXT: }
+# OPTMIX:        Tag: 256
+# OPTMIX-NEXT:   Name: <unallocated>
+# OPTMIX-NEXT:   Critical: No
+# OPTMIX-NEXT:   ValueType: MIX (3)
+# OPTMIX-NEXT:   Length: 11
+# OPTMIX-NEXT:   Value: (01 F5 FF FF FF FF FF FF FF FF 01)
+# OPTMIX-NEXT:   }
+# OPTMIX-NEXT: ]
+# OPTMIX-NEXT: }
+
+#--- valid.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+Sections:
+  - Name:  .mcs251.attributes
+    Type:  0x70000003
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+
+#--- badvendor.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+Sections:
+  - Name:  .mcs251.attributes
+    Type:  0x70000003
+    Content: 41000000AB4D43533235313001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+
+#--- minor2.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+Sections:
+  - Name:  .mcs251.attributes
+    Type:  0x70000003
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000002078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+
+#--- missing27.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+Sections:
+  - Name:  .mcs251.attributes
+    Type:  0x70000003
+    Content: 41000000A44D4353323531000100000099048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A810400000020
+
+#--- optu32.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+Sections:
+  - Name:  .mcs251.attributes
+    Type:  0x70000003
+    Content: 41000000b34d43533235310001000000a8048104000000020581040000000206810400000001078104000000030881040000f3ff098104000000200a8104000000200b8104000000200c8104000000020d8104000000080e8104000000020f810400000002108104000000021181040000000212810400000000138104000000001481040000000018830c010400000020010400000008198104000000011a8104000000201b8104000000008002010412345678
+
+#--- optmix.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+Sections:
+  - Name:  .mcs251.attributes
+    Type:  0x70000003
+    Content: 41000000ba4d43533235310001000000af048104000000020581040000000206810400000001078104000000030881040000f3ff098104000000200a8104000000200b8104000000200c8104000000020d8104000000080e8104000000020f810400000002108104000000021181040000000212810400000000138104000000001481040000000018830c010400000020010400000008198104000000011a8104000000201b8104000000008002030b01f5ffffffffffffffff01
