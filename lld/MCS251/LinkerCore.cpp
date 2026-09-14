@@ -10,6 +10,8 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/MCS251Attributes.h"
+#include "llvm/BinaryFormat/MCS251AttributesReader.h"
 #include "llvm/BinaryFormat/MCS251ISR.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/ObjectFile.h"
@@ -36,7 +38,23 @@ namespace lld::mcs251 {
 static constexpr uint16_t EM_MCS251 = 0x9999;
 static constexpr uint32_t SHF_MCS251_OVERLAY = 0x10000000;
 static constexpr uint32_t ABI_FLAGS = 0x00000001;
+// W4 (design §4.2): the v2 object-protocol e_flags value.  The low byte is
+// the object protocol version (2, agreeing with Tag 4); bit 8 is the
+// source/native marker.  "Other flags values are rejected": no mask-and-guess
+// path exists, only these two exact words.
+static constexpr uint32_t ABI_FLAGS_V2 = MCS251Attributes::EFlagsV2;
 static constexpr uint32_t EF_ABI_MASK = 0xff;
+
+// W4 (design §4): the capability bits this linker implements.  This is
+// deliberately a literal, never a rebinding of the codec's registered
+// required-values: those describe what an *object* may demand, while this
+// describes what the *linker* can honour.  Deriving one from the other would
+// silently claim support the day a future PM registers a non-zero
+// capability.  A4 implements the empty set, so the cross-object union check
+// below fails closed on any bit; a future revision must widen this constant
+// deliberately, before it registers a capability that an object may require.
+static constexpr uint32_t SupportedCapabilitiesLo = 0;
+static constexpr uint32_t SupportedCapabilitiesHi = 0;
 
 // Bit-object input contract (lld/MCS251/BIT-OBJECT-CONTRACT.md).  The bit
 // relocation numbers 10/11 are an lld-local extension until the public
@@ -146,6 +164,16 @@ struct InputFile {
   std::vector<std::unique_ptr<InputSection>> Sections;
   std::vector<InputSymbol> Symbols;
   bool NoteSeen = false;
+  // W4 (design §4.2): the ELF header e_flags word.  The header split keeps
+  // it because the v2 branch must cross-check Tag 4 against the object-
+  // protocol byte, and the group stage must distinguish v1 from v2 inputs.
+  uint32_t EFlags = 0;
+  // W4 (design §4.2): a decoded `.mcs251.attributes` carrier was accepted.
+  bool IsV2 = false;
+  // W4: the decoded v2 identity.  The decoded record list -- never the raw
+  // bytes -- is the interface: cross-object validation is field-by-field by
+  // design, so no consumer may memcmp payloads or the descriptor.
+  MCS251Attributes::Decoded V2Identity;
   // A3: at most one `.mcs251.isr` per object; presence triggers IRQ mode.
   bool HasIsrMeta = false;
   InputSection *MetaSection = nullptr;
@@ -560,6 +588,18 @@ static bool validateMetaSection(const InputSection &S, raw_ostream &Err) {
   if (N == ".note.mcs251.abi")
     return S.Type == ELF::SHT_NOTE && S.Flags == 0 && S.Align == 4 ||
            fail(Err, "malformed .note.mcs251.abi");
+  // W4 (design §4.2): the v2 identity carrier.  Exact name only, the frozen
+  // SHT_LOPROC-range type registered by the codec, no flags, align 1.
+  // Whether the section is *allowed* is decided by the e_flags branch in
+  // loadFile() (v2 requires exactly one, v1 must not carry one); this check
+  // only freezes the shape.  The section loop's name-claim path re-checks
+  // the full shape (type/flags plus the raw sh_addralign/entsize/link/info
+  // words it still has in hand) unconditionally, so the generic index-0
+  // SHT_NULL early return above cannot bypass it (A4W4-R1).
+  if (N == MCS251Attributes::SectionName)
+    return S.Type == MCS251Attributes::SectionType && S.Flags == 0 &&
+               S.Align == 1 ||
+           fail(Err, "malformed " + N);
   // A3.2: the ISR metadata section is whitelisted by its exact name only; no
   // `.mcs251.*` wildcard exists anywhere in the non-ALLOC whitelist.
   if (N == MCS251ISR::MetaSectionName)
@@ -621,6 +661,191 @@ static bool validateNote(InputFile &F, raw_ostream &Err) {
   return true;
 }
 
+//===----------------------------------------------------------------------===//
+// W4 (design §4.2): the v2 identity branch.
+//
+// e_flags == 0x1 keeps the byte-for-byte v1 note path above, untouched.
+// e_flags == 0x102 selects this branch: exactly one `.mcs251.attributes`
+// section, decoded through the strict codec (envelope, ULEB shortest form,
+// duplicates, missing/unknown Critical tags, vendor/scope, Tag 4..27 value
+// registration, Tag 11/13/24 internal agreement).  The linker adds only the
+// object-level rules the codec cannot see: carrier cardinality, no v1 note,
+// e_flags/tag-4 agreement and the set of memory model profiles this linker
+// can actually place.  Any other e_flags word is rejected at the header
+// check; there is no fallback between the two identity forms, and the v1
+// branch rejects a carrier rather than ignoring it.
+//===----------------------------------------------------------------------===//
+
+// Extract one MIX atom from an already schema-validated Tag 24 record.  The
+// codec has pinned the shape (exactly two U32 atoms of length 4), so this is
+// a read of decoded structure, never a byte-blob comparison.  Returns false
+// only for a shape the codec would have rejected.
+static bool mixAtomValue(const MCS251Attributes::Record &R, unsigned Index,
+                         uint32_t &Out) {
+  StringRef V(reinterpret_cast<const char *>(R.Value.data()), R.Value.size());
+  size_t Pos = 0;
+  for (unsigned I = 0; I <= Index; ++I) {
+    if (Pos >= V.size() || uint8_t(V[Pos]) != MCS251Attributes::VT_U32)
+      return false;
+    ++Pos;
+    uint64_t Len = 0;
+    unsigned Shift = 0;
+    while (true) {
+      if (Pos >= V.size() || Shift > 28)
+        return false;
+      uint8_t B = uint8_t(V[Pos++]);
+      Len |= uint64_t(B & 0x7f) << Shift;
+      if (!(B & 0x80))
+        break;
+      Shift += 7;
+    }
+    if (Len != 4 || V.size() - Pos < 4)
+      return false;
+    const uint8_t *P = reinterpret_cast<const uint8_t *>(V.data() + Pos);
+    Out = (uint32_t(P[0]) << 24) | (uint32_t(P[1]) << 16) |
+          (uint32_t(P[2]) << 8) | uint32_t(P[3]);
+    Pos += 4;
+  }
+  return true;
+}
+
+/// The memory model an object declares, as the (as0_pointer_bits,
+/// default_placement) pair of D.5 / N.5.  Tag 11 and Tag 13 carry it
+/// directly; Tag 24 repeats it as two MIX atoms and the codec has already
+/// rejected any disagreement between the three, so this is a read of
+/// validated structure.  A successful decode guarantees every input, so the
+/// boolean only protects the function's own contract.
+static bool v2ProfileOf(const MCS251Attributes::Decoded &D, uint32_t &AS0Bits,
+                        uint32_t &Placement) {
+  const MCS251Attributes::Record *Bits =
+      D.find(MCS251Attributes::Tag_AS0PointerBits);
+  const MCS251Attributes::Record *Place =
+      D.find(MCS251Attributes::Tag_DefaultPlacement);
+  const MCS251Attributes::Record *MM =
+      D.find(MCS251Attributes::Tag_MemoryModelProfile);
+  if (!Bits || !Place || !MM)
+    return false;
+  uint32_t Atom0 = 0, Atom1 = 0;
+  if (!mixAtomValue(*MM, 0, Atom0) || !mixAtomValue(*MM, 1, Atom1))
+    return false;
+  AS0Bits = Bits->Scalar;
+  Placement = Place->Scalar;
+  return Atom0 == AS0Bits && Atom1 == Placement;
+}
+
+/// The set of memory models this linker accepts in a v2 object.  This is the
+/// emission set A4 registered (32-bit AS0 Small/XSmall) and nothing else:
+/// 16-bit AS0 is refused by the retained Tiny/XTiny object gate on the
+/// compiler side, and Large (ExternalData placement) has no slot-placement
+/// implementation in this slice, so accepting it would claim support for a
+/// profile the toolchain cannot produce or place.  A future registration
+/// must be added here deliberately, not inferred.
+static bool isSupportedV2Profile(uint32_t AS0Bits, uint32_t Placement) {
+  return AS0Bits == MCS251Attributes::AS0PointerBits32 &&
+         (Placement == MCS251Attributes::Placement_InternalMovable ||
+          Placement == MCS251Attributes::Placement_InternalExtended);
+}
+
+/// Validate one v2 object's identity carrier.  The strict codec (W1) has
+/// already enforced the envelope, the record encoding, the Critical/tag
+/// schema, the ruled scalar values, the A4-registered values and the
+/// Tag 11/13/24 agreement; this adds the object-level rules the codec cannot
+/// see from inside a section: carrier cardinality, exclusivity against the
+/// v1 note, e_flags/tag-4 agreement and profile support.
+static bool validateV2Identity(InputFile &F, const InputSection *Attrs,
+                               raw_ostream &Err) {
+  if (!Attrs)
+    return fail(Err, F.Path + ": MCS251 v2 object requires exactly one " +
+                         MCS251Attributes::SectionName);
+  // Design §3.2/§4.2: a v2 object must not also carry the v1 note, and it
+  // must not be repaired from one.  The two identities are exclusive.
+  for (const auto &S : F.Sections)
+    if (S->Name == ".note.mcs251.abi")
+      return fail(Err, F.Path + ": MCS251 v2 object must not carry the v1 "
+                           ".note.mcs251.abi note");
+
+  // The strict codec is the single decode path (W1): envelope, vendor/scope,
+  // shortest-form ULEB, duplicate/missing/unknown-Critical tags, per-type
+  // schema and the A4-registered value set.
+  const ArrayRef<uint8_t> D(Attrs->Data);
+  if (llvm::Error E =
+          MCS251Attributes::decode(StringRef(reinterpret_cast<const char *>(
+                                               D.data()),
+                                               D.size()),
+                                   /*IsBigEndian=*/true, F.V2Identity))
+    return fail(Err, F.Path + ": " + toString(std::move(E)));
+
+  // Design §4.2: Tag 4 and the header must agree.  Both are pinned to the
+  // registered protocol version; this check makes the agreement explicit and
+  // local instead of relying on two separate equality checks.
+  const MCS251Attributes::Record *Proto =
+      F.V2Identity.find(MCS251Attributes::Tag_ObjectProtocolVersion);
+  if (!Proto || (F.EFlags & EF_ABI_MASK) != Proto->Scalar)
+    return fail(Err, F.Path +
+                         ": MCS251 v2 object_protocol_version disagrees with "
+                         "the ELF header e_flags protocol byte");
+
+  // Design §4.2 ("模型内其他约束逐字段核对") and §2.2: the memory model the
+  // object declares must be one this linker can place.  The codec guarantees
+  // the pair is one of the five frozen profiles, so this narrows the domain
+  // rather than re-deriving it.
+  uint32_t AS0Bits = 0, Placement = 0;
+  if (!v2ProfileOf(F.V2Identity, AS0Bits, Placement))
+    return fail(Err, F.Path + ": MCS251 v2 object has an inconsistent memory "
+                         "model profile");
+  if (!isSupportedV2Profile(AS0Bits, Placement))
+    return fail(Err, F.Path + ": MCS251 v2 object declares memory model "
+                         "profile (as0_pointer_bits=" +
+                         Twine(AS0Bits) + ", default_placement=" +
+                         Twine(Placement) +
+                         "), which this linker does not support; the "
+                         "registered v2 object profiles are the 32-bit "
+                         "Small (1) and XSmall (8) models");
+
+  F.IsV2 = true;
+  return true;
+}
+
+/// One cross-object comparison row: a tag whose value must be identical in
+/// every v2 object of a link.  These are the ABI/protocol compatibility
+/// fields of design §4.2.  Tag 13 (default_placement) and the placement
+/// atom of Tag 24 are deliberately absent: per D.5 those may differ between
+/// objects as long as every object's own placement constraint is honoured.
+struct V2ComparedTag {
+  uint32_t Tag;
+  const char *Name;
+};
+
+static const V2ComparedTag V2ComparedTags[] = {
+    {MCS251Attributes::Tag_ObjectProtocolVersion, "object_protocol_version"},
+    {MCS251Attributes::Tag_CallABIMajor, "call_abi_major"},
+    {MCS251Attributes::Tag_CallABIMinor, "call_abi_minor"},
+    {MCS251Attributes::Tag_RegisterParameterVariant,
+     "register_parameter_variant"},
+    {MCS251Attributes::Tag_GeneralRegisterSet, "general_register_set"},
+    {MCS251Attributes::Tag_IntBits, "int_bits"},
+    {MCS251Attributes::Tag_LongBits, "long_bits"},
+    {MCS251Attributes::Tag_AS0PointerBits, "as0_pointer_bits"},
+    {MCS251Attributes::Tag_ASLayoutVersion, "as_layout_version"},
+    {MCS251Attributes::Tag_InitProtocolVersion, "init_protocol_version"},
+    {MCS251Attributes::Tag_PlacementProtocolVersion,
+     "placement_protocol_version"},
+    {MCS251Attributes::Tag_StackContractVersion, "stack_contract_version"},
+    {MCS251Attributes::Tag_FunctionContractVersion,
+     "function_contract_version"},
+    {MCS251Attributes::Tag_RequiredCapabilitiesLo,
+     "required_capabilities_lo"},
+    {MCS251Attributes::Tag_RequiredCapabilitiesHi,
+     "required_capabilities_hi"},
+    {MCS251Attributes::Tag_ABIOptions, "abi_options"},
+    {MCS251Attributes::Tag_Reserved0, "reserved0"},
+    {MCS251Attributes::Tag_Reserved1, "reserved1"},
+    {MCS251Attributes::Tag_Reserved2, "reserved2"},
+    {MCS251Attributes::Tag_CodeModelProfile, "code_model_profile"},
+    {MCS251Attributes::Tag_CodePointerBits, "code_pointer_bits"},
+    {MCS251Attributes::Tag_ObjectProtocolMinor, "object_protocol_minor"},
+};
+
 static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
   F.Path = Path.str();
   auto MB = MemoryBuffer::getFile(Path);
@@ -636,9 +861,16 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
   if (!ELFObj)
     return fail(Err, Path + ": expected ELF32 big-endian object");
   const auto &H = ELFObj->getELFFile().getHeader();
-  if (H.e_type != ELF::ET_REL || H.e_machine != EM_MCS251 ||
-      H.e_version != ELF::EV_CURRENT || H.e_flags != ABI_FLAGS)
+  // W4 (design §4): the identity branch is selected by e_flags alone.  0x1 is
+  // the v1 note word, 0x102 the v2 attributes word; every other word is
+  // rejected here, so no later stage can disagree about which identity form
+  // an object claims.
+  if (H.e_flags != ABI_FLAGS && H.e_flags != ABI_FLAGS_V2)
     return fail(Err, Path + ": invalid MCS251 ELF header");
+  if (H.e_type != ELF::ET_REL || H.e_machine != EM_MCS251 ||
+      H.e_version != ELF::EV_CURRENT)
+    return fail(Err, Path + ": invalid MCS251 ELF header");
+  F.EFlags = H.e_flags;
   // SPEC §3.1: strict identity and ET_REL structural checks.
   if (H.e_ident[ELF::EI_OSABI] != ELF::ELFOSABI_NONE ||
       H.e_ident[ELF::EI_ABIVERSION] != 0 ||
@@ -654,6 +886,7 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
   if (!RawSections)
     return fail(Err, Path + ": " + toString(RawSections.takeError()));
   F.Sections.resize(RawSections->size());
+  InputSection *V2AttrsSection = nullptr;
   for (uint32_t I = 0; I != RawSections->size(); ++I) {
     const ELF32BE::Shdr &H = (*RawSections)[I];
     auto S = std::make_unique<InputSection>();
@@ -702,6 +935,36 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
         return fail(Err, Path + ": MCS251 bit: at most one .mcs251.bit per object");
       F.BitSection = S.get();
     }
+    if (S->Name == MCS251Attributes::SectionName) {
+      // A4W4-R1 fix: the claim path validates the *complete* frozen carrier
+      // shape itself, unconditionally.  validateMetaSection() gives the
+      // generic index-0 SHT_NULL header an early pass (the ELF null section
+      // has no shape of its own to freeze), so a mutated object whose
+      // section 0 both is SHT_NULL and carries the carrier name would reach
+      // the codec without ever meeting the type/flags checks there.  Requiring
+      // the registered type and zero flags on this path keeps the carrier
+      // rules decoupled from that generic early return.
+      if (S->Type != MCS251Attributes::SectionType || S->Flags != 0)
+        return fail(Err, Path + ": malformed " + MCS251Attributes::SectionName);
+      // W4 (design §3.1/§4.2): the carrier's remaining frozen shdr fields.
+      // sh_entsize/link/info are 0; a second carrier is always malformed --
+      // v2 requires exactly one and v1 must carry none.
+      //
+      // sh_addralign is checked here on the *raw* header word rather than
+      // through S->Align: that field is the section's usable alignment
+      // (normalized to at least 1), so a raw 0 would be silently accepted by
+      // an `Align == 1` test even though the frozen layout says align 1.  A
+      // conforming producer can only write 1, so require exactly that.
+      if (H.sh_addralign != 1)
+        return fail(Err, Path + ": " + MCS251Attributes::SectionName +
+                             " must have sh_addralign 1");
+      if (H.sh_entsize != 0 || H.sh_link != 0 || H.sh_info != 0)
+        return fail(Err, Path + ": malformed " + MCS251Attributes::SectionName);
+      if (V2AttrsSection)
+        return fail(Err, Path + ": at most one " +
+                             MCS251Attributes::SectionName + " per object");
+      V2AttrsSection = S.get();
+    }
     if (S->IsAlloc && S->Align != 1)
       return fail(Err, Path + ": ALLOC section alignment must be 1: " + S->Name);
     if (!S->IsNobits) {
@@ -714,8 +977,21 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
     }
     F.Sections[I] = std::move(S);
   }
-  if (!validateNote(F, Err))
-    return false;
+  // W4 (design §4): the two identity forms are exclusive and neither is
+  // repaired from the other.  e_flags picks the branch and the branch is
+  // total: a v2 object must carry exactly one decoded carrier, a v1 object
+  // must carry the frozen 52-byte note and no carrier at all.  There is no
+  // "carrier present, treat as v1" and no "note present, treat as v2" path.
+  if (F.EFlags == ABI_FLAGS_V2) {
+    if (!validateV2Identity(F, V2AttrsSection, Err))
+      return false;
+  } else {
+    if (V2AttrsSection)
+      return fail(Err, Path + ": v1 object must not carry " +
+                           MCS251Attributes::SectionName);
+    if (!validateNote(F, Err))
+      return false;
+  }
 
   uint32_t SymtabIndex = 0;
   for (uint32_t I = 0; I != RawSections->size(); ++I)
@@ -1162,6 +1438,7 @@ private:
 
   uint32_t areaStart(StringRef Name, uint32_t Default) const;
   bool hasAreaStart(StringRef Name) const;
+  bool validateIdentitySet();
   bool rejectInputVecs();
   bool resolveSymbols();
   bool buildBitIdentities();
@@ -1323,6 +1600,112 @@ bool Linker::buildBitIdentities() {
                                Twine::utohexstr(Def->Value) + " exceeds 0xff");
       }
     }
+  return true;
+}
+
+// W4 (design §4.2): the cross-object v2 identity rules.
+//
+// The per-object half already ran in loadFile(), so every file here is a
+// well-formed object of one of the two identity forms.  What remains is the
+// property of the set:
+//
+//  1. v1 and v2 objects must never be linked together (D.5 "v1 与 v2 默认拒绝
+//     裸混链").  A bare mix is rejected outright; there is no bridge and no
+//     flag that ignores an identity.
+//  2. Every v2 object must declare the same ABI/protocol fields.  The
+//     comparison is field-by-field on the decoded records -- never a memcmp
+//     of the payload or the descriptor (D.5: "逐字段比较", DESIGN.md N.6) --
+//     so a future object that legitimately differs in an unrelated byte
+//     cannot be rejected by accident, and a differing value names the field.
+//  3. default_placement (Tag 13) and the placement atom of Tag 24 are
+//     deliberately excluded from that comparison: D.5 allows Small and
+//     XSmall objects to be mixed as long as each object's own placement
+//     constraint is honoured, and the linker places each input by its own
+//     section flags.  as0_pointer_bits (Tag 11) IS compared, because mixing
+//     two default pointer widths is the D.5 "默认指针 16/32 混链" case that
+//     must be rejected.
+//  4. Required capabilities are unioned across the link and every bit must be
+//     one this linker implements.  A4 registers the empty set, so any
+//     non-zero capability is a hard error today; the union form is what
+//     matters, because a future capability must be supported by the linker
+//     before an object requiring it may enter a link.
+bool Linker::validateIdentitySet() {
+  const InputFile *V1 = nullptr;
+  const InputFile *V2 = nullptr;
+  for (const auto &F : Files) {
+    if (F->IsV2) {
+      if (!V2)
+        V2 = F.get();
+      continue;
+    }
+    if (!V1)
+      V1 = F.get();
+  }
+  if (V1 && V2)
+    return fail(Err, V2->Path + ": cannot link a v2 identity object (" +
+                         MCS251Attributes::SectionName +
+                         ") with a v1 identity object (" +
+                         V1->Path + ", .note.mcs251.abi)");
+  if (!V2)
+    return true;
+
+  // The reference identity: the first v2 object in command-line order, so the
+  // diagnostic always names a stable pair.
+  const InputFile &Ref = *V2;
+  for (const auto &F : Files) {
+    if (!F->IsV2 || F.get() == V2)
+      continue;
+    for (const V2ComparedTag &T : V2ComparedTags) {
+      const MCS251Attributes::Record *A = Ref.V2Identity.find(T.Tag);
+      const MCS251Attributes::Record *B = F->V2Identity.find(T.Tag);
+      // Compare the *effective* value.  Every required compared tag is
+      // present in both objects (the codec rejects a missing required tag),
+      // so absence can only mean an optional reserved word, whose registered
+      // value is zero whether it is written out or omitted: presence is a
+      // serialization choice, not an ABI statement, and must not be read as
+      // a disagreement.
+      const uint32_t AV = A ? A->Scalar : 0u;
+      const uint32_t BV = B ? B->Scalar : 0u;
+      // U32-valued compared tags carry their value in Scalar; the codec
+      // rejects any other type for these tags, so Scalar is authoritative.
+      if (AV != BV) {
+        std::string Msg;
+        raw_string_ostream OS(Msg);
+        OS << F->Path << ": MCS251 v2 object " << T.Name << " is 0x"
+           << format_hex_no_prefix(BV, 0) << ", but " << Ref.Path
+           << " declares 0x" << format_hex_no_prefix(AV, 0)
+           << "; objects of a v2 link must agree on every ABI/protocol "
+              "field (default_placement may differ between Small and XSmall)";
+        return fail(Err, OS.str());
+      }
+    }
+  }
+
+  // Capability union: every required bit, over every object, must be one this
+  // linker implements.  Tag 18/19 are the only capability words in this
+  // revision; the registered link-time support set is empty.
+  uint32_t Lo = 0, Hi = 0;
+  for (const auto &F : Files)
+    if (F->IsV2) {
+      const MCS251Attributes::Record *L =
+          F->V2Identity.find(MCS251Attributes::Tag_RequiredCapabilitiesLo);
+      const MCS251Attributes::Record *H =
+          F->V2Identity.find(MCS251Attributes::Tag_RequiredCapabilitiesHi);
+      Lo |= L ? L->Scalar : 0;
+      Hi |= H ? H->Scalar : 0;
+    }
+  if ((Lo & ~SupportedCapabilitiesLo) || (Hi & ~SupportedCapabilitiesHi)) {
+    std::string Msg;
+    raw_string_ostream OS(Msg);
+    OS << "MCS251 v2 link requires capabilities 0x"
+       << format_hex_no_prefix(Hi, 8) << format_hex_no_prefix(Lo, 8)
+       << ", but this linker implements 0x"
+       << format_hex_no_prefix(SupportedCapabilitiesHi, 8)
+       << format_hex_no_prefix(SupportedCapabilitiesLo, 8)
+       << "; a required capability must be supported before an object that "
+          "needs it can be linked";
+    return fail(Err, OS.str());
+  }
   return true;
 }
 
@@ -3656,6 +4039,14 @@ bool Linker::run(LinkerResult &Result) {
   InputOS.flush();
   if (Config.PrintInput)
     return true;
+  // W4 (design §4.2): the cross-object identity rules.  Per-object validity
+  // is enforced in loadFile() (so --print-input still exercises it); this
+  // stage is the property of the *set*: v1 and v2 objects never mix, and
+  // every v2 object's ABI/protocol fields must agree.  It runs before any
+  // symbol resolution or placement work, so a link whose identities disagree
+  // fails without ever touching layout, the image or an output file.
+  if (!validateIdentitySet())
+    return false;
   if (!resolveSymbols())
     return false;
   if (!buildBitIdentities())

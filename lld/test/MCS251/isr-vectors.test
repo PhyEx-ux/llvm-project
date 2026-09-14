@@ -658,7 +658,10 @@
 
 # -------------------------------------------------------------------------
 # Matrix: GC/LTO options keep being rejected; no CRT is a hard error; the
-# vector area cannot be moved; v2 objects keep being rejected.
+# vector area cannot be moved; a v2 header word on an object with no
+# `.mcs251.attributes` carrier is rejected (W4: e_flags=0x102 selects the v2
+# identity branch, which requires the carrier; there is no fallback to the
+# v1 note that this object still carries).
 # -------------------------------------------------------------------------
 # RUN: not mcs251-lld --gc-sections %t.crt.o %t.p01.o -o %t.gc.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=GCOPT
@@ -680,7 +683,7 @@
 # RUN: %python -c "p='%t.v2reg.o'; b=bytearray(open(p,'rb').read()); b[36:40]=bytes.fromhex('00000102'); open(p,'wb').write(b)"
 # RUN: not mcs251-lld --print-input %t.v2reg.o 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=V2REG
-# V2REG: invalid MCS251 ELF header
+# V2REG: MCS251 v2 object requires exactly one .mcs251.attributes
 
 # -------------------------------------------------------------------------
 # T07 step 20: explicit initial values may target the allocated CRT

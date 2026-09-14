@@ -1,0 +1,1416 @@
+#
+# W4 (A4 design §4.2/§5.3/§8.3): the lld v2 object-identity branch.
+#
+# e_flags picks the identity form and the branch is total: 0x102 selects the
+# `.mcs251.attributes` carrier (exactly one, decoded, no v1 note), 0x1 keeps
+# the byte-for-byte v1 note path and refuses a carrier, and any other word is
+# rejected at the header.  There is no fallback in either direction.
+#
+# The linker's own rules, on top of the strict codec, are:
+#   * exactly one carrier, never together with the v1 note;
+#   * Tag 4 agrees with the e_flags protocol byte;
+#   * the declared memory model is one this linker can place (the registered
+#     32-bit Small/XSmall profiles; 16-bit and Large stay refused);
+#   * v1 and v2 objects never mix;
+#   * every v2 object agrees on the ABI/protocol fields, compared field by
+#     field on the decoded records, while default_placement and the Tag 24
+#     placement atom may legitimately differ (D.5: Small + XSmall mix);
+#   * required capabilities are unioned and every bit must be implemented.
+#
+# The carriers below are byte-exact production output (llc, 172 bytes) so the
+# fixtures exercise the real wire format rather than a hand-rolled one; the
+# malformed variants are minimal edits of those bytes with a corrected
+# envelope, so each one fails for its intended reason and not for a length
+# mismatch.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj xs.yaml -o xs.o
+# RUN: yaml2obj sm.yaml -o sm.o
+# RUN: yaml2obj tiny.yaml -o tiny.o
+# RUN: yaml2obj large.yaml -o large.o
+# RUN: yaml2obj dup.yaml -o dup.o
+# RUN: yaml2obj unknown-critical.yaml -o unkc.o
+# RUN: yaml2obj unknown-optional.yaml -o unko.o
+# RUN: yaml2obj optmix.yaml -o om.o
+# RUN: yaml2obj missing-tag.yaml -o miss.o
+# RUN: yaml2obj non-shortest.yaml -o nshort.o
+# RUN: yaml2obj abi-options-nonzero.yaml -o abiopt.o
+# RUN: yaml2obj trailing-byte.yaml -o trail.o
+# RUN: yaml2obj truncated.yaml -o trunc.o
+# RUN: yaml2obj both.yaml -o both.o
+# RUN: yaml2obj v2-no-carrier.yaml -o nocarrier.o
+# RUN: yaml2obj v1-note.yaml -o v1note.o
+# RUN: yaml2obj v1-with-carrier.yaml -o v1carrier.o
+# RUN: yaml2obj isrv2.yaml -o isrv2.o
+# RUN: yaml2obj badtype.yaml -o badtype.o
+# RUN: yaml2obj badalign.yaml -o badalign.o
+# RUN: yaml2obj badentsize.yaml -o badentsize.o
+# RUN: yaml2obj alignzero.yaml -o alignzero.o
+# RUN: yaml2obj resv21-opt.yaml -o resv21-opt.o
+# RUN: yaml2obj resv21-crit.yaml -o resv21-crit.o
+# RUN: yaml2obj resv21-nz.yaml -o resv21-nz.o
+# RUN: yaml2obj resv22-opt.yaml -o resv22-opt.o
+# RUN: yaml2obj resv22-crit.yaml -o resv22-crit.o
+# RUN: yaml2obj resv22-nz.yaml -o resv22-nz.o
+# RUN: yaml2obj resv23-opt.yaml -o resv23-opt.o
+# RUN: yaml2obj resv23-crit.yaml -o resv23-crit.o
+# RUN: yaml2obj resv23-nz.yaml -o resv23-nz.o
+# RUN: yaml2obj caplo.yaml -o caplo.o
+# RUN: yaml2obj caphi.yaml -o caphi.o
+# RUN: yaml2obj abiminor.yaml -o abiminor.o
+# RUN: yaml2obj badlink.yaml -o badlink.o
+# RUN: yaml2obj badinfo.yaml -o badinfo.o
+# RUN: yaml2obj badflags.yaml -o badflags.o
+# RUN: yaml2obj oseg-a.yaml -o oseg-a.o
+# RUN: yaml2obj oseg-b.yaml -o oseg-b.o
+# yaml2obj registers only EF_MCS251_ABI_V1, so the v2 fixtures are emitted
+# with the v1 word and rewritten to 0x102 by setflags.py (the same technique
+# the pre-existing input-reader.test uses).  v1note.o and v1carrier.o are
+# deliberately left untouched.
+# RUN: %python setflags.py xs.o sm.o tiny.o large.o dup.o unkc.o unko.o om.o miss.o nshort.o abiopt.o trail.o trunc.o both.o nocarrier.o oseg-a.o oseg-b.o isrv2.o badtype.o badalign.o badentsize.o alignzero.o resv21-opt.o resv21-crit.o resv21-nz.o resv22-opt.o resv22-crit.o resv22-nz.o resv23-opt.o resv23-crit.o resv23-nz.o caplo.o caphi.o abiminor.o badlink.o badinfo.o badflags.o
+#
+# --- a v2 object is accepted and links; --print-input validates it too ---
+# RUN: mcs251-lld xs.o --area-start=CSEG=0xff0200 --map=%t/xs.map -o %t/xs.elf
+# RUN: test -f %t/xs.elf
+# RUN: grep 's_CSEG = 0xff0200' %t/xs.map
+# RUN: mcs251-lld --print-input xs.o 2>&1 | FileCheck %s --check-prefix=INSPECT
+# INSPECT: file xs.o
+# INSPECT: section[2] .mcs251.attributes type=1879048195 flags=0x0 size=172
+#
+# --- Small and XSmall mix: default_placement may differ (D.5), so the two
+# --- objects share one link and the linker still places each by its own
+# --- section flags -------------------------------------------------------
+# RUN: mcs251-lld xs.o sm.o --area-start=CSEG=0xff0200 --map=%t/smx.map -o %t/smx.elf
+# RUN: test -f %t/smx.elf
+# RUN: grep 'xs.o:.text' %t/smx.map
+# RUN: grep 'sm.o:.text' %t/smx.map
+#
+# --- an unknown NON-Critical tag stays skippable (N.6) ------------------
+# RUN: mcs251-lld unko.o --area-start=CSEG=0xff0200 -o %t/unko.elf
+# RUN: test -f %t/unko.elf
+# A4-FINAL-R1: an unknown non-Critical trailing record (here Tag 256 as a
+# MIX whose atom length would wrap) stays skippable: the object links.
+# RUN: mcs251-lld om.o --area-start=CSEG=0xff0200 -o %t/om.elf
+# RUN: test -f %t/om.elf
+#
+# --- the declared memory model must be one this linker can place --------
+# RUN: not mcs251-lld tiny.o --area-start=CSEG=0xff0200 -o %t/tiny.elf 2>&1 | FileCheck %s --check-prefix=TINY
+# RUN: not mcs251-lld large.o --area-start=CSEG=0xff0200 -o %t/large.elf 2>&1 | FileCheck %s --check-prefix=LARGE
+# TINY: as0_pointer_bits=16, default_placement=1
+# TINY-SAME: which this linker does not support
+# LARGE: as0_pointer_bits=32, default_placement=3
+# LARGE-SAME: which this linker does not support
+# RUN: test ! -e %t/tiny.elf
+# RUN: test ! -e %t/large.elf
+#
+# --- the strict codec is the single decode path (W1): every malformed
+# --- carrier is refused, each for its own reason ------------------------
+# RUN: not mcs251-lld dup.o --area-start=CSEG=0xff0200 -o %t/d.elf 2>&1 | FileCheck %s --check-prefix=DUP
+# RUN: test ! -e %t/d.elf
+# RUN: not mcs251-lld unkc.o --area-start=CSEG=0xff0200 -o %t/u.elf 2>&1 | FileCheck %s --check-prefix=UNKC
+# RUN: test ! -e %t/u.elf
+# RUN: not mcs251-lld miss.o --area-start=CSEG=0xff0200 -o %t/m.elf 2>&1 | FileCheck %s --check-prefix=MISS
+# RUN: test ! -e %t/m.elf
+# RUN: not mcs251-lld nshort.o --area-start=CSEG=0xff0200 -o %t/n.elf 2>&1 | FileCheck %s --check-prefix=NSHORT
+# RUN: test ! -e %t/n.elf
+# RUN: not mcs251-lld abiopt.o --area-start=CSEG=0xff0200 -o %t/r.elf 2>&1 | FileCheck %s --check-prefix=ABIOPT
+# RUN: test ! -e %t/r.elf
+# RUN: not mcs251-lld trail.o --area-start=CSEG=0xff0200 -o %t/t.elf 2>&1 | FileCheck %s --check-prefix=TRAIL
+# RUN: test ! -e %t/t.elf
+# RUN: not mcs251-lld trunc.o --area-start=CSEG=0xff0200 -o %t/tr.elf 2>&1 | FileCheck %s --check-prefix=TRUNC
+# RUN: test ! -e %t/tr.elf
+# DUP: duplicate object_protocol_version(4)
+# UNKC: unknown Critical tag 256 cannot be ignored
+# MISS: required object_protocol_minor(27) is missing
+# NSHORT: non-shortest ULEB128 in record length
+# ABIOPT: abi_options must be 0, got 7
+# TRAIL: missing TypeFlags for tag 0
+# TRUNC: truncated ULEB128 in tag
+#
+# --- the carrier's frozen section shape: exact type, align 1, no entsize -
+# RUN: not mcs251-lld badtype.o --area-start=CSEG=0xff0200 -o %t/bt.elf 2>&1 | FileCheck %s --check-prefix=SHAPE
+# RUN: test ! -e %t/bt.elf
+# RUN: not mcs251-lld badalign.o --area-start=CSEG=0xff0200 -o %t/ba.elf 2>&1 | FileCheck %s --check-prefix=SHAPE
+# RUN: test ! -e %t/ba.elf
+# RUN: not mcs251-lld badentsize.o --area-start=CSEG=0xff0200 -o %t/be.elf 2>&1 | FileCheck %s --check-prefix=SHAPE
+# RUN: test ! -e %t/be.elf
+# SHAPE: malformed .mcs251.attributes
+#
+# A raw sh_addralign of 0 must not be laundered into the usable alignment 1:
+# the frozen carrier layout is align 1 exactly, so the raw header word is what
+# gets checked.
+# RUN: not mcs251-lld alignzero.o --area-start=CSEG=0xff0200 -o %t/az.elf 2>&1 | FileCheck %s --check-prefix=ALIGN0
+# RUN: test ! -e %t/az.elf
+# ALIGN0: .mcs251.attributes must have sh_addralign 1
+#
+# --- A4W4-R1 regression: the index-0 SHT_NULL header must not be able to
+# --- carry the carrier *name* past the shape checks.  yaml2obj cannot name
+# --- the null section, so nullcarrier.py edits the header table of xs.o
+# --- directly: the carrier's header moves into slot 0 (type zeroed to
+# --- SHT_NULL), the vacated slot becomes an ordinary string table, and the
+# --- two inputs differ only in the null header's flag word (0 and 1).  The
+# --- name-claim path validates the full carrier shape unconditionally, so
+# --- both are refused with no output -- the generic index-0 early return
+# --- in validateMetaSection() no longer short-circuits the type/flags
+# --- checks for a named section 0. ------------------------------------------
+# RUN: %python nullcarrier.py xs.o carrier-null0-flags0.o 0
+# RUN: %python nullcarrier.py xs.o carrier-null0-flags1.o 1
+# RUN: not mcs251-lld carrier-null0-flags0.o --area-start=CSEG=0xff0200 -o %t/n0a.elf 2>&1 | FileCheck %s --check-prefix=NULL0
+# RUN: not mcs251-lld carrier-null0-flags1.o --area-start=CSEG=0xff0200 -o %t/n0b.elf 2>&1 | FileCheck %s --check-prefix=NULL0
+# RUN: not mcs251-lld --print-input carrier-null0-flags1.o 2>&1 | FileCheck %s --check-prefix=NULL0
+# NULL0: malformed .mcs251.attributes
+# RUN: test ! -e %t/n0a.elf
+# RUN: test ! -e %t/n0b.elf
+#
+# --- the carrier's remaining raw header words: sh_link, sh_info and a
+# --- non-zero sh_flags word (SHF_WRITE here, without SHF_ALLOC, so the
+# --- section stays metadata and hits the carrier shape rules) ------------
+# RUN: not mcs251-lld badlink.o --area-start=CSEG=0xff0200 -o %t/bl.elf 2>&1 | FileCheck %s --check-prefix=SHAPE
+# RUN: test ! -e %t/bl.elf
+# RUN: not mcs251-lld badinfo.o --area-start=CSEG=0xff0200 -o %t/bi.elf 2>&1 | FileCheck %s --check-prefix=SHAPE
+# RUN: test ! -e %t/bi.elf
+# RUN: not mcs251-lld badflags.o --area-start=CSEG=0xff0200 -o %t/bf.elf 2>&1 | FileCheck %s --check-prefix=SHAPE
+# RUN: test ! -e %t/bf.elf
+#
+# --- a real second carrier section (two same-named sections, both
+# --- carrier-shaped), unlike dup.o's duplicated Tag 4 inside one carrier --
+# RUN: %python dupcarrier.py xs.o dupsec.o
+# RUN: not mcs251-lld dupsec.o --area-start=CSEG=0xff0200 -o %t/ds.elf 2>&1 | FileCheck %s --check-prefix=DUPSEC
+# DUPSEC: at most one .mcs251.attributes per object
+# RUN: test ! -e %t/ds.elf
+#
+# --- Tag 21-23 (reserved0-2): omitting the tag and writing an explicit
+# --- zero are the same statement, so both objects may share one link;
+# --- marking a reserved tag Critical, or giving it any non-zero value, is
+# --- refused ---------------------------------------------------------------
+# RUN: mcs251-lld xs.o resv21-opt.o --area-start=CSEG=0xff0200 -o %t/r21.elf
+# RUN: mcs251-lld xs.o resv22-opt.o --area-start=CSEG=0xff0200 -o %t/r22.elf
+# RUN: mcs251-lld xs.o resv23-opt.o --area-start=CSEG=0xff0200 -o %t/r23.elf
+# RUN: test -f %t/r21.elf
+# RUN: test -f %t/r22.elf
+# RUN: test -f %t/r23.elf
+# RUN: not mcs251-lld resv21-crit.o --area-start=CSEG=0xff0200 -o %t/c21.elf 2>&1 | FileCheck %s --check-prefix=R21C
+# RUN: test ! -e %t/c21.elf
+# RUN: not mcs251-lld resv22-crit.o --area-start=CSEG=0xff0200 -o %t/c22.elf 2>&1 | FileCheck %s --check-prefix=R22C
+# RUN: test ! -e %t/c22.elf
+# RUN: not mcs251-lld resv23-crit.o --area-start=CSEG=0xff0200 -o %t/c23.elf 2>&1 | FileCheck %s --check-prefix=R23C
+# RUN: test ! -e %t/c23.elf
+# R21C: reserved reserved0(21) must not be Critical
+# R22C: reserved reserved1(22) must not be Critical
+# R23C: reserved reserved2(23) must not be Critical
+# RUN: not mcs251-lld resv21-nz.o --area-start=CSEG=0xff0200 -o %t/z21.elf 2>&1 | FileCheck %s --check-prefix=R21N
+# RUN: test ! -e %t/z21.elf
+# RUN: not mcs251-lld resv22-nz.o --area-start=CSEG=0xff0200 -o %t/z22.elf 2>&1 | FileCheck %s --check-prefix=R22N
+# RUN: test ! -e %t/z22.elf
+# RUN: not mcs251-lld resv23-nz.o --area-start=CSEG=0xff0200 -o %t/z23.elf 2>&1 | FileCheck %s --check-prefix=R23N
+# RUN: test ! -e %t/z23.elf
+# R21N: reserved reserved0(21) must be zero, got 1
+# R22N: reserved reserved1(22) must be zero, got 1
+# R23N: reserved reserved2(23) must be zero, got 1
+#
+# --- Tag 18/19 (the capability words) and the registered scalar set: A4
+# --- registered every capability bit and call_abi_minor value as exactly
+# --- one approved value, so any other word is an unregistered requirement
+# --- this linker cannot accept --------------------------------------------
+# RUN: not mcs251-lld caplo.o --area-start=CSEG=0xff0200 -o %t/cl.elf 2>&1 | FileCheck %s --check-prefix=CAPLO
+# RUN: test ! -e %t/cl.elf
+# RUN: not mcs251-lld caphi.o --area-start=CSEG=0xff0200 -o %t/ch.elf 2>&1 | FileCheck %s --check-prefix=CAPHI
+# RUN: test ! -e %t/ch.elf
+# CAPLO: required_capabilities_lo must be 0, got 1
+# CAPHI: required_capabilities_hi must be 0, got 1
+# RUN: not mcs251-lld abiminor.o --area-start=CSEG=0xff0200 -o %t/am.elf 2>&1 | FileCheck %s --check-prefix=ABIMINOR
+# RUN: test ! -e %t/am.elf
+# ABIMINOR: call_abi_minor must be 1, got 2
+#
+# --- identity exclusivity: neither form is repaired from the other ------
+# RUN: not mcs251-lld both.o --area-start=CSEG=0xff0200 -o %t/b.elf 2>&1 | FileCheck %s --check-prefix=BOTH
+# RUN: test ! -e %t/b.elf
+# RUN: not mcs251-lld nocarrier.o --area-start=CSEG=0xff0200 -o %t/nc.elf 2>&1 | FileCheck %s --check-prefix=NOCARRIER
+# RUN: test ! -e %t/nc.elf
+# RUN: not mcs251-lld v1carrier.o --area-start=CSEG=0xff0200 -o %t/v1c.elf 2>&1 | FileCheck %s --check-prefix=V1CARRIER
+# RUN: test ! -e %t/v1c.elf
+# BOTH: MCS251 v2 object must not carry the v1 .note.mcs251.abi note
+# NOCARRIER: MCS251 v2 object requires exactly one .mcs251.attributes
+# V1CARRIER: v1 object must not carry .mcs251.attributes
+#
+# --- v1 and v2 objects never mix, in either argument order --------------
+# RUN: not mcs251-lld v1note.o xs.o --area-start=CSEG=0xff0200 -o %t/m1.elf 2>&1 | FileCheck %s --check-prefix=MIX
+# RUN: not mcs251-lld xs.o v1note.o --area-start=CSEG=0xff0200 -o %t/m2.elf 2>&1 | FileCheck %s --check-prefix=MIX
+# MIX: cannot link a v2 identity object (.mcs251.attributes) with a v1 identity object
+# RUN: test ! -e %t/m1.elf
+# RUN: test ! -e %t/m2.elf
+#
+# --- a v2 object may also carry ISR metadata: identity and IRQ mode are
+# --- orthogonal, so the link reaches the IRQ stage (and fails there only
+# --- because this minimal input set has no frozen CRT) ------------------
+# RUN: not mcs251-lld isrv2.o --area-start=CSEG=0xff0200 -o %t/isr.elf 2>&1 | FileCheck %s --check-prefix=ISRV2
+# RUN: test ! -e %t/isr.elf
+# ISRV2: IRQ mode requires exactly one IRQ_DEFAULT
+# RUN: mcs251-lld --print-input isrv2.o 2>&1 | FileCheck %s --check-prefix=ISRV2IN
+# ISRV2IN: .mcs251.isr type=1 flags=0x0 size=48
+#
+# --- the v1 note path is byte-for-byte untouched: it still links ---------
+# RUN: mcs251-lld v1note.o --area-start=CSEG=0xff0200 --map=%t/v1.map -o %t/v1.elf
+# RUN: test -f %t/v1.elf
+# RUN: grep 's_CSEG = 0xff0200' %t/v1.map
+#
+# --- OSEG/DSEG placement is unchanged (design §4 W4 judgement): two leaf
+# --- pointer slots share one OSEG overlay address, reported once ---------
+# RUN: mcs251-lld oseg-a.o oseg-b.o --area-start=CSEG=0xff0200 --map=%t/oseg.map -o %t/oseg.elf
+# RUN: test -f %t/oseg.elf
+# RUN: grep 's_OSEG = 0x0008' %t/oseg.map
+# RUN: grep 'oseg-a.o:.mcs251.OSEG.0 0x0008 +0x4' %t/oseg.map
+# RUN: grep 'oseg-b.o:.mcs251.OSEG.0 0x0008 +0x4' %t/oseg.map
+
+
+#--- setflags.py
+#!/usr/bin/env python3
+"""Patch the ELF header e_flags word of each object to the v2 identity word.
+
+yaml2obj only accepts enum bit names for FileHeader.Flags, and EM_MCS251
+registers just EF_MCS251_ABI_V1.  The fixtures are therefore emitted with the
+v1 word and rewritten here, exactly as the pre-existing input-reader.test
+does; every object named on the command line becomes a v2 object, all others
+stay v1.
+"""
+import pathlib, sys
+
+EF_V2 = bytes.fromhex('00000102')
+# ELF32 e_flags sits at offset 36 (0x24) in the big-endian header.
+OFF = 36
+
+for name in sys.argv[1:]:
+    p = pathlib.Path(name)
+    b = bytearray(p.read_bytes())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = EF_V2
+    p.write_bytes(bytes(b))
+    print(f"{name}: e_flags -> 0x102")
+
+#--- xs.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g_xs
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- sm.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000010E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000001198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g_sm
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- tiny.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000100C8104000000020D8104000000010E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000010010400000001198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- large.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000030E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000003198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- dup.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B34D43533235310001000000A8048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000000481040000000002
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- unknown-critical.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B34D43533235310001000000A8048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000008002820400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- unknown-optional.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B34D43533235310001000000A8048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000008002020401020304
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- missing-tag.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000A44D4353323531000100000099048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A810400000020
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- non-shortest.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581840000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- abi-options-nonzero.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000718830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- trailing-byte.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AC4D43533235310001000000A1048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B81040000000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- truncated.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000A54D435332353100010000009A048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A81040000002080
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- alignzero.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 0
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g_xs
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+#--- badtype.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: SHT_PROGBITS
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g_xs
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+#--- badalign.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 4
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g_xs
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+#--- badentsize.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    EntSize: 4
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g_xs
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+#--- both.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Content: '0000000700000020000000014D43533235310000000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- v2-no-carrier.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Content: '0000000700000020000000014D43533235310000000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- v1-note.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Content: '0000000700000020000000014D43533235310000000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- v1-with-carrier.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- isrv2.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D0CA0BCA1BCA2BCA3BCA4BCA5BCA6BCA7BCAEBDAEBDA7BDA6BDA5BDA4BDA3BDA2BDA1BDA0BD0D032AA'
+  - Name: .mcs251.REG_BANK_0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .mcs251.isr
+    AddressAlign: 4
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq
+        Addend: 0
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _irq
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+    Size: 41
+    Type: STT_FUNC
+  - Name: _slot_PARM_2
+    Binding: STB_GLOBAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 4
+    Type: STT_OBJECT
+  - Name: _slot
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x29
+    Size: 1
+    Type: STT_FUNC
+
+#--- oseg-a.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '90'
+  - Name: .mcs251.REG_BANK_0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.OSEG.0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _a
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+  - Name: _a_PARM_2
+    Binding: STB_GLOBAL
+    Section: .mcs251.OSEG.0
+    Value: 0
+    Size: 4
+    Type: STT_OBJECT
+
+
+#--- oseg-b.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '90'
+  - Name: .mcs251.REG_BANK_0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.OSEG.0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _b
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+  - Name: _b_PARM_2
+    Binding: STB_GLOBAL
+    Section: .mcs251.OSEG.0
+    Value: 0
+    Size: 4
+    Type: STT_OBJECT
+
+
+
+#--- nullcarrier.py
+#!/usr/bin/env python3
+"""Build the A4W4-R1 regression inputs from a yaml2obj v2 object.
+
+The ELF index-0 section header cannot be named by yaml2obj, so this script
+edits the section header table directly: the carrier's header (located by its
+registered type 0x70000003) moves into slot 0 with sh_type zeroed to SHT_NULL
+and sh_flags set from the command line; the vacated slot receives a copy of
+the first SHT_STRTAB header, so the only section carrying the carrier *name*
+is the null section.  Usage: nullcarrier.py <in.o> <out.o> <flags>."""
+import pathlib
+import struct
+import sys
+
+src, dst, flags = sys.argv[1], sys.argv[2], int(sys.argv[3])
+b = bytearray(pathlib.Path(src).read_bytes())
+shoff = int.from_bytes(b[32:36], 'big')
+shnum = int.from_bytes(b[48:50], 'big')
+headers = [struct.unpack_from('>10I', b, shoff + 40 * i) for i in range(shnum)]
+carrier = next(i for i, h in enumerate(headers) if h[1] == 0x70000003)
+strtab = next(i for i, h in enumerate(headers) if h[1] == 3)  # SHT_STRTAB
+# Slot 0 becomes the carrier header: name offset, offset and size survive,
+# but the type is SHT_NULL and the flags word is the variant under test.
+b[shoff:shoff + 40] = b[shoff + 40 * carrier:shoff + 40 * (carrier + 1)]
+b[shoff + 4:shoff + 8] = bytes(4)
+b[shoff + 8:shoff + 12] = flags.to_bytes(4, 'big')
+# The vacated slot becomes an ordinary duplicate string-table header.
+b[shoff + 40 * carrier:shoff + 40 * (carrier + 1)] = \
+    b[shoff + 40 * strtab:shoff + 40 * (strtab + 1)]
+pathlib.Path(dst).write_bytes(bytes(b))
+
+
+#--- resv21-opt.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F81040000000210810400000002118104000000021281040000000013810400000000148104000000001501040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- resv21-crit.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F81040000000210810400000002118104000000021281040000000013810400000000148104000000001581040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- resv21-nz.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F81040000000210810400000002118104000000021281040000000013810400000000148104000000001501040000000118830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- resv22-opt.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F81040000000210810400000002118104000000021281040000000013810400000000148104000000001601040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- resv22-crit.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F81040000000210810400000002118104000000021281040000000013810400000000148104000000001681040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- resv22-nz.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F81040000000210810400000002118104000000021281040000000013810400000000148104000000001601040000000118830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- resv23-opt.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F81040000000210810400000002118104000000021281040000000013810400000000148104000000001701040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- resv23-crit.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F81040000000210810400000002118104000000021281040000000013810400000000148104000000001781040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- resv23-nz.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F81040000000210810400000002118104000000021281040000000013810400000000148104000000001701040000000118830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- caplo.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000001138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- caphi.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000011481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- abiminor.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000002078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- badlink.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Link: .shstrtab
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- badinfo.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Info: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- badflags.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Flags: [ SHF_WRITE ]
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- dupcarrier.py
+#!/usr/bin/env python3
+"""Build the duplicate-carrier regression input from a yaml2obj v2 object.
+
+yaml2obj refuses two sections with the same name, so the second carrier is
+created by copying the carrier's whole section header over the .text header
+slot (the mutation the W4 review reproduced with): the object then carries
+two same-named, carrier-shaped sections and must be refused by the carrier
+cardinality rule, not by a shape accident.  Usage: dupcarrier.py <in> <out>."""
+import pathlib
+import struct
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+b = bytearray(pathlib.Path(src).read_bytes())
+shoff = int.from_bytes(b[32:36], 'big')
+shnum = int.from_bytes(b[48:50], 'big')
+headers = [struct.unpack_from('>10I', b, shoff + 40 * i) for i in range(shnum)]
+carrier = next(i for i, h in enumerate(headers) if h[1] == 0x70000003)
+text = next(i for i, h in enumerate(headers) if h[1] == 1)  # SHT_PROGBITS
+b[shoff + 40 * text:shoff + 40 * (text + 1)] = \
+    b[shoff + 40 * carrier:shoff + 40 * (carrier + 1)]
+pathlib.Path(dst).write_bytes(bytes(b))
+
+#--- optmix.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BA4D43533235310001000000AF048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000008002030B01F5FFFFFFFFFFFFFFFF01
+Symbols:
+  - Name: _g_om
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0

@@ -10,6 +10,14 @@
 # RUN: %python -c "p='v2.o'; b=bytearray(open(p,'rb').read()); b[36:40]=bytes.fromhex('00000102'); open(p,'wb').write(b)"
 # RUN: mcs251-lld --print-input valid.o 2>&1 | FileCheck %s --check-prefix=INPUT
 # RUN: not mcs251-lld --print-input bad-rel.o 2>&1 | FileCheck %s --check-prefix=REL
+#
+# W4 (A4 design §4): 0x102 no longer means "unknown word".  It selects the v2
+# identity branch, so this file's v2.o -- a valid v1 object with only the
+# header word rewritten and no `.mcs251.attributes` carrier -- is refused for
+# the missing carrier.  The link of valid.o with it is refused for that same
+# per-object reason: the v2 object never becomes a well-formed member of the
+# input set, so the mix rule has nothing to compare.  (A well-formed v1/v2
+# mix is covered by v2-object-identity.test.)
 # RUN: not mcs251-lld --print-input v2.o 2>&1 | FileCheck %s --check-prefix=ABI-V2
 # RUN: not mcs251-lld valid.o v2.o -o mixed.elf 2>&1 | FileCheck %s --check-prefix=ABI-V2
 # RUN: test ! -e mixed.elf
@@ -21,7 +29,7 @@
 # INPUT: symbol[1] _target section=1 value=0x3 size=0 bind=1 type=0
 #
 # REL: mcs251 linker: error: SHT_REL is unsupported; MCS251 requires SHT_RELA
-# ABI-V2: mcs251 linker: error: v2.o: invalid MCS251 ELF header
+# ABI-V2: mcs251 linker: error: v2.o: MCS251 v2 object requires exactly one .mcs251.attributes
 
 #--- valid.yaml
 --- !ELF
