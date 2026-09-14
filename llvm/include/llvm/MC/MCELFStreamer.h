@@ -124,6 +124,24 @@ public:
                                    SubSectionVec);
   }
 
+  /// Emit an ARM-attributes style envelope around a caller-supplied,
+  /// already-serialized self-describing attribute body.
+  ///
+  /// The caller passes the vendor name and the complete scope payload
+  /// (records of [Tag][TypeFlags][Length][Value]); this routine emits only
+  /// the common envelope: the 0x41 format version, the vendor subsection
+  /// size, the vendor name with its NUL terminator, the File scope tag, the
+  /// scope size, and then the payload verbatim.  The payload may contain
+  /// arbitrary bytes including NUL (it travels as a StringRef, never as a C
+  /// string), and nothing here interprets or re-encodes the records: the
+  /// AttributeItem encoding above (ULEB tag + value, no type or length
+  /// fields) is NOT applied to it.  The two u32 length fields follow the
+  /// target byte order, exactly as in the AttributeItem paths.
+  void emitSelfDescribingAttributesSection(StringRef Vendor,
+                                           const Twine &Section, unsigned Type,
+                                           MCSection *&AttributeSection,
+                                           StringRef Payload);
+
 private:
   AttributeItem *getAttributeItem(unsigned Attribute);
   size_t calculateContentSize(SmallVector<AttributeItem, 64> &AttrsVec) const;

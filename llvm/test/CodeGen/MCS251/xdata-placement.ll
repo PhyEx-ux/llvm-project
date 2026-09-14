@@ -106,7 +106,10 @@
 
 ; HUGE: LLVM ERROR: MCS251: __xdata global 'big': object size 65536 does not fit the 16-bit XDATA record limit (65535 bytes; XSEG objects never straddle a 64K window)
 ; ALIGN: LLVM ERROR: MCS251: __xdata global 'a': storage must be byte-aligned
-; ALG: LLVM ERROR: MCS251: module uses an ABI capability that cannot be represented by the v1 relocatable-object identity; v2 object output is not implemented
+; W3b: the default contract is v2, so initializer algebra (GEP over null,
+; inttoptr, addrspacecast) is rejected by the registered-capability gate of
+; the v2 identity (still fail-closed for the same modules as before).
+; ALG: LLVM ERROR: MCS251: module uses an ABI capability outside the registered A4 v2 object identity
 ; TEXT: LLVM ERROR: MCS251: __xdata global 'zero': storage requires ELF object output
 
 ;--- defs.ll

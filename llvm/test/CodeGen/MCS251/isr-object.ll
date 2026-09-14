@@ -86,10 +86,18 @@
 ; RUN: llvm-objcopy --dump-section=.text=%t/gp.bin %t/gp.o
 ; RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == 'c0d0ca0bca1bca2bca3bca4bca5bca6bca7bcaebdaebda7bda6bda5bda4bda3bda2bda1bda0bd0d032', b.hex()" %t/gp.bin
 
-; CHECK: EF_MCS251_ABI_V1
+; W3b (PM ruling 2026-09-13 #2): the object RUN uses the v2 contract, so the
+; ISR module publishes the v2 identity (0x102 + .mcs251.attributes, no v1
+; note) instead of the W3 downgrade to v1; the .mcs251.isr records and
+; relocations are untouched.
+; CHECK: Flags [ (0x102)
+; CHECK-NOT: .note.mcs251.abi
 ; CHECK: Name: .mcs251.isr
 ; CHECK: Type: SHT_PROGBITS
 ; CHECK: AddressAlignment: 4
+; The v2 identity carrier closes the section table (emitEndOfAsmFile).
+; CHECK: Name: .mcs251.attributes
+; CHECK: Type: Unknown (0x70000003)
 ; CHECK: R_MCS251_ISR_REF _irq 0x0
 ; CHECK: R_MCS251_ISR_REF _irq 0x0
 ; REL: MCS251 ISR requires ELF object output
@@ -99,7 +107,7 @@
 ; SYM: Name: _irq
 ; SYM: Type: Function (0x2)
 
-; ESCAPE: cannot be represented by the v1 relocatable-object identity
+; ESCAPE: outside the registered A4 v2 object identity
 ; V1USED: defined global data requires
 ; NOTUSED: non-registration use
 ; ISRERET: must return with RETI

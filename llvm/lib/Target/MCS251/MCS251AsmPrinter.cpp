@@ -51,6 +51,9 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/MCS251Attributes.h"
+#include "llvm/BinaryFormat/MCS251AttributesReader.h"
+#include "llvm/BinaryFormat/MCS251AttributesWriter.h"
 #include "llvm/BinaryFormat/MCS251Bit.h"
 #include "llvm/BinaryFormat/MCS251ISR.h"
 #include "llvm/CodeGen/AsmPrinter.h"
@@ -66,6 +69,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCELFObjectWriter.h"
+#include "llvm/MC/MCELFStreamer.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -136,6 +141,16 @@ class MCS251AsmPrinter final : public AsmPrinter {
   // exists only for ISR modules; modules without ISR definitions keep the
   // original behavior for llvm.used unchanged.
   bool ModuleHasISRDefinitions = false;
+  // A4/W2+W3, re-ruled by W3b (PM ruling 2026-09-13 #2): set by
+  // classifyModule whenever ELF object output runs under a specified v2
+  // layout contract (ASLayoutVersion==2, the materialized default included)
+  // and the module passed the capability gate.  The object identity is the
+  // CONTRACT GENERATION, never the module content; the historical downgrade
+  // of a "v1-representable" module to the v1 identity is deleted.  It arms
+  // the v2 identity publication: e_flags=EFlagsV2 (installed on the ELF
+  // writer before initSections, so the v1 note is never emitted) and the
+  // `.mcs251.attributes` section in emitEndOfAsmFile.
+  bool ModuleV2Identity = false;
 
   const MCS251TargetMachine &getMCS251TM() const {
     return static_cast<const MCS251TargetMachine &>(TM);
@@ -160,8 +175,29 @@ class MCS251AsmPrinter final : public AsmPrinter {
     return true;
   }
 
+  // A4/W3b (design §3.3, PM ruling 2026-09-13 #2): the D.5 static-slot
+  // address spaces.  Under a v2 contract the ELF identity is the contract's
+  // generation regardless of content; a trailing pointer parameter in one of
+  // these spaces is a registered capability, while any other pointer address
+  // space in that position stays an unregistered capability (fail-closed).
+  static bool isD5StaticSlotAddressSpace(unsigned AS) {
+    switch (AS) {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 8:
+    case 9:
+      return true;
+    default:
+      return false;
+    }
+  }
+
   static bool hasV1PointerTypes(Type *Ty,
-                                SmallPtrSetImpl<Type *> &Seen) {
+                                SmallPtrSetImpl<Type *> &Seen,
+                                bool AllowV2SlotAS = false) {
     // Check a pointer before consulting Seen.  An unsupported pointer type is
     // rejected on every encounter, rather than becoming acceptable merely
     // because a previous walk inserted it before returning false.
@@ -171,12 +207,19 @@ class MCS251AsmPrinter final : public AsmPrinter {
     // AS3/AS4 pointer capability remains v2-only.  AS3/AS4 pointer
     // CONSTANTS that are the exact emittable initializer leaf are admitted
     // separately by hasV1PlacementInitializer().
+    //
+    // A4/W3: with AllowV2SlotAS the walk is the v2 whitelist variant used
+    // ONLY for function signatures and function bodies, where the D.5
+    // static-slot capability (and the pointer values that feed it) is a
+    // registered v2 capability.  The global-storage walks below never set
+    // the flag: global pointer storage keeps the exact v1 rules.
     if (auto *PT = dyn_cast<PointerType>(Ty))
-      return PT->getAddressSpace() == 0;
+      return PT->getAddressSpace() == 0 ||
+             (AllowV2SlotAS && isD5StaticSlotAddressSpace(PT->getAddressSpace()));
     if (!Seen.insert(Ty).second)
       return true;
     for (Type *SubTy : Ty->subtypes())
-      if (!hasV1PointerTypes(SubTy, Seen))
+      if (!hasV1PointerTypes(SubTy, Seen, AllowV2SlotAS))
         return false;
     return true;
   }
@@ -219,16 +262,18 @@ class MCS251AsmPrinter final : public AsmPrinter {
   // or the validated direct-AS6 memory base above.
   static bool hasV1ObjectCompatibleConstant(
       const Constant *C, SmallPtrSetImpl<Type *> &SeenTypes,
-      SmallPtrSetImpl<const Constant *> &SeenConstants) {
+      SmallPtrSetImpl<const Constant *> &SeenConstants,
+      bool AllowV2SlotAS = false) {
     if (!SeenConstants.insert(C).second)
       return true;
-    if (!hasV1PointerTypes(C->getType(), SeenTypes))
+    if (!hasV1PointerTypes(C->getType(), SeenTypes, AllowV2SlotAS))
       return false;
     for (const Use &U : C->operands()) {
-      if (!hasV1PointerTypes(U->getType(), SeenTypes))
+      if (!hasV1PointerTypes(U->getType(), SeenTypes, AllowV2SlotAS))
         return false;
       if (const auto *Child = dyn_cast<Constant>(U.get()))
-        if (!hasV1ObjectCompatibleConstant(Child, SeenTypes, SeenConstants))
+        if (!hasV1ObjectCompatibleConstant(Child, SeenTypes, SeenConstants,
+                                           AllowV2SlotAS))
           return false;
     }
     return true;
@@ -442,21 +487,90 @@ class MCS251AsmPrinter final : public AsmPrinter {
   }
 
   bool isV1ObjectCompatible(const Module &M) const {
+    return scanObjectIdentity(M, /*V2Whitelist=*/false);
+  }
+
+  // A4/W3 (design §3.3), re-ruled by W3b (PM ruling 2026-09-13 #2): the
+  // census of trailing pointer parameters.  Some function (definition or
+  // declaration -- a cross-TU declaration creates slot references just like
+  // a definition) carries a pointer formal at Index>0.  W3 used
+  // "WhitelistedSlots present" as the TRIGGER that admitted a module to the
+  // v2 identity; W3b deletes that trigger (the identity is the contract
+  // generation).  What survives is the unregistered-capability half: a
+  // trailing pointer in an address space outside the D.5 table can be a
+  // static slot in no identity, v2 included.
+  enum class StaticSlotScan { NoSlots, WhitelistedSlots, UnregisteredSlotAS };
+
+  static StaticSlotScan scanStaticPointerSlots(const Module &M) {
+    StaticSlotScan Result = StaticSlotScan::NoSlots;
+    for (const Function &F : M) {
+      unsigned Index = 0;
+      for (const Argument &Arg : F.args()) {
+        if (Index++ == 0)
+          continue;
+        auto *PT = dyn_cast<PointerType>(Arg.getType());
+        if (!PT)
+          continue;
+        if (isD5StaticSlotAddressSpace(PT->getAddressSpace()))
+          Result = StaticSlotScan::WhitelistedSlots;
+        else
+          return StaticSlotScan::UnregisteredSlotAS;
+      }
+    }
+    return Result;
+  }
+
+  // The shared object-identity scan.  V2Whitelist=false is the historical
+  // v1 compatibility walk, line for line (its bytes and verdicts must never
+  // change); under W3b it serves the explicit v1 contract and the REL/asm
+  // content boundary, which has no identity carrier.  V2Whitelist=true is
+  // the A4 v2 CAPABILITY walk (PM ruling 2026-09-13 #2 decoupled it from
+  // identity selection): the same globals and initializer rules (global
+  // pointer storage keeps the exact v1 policy), with the function
+  // signature/body pointer acceptance widened from AS0 to the D.5
+  // static-slot set.  A module passing it is publishable under the
+  // registered v2 identity -- whatever its content, slot-bearing or not.
+  bool scanObjectIdentity(const Module &M, bool V2Whitelist) const {
     // P1-2: the contract is resolved target-side (feature string or the
     // llc command-line options), no longer through generic TargetOptions.
     const std::optional<MCS251::MemoryContract> &Resolved =
         getMCS251TM().getMemoryContract();
-    if (!Resolved || !Resolved->isSpecified() || Resolved->ASLayoutVersion == 1)
-      return true;
+    if (!V2Whitelist) {
+      if (!Resolved || !Resolved->isSpecified() || Resolved->ASLayoutVersion == 1)
+        return true;
+    } else {
+      // The v2 identity exists only under a specified v2 layout contract.
+      if (!Resolved || !Resolved->isSpecified() || Resolved->ASLayoutVersion != 2)
+        return false;
+    }
     const MCS251::MemoryContract &Contract = *Resolved;
-    // Of the layout-v2 requests, only the 32-bit/InternalExtended profile can
-    // be downgraded to the implemented v1 placement and pointer ABI. Tiny,
-    // Small/InternalMovable and Large/ExternalData require v2 identity even if
-    // this particular module happens not to define storage.
-    if (M.getDataLayout().getPointerSizeInBits(0) != 32 ||
-        Contract.DefaultPlacement != 8 || !M.alias_empty() ||
-        !M.ifunc_empty())
-      return false;
+    if (!V2Whitelist) {
+      // Of the layout-v2 requests, only the 32-bit/InternalExtended profile can
+      // be downgraded to the implemented v1 placement and pointer ABI. Tiny,
+      // Small/InternalMovable and Large/ExternalData require v2 identity even if
+      // this particular module happens not to define storage.
+      if (M.getDataLayout().getPointerSizeInBits(0) != 32 ||
+          Contract.DefaultPlacement != 8 || !M.alias_empty() ||
+          !M.ifunc_empty())
+        return false;
+    } else {
+      // A4/W3+W3b capability preconditions: 32-bit AS0, an
+      // emission-registered memory model profile (XSmall placement 8 /
+      // Small placement 1), and no aliases or ifuncs (they stay
+      // unregistered v2 capabilities).
+      if (M.getDataLayout().getPointerSizeInBits(0) != 32 ||
+          !MCS251Attributes::isRegisteredA4Profile(32, Contract.DefaultPlacement) ||
+          !M.alias_empty() || !M.ifunc_empty())
+        return false;
+      // W3b: the W3 TRIGGER ("the module must carry trailing pointer static
+      // slots to become v2") is deleted by the ruling -- a v2-contract ELF
+      // object is v2 regardless of content.  Only the
+      // unregistered-capability half of the slot census survives: a
+      // trailing pointer formal outside the D.5 table is not a static slot
+      // in any identity.
+      if (scanStaticPointerSlots(M) == StaticSlotScan::UnregisteredSlotAS)
+        return false;
+    }
 
     SmallPtrSet<Type *, 32> SeenTypes;
     SmallPtrSet<const Constant *, 32> SeenConstants;
@@ -508,15 +622,17 @@ class MCS251AsmPrinter final : public AsmPrinter {
         return false;
     }
     for (const Function &F : M) {
-      if (!hasV1PointerTypes(F.getFunctionType(), SeenTypes))
+      if (!hasV1PointerTypes(F.getFunctionType(), SeenTypes, V2Whitelist))
         return false;
-      unsigned Index = 0;
-      for (const Argument &Arg : F.args())
-        if (Index++ && Arg.getType()->isPointerTy())
-          return false; // v2-sized static pointer slot.
+      if (!V2Whitelist) {
+        unsigned Index = 0;
+        for (const Argument &Arg : F.args())
+          if (Index++ && Arg.getType()->isPointerTy())
+            return false; // v2-sized static pointer slot.
+      }
       for (const BasicBlock &BB : F)
         for (const Instruction &I : BB) {
-          if (!hasV1PointerTypes(I.getType(), SeenTypes))
+          if (!hasV1PointerTypes(I.getType(), SeenTypes, V2Whitelist))
             return false;
           for (const Use &U : I.operands()) {
             // The only direct-CODE exception is the exact Function value used
@@ -528,11 +644,11 @@ class MCS251AsmPrinter final : public AsmPrinter {
                 continue;
             if (isDirectSFRMemoryOperand(U, I))
               continue;
-            if (!hasV1PointerTypes(U->getType(), SeenTypes))
+            if (!hasV1PointerTypes(U->getType(), SeenTypes, V2Whitelist))
               return false;
             if (const auto *C = dyn_cast<Constant>(U.get()))
               if (!hasV1ObjectCompatibleConstant(C, SeenTypes,
-                                                  SeenConstants))
+                                                  SeenConstants, V2Whitelist))
                 return false;
           }
         }
@@ -540,14 +656,15 @@ class MCS251AsmPrinter final : public AsmPrinter {
     return true;
   }
 
-  // X3-R1: no v2 identity payload is built or installed here.  DESIGN.md
-  // N.9 keeps the complete v2 identity value domain open (call ABI,
-  // register variant, init/placement/stack/function protocols, capability
-  // words, ABI options, code profile), so no candidate value set may be
-  // emitted as a production object identity; the `.mcs251.attributes`
-  // codec remains a structure codec validated by its own unit tests, with
-  // no production caller.  A module outside the v1 object identity is
-  // rejected by classifyModule() below.
+  // A4/W2+W3: the v2 identity payload is assembled by the registered-value
+  // codec (MCS251Attributes::renderRegisteredIdentity) and published as
+  // `.mcs251.attributes` in emitEndOfAsmFile() when classifyModule() passes
+  // a v2-contract ELF module through the capability gates
+  // (PM ruling 2026-09-13 #2); e_flags=EFlagsV2 is installed on the ELF
+  // writer before initSections so the v1 ABI note is never emitted next to
+  // it.  No candidate value set can reach an object: the payload is built
+  // from the registered constants alone and validated by decode() before
+  // emission.
 
   void emitASxxxxText(const Twine &Text) {
     if (!usesELFObjects())
@@ -1229,20 +1346,30 @@ public:
     EmitToStreamer(*OutStreamer, TmpInst);
   }
 
-  /// Classify the module: decide whether it is representable by the v1
-  /// relocatable-object identity.
+  /// Classify the module: select the object identity and enforce the
+  /// fail-closed capability gates.
   ///
-  /// X3-R1: a module that uses a capability outside the v1 object identity
-  /// is NEVER emitted as an object.  DESIGN.md N.9 keeps the complete v2
-  /// identity value domain open (call ABI, register variant, object minor,
-  /// AS layout adoption, the init/placement/stack/function subprotocols,
-  /// code model profile, capability words, ABI options), and this slice's
-  /// initialization records are v1, so no candidate identity payload may be
-  /// published as a production object (the `.mcs251.attributes` codec is a
-  /// structure codec with no production caller; see its unit tests).  The
-  /// object path therefore fails loudly, fail-closed, with no escape
-  /// switch; the gate may only be reopened after the fields and
-  /// subprotocols are approved.
+  /// A4/W3b (PM ruling 2026-09-13 #2, "V1 is deprecated; the default
+  /// considers V2 only"): the ELF object identity is the CONTRACT
+  /// GENERATION, never the module content.  A specified ASLayoutVersion==2
+  /// contract (the materialized llc/clang default included) publishing an
+  /// ELF object emits the v2 identity (e_flags=0x102 +
+  /// `.mcs251.attributes`) whatever the module contains; the W3 rule that
+  /// a "v1-representable" module under a v2 contract downgrades to the v1
+  /// identity is DELETED.  The v1 identity bytes are produced only under an
+  /// explicit ASLayoutVersion==1 contract (1,1,32,8,1).
+  ///
+  /// Content still gates fail-closed, but as CAPABILITIES, decoupled from
+  /// the identity selection (scanObjectIdentity(V2Whitelist=true)):
+  /// alias/ifunc, 16-bit objects (the TargetMachine gate), unregistered
+  /// model profiles (Large), a trailing pointer formal outside the D.5
+  /// static-slot set, static pointer initializer algebra and any capability
+  /// outside the registration keep the fatal, and the diagnostic names the
+  /// unregistered-capability reason.
+  ///
+  /// The REL/asm boundary is unchanged: it has no identity carrier, so the
+  /// historical CONTENT determination stays (downgradable content keeps
+  /// emitting the v1-era REL/asm bytes; v2-only content is fatal).
   ///
   /// The routine is idempotent: emitStartOfAsmFile re-asserts the same facts,
   /// which matters because a MIR entry point (-start-after...) reaches the
@@ -1259,14 +1386,67 @@ public:
       return MCS251::isBitObjectGlobal(GV);
     });
 
+    ModuleV2Identity = false;
+    // P1-2: the contract is resolved target-side.  The identity half of the
+    // ruling keys off its layout generation alone.
+    const std::optional<MCS251::MemoryContract> &Resolved =
+        getMCS251TM().getMemoryContract();
+    const bool V2Contract =
+        Resolved && Resolved->isSpecified() && Resolved->ASLayoutVersion == 2;
+    if (V2Contract && getMCS251TM().emitsObjectFile() && usesELFObjects()) {
+      // ELF object output under a v2 contract: v2 identity, content-agnostic,
+      // gated only by the registered-capability walk.
+      if (!scanObjectIdentity(M, /*V2Whitelist=*/true))
+        report_fatal_error(
+            "MCS251: module uses an ABI capability outside the registered "
+            "A4 v2 object identity (32-bit AS0 XSmall/Small modules with "
+            "the D.5 pointer address spaces 0/1/2/3/4/8/9 in static slots, "
+            "signatures and function bodies; alias/ifunc, 16-bit objects, "
+            "other pointer address spaces, unregistered model profiles and "
+            "static pointer initializer algebra stay unregistered)");
+      enterV2ObjectMode();
+      return false;
+    }
+
+    // The v1 identity (explicit v1 contract) and the REL/asm content
+    // boundary keep the historical determination byte for byte.
     const bool V1Compatible = isV1ObjectCompatible(M);
     if (!V1Compatible && getMCS251TM().emitsObjectFile()) {
-      report_fatal_error(
-          "MCS251: module uses an ABI capability that cannot be represented "
-          "by the v1 relocatable-object identity; v2 object output is not "
-          "implemented (the complete identity and subprotocols are not approved)");
+      // REL object output carrying v2-only content: keep the fail-closed
+      // boundary.  Content v2-only through whitelisted static slots reaches
+      // enterV2ObjectMode, whose REL carrier check is the historical fatal;
+      // any other v2-only shape fails the capability walk here.
+      if (!scanObjectIdentity(M, /*V2Whitelist=*/true))
+        report_fatal_error(
+            "MCS251: module uses an ABI capability that cannot be represented "
+            "by the v1 relocatable-object identity; v2 object output is not "
+            "implemented for this unregistered capability (outside the A4 "
+            "whitelist: 32-bit AS0 modules whose v2-only capabilities are "
+            "pointer static slots in the D.5 address spaces 0/1/2/3/4/8/9 "
+            "plus already-supported capabilities; alias/ifunc, 16-bit "
+            "objects, other address spaces and static pointer initializer "
+            "algebra stay unregistered)");
+      enterV2ObjectMode();
     }
     return V1Compatible;
+  }
+
+  // A4/W2: arm the v2 identity publication for this compilation.  Must run
+  // before the ELF streamer's initSections (the codegen path guarantees
+  // this: doInitialization classifies before calling the base class) so the
+  // v1 note is suppressed and the header flags are already EFlagsV2.
+  void enterV2ObjectMode() {
+    if (!usesELFObjects())
+      report_fatal_error(
+          "MCS251: the v2 object identity (pointer static slots) requires "
+          "ELF object output (-mcs251-object-format=elf -filetype=obj); the "
+          "ASxxxx REL format has no v2 identity carrier");
+    // Safe downcast: usesELFObjects() + object output is exactly the
+    // combination for which MCS251TargetMachine::createMCStreamer built the
+    // MCS251 ELF streamer (an MCELFStreamer subclass).
+    auto &ES = *static_cast<MCELFStreamer *>(OutStreamer.get());
+    ES.getWriter().setELFHeaderEFlags(MCS251Attributes::EFlagsV2);
+    ModuleV2Identity = true;
   }
 
   void emitStartOfAsmFile(Module &M) override {
@@ -1318,7 +1498,10 @@ public:
                              GA.getName() + "')");
       }
     }
-    const bool V1Compatible = isV1ObjectCompatible(M);
+    // A4/W3b: a v2-identity module never claims the v1 ABI signature, not
+    // even in the (ELF-swallowed) text prologue.  For REL/asm output the
+    // historical content determination keeps deciding, unchanged.
+    const bool V1Compatible = !ModuleV2Identity && isV1ObjectCompatible(M);
     emitASxxxxText("\t.module " + ModuleName);
     emitASxxxxText("\t.source");
     if (V1Compatible)
@@ -1395,11 +1578,56 @@ public:
       emitBitObjectRecords(M);
   }
 
+  // A4/W2+W3b: publish the v2 identity section for a v2-contract ELF object
+  // that passed the capability gate.  The payload is assembled by the
+  // registered-value codec and validated by the strict decoder before a
+  // byte is emitted (design §3.2): every required tag exactly once and
+  // Critical, every value the approved registered one, so no candidate
+  // combination can reach an object.  The ARM-attributes envelope (0x41 /
+  // BE32 VendorSize=16+P / "MCS251\0" / scope tag 1 / BE32 ScopeSize=5+P)
+  // is emitted by the common MCELFStreamer entry exactly as design §3.1
+  // specifies; the section is SHT 0x70000003, non-ALLOC, alignment 1, and
+  // it is the only v2 identity carrier: the v1 note was suppressed in
+  // initSections because EFlagsV2 was installed first.
+  void emitEndOfAsmFile(Module &M) override {
+    if (!ModuleV2Identity)
+      return; // v1 identity objects emit no extra identity bytes (unchanged).
+    const std::optional<MCS251::MemoryContract> &Contract =
+        getMCS251TM().getMemoryContract();
+    if (!Contract || !Contract->isSpecified())
+      report_fatal_error("MCS251: the v2 object identity requires a "
+                         "specified v2 memory contract");
+    std::string SectionBytes = MCS251Attributes::renderRegisteredIdentity(
+        Contract->AS0PointerBits, Contract->DefaultPlacement);
+    MCS251Attributes::Decoded Decoded;
+    if (llvm::Error E = MCS251Attributes::decode(SectionBytes,
+                                                 /*IsBigEndian=*/true, Decoded)) {
+      std::string Msg = toString(std::move(E));
+      report_fatal_error(Twine("MCS251: refusing to emit an unregistered v2 "
+                               "object identity: ") +
+                         Msg);
+    }
+    auto &ES = *static_cast<MCELFStreamer *>(OutStreamer.get());
+    MCSection *AttributeSection = nullptr;
+    // The codec renders the complete section (envelope + records); the
+    // common MC entry builds the envelope itself from the vendor name, so
+    // hand it only the self-describing record payload.  The envelope the
+    // entry emits is byte-identical to the one stripped here.
+    StringRef Records = StringRef(SectionBytes).substr(
+        MCS251Attributes::EnvelopeSize);
+    ES.emitSelfDescribingAttributesSection(
+        MCS251Attributes::Vendor, MCS251Attributes::SectionName,
+        MCS251Attributes::SectionType, AttributeSection, Records);
+  }
+
   bool doInitialization(Module &M) override {
-    // Run the v1/v2 classification *before* the base implementation: a
-    // module outside the v1 object identity must fail before any section or
-    // identity carrier byte is emitted (the ELF streamer always emits the
-    // v1 note; there is no v2 carrier, see X3-R1).
+    // Run the identity classification *before* the base implementation: an
+    // ELF object under a v2 contract must be armed for the v2 identity
+    // (EFlagsV2 installed on the ELF writer) before any section or identity
+    // carrier byte is emitted -- the base class calls initSections, which
+    // emits the v1 note only when the flags word still announces v1.  A
+    // module whose capabilities fall outside the registered v2 identity
+    // fails here fail-closed (classifyModule).
     classifyModule(M);
     return AsmPrinter::doInitialization(M);
   }

@@ -8,7 +8,11 @@ blob = Path(sys.argv[1]).read_bytes()
 assert blob[:7] == b"\x7fELF\x01\x02\x01"
 header = struct.unpack_from(">HHIIIIIHHHHHH", blob, 16)
 assert header[0:2] == (1, 0x9999)
-assert header[6] == 1
+# A4/W3b (PM ruling 2026-09-13 #2): the ELF identity is the contract
+# generation. This helper validates RELA fields and area payloads, not
+# identity; it accepts the v1 note word (0x1, explicit v1 contract) and the
+# v2 attributes word (0x102, any specified v2 contract incl. the default).
+assert header[6] in (1, 0x102), header[6]
 sections = [
     struct.unpack_from(">IIIIIIIIII", blob, header[5] + i * header[10])
     for i in range(header[11])

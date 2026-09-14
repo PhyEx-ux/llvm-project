@@ -623,6 +623,45 @@ void MCELFStreamer::createAttributesSection(
   AttrsVec.clear();
 }
 
+void MCELFStreamer::emitSelfDescribingAttributesSection(
+    StringRef Vendor, const Twine &Section, unsigned Type,
+    MCSection *&AttributeSection, StringRef Payload) {
+  // Same envelope skeleton as createAttributesSection above, but the scope
+  // payload is a caller-supplied, self-describing byte string that is
+  // forwarded verbatim: the ARM AttributeItem record encoding (ULEB tag +
+  // value, no type or length fields) must not be applied to it, and the
+  // payload may contain NUL bytes, so it travels as a StringRef, never as a
+  // C string.  Only the common envelope (format version, vendor subsection
+  // size, vendor name + NUL, File scope tag, scope size) is emitted here.
+
+  // Switch section to AttributeSection or get/create the section.
+  if (AttributeSection) {
+    switchSection(AttributeSection);
+  } else {
+    AttributeSection = getContext().getELFSection(Section, Type, 0);
+    switchSection(AttributeSection);
+
+    // Format version
+    emitInt8(0x41);
+  }
+
+  // Vendor size + Vendor name + '\0'
+  const size_t VendorHeaderSize = 4 + Vendor.size() + 1;
+
+  // Tag + Tag Size
+  const size_t TagHeaderSize = 1 + 4;
+
+  emitInt32(VendorHeaderSize + TagHeaderSize + Payload.size());
+  emitBytes(Vendor);
+  emitInt8(0); // '\0'
+
+  emitInt8(ARMBuildAttrs::File);
+  emitInt32(TagHeaderSize + Payload.size());
+
+  // The complete self-describing scope payload, byte for byte.
+  emitBytes(Payload);
+}
+
 void MCELFStreamer::createAttributesWithSubsection(
     MCSection *&AttributeSection, const Twine &Section, unsigned Type,
     SmallVector<AttributeSubSection, 64> &SubSectionVec) {
