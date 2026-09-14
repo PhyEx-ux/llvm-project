@@ -16,6 +16,7 @@
 #include "clang/AST/ASTFwd.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Sema/SemaBase.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace clang {
@@ -77,6 +78,37 @@ public:
   /// indirect") and returns true when the call form is rejected.
   bool CheckMCS251BitCallForm(const FunctionType *FnType, bool IsIndirect,
                               SourceLocation Loc, SourceRange Range);
+
+  /// G2 §4.4 (N16-N18): the frozen variadic-call gates of the B1 static-slot
+  /// continuation ABI, checked at the same routing point as
+  /// CheckMCS251BitCallForm (BuildResolvedCallExpr). In order:
+  ///  - C1 (err_mcs251_variadic_call_indirect): any call through a function
+  ///    pointer whose type contains `...`, regardless of the argument count
+  ///    (the continuation slots are named after the callee symbol, so an
+  ///    indirect call has no ABI);
+  ///  - A (err_mcs251_variadic_call_cap_exceeded): more than the fixed six
+  ///    variadic arguments -- prototype calls count \c Args.size() minus the
+  ///    fixed parameters, unprototyped calls count \c Args.size() minus the
+  ///    register-channel first argument;
+  ///  - D1 (err_mcs251_variadic_arg_type): each argument in a variadic
+  ///    position of a direct prototype call must not be in the frozen
+  ///    rejection set (aggregate/union, integers wider than 32 bits,
+  ///    pointers into non-ordinary address spaces; see
+  ///    isMCS251RejectedVariadicType). Promotion never rescues a rejected
+  ///    category, so the as-written type decides.
+  /// Returns true if the call was rejected (diagnostics already emitted).
+  bool CheckMCS251VariadicCall(const FunctionType *FnType, bool IsIndirect,
+                               ArrayRef<Expr *> Args, SourceLocation Loc,
+                               SourceRange Range);
+
+  /// G2 §4.4.3 D2: the `__builtin_va_arg` read path enforces the same frozen
+  /// rejection set as the call path (aggregate/union, integers wider than
+  /// 32 bits, pointers into non-ordinary address spaces) on the target type
+  /// \p T. bit stays with the existing N13/M2 boundaries (G2 §4.6: the
+  /// registered va_arg-of-bit gap is not widened here). Returns true if a
+  /// diagnostic was emitted.
+  bool CheckMCS251VAArgType(QualType T, SourceLocation Loc,
+                            SourceRange Range);
 
   //===--------------------------------------------------------------------===//
   // MCS251 OpenMP/OpenACC construct restriction context (P08 revision,

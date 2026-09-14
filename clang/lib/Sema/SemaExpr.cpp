@@ -7324,6 +7324,14 @@ ExprResult Sema::BuildResolvedCallExpr(Expr *Fn, NamedDecl *NDecl,
     return ExprError();
   }
 
+  // G2 §4.4 (N16-N18): the frozen B1 variadic-call gates (indirect call
+  // form, the fixed 6-slot cap, rejected variadic argument types) share this
+  // single routing point with the N13-N15 bit call-form checks above.
+  if (FuncT && MCS251().CheckMCS251VariadicCall(FuncT, /*IsIndirect=*/!FDecl,
+                                                Args, LParenLoc,
+                                                Fn->getSourceRange()))
+    return ExprError();
+
   CallExpr *TheCall;
   if (Config) {
     assert(UsesADL == ADLCallKind::NotADL &&
@@ -17468,6 +17476,15 @@ ExprResult Sema::BuildVAArgExpr(SourceLocation BuiltinLoc,
   if (MCS251Ptr && MCS251Ptr->inDirectiveRestriction() && TInfo)
     MCS251Ptr->CheckVAArgTypeInDirectiveRestriction(
         TInfo->getType(), BuiltinLoc, SourceRange(BuiltinLoc, RPLoc));
+
+  // MCS251 G2 §4.4.3 D2: the va_arg *read* path enforces the same frozen
+  // rejection set as the variadic call path (aggregate/union, integers
+  // wider than 32 bits, pointers into non-ordinary address spaces). bit
+  // stays with the existing N13/M2 boundaries (G2 §4.6).
+  if (MCS251Ptr && TInfo &&
+      MCS251Ptr->CheckMCS251VAArgType(TInfo->getType(), BuiltinLoc,
+                                      SourceRange(BuiltinLoc, RPLoc)))
+    return ExprError();
 
   Expr *OrigExpr = E;
   VAArgExpr::VarArgKind VAKind = VAArgExpr::VA_Std;

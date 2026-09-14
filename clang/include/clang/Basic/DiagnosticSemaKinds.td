@@ -12784,6 +12784,23 @@ def err_mcs251_sbit_ordinary_redecl
 // "multi-argument indirect").
 def err_mcs251_bit_call_unsupported
     : Error<"MCS251 bit call form '%0' is not supported">;
+// G2 §4.4 (N16-N18): the frozen B1 static-slot variadic ABI gates, diagnosed
+// at the Sema layer (the llc backstops of §4.4.3 C2/D3 are separate). The
+// messages are frozen: do not reword them. The variadic cap N=6 is a compiler
+// constant, not a command-line option; changing it requires a P-4 call_abi
+// minor bump. bit is deliberately *not* re-checked here: variadic signatures
+// carrying bit stay with the N13 family above, and the pre-existing
+// bit-through-varargs / va_arg-of-bit gaps recorded in
+// clang/lib/Basic/Targets/MCS251.h are not widened by this batch (G2 §4.6).
+def err_mcs251_variadic_call_indirect
+    : Error<"MCS251 variadic call form 'indirect' is not supported (static "
+            "slots require a named callee)">;
+def err_mcs251_variadic_call_cap_exceeded
+    : Error<"MCS251 variadic call exceeds the fixed 6-slot variadic ABI cap "
+            "(%0 variadic arguments given)">;
+def err_mcs251_variadic_arg_type
+    : Error<"MCS251 variadic argument must be a promoted scalar "
+            "(i8/i16/i32/f32) or ordinary data pointer">;
 // P08 revision (Alice ruling, plan B): the first slice rejects every MCS251 bit
 // capability (bit types/objects, sbit, L1 fixed-bit references) *inside* an
 // enabled OpenMP/OpenACC construct: directive arguments, clauses, associated

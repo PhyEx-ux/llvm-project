@@ -1610,6 +1610,125 @@ bool SemaMCS251::CheckMCS251BitCallForm(const FunctionType *FnType,
   return false;
 }
 
+// G2 §4.2/§4.4.3: the frozen variadic rejection set shared by the call path
+// (D1, variadic-position arguments) and the va_arg read path (D2). A type is
+// rejected when the B1 continuation-slot ABI has no encoding for it:
+//  - aggregate or union (the backend would only ever see byval pieces);
+//  - an integer wider than 32 bits (i64, i.e. `long long` on this target:
+//    the slot-width table has no 8-byte slot and no promotion shrinks one);
+//  - a pointer into a non-ordinary address space (the ordinary set mirrors
+//    the backend's hasOrdinaryPointerABI: target AS 0,1,2,3,4,8,9; the
+//    LangAS-to-target-AS bridge is ASTContext::getTargetAddressSpace, the
+//    same mapping CodeGen uses for the IR addrspace).
+// Promotion cannot rescue any of these categories, so the as-written type
+// decides (G2 §4.4.3 "提升后类型判定"). bit is intentionally absent: bit
+// actual arguments through `...` are already rejected by the N13 check in
+// Sema::DefaultVariadicArgumentPromotion, and the va_arg-of-bit gap recorded
+// in clang/lib/Basic/Targets/MCS251.h is not widened by this batch (G2 §4.4.3
+// "bit 走 N13 既有拒绝（不新增）" / §4.6).
+//
+// Review fix (G2-S1 FINDING): an array argument decays before it reaches the
+// variadic slot, so the judgement type is the decayed pointer type -- an
+// `address_space(5)` array decays to an AS5 pointer (the element's address
+// space survives the decay) and must be rejected exactly like an AS5 pointer
+// passed directly, per the same §4.4.3 promoted-type rule.
+static bool isMCS251RejectedVariadicType(ASTContext &Ctx, QualType T) {
+  if (T->isArrayType())
+    T = Ctx.getArrayDecayedType(T);
+  if (T->isPointerType()) {
+    switch (Ctx.getTargetAddressSpace(T->getPointeeType().getAddressSpace())) {
+    case 0:
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 8:
+    case 9:
+      return false;
+    default:
+      return true;
+    }
+  }
+  if (T->isRecordType())
+    return true;
+  return T->isIntegerType() && Ctx.getTypeSize(T) > 32;
+}
+
+bool SemaMCS251::CheckMCS251VariadicCall(const FunctionType *FnType,
+                                         bool IsIndirect,
+                                         ArrayRef<Expr *> Args,
+                                         SourceLocation Loc,
+                                         SourceRange Range) {
+  if (!isMCS251Target(SemaRef.Context))
+    return false;
+  if (!FnType || FnType->isDependentType())
+    return false;
+
+  const auto *Proto = dyn_cast<FunctionProtoType>(FnType);
+
+  // C1 (N16): an indirect variadic call has no named callee to derive the
+  // `_PARM_n` continuation-slot symbols from, so it is rejected regardless
+  // of how many variadic arguments it passes (frozen: G2 §4.4.3 C1; the llc
+  // `IsVarArg && !IsDirect` fatal of C2 stays as the IR-level backstop).
+  if (IsIndirect && Proto && Proto->isVariadic()) {
+    SemaRef.Diag(Loc, diag::err_mcs251_variadic_call_indirect) << Range;
+    return true;
+  }
+
+  if (Proto && Proto->isVariadic()) {
+    // A (N17), prototype form: the six continuation slots are the only
+    // variadic storage, so a call passing more than six variadic arguments
+    // is a compile-time hard error (frozen formula Args.size() - NumParams
+    // > 6, G2 §4.4.2). Under-argument calls fall through and are diagnosed
+    // as ordinary arity errors later.
+    unsigned NumFixed = Proto->getNumParams();
+    if (Args.size() > NumFixed && Args.size() - NumFixed > 6) {
+      SemaRef.Diag(Loc, diag::err_mcs251_variadic_call_cap_exceeded)
+          << static_cast<unsigned>(Args.size() - NumFixed) << Range;
+      return true;
+    }
+    // D1 (N18): reject every variadic-position argument in the frozen
+    // rejection set, per argument (G2 §4.4.3 D1).
+    bool Diagnosed = false;
+    for (unsigned I = NumFixed; I < Args.size(); ++I) {
+      const Expr *Arg = Args[I];
+      if (!Arg || Arg->isTypeDependent() || Arg->isInstantiationDependent())
+        continue;
+      if (isMCS251RejectedVariadicType(SemaRef.Context, Arg->getType())) {
+        SemaRef.Diag(Arg->getBeginLoc(), diag::err_mcs251_variadic_arg_type)
+            << Arg->getSourceRange();
+        Diagnosed = true;
+      }
+    }
+    return Diagnosed;
+  }
+
+  if (!Proto) {
+    // A (N17), unprototyped form: the first argument occupies the
+    // first-source-parameter channel (registers, no slot), so the remaining
+    // arguments are the ones the six continuation slots must hold -- frozen
+    // formula Args.size() - 1 > 6 (G2 §4.3.6/§4.4.2).
+    if (Args.size() > 7) {
+      SemaRef.Diag(Loc, diag::err_mcs251_variadic_call_cap_exceeded)
+          << static_cast<unsigned>(Args.size() - 1) << Range;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SemaMCS251::CheckMCS251VAArgType(QualType T, SourceLocation Loc,
+                                      SourceRange Range) {
+  if (!isMCS251Target(SemaRef.Context))
+    return false;
+  if (!T->isDependentType() &&
+      isMCS251RejectedVariadicType(SemaRef.Context, T)) {
+    SemaRef.Diag(Loc, diag::err_mcs251_variadic_arg_type) << Range;
+    return true;
+  }
+  return false;
+}
+
 bool SemaMCS251::CheckMCS251ControlledBitDirectiveClauses(Stmt *Directive) {  // P08 revision (plan B): same as CheckMCS251ControlledBitRMW -- the
   // construct gate owns every bit capability inside a directive, so the
   // clause-evaluation classification is suppressed there (kept for
