@@ -9,10 +9,12 @@
 // Strict reader for the MCS-251 v2 relocatable-object identity carrier
 // (`.mcs251.attributes`), implementing the rejection rules of DESIGN.md N.6.
 //
-// X3-R1 status: this is a STRUCTURE codec with no production caller; a
-// successful decode attests the frozen envelope/record/type/tag rules and
-// the ruled scalar values only, never that the field-value combination is
-// an approved v2 object identity (the N.5/N.9 value domains are open).
+// A4 status (PM ruling 2026-09-13): the former open value domains are
+// registered, so a successful decode now attests the frozen
+// envelope/record/type/tag rules, the ruled scalar values AND the
+// A4-registered values.  Which (as0_pointer_bits, default_placement)
+// profiles may be EMITTED is a narrower, emitter-side policy
+// (isRegisteredA4Profile / renderRegisteredIdentity).
 //
 // The reader is deliberately total and total-failing: every malformed input
 // produces a diagnostic and no partially-populated result.  It never guesses
@@ -42,7 +44,17 @@ struct Record {
   uint8_t ValueType = 0;
   uint32_t Length = 0;
   std::vector<uint8_t> Value;
-  uint32_t Scalar = 0; ///< valid when ValueType == VT_U32 and Length == 4
+  /// Valid (set by the decoder) only when SchemaValidated is true and
+  /// ValueType == VT_U32 and Length == 4.  Unknown optional records keep
+  /// their payload exclusively in Value.
+  uint32_t Scalar = 0;
+  /// True only for records the decoder validated against the registry
+  /// schema: required U32 tags (Critical U32 of length 4), the optional
+  /// reserved zeros and the memory_model_profile MIX atom stream.  Unknown
+  /// optional records are carried as raw bytes with this flag false, so a
+  /// consumer must not decode their payload as a Scalar or as MIX atoms --
+  /// this revision has no schema for it (A4-FINAL-R1).
+  bool SchemaValidated = false;
 };
 
 /// A fully decoded, schema-validated v2 identity.

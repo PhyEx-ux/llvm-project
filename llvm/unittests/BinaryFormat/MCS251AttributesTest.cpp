@@ -10,11 +10,10 @@
 // string is the fixture frozen in DESIGN.md N.7; every rejection case is drawn
 // from the N.6 rejection table.
 //
-// X3-R6 status: these are STRUCTURE-codec tests.  The writer has no
-// production caller and the tests that build "complete" identities use the
-// N.5 candidate values for the still-open fields; passing these tests is
-// structural acceptance of the codec, NOT acceptance of a complete v2
-// object identity (the N.5/N.9 value domains are unapproved).
+// A4 status (PM ruling 2026-09-13): the complete identities in these tests
+// carry the REGISTERED value set (design §2), which the decoder now enforces;
+// the registered XSmall/Small identities here are byte-for-byte the payloads
+// production objects publish.
 //
 //===----------------------------------------------------------------------===//
 
@@ -68,12 +67,11 @@ constexpr const char *FixtureHex =
 
 class MCS251AttributesTest : public ::testing::Test {};
 
-// A complete first-slice identity with all required tags and the ruled
+// A complete first-slice identity with all required tags and the registered
 // values (the XSmall profile: as0_pointer_bits 32, default_placement 8),
-// minus the one tag named by \p Skip (nullopt = complete).  The open fields
-// carry the N.5 CANDIDATE values; building a "complete" identity exercises
-// the codec's structural rules only -- it is not an approved value
-// combination and must never be emitted into an object.
+// minus the one tag named by \p Skip (nullopt = complete).  The field values
+// are the A4-registered set (design §2, PM ruling 2026-09-13), so the
+// rendered bytes are exactly the payload a production v2 object carries.
 static void addCompleteIdentity(Writer &W,
                                 std::optional<uint32_t> Skip = std::nullopt) {
   auto U32 = [&](uint32_t Tag, uint32_t Value) {
@@ -81,30 +79,30 @@ static void addCompleteIdentity(Writer &W,
       W.addU32(Tag, Value);
   };
   U32(Tag_ObjectProtocolVersion, ObjectProtocolVersion);
-  U32(Tag_CallABIMajor, 2);
-  U32(Tag_CallABIMinor, 0);
-  U32(Tag_RegisterParameterVariant, 3);
+  U32(Tag_CallABIMajor, CallABIMajor);
+  U32(Tag_CallABIMinor, CallABIMinor);
+  U32(Tag_RegisterParameterVariant, RegisterParameterVariant);
   U32(Tag_GeneralRegisterSet, GeneralRegisterSet);
   U32(Tag_IntBits, IntBits);
   U32(Tag_LongBits, LongBits);
   U32(Tag_AS0PointerBits, AS0PointerBits32);
-  U32(Tag_ASLayoutVersion, 2);
+  U32(Tag_ASLayoutVersion, ASLayoutVersion);
   U32(Tag_DefaultPlacement, Placement_InternalExtended);
-  U32(Tag_InitProtocolVersion, 2);
-  U32(Tag_PlacementProtocolVersion, 2);
-  U32(Tag_StackContractVersion, 2);
-  U32(Tag_FunctionContractVersion, 1);
-  U32(Tag_RequiredCapabilitiesLo, 0);
-  U32(Tag_RequiredCapabilitiesHi, 0);
-  U32(Tag_ABIOptions, 0);
+  U32(Tag_InitProtocolVersion, InitProtocolVersion);
+  U32(Tag_PlacementProtocolVersion, PlacementProtocolVersion);
+  U32(Tag_StackContractVersion, StackContractVersion);
+  U32(Tag_FunctionContractVersion, FunctionContractVersion);
+  U32(Tag_RequiredCapabilitiesLo, RequiredCapabilitiesLo);
+  U32(Tag_RequiredCapabilitiesHi, RequiredCapabilitiesHi);
+  U32(Tag_ABIOptions, ABIOptions);
   if (Tag_MemoryModelProfile != Skip)
     W.addMix(Tag_MemoryModelProfile,
              {OutRecord{0, true, VT_U32, AS0PointerBits32, "", {}, false},
               OutRecord{0, true, VT_U32, Placement_InternalExtended, "", {},
                         false}});
-  U32(Tag_CodeModelProfile, 1);
+  U32(Tag_CodeModelProfile, CodeModelProfile);
   U32(Tag_CodePointerBits, CodePointerBits);
-  U32(Tag_ObjectProtocolMinor, 0);
+  U32(Tag_ObjectProtocolMinor, ObjectProtocolMinor);
 }
 
 TEST_F(MCS251AttributesTest, EnvelopeDecodesFromFixture) {
@@ -322,31 +320,31 @@ TEST_F(MCS251AttributesTest, TrailingBytesAreRejected) {
 
 TEST_F(MCS251AttributesTest, CompleteIdentityRoundTrips) {
   // Emit a complete first-slice identity with all required tags plus the
-  // ruled values, then decode it and confirm every field survives.
+  // registered values, then decode it and confirm every field survives.
   Writer W;
   W.addU32(Tag_ObjectProtocolVersion, ObjectProtocolVersion);
-  W.addU32(Tag_CallABIMajor, 2);
-  W.addU32(Tag_CallABIMinor, 0);
-  W.addU32(Tag_RegisterParameterVariant, 3);
+  W.addU32(Tag_CallABIMajor, CallABIMajor);
+  W.addU32(Tag_CallABIMinor, CallABIMinor);
+  W.addU32(Tag_RegisterParameterVariant, RegisterParameterVariant);
   W.addU32(Tag_GeneralRegisterSet, GeneralRegisterSet);
   W.addU32(Tag_IntBits, IntBits);
   W.addU32(Tag_LongBits, LongBits);
   W.addU32(Tag_AS0PointerBits, AS0PointerBits32);
-  W.addU32(Tag_ASLayoutVersion, 2);
+  W.addU32(Tag_ASLayoutVersion, ASLayoutVersion);
   W.addU32(Tag_DefaultPlacement, Placement_InternalExtended);
-  W.addU32(Tag_InitProtocolVersion, 2);
-  W.addU32(Tag_PlacementProtocolVersion, 2);
-  W.addU32(Tag_StackContractVersion, 2);
-  W.addU32(Tag_FunctionContractVersion, 1);
-  W.addU32(Tag_RequiredCapabilitiesLo, 0);
-  W.addU32(Tag_RequiredCapabilitiesHi, 0);
-  W.addU32(Tag_ABIOptions, 0);
+  W.addU32(Tag_InitProtocolVersion, InitProtocolVersion);
+  W.addU32(Tag_PlacementProtocolVersion, PlacementProtocolVersion);
+  W.addU32(Tag_StackContractVersion, StackContractVersion);
+  W.addU32(Tag_FunctionContractVersion, FunctionContractVersion);
+  W.addU32(Tag_RequiredCapabilitiesLo, RequiredCapabilitiesLo);
+  W.addU32(Tag_RequiredCapabilitiesHi, RequiredCapabilitiesHi);
+  W.addU32(Tag_ABIOptions, ABIOptions);
   W.addMix(Tag_MemoryModelProfile,
            {OutRecord{0, true, VT_U32, AS0PointerBits32, "", {}},
             OutRecord{0, true, VT_U32, Placement_InternalExtended, "", {}}});
-  W.addU32(Tag_CodeModelProfile, 1);
+  W.addU32(Tag_CodeModelProfile, CodeModelProfile);
   W.addU32(Tag_CodePointerBits, CodePointerBits);
-  W.addU32(Tag_ObjectProtocolMinor, 0);
+  W.addU32(Tag_ObjectProtocolMinor, ObjectProtocolMinor);
 
   std::string Bytes = W.render(/*IsBigEndian=*/true);
   Decoded D;
@@ -380,31 +378,14 @@ TEST_F(MCS251AttributesTest, LittleEndianEnvelopeRoundTrips) {
 
 TEST_F(MCS251AttributesTest, MemoryModelProfileMustAgreeWithTags11And13) {
   Writer W;
-  W.addU32(Tag_ObjectProtocolVersion, ObjectProtocolVersion);
-  W.addU32(Tag_CallABIMajor, 2);
-  W.addU32(Tag_CallABIMinor, 0);
-  W.addU32(Tag_RegisterParameterVariant, 3);
-  W.addU32(Tag_GeneralRegisterSet, GeneralRegisterSet);
-  W.addU32(Tag_IntBits, IntBits);
-  W.addU32(Tag_LongBits, LongBits);
-  W.addU32(Tag_AS0PointerBits, AS0PointerBits32);
-  W.addU32(Tag_ASLayoutVersion, 2);
-  W.addU32(Tag_DefaultPlacement, Placement_InternalExtended);
-  W.addU32(Tag_InitProtocolVersion, 2);
-  W.addU32(Tag_PlacementProtocolVersion, 2);
-  W.addU32(Tag_StackContractVersion, 2);
-  W.addU32(Tag_FunctionContractVersion, 1);
-  W.addU32(Tag_RequiredCapabilitiesLo, 0);
-  W.addU32(Tag_RequiredCapabilitiesHi, 0);
-  W.addU32(Tag_ABIOptions, 0);
-  // Deliberately inconsistent: profile says (16, InternalMovable) while the
-  // scalar tags say (32, InternalExtended).
-  W.addMix(Tag_MemoryModelProfile,
-           {OutRecord{0, true, VT_U32, AS0PointerBits16, "", {}},
-            OutRecord{0, true, VT_U32, Placement_InternalMovable, "", {}}});
-  W.addU32(Tag_CodeModelProfile, 1);
-  W.addU32(Tag_CodePointerBits, CodePointerBits);
-  W.addU32(Tag_ObjectProtocolMinor, 0);
+  addCompleteIdentity(W);
+  // Deliberately inconsistent: patch the profile to (16, InternalMovable)
+  // while the scalar tags say (32, InternalExtended).
+  for (OutRecord &R : const_cast<std::vector<OutRecord> &>(W.records()))
+    if (R.Tag == Tag_MemoryModelProfile) {
+      R.Atoms[0].Scalar = AS0PointerBits16;
+      R.Atoms[1].Scalar = Placement_InternalMovable;
+    }
 
   std::string Bytes = W.render(true);
   Decoded D;
@@ -417,29 +398,7 @@ TEST_F(MCS251AttributesTest, MemoryModelProfileMustAgreeWithTags11And13) {
 TEST_F(MCS251AttributesTest, RuledValuesAreEnforced) {
   auto buildWith = [](uint32_t Tag, uint32_t Value) {
     Writer W;
-    W.addU32(Tag_ObjectProtocolVersion, ObjectProtocolVersion);
-    W.addU32(Tag_CallABIMajor, 2);
-    W.addU32(Tag_CallABIMinor, 0);
-    W.addU32(Tag_RegisterParameterVariant, 3);
-    W.addU32(Tag_GeneralRegisterSet, GeneralRegisterSet);
-    W.addU32(Tag_IntBits, IntBits);
-    W.addU32(Tag_LongBits, LongBits);
-    W.addU32(Tag_AS0PointerBits, AS0PointerBits32);
-    W.addU32(Tag_ASLayoutVersion, 2);
-    W.addU32(Tag_DefaultPlacement, Placement_InternalExtended);
-    W.addU32(Tag_InitProtocolVersion, 2);
-    W.addU32(Tag_PlacementProtocolVersion, 2);
-    W.addU32(Tag_StackContractVersion, 2);
-    W.addU32(Tag_FunctionContractVersion, 1);
-    W.addU32(Tag_RequiredCapabilitiesLo, 0);
-    W.addU32(Tag_RequiredCapabilitiesHi, 0);
-    W.addU32(Tag_ABIOptions, 0);
-    W.addMix(Tag_MemoryModelProfile,
-             {OutRecord{0, true, VT_U32, AS0PointerBits32, "", {}},
-              OutRecord{0, true, VT_U32, Placement_InternalExtended, "", {}}});
-    W.addU32(Tag_CodeModelProfile, 1);
-    W.addU32(Tag_CodePointerBits, CodePointerBits);
-    W.addU32(Tag_ObjectProtocolMinor, 0);
+    addCompleteIdentity(W);
     // Patch the target tag to a wrong value while keeping ordering valid.
     for (OutRecord &R : const_cast<std::vector<OutRecord> &>(W.records()))
       if (R.Tag == Tag)
@@ -455,11 +414,28 @@ TEST_F(MCS251AttributesTest, RuledValuesAreEnforced) {
            {Tag_CodePointerBits, 16, "code_pointer_bits"},
            {Tag_GeneralRegisterSet, 0, "general_register_set"},
            {Tag_AS0PointerBits, 24, "as0_pointer_bits"},
-           {Tag_DefaultPlacement, 2, "default_placement"}}) {
+           {Tag_DefaultPlacement, 2, "default_placement"},
+           // A4-registered values (design §2): every field rejects a
+           // candidate/wrong value, old candidate values included.
+           {Tag_CallABIMajor, 1, "call_abi_major"},
+           {Tag_CallABIMinor, 0, "call_abi_minor"},
+           {Tag_RegisterParameterVariant, 2, "register_parameter_variant"},
+           {Tag_ASLayoutVersion, 1, "as_layout_version"},
+           {Tag_InitProtocolVersion, 1, "init_protocol_version"},
+           {Tag_PlacementProtocolVersion, 1, "placement_protocol_version"},
+           {Tag_StackContractVersion, 1, "stack_contract_version"},
+           {Tag_FunctionContractVersion, 1, "function_contract_version"},
+           {Tag_RequiredCapabilitiesLo, 1, "required_capabilities_lo"},
+           {Tag_RequiredCapabilitiesHi, 1, "required_capabilities_hi"},
+           {Tag_ABIOptions, 1, "abi_options"},
+           {Tag_CodeModelProfile, 0, "code_model_profile"},
+           {Tag_ObjectProtocolMinor, 1, "object_protocol_minor"}}) {
     Decoded D;
     Error E = decode(buildWith(Tag, Bad), true, D);
     ASSERT_TRUE(bool(E)) << "tag " << Tag << " should reject value " << Bad;
-    EXPECT_NE(toString(std::move(E)).find(Expect), std::string::npos);
+    std::string Msg = toString(std::move(E));
+    EXPECT_NE(Msg.find(Expect), std::string::npos) << Msg;
+    EXPECT_NE(Msg.find("got"), std::string::npos) << Msg;
   }
 }
 
@@ -639,30 +615,11 @@ TEST_F(MCS251AttributesTest, DiagnosticsCarrySpecificValues) {
   // generic sentence.  A complete identity is needed so the value check (which
   // runs after the required-field check) is actually reached.
   Writer W;
-  W.addU32(Tag_ObjectProtocolVersion, 1); // wrong: must be 2
-  W.addU32(Tag_CallABIMajor, 2);
-  W.addU32(Tag_CallABIMinor, 0);
-  W.addU32(Tag_RegisterParameterVariant, 3);
-  W.addU32(Tag_GeneralRegisterSet, GeneralRegisterSet);
-  W.addU32(Tag_IntBits, IntBits);
-  W.addU32(Tag_LongBits, LongBits);
-  W.addU32(Tag_AS0PointerBits, AS0PointerBits32);
-  W.addU32(Tag_ASLayoutVersion, 2);
-  W.addU32(Tag_DefaultPlacement, Placement_InternalExtended);
-  W.addU32(Tag_InitProtocolVersion, 2);
-  W.addU32(Tag_PlacementProtocolVersion, 2);
-  W.addU32(Tag_StackContractVersion, 2);
-  W.addU32(Tag_FunctionContractVersion, 1);
-  W.addU32(Tag_RequiredCapabilitiesLo, 0);
-  W.addU32(Tag_RequiredCapabilitiesHi, 0);
-  W.addU32(Tag_ABIOptions, 0);
-  W.addMix(Tag_MemoryModelProfile,
-           {OutRecord{0, true, VT_U32, AS0PointerBits32, "", {}, false},
-            OutRecord{0, true, VT_U32, Placement_InternalExtended, "", {},
-                      false}});
-  W.addU32(Tag_CodeModelProfile, 1);
-  W.addU32(Tag_CodePointerBits, CodePointerBits);
-  W.addU32(Tag_ObjectProtocolMinor, 0);
+  addCompleteIdentity(W);
+  // Wrong value: object_protocol_version must be 2.
+  for (OutRecord &R : const_cast<std::vector<OutRecord> &>(W.records()))
+    if (R.Tag == Tag_ObjectProtocolVersion)
+      R.Scalar = 1;
 
   Decoded D;
   Error E = decode(W.render(true), true, D);
@@ -783,6 +740,10 @@ TEST_F(MCS251AttributesTest, CompleteIdentityEmittedBytesAreFrozen) {
   //   envelope: 41 | VendorSize=16+P | "MCS251\0" | 01 | ScopeSize=5+P
   //   P = 20 U32 records (7 bytes each) + the MIX record (3 + 12 bytes)
   //     = 155, so VendorSize = 171 (0xAB) and ScopeSize = 160 (0xA0).
+  // The values are the A4-registered set (PM ruling 2026-09-13): call ABI
+  // 2/1, register parameter variant 3, AS layout 2, placement 8, the four
+  // subprotocols 2, capabilities 0/0, abi_options 0, code model 1, object
+  // protocol minor 0.
   Writer W;
   addCompleteIdentity(W);
   std::string Bytes = W.render(/*IsBigEndian=*/true);
@@ -793,11 +754,11 @@ TEST_F(MCS251AttributesTest, CompleteIdentityEmittedBytesAreFrozen) {
       // Envelope (big-endian u32 lengths).
       "41" "000000AB" "4D435332353100" "01" "000000A0"
       // Twenty U32 records, tag order 4..20.
-      "04810400000002" "05810400000002" "06810400000000"
+      "04810400000002" "05810400000002" "06810400000001"
       "07810400000003" "0881040000F3FF" "09810400000020"
       "0A810400000020" "0B810400000020" "0C810400000002"
       "0D810400000008" "0E810400000002" "0F810400000002"
-      "10810400000002" "11810400000001" "12810400000000"
+      "10810400000002" "11810400000002" "12810400000000"
       "13810400000000" "14810400000000"
       // Tag 24 MIX (Critical): two U32 atoms (32, 8); each atom is type(1)
       // + length(1) + value(4) = 6 bytes, so the record length is 12.
@@ -815,6 +776,90 @@ TEST_F(MCS251AttributesTest, CompleteIdentityEmittedBytesAreFrozen) {
   Decoded D;
   Error E = decode(Bytes, true, D);
   ASSERT_FALSE(bool(E)) << toString(std::move(E));
+}
+
+TEST_F(MCS251AttributesTest, RegisteredIdentityMatchesFrozenBytes) {
+  // renderRegisteredIdentity() is the production payload source; its XSmall
+  // output must be byte-for-byte the complete identity above, and Small must
+  // differ from it in exactly the two placement fields (Tag 13 and the
+  // memory_model_profile placement atom).
+  std::string XSmall = renderRegisteredIdentity(
+      MemoryModelProfile_XSmall.AS0PointerBits, MemoryModelProfile_XSmall.Placement);
+  Writer W;
+  addCompleteIdentity(W);
+  EXPECT_EQ(XSmall, W.render(/*IsBigEndian=*/true));
+
+  std::string Small = renderRegisteredIdentity(
+      MemoryModelProfile_Small.AS0PointerBits, MemoryModelProfile_Small.Placement);
+  EXPECT_EQ(Small.size(), XSmall.size());
+  // The only differences are Tag 13 (default_placement, the 10th record:
+  // tag 4 is at payload offset 0, each U32 record is 7 bytes) and the
+  // memory_model_profile placement atom (the last 4 bytes of the MIX value,
+  // which is the payload's final 4 bytes before tags 25..27).
+  size_t Tag13Offset = 17 + 9 * 7;
+  EXPECT_EQ(toHex(StringRef(XSmall).substr(Tag13Offset, 7)),
+            "0d810400000008");
+  EXPECT_EQ(toHex(StringRef(Small).substr(Tag13Offset, 7)),
+            "0d810400000001");
+  // MIX placement atom: the MIX record (tag 24) follows the 17 U32 records
+  // of tags 4..20; its header is 3 bytes, atom 1 is 6 bytes (type, length,
+  // BE32 value), so atom 2's 4-byte value starts at MixOffset + 3 + 6 + 2.
+  size_t MixOffset = 17 + 17 * 7;
+  EXPECT_EQ(toHex(StringRef(XSmall).substr(MixOffset + 3 + 6 + 2, 4)),
+            "00000008");
+  EXPECT_EQ(toHex(StringRef(Small).substr(MixOffset + 3 + 6 + 2, 4)),
+            "00000001");
+  // Every byte outside those two fields is identical.
+  std::string A = XSmall, B = Small;
+  for (size_t I = 0; I < A.size(); ++I) {
+    bool InTag13 = I >= Tag13Offset && I < Tag13Offset + 7;
+    bool InMixPlacement =
+        I >= MixOffset + 3 + 6 + 2 && I < MixOffset + 3 + 6 + 2 + 4;
+    if (!InTag13 && !InMixPlacement)
+      EXPECT_EQ(A[I], B[I]) << "byte " << I << " must be identical";
+  }
+  // Both decode.
+  for (const std::string *Identity : {&XSmall, &Small}) {
+    Decoded D;
+    Error E = decode(*Identity, true, D);
+    ASSERT_FALSE(bool(E)) << toString(std::move(E));
+  }
+}
+
+TEST_F(MCS251AttributesTest, RegisteredIdentityRejectsUnregisteredProfiles) {
+  // Only XSmall (32,8) and Small (32,1) are registered for A4 emission.
+  // Tiny, XTiny and Large are structurally decodable profiles but must not
+  // be renderable as production identities.
+  for (const MemoryModelProfile &P :
+       {MemoryModelProfile_Tiny, MemoryModelProfile_XTiny,
+        MemoryModelProfile_Large})
+    EXPECT_DEATH(
+        renderRegisteredIdentity(P.AS0PointerBits, P.Placement),
+        "is not registered for A4 v2 object emission");
+  EXPECT_DEATH(renderRegisteredIdentity(32, 3),
+               "is not registered for A4 v2 object emission");
+}
+
+TEST_F(MCS251AttributesTest, RegisteredValuesMatchRulingTable) {
+  // Pin the A4 ruling values (design §2, PM 2026-09-13) as named constants.
+  EXPECT_EQ(CallABIMajor, 2u);
+  EXPECT_EQ(CallABIMinor, 1u);
+  EXPECT_EQ(RegisterParameterVariant, 3u);
+  EXPECT_EQ(ASLayoutVersion, 2u);
+  EXPECT_EQ(InitProtocolVersion, 2u);
+  EXPECT_EQ(PlacementProtocolVersion, 2u);
+  EXPECT_EQ(StackContractVersion, 2u);
+  EXPECT_EQ(FunctionContractVersion, 2u);
+  EXPECT_EQ(RequiredCapabilitiesLo, 0u);
+  EXPECT_EQ(RequiredCapabilitiesHi, 0u);
+  EXPECT_EQ(ABIOptions, 0u);
+  EXPECT_EQ(CodeModelProfile, 1u);
+  EXPECT_EQ(ObjectProtocolMinor, 0u);
+  EXPECT_TRUE(isRegisteredA4Profile(32, 8));
+  EXPECT_TRUE(isRegisteredA4Profile(32, 1));
+  EXPECT_FALSE(isRegisteredA4Profile(16, 1));
+  EXPECT_FALSE(isRegisteredA4Profile(16, 8));
+  EXPECT_FALSE(isRegisteredA4Profile(32, 3));
 }
 
 TEST_F(MCS251AttributesTest, WriterRejectsInvalidMIXAtomTypes) {

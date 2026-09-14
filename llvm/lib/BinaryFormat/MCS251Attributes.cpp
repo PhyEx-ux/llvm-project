@@ -10,13 +10,12 @@
 // layout is frozen in validation/mcs251-models/DESIGN.md N.3-N.6; see
 // llvm/BinaryFormat/MCS251Attributes.h for the registration point.
 //
-// X3-R1 status: this is a STRUCTURE codec with no production caller.  It
-// validates the frozen envelope/record/type/tag rules (and the ruled
-// scalar values); it does NOT attest that any decoded field-value
-// combination is an approved v2 object identity -- the N.5/N.9 value
-// domains are still open, and no production emitter may serialize them.
-// Unit-test coverage of this codec is structural acceptance, not complete
-// v2 identity acceptance.
+// A4 status (PM ruling 2026-09-13): the former N.5/N.9 open value domains
+// are registered (A4-V2-OBJECT-IDENTITY-DESIGN.md §2).  The decoder now
+// enforces the registered values as equality checks, and
+// renderRegisteredIdentity() assembles the minimal registered identity that
+// the MCS251 v2 object path publishes.  No candidate value set can be
+// serialized into a production object through this codec.
 //
 //===----------------------------------------------------------------------===//
 
@@ -25,6 +24,8 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <cstring>
+#include <initializer_list>
+#include <tuple>
 
 using namespace llvm;
 using namespace llvm::MCS251Attributes;
@@ -218,6 +219,47 @@ std::string Writer::render(bool IsBigEndian) const {
   appendU32(Out, ScopeSizeBase + uint32_t(Payload.size()), IsBigEndian);
   Out.append(Payload);
   return Out;
+}
+
+std::string MCS251Attributes::renderRegisteredIdentity(uint32_t AS0Bits,
+                                                       uint32_t Placement) {
+  // The A4 minimal registration set (design §2.2): all 21 RequiredTags in
+  // canonical order, tags 21-23 omitted.  Only the XSmall (32,8) and Small
+  // (32,1) profiles are approved for production emission; every other
+  // frozen profile fails closed here instead of reaching an object.
+  if (!isRegisteredA4Profile(AS0Bits, Placement))
+    report_fatal_error(
+        "MCS251 attributes: the (as0_pointer_bits, default_placement) pair (" +
+        Twine(AS0Bits) + "," + Twine(Placement) +
+        ") is not registered for A4 v2 object emission");
+
+  Writer W;
+  W.addU32(Tag_ObjectProtocolVersion, ObjectProtocolVersion);
+  W.addU32(Tag_CallABIMajor, CallABIMajor);
+  W.addU32(Tag_CallABIMinor, CallABIMinor);
+  W.addU32(Tag_RegisterParameterVariant, RegisterParameterVariant);
+  W.addU32(Tag_GeneralRegisterSet, GeneralRegisterSet);
+  W.addU32(Tag_IntBits, IntBits);
+  W.addU32(Tag_LongBits, LongBits);
+  W.addU32(Tag_AS0PointerBits, AS0Bits);
+  W.addU32(Tag_ASLayoutVersion, ASLayoutVersion);
+  W.addU32(Tag_DefaultPlacement, Placement);
+  W.addU32(Tag_InitProtocolVersion, InitProtocolVersion);
+  W.addU32(Tag_PlacementProtocolVersion, PlacementProtocolVersion);
+  W.addU32(Tag_StackContractVersion, StackContractVersion);
+  W.addU32(Tag_FunctionContractVersion, FunctionContractVersion);
+  W.addU32(Tag_RequiredCapabilitiesLo, RequiredCapabilitiesLo);
+  W.addU32(Tag_RequiredCapabilitiesHi, RequiredCapabilitiesHi);
+  W.addU32(Tag_ABIOptions, ABIOptions);
+  W.addMix(Tag_MemoryModelProfile,
+           {OutRecord{0, true, VT_U32, AS0Bits, "", {}},
+            OutRecord{0, true, VT_U32, Placement, "", {}}});
+  W.addU32(Tag_CodeModelProfile, CodeModelProfile);
+  W.addU32(Tag_CodePointerBits, CodePointerBits);
+  W.addU32(Tag_ObjectProtocolMinor, ObjectProtocolMinor);
+  // The MCS-251 ELF target is big-endian; the envelope u32 lengths and the
+  // U32 record values are always serialized MSB-first.
+  return W.render(/*IsBigEndian=*/true);
 }
 
 //===----------------------------------------------------------------------===//
@@ -637,8 +679,15 @@ llvm::Error MCS251Attributes::decode(StringRef Bytes, bool IsBigEndian,
           OS << " has no implemented schema in this revision and cannot be "
                 "treated as Critical";
         });
+      // No concrete type rule: the value bytes were never schema-decoded;
+      // keep SchemaValidated false so consumers display raw bytes.
+      Out.Records.push_back(std::move(R));
+      continue;
     }
 
+    // Known tag with a concrete type rule: the checks above validated the
+    // record (and decoded Scalar where applicable).
+    R.SchemaValidated = true;
     Out.Records.push_back(std::move(R));
   }
 
@@ -685,6 +734,40 @@ llvm::Error MCS251Attributes::decode(StringRef Bytes, bool IsBigEndian,
          << format_hex_no_prefix(GeneralRegisterSet, 8) << ", got "
          << format_hex_no_prefix(getU32(Tag_GeneralRegisterSet), 8);
     });
+
+  // --- A4-registered values (PM ruling 2026-09-13; design §2) ------------
+  // These fields were the N.5/N.9 open set; the ruling registered exactly
+  // one value per field, so the decoder enforces equality.  A candidate or
+  // future value must be rejected here, not silently defaulted.
+  for (auto [T, Registered, Name] :
+       std::initializer_list<std::tuple<uint32_t, uint32_t, const char *>>{
+           {Tag_CallABIMajor, CallABIMajor, "call_abi_major"},
+           {Tag_CallABIMinor, CallABIMinor, "call_abi_minor"},
+           {Tag_RegisterParameterVariant, RegisterParameterVariant,
+            "register_parameter_variant"},
+           {Tag_ASLayoutVersion, ASLayoutVersion, "as_layout_version"},
+           {Tag_InitProtocolVersion, InitProtocolVersion,
+            "init_protocol_version"},
+           {Tag_PlacementProtocolVersion, PlacementProtocolVersion,
+            "placement_protocol_version"},
+           {Tag_StackContractVersion, StackContractVersion,
+            "stack_contract_version"},
+           {Tag_FunctionContractVersion, FunctionContractVersion,
+            "function_contract_version"},
+           {Tag_RequiredCapabilitiesLo, RequiredCapabilitiesLo,
+            "required_capabilities_lo"},
+           {Tag_RequiredCapabilitiesHi, RequiredCapabilitiesHi,
+            "required_capabilities_hi"},
+           {Tag_ABIOptions, ABIOptions, "abi_options"},
+           {Tag_CodeModelProfile, CodeModelProfile, "code_model_profile"},
+           {Tag_ObjectProtocolMinor, ObjectProtocolMinor,
+            "object_protocol_minor"},
+       })
+    if (getU32(T) != Registered)
+      return makeError([&](raw_ostream &OS) {
+        OS << Name << " must be " << Registered << ", got " << getU32(T)
+           << " (the A4-registered value is the only approved value)";
+      });
 
   uint32_t AS0 = getU32(Tag_AS0PointerBits);
   if (AS0 != AS0PointerBits16 && AS0 != AS0PointerBits32)

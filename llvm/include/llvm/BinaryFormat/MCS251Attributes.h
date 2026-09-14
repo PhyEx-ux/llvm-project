@@ -23,9 +23,12 @@
 // big-endian.  Tag and Length inside a record are naked ULEB128 and are never
 // byte-swapped.
 //
-// This file defines the encoding only.  It deliberately contains no policy
-// about which values are "approved": several fields are still listed as open
-// in DESIGN.md N.5/N.9 and must not be silently defaulted here.
+// This file defines the encoding and the value registration.  The A4 open
+// values were ruled by the PM on 2026-09-13 (design
+// validation/mcs251-models/proposals/A4-V2-OBJECT-IDENTITY-DESIGN.md §2 and
+// the ruling record at its end), so the registered constants below are the
+// only values production may emit or accept; a candidate value must not
+// enter a relocatable object.
 //
 //===----------------------------------------------------------------------===//
 
@@ -126,29 +129,29 @@ enum Tag : uint32_t {
   // Values 0-3 are reserved for the scope namespace; the first allocated
   // attribute tag is 4.
   Tag_ObjectProtocolVersion   = 4,  ///< U32, required, ruled: 2
-  Tag_CallABIMajor            = 5,  ///< U32, required, open: candidate 2
-  Tag_CallABIMinor            = 6,  ///< U32, required, open: candidate 0
-  Tag_RegisterParameterVariant= 7,  ///< U32, required, open: candidate 3
+  Tag_CallABIMajor            = 5,  ///< U32, required, registered A4: 2
+  Tag_CallABIMinor            = 6,  ///< U32, required, registered A4: 1
+  Tag_RegisterParameterVariant= 7,  ///< U32, required, registered A4: 3
   Tag_GeneralRegisterSet      = 8,  ///< U32, required, ruled: 0x0000f3ff
   Tag_IntBits                 = 9,  ///< U32, required, ruled: 32
   Tag_LongBits                = 10, ///< U32, required, ruled: 32
   Tag_AS0PointerBits          = 11, ///< U32, required, ruled: 16 or 32
-  Tag_ASLayoutVersion         = 12, ///< U32, required, open
+  Tag_ASLayoutVersion         = 12, ///< U32, required, registered A4: 2
   Tag_DefaultPlacement        = 13, ///< U32, required, ruled: 1/3/8
-  Tag_InitProtocolVersion     = 14, ///< U32, required, open: candidate 2
-  Tag_PlacementProtocolVersion= 15, ///< U32, required, open: candidate 2
-  Tag_StackContractVersion    = 16, ///< U32, required, open: candidate 2
-  Tag_FunctionContractVersion = 17, ///< U32, required, open
-  Tag_RequiredCapabilitiesLo  = 18, ///< U32, required, open
-  Tag_RequiredCapabilitiesHi  = 19, ///< U32, required, open
-  Tag_ABIOptions              = 20, ///< U32, required, open
+  Tag_InitProtocolVersion     = 14, ///< U32, required, registered A4: 2
+  Tag_PlacementProtocolVersion= 15, ///< U32, required, registered A4: 2
+  Tag_StackContractVersion    = 16, ///< U32, required, registered A4: 2
+  Tag_FunctionContractVersion = 17, ///< U32, required, registered A4: 2
+  Tag_RequiredCapabilitiesLo  = 18, ///< U32, required, registered A4: 0
+  Tag_RequiredCapabilitiesHi  = 19, ///< U32, required, registered A4: 0
+  Tag_ABIOptions              = 20, ///< U32, required, registered A4: 0
   Tag_Reserved0               = 21, ///< U32, optional, must be 0
   Tag_Reserved1               = 22, ///< U32, optional, must be 0
   Tag_Reserved2               = 23, ///< U32, optional, must be 0
   Tag_MemoryModelProfile      = 24, ///< MIX(U32,U32), required
-  Tag_CodeModelProfile        = 25, ///< U32, required, open
+  Tag_CodeModelProfile        = 25, ///< U32, required, registered A4: 1
   Tag_CodePointerBits         = 26, ///< U32, required, ruled: 32
-  Tag_ObjectProtocolMinor     = 27, ///< U32, required, open: candidate 0
+  Tag_ObjectProtocolMinor     = 27, ///< U32, required, registered A4: 0
 
   Tag_FirstAllocated = Tag_ObjectProtocolVersion,
   Tag_LastRegistered = Tag_ObjectProtocolMinor,
@@ -190,6 +193,30 @@ inline constexpr uint32_t CodePointerBits        = 32;
 inline constexpr uint32_t AS0PointerBits16       = 16;
 inline constexpr uint32_t AS0PointerBits32       = 32;
 
+//===----------------------------------------------------------------------===//
+// A4-registered field values (PM ruling 2026-09-13; A4 design §2).  These
+// were the open fields of N.5/N.9; the ruling registered exactly this set,
+// and the decoder enforces them as equality checks, so a candidate value can
+// no longer be serialized into a production object.
+//===----------------------------------------------------------------------===//
+
+inline constexpr uint32_t CallABIMajor            = 2;
+/// CallABIMinor=1 is the SOLE carrier of the "later pointer parameters take
+/// static slots" capability (design §2.1): no RequiredCapabilitiesLo bit is
+/// defined for it and the two encodings must not be mixed.
+inline constexpr uint32_t CallABIMinor            = 1;
+inline constexpr uint32_t RegisterParameterVariant = 3;
+inline constexpr uint32_t ASLayoutVersion         = 2;
+inline constexpr uint32_t InitProtocolVersion     = 2;
+inline constexpr uint32_t PlacementProtocolVersion = 2;
+inline constexpr uint32_t StackContractVersion    = 2;
+inline constexpr uint32_t FunctionContractVersion = 2;
+inline constexpr uint32_t RequiredCapabilitiesLo  = 0;
+inline constexpr uint32_t RequiredCapabilitiesHi  = 0;
+inline constexpr uint32_t ABIOptions              = 0;
+inline constexpr uint32_t CodeModelProfile        = 1;
+inline constexpr uint32_t ObjectProtocolMinor     = 0;
+
 /// default_placement: InternalMovable / ExternalData / InternalExtended.
 enum DefaultPlacement : uint32_t {
   Placement_InternalMovable  = 1,
@@ -208,6 +235,18 @@ inline constexpr MemoryModelProfile MemoryModelProfile_XTiny  = {16, Placement_I
 inline constexpr MemoryModelProfile MemoryModelProfile_Small  = {32, Placement_InternalMovable};
 inline constexpr MemoryModelProfile MemoryModelProfile_XSmall = {32, Placement_InternalExtended};
 inline constexpr MemoryModelProfile MemoryModelProfile_Large  = {32, Placement_ExternalData};
+
+/// \return true when (AS0Bits, Placement) is one of the two memory model
+/// profiles registered for A4 production emission: XSmall (32,
+/// InternalExtended) and Small (32, InternalMovable).  The other three
+/// frozen profiles remain structurally decodable but are not approved for
+/// emission (16-bit objects are rejected by the object gate; Large is
+/// outside the A4 registration).
+inline bool isRegisteredA4Profile(uint32_t AS0Bits, uint32_t Placement) {
+  return AS0Bits == AS0PointerBits32 &&
+         (Placement == Placement_InternalExtended ||
+          Placement == Placement_InternalMovable);
+}
 
 /// Tag 256 in the N.7 fixture is an unallocated tag used to exercise the
 /// unknown-tag rules; this constant exists only so tests do not hardcode it.

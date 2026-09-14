@@ -10,13 +10,12 @@
 // layout frozen in DESIGN.md N.3/N.4/N.5 and is used by the unit tests and
 // YAML fixtures.
 //
-// X3-R1 status: this is a STRUCTURE codec, not an approved v2 object
-// identity emitter.  The N.5/N.9 field VALUE DOMAINS are still open (call
-// ABI, register variant, init/placement/stack/function subprotocols, code
-// model profile, capability words, ABI options), so nothing in production
-// may render these bytes into a relocatable object: the writer currently
-// has no production caller, and the tests that build "complete" identities
-// exercise the codec's rules, not an approved value combination.
+// A4 status (PM ruling 2026-09-13): the value domains are registered
+// (A4-V2-OBJECT-IDENTITY-DESIGN.md §2).  renderRegisteredIdentity() is the
+// production assembler for the minimal registered identity; the raw add*
+// entry points remain available so tests can still construct deliberate
+// malformed or unregistered combinations, but the decoder now rejects every
+// unregistered value.
 //
 // Emission is canonical: tags strictly increasing by number (N.6; a
 // violation is a hard render error, not an assert), reserved tags omitted
@@ -88,6 +87,16 @@ void encodeULEB128(uint64_t Value, std::string &Out);
 /// Encode a ULEB128 value using a caller-chosen byte count (tests only; allows
 /// deliberately non-shortest encodings so the reader can reject them).
 void encodeULEB128Padded(uint64_t Value, unsigned Bytes, std::string &Out);
+
+/// Assemble and render the complete A4 registered identity (design §2.2:
+/// every RequiredTag exactly once, tags 21-23 omitted) for the given
+/// (as0_pointer_bits, default_placement) profile, big-endian.  Only the
+/// registered XSmall (32,8) and Small (32,1) profiles are accepted; every
+/// other pair is a hard error, so no unregistered identity can be rendered
+/// into a production object.  This is the production payload source for the
+/// MCS251 v2 object path.
+std::string renderRegisteredIdentity(uint32_t AS0PointerBits,
+                                     uint32_t DefaultPlacement);
 
 } // end namespace MCS251Attributes
 } // end namespace llvm
