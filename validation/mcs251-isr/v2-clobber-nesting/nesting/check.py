@@ -47,7 +47,7 @@ def blob(a, n):
 
 # Reset vector plus BOTH interrupt vectors: slot 1 Timer0 @0xFF000B,
 # slot 3 Timer1 @0xFF001B (frozen formula base 0xff0003 + 8*slot, EJMP).
-assert blob(0xff0000, 3) == b'\x02\x02\x10'
+assert blob(0xff0000, 3) == b'\x02\x05\x00'
 assert blob(0xff000b, 1) == b'\x8a' and blob(0xff001b, 1) == b'\x8a'
 assert blob(0xff000c, 3) == isr_high.to_bytes(3, 'big')
 assert blob(0xff001c, 3) == isr_low.to_bytes(3, 'big')

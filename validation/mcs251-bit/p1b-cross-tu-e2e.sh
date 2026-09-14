@@ -85,8 +85,8 @@ echo "compile: tu1/tu2/fw clang -cc1 + llc ELF OK"
 link() { # out-prefix object-order...
   local pfx=$1; shift
   (cd "$OUT" && "$LLD" "$@" \
-    --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 \
-    --area-start=CSEG=0xff0320 --area-start=XINIT=0xff8000 \
+    --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+    --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
     --map="$(basename "$pfx").map" -o "$(basename "$pfx").elf")
 }
 link "$OUT/a" crt.o fw.o tu1.o tu2.o

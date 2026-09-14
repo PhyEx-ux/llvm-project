@@ -3175,7 +3175,7 @@ void Verifier::verifySiblingFuncletUnwinds() {
 /// Verify the MCS251 ISR entry contract (A2 interface freeze): the MCS251_INTR
 /// convention (128) and the "mcs251-isr-vector" string attribute must appear
 /// together, the slot must be canonical decimal text naming a legal slot of
-/// the frozen 0-51 profile, the type must be non-vararg void(), linkage and
+/// the frozen 0-126 profile, the type must be non-vararg void(), linkage and
 /// attribute restrictions hold, uses are limited to structurally correct
 /// llvm.used keepalive entries, and every definition is noinline, kept alive
 /// by llvm.used, and registers its slot at most once per module. Declarations
@@ -3196,25 +3196,16 @@ void Verifier::verifyMCS251ISR(const Function &F) {
 
   // The slot value is canonical decimal text ("0" and "1" are legal;
   // "01", "+1", "0x1", the empty string and negative values are not) and
-  // must name a legal slot. Reserved, system and out-of-profile slots are
-  // never user-assignable.
+  // must name a legal slot.  The shared parser owns the canonical-decimal
+  // rules and the overflow bound; the shared table owns legality, so a
+  // reserved/system number inside the profile is rejected too.
   uint64_t SlotVal = 0;
-  StringRef SlotText = VecAttr.getValueAsString();
-  bool Canonical = !SlotText.empty() &&
-                   (SlotText.size() == 1 || SlotText.front() != '0');
-  if (Canonical) {
-    for (char C : SlotText) {
-      if (!isDigit(C)) {
-        Canonical = false;
-        break;
-      }
-      SlotVal = SlotVal * 10 + (C - '0');
-      if (SlotVal > 51)
-        break; // already out of profile; no need to accumulate further
-    }
-  }
+  bool Canonical =
+      MCS251ISR::parseCanonicalSlot(VecAttr.getValueAsString(), SlotVal);
   Check(Canonical && MCS251ISR::isLegalISRSlot(SlotVal),
-        "MCS251 ISR: vector is not a legal slot in profile 0-51", &F);
+        Twine("MCS251 ISR: vector is not a legal slot in profile 0-") +
+            Twine(MCS251ISR::ISRVectorMaxSlot),
+        &F);
 
   // An entry has hardware-fixed frame; only non-vararg void() is an entry.
   Check(F.getFunctionType()->getReturnType()->isVoidTy() &&

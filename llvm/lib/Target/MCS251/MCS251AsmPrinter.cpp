@@ -179,21 +179,9 @@ class MCS251AsmPrinter final : public AsmPrinter {
   bool usesELFObjects() const { return getMCS251TM().usesELFObjects(); }
 
   // The slot value is canonical decimal text ("0" and "1" are legal;
-  // "01", "+1", "0x1", the empty string and negative values are not).
-  // (Mirrors the frozen T01 structure check.)
-  static bool isCanonicalISRSlotText(StringRef SlotText, uint64_t &SlotVal) {
-    if (SlotText.empty() ||
-        (SlotText.size() > 1 && SlotText.front() == '0'))
-      return false;
-    for (char C : SlotText) {
-      if (!isDigit(C))
-        return false;
-      SlotVal = SlotVal * 10 + (C - '0');
-      if (SlotVal > 51)
-        break; // already out of profile; no need to accumulate further
-    }
-    return true;
-  }
+  // The canonical-decimal slot check is shared with the Verifier and the
+  // target contract check through MCS251ISR::parseCanonicalSlot; the object
+  // boundary re-validates with the same rules so no layer can drift.
 
   // A4/W3b (design §3.3, PM ruling 2026-09-13 #2): the D.5 static-slot
   // address spaces.  Under a v2 contract the ELF identity is the contract's
@@ -1154,10 +1142,11 @@ public:
       report_fatal_error("MCS251 ISR: calling convention and vector attribute "
                          "must appear together");
     uint64_t Slot = 0;
-    if (!isCanonicalISRSlotText(VecAttr.getValueAsString(), Slot) ||
+    if (!MCS251ISR::parseCanonicalSlot(VecAttr.getValueAsString(), Slot) ||
         !MCS251ISR::isLegalISRSlot(Slot))
-      report_fatal_error("MCS251 ISR: vector is not a legal slot in profile "
-                         "0-51");
+      report_fatal_error(
+          Twine("MCS251 ISR: vector is not a legal slot in profile 0-") +
+          Twine(MCS251ISR::ISRVectorMaxSlot));
 
     MCSection *Saved = OutStreamer->getCurrentSectionOnly();
     // A3.2: SHT_PROGBITS, flags 0, alignment 4, no entry size, big-endian

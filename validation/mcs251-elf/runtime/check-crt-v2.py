@@ -33,7 +33,7 @@
 #     crt-selfstart.yaml;
 #   - irq variant: HOME 3-byte ljmp, BOOT 0x106 bytes against the frozen
 #     T08 template, the 16-byte BSEG_BYTES reservation, the two 24-byte
-#     .mcs251.isr asset records with ProtocolVersion STILL 1 (the ISR record
+#     .mcs251.isr asset records with ProtocolVersion 2 (G1 raised the ISR record
 #     protocol and the ELF object identity are two different protocols; the
 #     ISR bump belongs to G1, not A4), the frozen relocations and symbols -
 #     identical bytes to crt-irq.yaml.
@@ -443,15 +443,15 @@ IRQ_ISR_RELOCS = {
     0x24: (R_MCS251_ISR_REF, "__mcs251_reset"),
 }
 
-# .mcs251.isr asset records (A3.2/A3.3): ProtocolVersion stays 1 (the ISR
+# .mcs251.isr asset records (A3.2/A3.3): ProtocolVersion is 2 (G1 raised the ISR
 # metadata protocol is independent of the ELF object identity; G1 owns the
 # bump).  Fields: version, record_size, kind, entry, hw, save, slot, caps.
 IRQ_ISR_RECORDS = [
     # IRQ_DEFAULT: kind 3, entry_kind 2 (IRQ_STOP), hw 1, asset 1
-    {"version": 1, "record_size": 24, "kind": 3, "entry": 2, "hw": 1,
+    {"version": 2, "record_size": 24, "kind": 3, "entry": 2, "hw": 1,
      "save": 0, "slot": 0xFFFF, "caps": 0x0001, "asset": 1},
     # IRQ_RESET: kind 4, entry_kind 3 (RESET), hw 0, asset 1
-    {"version": 1, "record_size": 24, "kind": 4, "entry": 3, "hw": 0,
+    {"version": 2, "record_size": 24, "kind": 4, "entry": 3, "hw": 0,
      "save": 0, "slot": 0xFFFF, "caps": 0x0001, "asset": 1},
 ]
 
@@ -1079,7 +1079,7 @@ def check_irq(data, eh, sections, symbols):
             "BSEG_BYTES reservation shape changed")
     ok("BSEG_BYTES: 16B writable NOBITS reservation, align 1, ET_REL addr 0")
 
-    # ISR records: ProtocolVersion 1 kept (G1 owns the bump; W7 card).
+    # ISR records: ProtocolVersion 2 (G1 raised the ISR protocol version).
     isr = by_name(sections, ".mcs251.isr")
     require(isr["type"] == SHT_PROGBITS and isr["flags"] == 0 and
             isr["align"] == 4 and isr["entsize"] == 0,
@@ -1095,9 +1095,9 @@ def check_irq(data, eh, sections, symbols):
         require((version, rsize) == (want["version"], want["record_size"]),
                 "record %d header version/size bad (%d/%d)"
                 % (idx, version, rsize))
-        require(version == 1,
-                "record %d ProtocolVersion %d, expected 1 (ISR protocol "
-                "stays v1 in A4; the ELF identity is a separate protocol)"
+        require(version == 2,
+                "record %d ProtocolVersion %d, expected 2 (G1 raised the "
+                "ISR protocol version; the ELF identity is separate)"
                 % (idx, version))
         require(kind == want["kind"] and entry == want["entry"],
                 "record %d kind/entry mismatch" % idx)
@@ -1108,7 +1108,7 @@ def check_irq(data, eh, sections, symbols):
         require(symref == b"\x00" * 4 and reserved == b"\x00" * 4,
                 "record %d symbol_reference/reserved not zero" % idx)
         require(asset == want["asset"], "record %d asset_profile mismatch" % idx)
-    ok("ISR records: IRQ_DEFAULT + IRQ_RESET, ProtocolVersion 1 kept, "
+    ok("ISR records: IRQ_DEFAULT + IRQ_RESET, ProtocolVersion 2, "
        "24B each, asset_profile 1")
 
     check_rela_set(data, eh, sections, symbols, ".rela.mcs251.HOME",

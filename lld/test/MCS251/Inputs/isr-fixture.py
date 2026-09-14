@@ -37,19 +37,30 @@ assert len(ISR_BODY) == 41
 # rule: the kind3-associated function itself keeps valid default shape.
 DEFAULT_BODY = bytes.fromhex('C2AF80FE')
 
-# Independent legal-slot copy for generator-side argument sanity (39 slots).
-LEGAL = (0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21,
-         24, 25, 26, 27, 28, 29, 30, 36, 37, 38, 39, 40, 41, 42, 43, 44,
-         47, 48, 49, 50, 51)
+# Independent legal-slot copy for generator-side argument sanity.  G1 profile
+# (PM ruling 2026-09-13): 127 slots, Legal = 109.  This is a deliberate second
+# copy so the generator cannot silently follow a product-table regression.
+LEGAL = tuple(
+    s for s in range(127)
+    if s not in (7, 13, 14, 15, 22, 23, 32, 33, 34, 35,
+                 81, 92, 93, 94, 95, 100, 101, 113))
+assert len(LEGAL) == 109, len(LEGAL)
 
-ABI_NOTE_DESC = ('000000010000000100000000000000020000F3FF'
-                 '000000070000000000000000')
+# G1 x P-4: the generated object carries the A4 v2 identity (a
+# `.mcs251.attributes` carrier) rather than the v1 `.note.mcs251.abi`, because
+# the only approved IRQ CRT is a v2 object and a v1/v2 mix is refused.  Tag 28
+# records the ordinary `_main` definition so the P-4 per-object coverage rule
+# is satisfied; the ISR handler symbols are local and stay out of the
+# signature domain.
+ATTRS_CARRIER_HEX = ('41000000C14D43533235310001000000B6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8413010001000000000001000002015F6D61696E00')
 
 RECORD = '>HHBBBBHHIII'  # 24 bytes, all big-endian (A3.2).
 
 
 def rec(kind, entry, hw, save, slot, asset):
-    return struct.pack(RECORD, 1, 24, kind, entry, hw, save, slot, 1, 0,
+    # G1 raised the ISR protocol version to 2 (PM ruling 2026-09-13); the
+    # 24-byte layout is unchanged.
+    return struct.pack(RECORD, 2, 24, kind, entry, hw, save, slot, 1, 0,
                        asset, 0)
 
 
@@ -109,7 +120,8 @@ def build(slots, mutation):
     if mutation:
         first = slots[0]
         if mutation == 'version':
-            records[0] = b'\x00\x02' + records[0][2:]
+            # The legal version is 2; the old 1 is now the rejected value.
+            records[0] = b'\x00\x01' + records[0][2:]
         elif mutation == 'record-size':
             records[0] = records[0][:2] + b'\x00\x19' + records[0][4:]
         elif mutation == 'caps':
@@ -173,9 +185,8 @@ def build(slots, mutation):
                  '        Symbol: %s\n        Addend: %d\n'
                  % (o, n, a) for (o, n, a) in relocs)))
     sections.append(
-        ('.note.mcs251.abi', 'SHT_NOTE', '[ ]', 4, None,
-         "Notes:\n      - Name: MCS251\n        Type: 1\n"
-         "        Desc: '%s'" % ABI_NOTE_DESC))
+        ('.mcs251.attributes', '0x70000003', '[ ]', 1,
+         "Content: '%s'" % ATTRS_CARRIER_HEX, None))
 
     out = []
     out.append('--- !ELF')

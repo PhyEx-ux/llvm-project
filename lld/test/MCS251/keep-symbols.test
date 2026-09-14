@@ -14,13 +14,15 @@
 # against the raw bytes, not just readobj's tolerant printer).
 #
 # RUN: rm -rf %t && split-file %s %t && cd %t
-# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o %t.crt.o
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml -o %t.crt.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt.o
 # RUN: %python %S/Inputs/isr-fixture.py --out %t.isr.yaml --slots 1
 # RUN: yaml2obj %t.isr.yaml -o %t.isr.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.isr.o
 
 # --- Default behavior is unchanged: no FUNC rows, no ELF symbols ---
 # RUN: mcs251-lld %t.crt.o %t.isr.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 --map=%t.def.map -o %t.def.elf
 # RUN: not grep -q 'FUNC' %t.def.map
 # RUN: llvm-readobj --symbols %t.def.elf > %t.def.syms
@@ -28,16 +30,16 @@
 
 # --- --keep-symbols: the final ELF carries the traceability symbols ---
 # RUN: mcs251-lld %t.crt.o %t.isr.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 --keep-symbols --map=%t.ks.map -o %t.ks.elf
 
 # The registered handler symbol sits exactly at the fixture .text base
-# (CSEG=0xff0400), with its full input range.  The image checker below
+# (CSEG=0xff0700), with its full input range.  The image checker below
 # independently proves the slot-1 EJMP lands on that same address, so the
 # symbol value/range agrees with the vector.
 # RUN: llvm-readobj --symbols %t.ks.elf | FileCheck %s --check-prefix=SYM
 # SYM: Name: _irq1
-# SYM-NEXT: Value: 0xFF0400
+# SYM-NEXT: Value: 0xFF0700
 # SYM-NEXT: Size: 41
 # SYM-NEXT: Binding: Local (0x0)
 # SYM-NEXT: Type: Function (0x2)
@@ -47,12 +49,12 @@
 # SYM-NEXT: Binding: Global (0x1)
 # SYM-NEXT: Type: Function (0x2)
 # SYM: Name: __mcs251_isr_unhandled
-# SYM-NEXT: Value: 0xFF0312
+# SYM-NEXT: Value: 0xFF0602
 # SYM-NEXT: Size: 4
 # SYM-NEXT: Binding: Global (0x1)
 # SYM-NEXT: Type: Function (0x2)
 # SYM: Name: _main
-# SYM-NEXT: Value: 0xFF0429
+# SYM-NEXT: Value: 0xFF0729
 # SYM-NEXT: Size: 2
 # SYM-NEXT: Binding: Global (0x1)
 # SYM-NEXT: Type: Function (0x2)
@@ -64,13 +66,14 @@
 # --- Map function rows: address + size for every sized STT_FUNC ---
 # Row order: locals first (input order), then globals (input order).
 # RUN: FileCheck %s --check-prefix=MAP < %t.ks.map
-# MAP: FUNC 0xff0400 +0x29 _irq1
+# MAP: FUNC 0xff0700 +0x29 _irq1
 # MAP: FUNC 0xff0000 +0x3 __mcs251_reset
-# MAP: FUNC 0xff0312 +0x4 __mcs251_isr_unhandled
-# MAP: FUNC 0xff0429 +0x2 _main
+# MAP: FUNC 0xff0602 +0x4 __mcs251_isr_unhandled
+# MAP: FUNC 0xff0729 +0x2 _main
 
 # --- NOBITS (direct-addr RAM) symbols have no loadable section: ABS ---
 # RUN: yaml2obj %t/abs.yaml -o %t.abs.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.abs.o
 # RUN: mcs251-lld %t.abs.o --area-start=CSEG=0xff0200 --keep-symbols \
 # RUN:   -o %t.abs.elf
 # RUN: llvm-readobj --symbols %t.abs.elf | FileCheck %s --check-prefix=ABS
@@ -140,13 +143,10 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_WRITE ]
     AddressAlign: 1
     Size: 4
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000'
 Symbols:
   - Name: _var
     Type: STT_OBJECT

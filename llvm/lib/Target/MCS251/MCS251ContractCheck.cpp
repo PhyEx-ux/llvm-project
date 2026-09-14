@@ -460,23 +460,6 @@ static bool isMCS251LegalUsedRoot(const GlobalVariable &GV) {
   return true;
 }
 
-// Parse the canonical decimal slot text of \p F ("0" and "1" are legal;
-// "01", "+1", "0x1", the empty string and negative values are not).
-static bool isCanonicalISRSlotText(StringRef SlotText, uint64_t &SlotVal) {
-  bool Canonical =
-      !SlotText.empty() && (SlotText.size() == 1 || SlotText.front() != '0');
-  if (!Canonical)
-    return false;
-  for (char C : SlotText) {
-    if (!isDigit(C))
-      return false;
-    SlotVal = SlotVal * 10 + (C - '0');
-    if (SlotVal > 51)
-      break; // already out of profile; no need to accumulate further
-  }
-  return true;
-}
-
 //===----------------------------------------------------------------------===//
 // BT12: persistent bit-object placeholders and their escape gate.
 //===----------------------------------------------------------------------===//
@@ -834,9 +817,12 @@ static Error verifyMCS251ISRStructure(const Module &M) {
                     "appear together");
 
     uint64_t SlotVal = 0;
-    if (!isCanonicalISRSlotText(VecAttr.getValueAsString(), SlotVal) ||
+    if (!MCS251ISR::parseCanonicalSlot(VecAttr.getValueAsString(), SlotVal) ||
         !MCS251ISR::isLegalISRSlot(SlotVal))
-      return reject("MCS251 ISR: vector is not a legal slot in profile 0-51");
+      return reject((Twine("MCS251 ISR: vector is not a legal slot in profile "
+                           "0-") +
+                     Twine(MCS251ISR::ISRVectorMaxSlot))
+                        .str());
 
     // An entry has hardware-fixed frame; only non-vararg void() is an entry.
     if (!(F.getFunctionType()->getReturnType()->isVoidTy() &&

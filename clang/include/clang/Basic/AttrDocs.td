@@ -2983,7 +2983,8 @@ save/restore sequence with a ``RETI`` return, and to register the function
 in the vector table for slot ``N``.
 
 The parameter ``N`` must be an integer constant expression naming a legal
-interrupt slot in the range 0-51; reserved and system slots are rejected.
+interrupt slot in the range 0-126 (the STC32G144K246 evidence profile);
+reserved and system slots are rejected.
 The attributed function must have type ``void(void)``.
 
 The interrupt identity is established by the first declaration of the

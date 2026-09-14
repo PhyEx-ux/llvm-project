@@ -12703,7 +12703,7 @@ def err_mcs251_interrupt_not_implemented
     : Error<"MCS251 interrupt support not yet implemented; "
             "ISR code generation is not available">;
 def err_mcs251_isr_vector_not_legal
-    : Error<"MCS251 interrupt vector must be a legal slot in 0-51">;
+    : Error<"MCS251 interrupt vector must be a legal slot in 0-%0">;
 def err_mcs251_isr_wrong_type
     : Error<"MCS251 interrupt function must have type void(void)">;
 def err_mcs251_isr_identity_not_first

@@ -14,7 +14,7 @@ void c() interrupt (48 + 1) {}
 void ordinary();
 
 int value interrupt 1; // expected-error {{interrupt suffix requires a function declarator}}
-void bad() interrupt 7 {} // expected-error {{MCS251 interrupt vector must be a legal slot in 0-51}}
+void bad() interrupt 7 {} // expected-error {{MCS251 interrupt vector must be a legal slot in 0-126}}
 void oldarg(x) interrupt 1 int x; {} // expected-error {{MCS251 interrupt function must have type void(void)}} expected-warning {{a function definition without a prototype is deprecated}}
 void using_bad() interrupt 2 using 1 {} // expected-error {{using is not supported for MCS251 interrupt functions}}
 void dunder_using_bad() interrupt 3 __using(1) {} // expected-error {{using is not supported for MCS251 interrupt functions}}

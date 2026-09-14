@@ -101,9 +101,9 @@
 # Reloc offsets are field starts inside their section (byte after the opcode,
 # or after the 7E-subop byte for the two 7E forms), matching SPEC 7.1/7.2 and
 # the old crt fixture. All fields are zero placeholders; addresses come from
-# lld at link time. Area bases (HOME 0xff0000, BOOT >= 0xff0210, XINIT
+# lld at link time. Area bases (HOME 0xff0000, BOOT >= 0xff0500, XINIT
 # 0xff8000) are link parameters (--area-start), never encoded here (SPEC 3.1);
-# the BOOT asset itself defaults to 0xff0210 via the link (T07 step 11).
+# the BOOT asset itself defaults to 0xff0500 via the link (T07 step 11).
 #
 # Build with gen-crt-irq.sh (caller-supplied frozen yaml2obj/llvm-readobj);
 # independently checked by check-crt-irq.py. The old crt-selfstart assets are
@@ -152,7 +152,7 @@ Sections:
     Size: 16
   # New ISR metadata: exactly two asset records for this CRT object, no ALLOC,
   # no address payload. All fields big-endian (A3.2):
-  #   protocol_version=0001  record_size=0018
+  #   protocol_version=0002  record_size=0018
   #   IRQ_DEFAULT: kind=03 entry=02 hw=01 save=00 slot=FFFF caps=0001
   #                symbol_reference=00000000 (R_MCS251_ISR_REF) asset=00000001
   #                reserved=00000000
@@ -163,7 +163,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ ]
     AddressAlign: 4
-    Content: '0001001803020100FFFF00010000000000000001000000000001001804030000FFFF0001000000000000000100000000'
+    Content: '0002001803020100FFFF00010000000000000001000000000002001804030000FFFF0001000000000000000100000000'
   - Name: .rela.mcs251.HOME
     Type: SHT_RELA
     Link: .symtab

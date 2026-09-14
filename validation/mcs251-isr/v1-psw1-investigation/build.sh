@@ -29,7 +29,7 @@ CRT="$HERE/../../mcs251-elf/runtime/crt-irq.yaml"
 link_one() { # arm obj1 [obj2 ...]
   local arm=$1; shift
   "${LLD[@]}" "$@" \
-    --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+    --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
     --area-start=XINIT=0xff8000 --area-start=DSEG=0x30 --edata-end=0x0fff \
     --area-start=.mcs251.DATA.fixture=0x30 --area-start=.mcs251.DATA.result=0x100 \
     --area-start=.mcs251.DATA.teststack=0x580 \

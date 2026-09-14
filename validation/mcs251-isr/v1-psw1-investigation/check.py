@@ -41,10 +41,10 @@ def map_addr(name, unit, sym=None):
     return int(match[1], 16), int(match[2], 16)
 
 
-# Reset vector in every image: 3-byte ljmp into BOOT at 0xFF0210.
+# Reset vector in every image: 3-byte ljmp into BOOT at 0xFF0500.
 for arm in ('baseline', 'minisr', 'compiler'):
     mem = hexmem(out/('v1-%s.hex' % arm))
-    assert blob(mem, 0xff0000, 3) == b'\x02\x02\x10', arm
+    assert blob(mem, 0xff0000, 3) == b'\x02\x05\x00', arm
 
 # Shared asm module: LP stage is byte-identical in shape to the T10 wait
 # (mov 0x21/0x22/0x23 init, JB + three DJNZ chain) and IX waits DJNZ-free.

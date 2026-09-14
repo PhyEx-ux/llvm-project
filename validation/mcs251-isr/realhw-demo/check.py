@@ -38,7 +38,8 @@ for unit, name in [('isr','_timer0'),('helper','_helper')]:
     symbols[name]=(int(match[1],16),int(match[2],16))
 isr=symbols['_timer0'][0]; helper=symbols['_helper'][0]
 assert blob(0xff000b,4)==b'\x8a'+isr.to_bytes(3,'big')
-assert blob(0xff0000,3)==b'\x02\x02\x10'
+# G1 recipe: reset is a 3-byte ljmp into BOOT at 0xFF0500.
+assert blob(0xff0000,3)==b'\x02\x05\x00'
 asm=(out/'isr.asm').read_text()
 expected=['psw']+['dr'+str(i) for i in range(0,32,4)]+['dpx']
 assert re.findall(r'^\s*push (\w+)',asm,re.M)==expected

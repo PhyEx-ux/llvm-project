@@ -1,5 +1,5 @@
 /* firmware.c - ISR campaign T09 integration firmware (ISR-TASK-BREAKDOWN.md
- * T09 card step 3). One source, eight compile-time case families, compiled by
+ * T09 card step 3). One source, nine compile-time case families, compiled by
  * compile-matrix.py at each of O0/O1/O2/O3/Os:
  *
  *   T09_CASE_GNU      GNU attribute ISR, slot 1            (external)
@@ -16,6 +16,9 @@
  *   T09_CASE_XTU      ISR calling an ordinary cross-TU helper, slot 8
  *   T09_CASE_MULTI    ISR calling the multi-argument helper through the
  *                     existing static parameter-slot ABI, slot 9
+ *   T09_CASE_NEWSLOTS the G1 extended profile: the reclassified slots
+ *                     31/45/46 and high slots 52/59/90/102/126, one ISR
+ *                     each, exercising the whole extended number range
  *   T09_CASE_ALL      all of the above in one translation unit (compiled with
  *                     -fmcs251-keil; exercises several ISR definitions, and
  *                     therefore several paired metadata records, per object)
@@ -46,6 +49,8 @@ volatile unsigned char g_seed; /* written by main before any work */
 /* Per-ISR activity bytes, indexed by the case slot (volatile: no level may
  * remove the ISR body stores). */
 volatile unsigned char g_hit[16];
+/* Per-slot activity bytes for the G1 extended-profile case. */
+volatile unsigned char g_ns[8];
 
 static void fail_halt(void) {
   for (;;) {
@@ -163,6 +168,29 @@ void isr_multi(void) __attribute__((interrupt(9)));
 void isr_multi(void) {
   helper_multi(g_seed, 1, 2);
 }
+#endif
+
+/* ---- T09_CASE_NEWSLOTS: the G1 reclassified slots 31/45/46 and a spread
+ * of high slots 52/59/90/102/126.  Every one of them is a DualSource legal
+ * slot in the G144K246 evidence profile; this family drives the whole
+ * C -> IR -> ELF -> lld chain over the extended number range. */
+#if defined(T09_CASE_NEWSLOTS)
+void isr_lin2(void) __attribute__((interrupt(31)));
+void isr_lin2(void) { g_ns[0] = (unsigned char)(g_ns[0] + 1); }
+void isr_p8(void) __attribute__((interrupt(45)));
+void isr_p8(void) { g_ns[1] = (unsigned char)(g_ns[1] + 1); }
+void isr_p9(void) __attribute__((interrupt(46)));
+void isr_p9(void) { g_ns[2] = (unsigned char)(g_ns[2] + 1); }
+void isr_dma_ur2t(void) __attribute__((interrupt(52)));
+void isr_dma_ur2t(void) { g_ns[3] = (unsigned char)(g_ns[3] + 1); }
+void isr_lcm(void) __attribute__((interrupt(59)));
+void isr_lcm(void) { g_ns[4] = (unsigned char)(g_ns[4] + 1); }
+void isr_paint(void) __attribute__((interrupt(90)));
+void isr_paint(void) { g_ns[5] = (unsigned char)(g_ns[5] + 1); }
+void isr_uart5(void) __attribute__((interrupt(102)));
+void isr_uart5(void) { g_ns[6] = (unsigned char)(g_ns[6] + 1); }
+void isr_dma_pwmer(void) __attribute__((interrupt(126)));
+void isr_dma_pwmer(void) { g_ns[7] = (unsigned char)(g_ns[7] + 1); }
 #endif
 
 int main(void) {

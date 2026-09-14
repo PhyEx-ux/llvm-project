@@ -4,13 +4,19 @@
 void good(void) __attribute__((interrupt(VEC)));
 void good(void) {}
 
-void neg(void) __attribute__((interrupt(-1))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-51}}
-void gap(void) __attribute__((interrupt(7))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-51}}
-void transfer(void) __attribute__((interrupt(13))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-51}}
-void system14(void) __attribute__((interrupt(14))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-51}}
-void system15(void) __attribute__((interrupt(15))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-51}}
-void high(void) __attribute__((interrupt(52))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-51}}
-void wide(void) __attribute__((interrupt(0x100000001ULL))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-51}}
+void neg(void) __attribute__((interrupt(-1))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-126}}
+void gap(void) __attribute__((interrupt(7))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-126}}
+void transfer(void) __attribute__((interrupt(13))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-126}}
+void system14(void) __attribute__((interrupt(14))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-126}}
+void system15(void) __attribute__((interrupt(15))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-126}}
+void high52(void) __attribute__((interrupt(52))); // accepted: 52 became Legal
+void high52(void) {}
+void high126(void) __attribute__((interrupt(126))); // accepted: the new upper bound
+void high126(void) {}
+void reserved100(void) __attribute__((interrupt(100))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-126}}
+void high81(void) __attribute__((interrupt(81))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-126}}
+void over127(void) __attribute__((interrupt(127))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-126}}
+void wide(void) __attribute__((interrupt(0x100000001ULL))); // expected-error {{MCS251 interrupt vector must be a legal slot in 0-126}}
 
 int runtime_slot;
 void nonice(void) __attribute__((interrupt(runtime_slot))); // expected-error {{integer constant expression}}

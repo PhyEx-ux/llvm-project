@@ -12,7 +12,7 @@
 #     the frozen non-IRQ recipe) and the map keeps the frozen area bases;
 #   * a v2 ISR demo object (user handler carrying a trailing-pointer static
 #     slot, the exact A4 capability) links against the v2 IRQ CRT with the
-#     IRQ recipe BOOT=0xff0210/CSEG=0xff0400; lld synthesizes the 52-slot
+#     IRQ recipe BOOT=0xff0500/CSEG=0xff0700; lld synthesizes the 127-slot
 #     vector table from the .mcs251.isr inputs and places the OSEG slot;
 #   * v1/v2 mixing is rejected in BOTH directions against BOTH CRT flavors
 #     (design 4.2: "v1 and v2 objects never mix" - the CRT is an object
@@ -51,11 +51,11 @@
 # --- parameter is a pointer, carried as the 4-byte OSEG.1 static slot):
 # --- identity and IRQ mode are orthogonal, the link synthesizes the vector
 # --- table and places the slot ------------------------------------------
-# RUN: mcs251-lld demo-isr-v2.o irq-raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --map=isr.map -o isr.elf
+# RUN: mcs251-lld demo-isr-v2.o irq-raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --map=isr.map -o isr.elf
 # RUN: test -f isr.elf
-# RUN: grep 's_BOOT = 0xff0210' isr.map
-# RUN: grep 's_CSEG = 0xff0400' isr.map
-# RUN: grep 'l_VECS = 0x01a0' isr.map
+# RUN: grep 's_BOOT = 0xff0500' isr.map
+# RUN: grep 's_CSEG = 0xff0700' isr.map
+# RUN: grep 'l_VECS = 0x03f8' isr.map
 # RUN: grep 's_OSEG = 0x0008' isr.map
 #
 # --- identity exclusivity against the CRT, both directions, both flavors:
@@ -63,18 +63,23 @@
 # --- v2 CRT --------------------------------------------------------------
 # RUN: not mcs251-lld demo-v2.o crt-ss-v1.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o m1.elf 2>&1 | FileCheck %s --check-prefix=MIX
 # RUN: test ! -e m1.elf
-# RUN: not mcs251-lld demo-isr-v2.o crt-irq-v1.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o m2.elf 2>&1 | FileCheck %s --check-prefix=MIX
+# The v1 IRQ CRT is refused by the ISR protocol-version gate (D5) before the
+# identity mix rule can run, so the identity-mix negative uses the v1
+# self-start CRT instead (a v1 object with no ISR metadata).
+# RUN: not mcs251-lld demo-isr-v2.o demo-v1.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o m2.elf 2>&1 | FileCheck %s --check-prefix=MIX
 # RUN: test ! -e m2.elf
-# RUN: not mcs251-lld demo-v1.o irq-raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o m3.elf 2>&1 | FileCheck %s --check-prefix=MIX
+# RUN: not mcs251-lld demo-v1.o irq-raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o m3.elf 2>&1 | FileCheck %s --check-prefix=MIX
 # RUN: test ! -e m3.elf
 # RUN: not mcs251-lld demo-v1.o ss-raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o m4.elf 2>&1 | FileCheck %s --check-prefix=MIX
 # RUN: test ! -e m4.elf
 # MIX: cannot link a v2 identity object (.mcs251.attributes) with a v1 identity object
 #
-# --- the frozen v1 chain still links (v1 fixtures byte-untouched) --------
-# RUN: mcs251-lld demo-v1.o crt-irq-v1.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --map=v1.map -o v1.elf
+# --- the frozen v1 identity chain still links: the v1 fixtures carry v2 ISR
+# --- records (the ISR protocol bumps for every IRQ asset), while their ELF
+# --- identity stays the v1 note; the two protocols are independent. -------
+# RUN: mcs251-lld demo-v1.o crt-irq-v1.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --map=v1.map -o v1.elf
 # RUN: test -f v1.elf
-# RUN: grep 's_BOOT = 0xff0210' v1.map
+# RUN: grep 's_BOOT = 0xff0500' v1.map
 
 
 #--- setflags.py
@@ -164,7 +169,7 @@ Sections:
   - Name: .mcs251.isr
     Type: SHT_PROGBITS
     AddressAlign: 4
-    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
   - Name: .rela.mcs251.isr
     Type: SHT_RELA
     Flags: [ SHF_INFO_LINK ]

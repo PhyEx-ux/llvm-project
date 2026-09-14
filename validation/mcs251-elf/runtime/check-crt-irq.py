@@ -105,14 +105,14 @@ XWALKER_SIZE = 98
 # The two 24-byte asset records (A3.2/A3.3): IRQ_DEFAULT then IRQ_RESET.
 RECORD_SIZE = 24
 RECORD_DEFAULT = {
-    "version": 1, "record_size": 24,
+    "version": 2, "record_size": 24,
     "record_kind": 3, "entry_kind": 2,          # IRQ_STOP
     "hardware_profile": 1, "save_profile": 0,
     "vector_slot": 0xFFFF, "required_caps": 0x0001,
     "asset_profile": 1,
 }
 RECORD_RESET = {
-    "version": 1, "record_size": 24,
+    "version": 2, "record_size": 24,
     "record_kind": 4, "entry_kind": 3,          # RESET
     "hardware_profile": 0, "save_profile": 0,
     "vector_slot": 0xFFFF, "required_caps": 0x0001,
@@ -621,7 +621,7 @@ def check_isr_metadata(data, sections):
     (version, rsize, kind, entry, hw, save, slot, caps,
      symref, asset, reserved) = fields
     want = RECORD_DEFAULT
-    require((version, rsize) == (1, 24), "DEFAULT record header version/size bad")
+    require((version, rsize) == (2, 24), "DEFAULT record header version/size bad")
     require(kind == want["record_kind"], "record 0 is not IRQ_DEFAULT (kind 3)")
     require(entry == want["entry_kind"], "DEFAULT entry_kind %d, expected 2" % entry)
     require(hw == want["hardware_profile"], "DEFAULT hardware_profile %d" % hw)
@@ -636,7 +636,7 @@ def check_isr_metadata(data, sections):
     (version, rsize, kind, entry, hw, save, slot, caps,
      symref, asset, reserved) = fields
     want = RECORD_RESET
-    require((version, rsize) == (1, 24), "RESET record header version/size bad")
+    require((version, rsize) == (2, 24), "RESET record header version/size bad")
     require(kind == want["record_kind"], "record 1 is not IRQ_RESET (kind 4)")
     require(entry == want["entry_kind"], "RESET entry_kind %d, expected 3" % entry)
     require(hw == want["hardware_profile"], "RESET hardware_profile %d" % hw)

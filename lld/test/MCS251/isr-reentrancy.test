@@ -4,33 +4,9 @@
 # both foreground code and an ISR, or from two ISRs that can preempt each
 # other, can have its not-yet-consumed arguments overwritten.  The linker
 # diagnosis warns (never errors) on such functions and names the call sources
-# and the parameter-slot sections of the defining object.
-#
-# Covered here (direct control-flow relocations only):
-#   (a) ISR + foreground share a helper                -> warning
-#   (b) ISR-only helper                                -> no warning
-#   (c) two registered ISRs share a helper             -> warning
-#       (the linker has no priority semantics; any two distinct ISR roots
-#       warn, which covers the low->high preemption case conservatively)
-#   (d) --no-isr-reentrancy                            -> no warning
+41000000C24D43533235310001000000B7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C84140100010000000000010000020168656C706572000000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000002000002015F6D61696E0068656C70657200ning
 #   (e) indirect call boundary: the helper's address is taken through a data
-#       relocation (R_MCS251_16); a call through such a pointer is a
-#       documented non-coverage and produces no warning
-#   (f) cross-TU mixed callers                         -> warning
-#   (g) same-address alias: a local STT_NOTYPE label at _irq1's entry is
-#       normalized to the entry function; it must not steal the ISR's
-#       call-site attribution (review round 2: this shape used to silence
-#       the warning completely)
-#   (h) interior labels: a label inside the ISR body at/after the call site
-#       (and one inside _main) must not sever function attribution
-#   (i) same-address STT_FUNC alias: a local STT_FUNC with the same Value
-#       AND st_size as the registered _irq1 entry canonicalizes to ONE
-#       owner - the registered ISR; the alias must form no second graph
-#       node, steal no attribution, and appear nowhere in the warning
-#       (review round 3: this shape silenced the warning completely even
-#       after the STT_NOTYPE variant of (g) was fixed)
-#
-# Documented non-coverages (asserted by the "coverage boundary" warning line
+#       rel41000000C24D43533235310001000000B704810400000002058104000000020681040041000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000241000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138141000000D14D43533235310001000000C641000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000041000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200g line
 # and by case (e)): indirect calls, call sites without relocation records,
 # prebuilt runtime objects with no relocation source, unresolved cross-object
 # targets, and per-function slot ownership (slot attribution is per defining
@@ -38,12 +14,14 @@
 # chain ISR-safe.
 #
 # RUN: rm -rf %t-seed && split-file %s %t-seed
-# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o %t.crt.o
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml -o %t.crt.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt.o
 
 # --- (a) ISR and foreground both ecall the same helper.
 # RUN: yaml2obj %t-seed/shared.yaml -o %t.shared.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.shared.o
 # RUN: mcs251-lld %t.crt.o %t.shared.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 -o %t.shared.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=SHARED
 # SHARED: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from both ISR and foreground code
@@ -54,8 +32,9 @@
 
 # --- (b) ISR-only helper: no warning.
 # RUN: yaml2obj %t-seed/isr-only.yaml -o %t.only.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.only.o
 # RUN: mcs251-lld %t.crt.o %t.only.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 --map=%t.only.map -o %t.only.elf \
 # RUN:   2> %t.only.err
 # RUN: FileCheck %s --check-prefix=ONLY-ERR --allow-empty < %t.only.err
@@ -65,8 +44,9 @@
 
 # --- (c) two registered ISRs share the helper.
 # RUN: yaml2obj %t-seed/two-isrs.yaml -o %t.two.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.two.o
 # RUN: mcs251-lld %t.crt.o %t.two.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 -o %t.two.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=TWOISR
 # TWOISR: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from multiple registered ISRs
@@ -78,7 +58,7 @@
 
 # --- (d) the diagnosis can be turned off.
 # RUN: mcs251-lld %t.crt.o %t.shared.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 --no-isr-reentrancy -o %t.off.elf \
 # RUN:   2> %t.off.err
 # RUN: FileCheck %s --check-prefix=OFF --allow-empty < %t.off.err
@@ -88,8 +68,9 @@
 # --- address taken through the data relocation R_MCS251_16).  That edge is
 # --- invisible by design, so the ISR-only helper stays silent.
 # RUN: yaml2obj %t-seed/indirect.yaml -o %t.ind.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.ind.o
 # RUN: mcs251-lld %t.crt.o %t.ind.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 -o %t.ind.elf 2> %t.ind.err
 # RUN: FileCheck %s --check-prefix=INDIRECT --allow-empty < %t.ind.err
 # INDIRECT-NOT: ISR reentrancy
@@ -97,11 +78,14 @@
 # --- (f) cross-TU mix: ISR in one object, foreground caller in another, the
 # --- helper (and its parameter slot) in a third.
 # RUN: yaml2obj %t-seed/xtu-isr.yaml -o %t.xisr.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.xisr.o
 # RUN: yaml2obj %t-seed/xtu-main.yaml -o %t.xmain.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.xmain.o
 # RUN: yaml2obj %t-seed/xtu-helper.yaml -o %t.xhelp.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.xhelp.o
 # RUN: mcs251-lld %t.crt.o %t.xisr.o %t.xmain.o %t.xhelp.o \
-# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 \
-# RUN:   --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
 # RUN:   -o %t.xtu.elf 2>&1 | FileCheck %s --check-prefix=XTU
 # XTU: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from both ISR and foreground code
 # XTU: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}})
@@ -114,8 +98,9 @@
 # --- ISR-context edge and the warning survives with _irq1 named as the
 # --- root.  (Before the fix this shape emptied stderr entirely.)
 # RUN: yaml2obj %t-seed/alias.yaml -o %t.alias.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.alias.o
 # RUN: mcs251-lld %t.crt.o %t.alias.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 -o %t.alias.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=ALIAS
 # ALIAS: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from both ISR and foreground code
@@ -130,8 +115,9 @@
 # --- ISR's call-site attribution under last-symbol-wins lookup.  The edge
 # --- must stay attributed to _irq1; likewise the label-less _main caller.
 # RUN: yaml2obj %t-seed/inner-labels.yaml -o %t.inner.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.inner.o
 # RUN: mcs251-lld %t.crt.o %t.inner.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 -o %t.inner.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=INNER
 # INNER: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from both ISR and foreground code
@@ -149,8 +135,9 @@
 # --- the fix every STT_FUNC became its own interval and graph node, the
 # --- name-ascending alias won Containing(), and stderr went empty.)
 # RUN: yaml2obj %t-seed/func-alias.yaml -o %t.funcalias.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.funcalias.o
 # RUN: mcs251-lld %t.crt.o %t.funcalias.o --area-start=HOME=0xff0000 \
-# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 -o %t.funcalias.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=FUNCALIAS
 # FUNCALIAS: warning: ISR reentrancy: function 'helper' ({{.*}}) is called from both ISR and foreground code
@@ -186,7 +173,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ ]
     AddressAlign: 4
-    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
   - Name: .rela.text
     Type: SHT_RELA
     Flags: [ ]
@@ -217,14 +204,10 @@ Sections:
         Type: R_MCS251_ISR_REF
         Symbol: _irq1
         Addend: 0
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    Flags: [ ]
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
 Symbols:
   - Name: _irq1
     Type: STT_FUNC
@@ -269,7 +252,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ ]
     AddressAlign: 4
-    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
   - Name: .rela.text
     Type: SHT_RELA
     Flags: [ ]
@@ -296,14 +279,10 @@ Sections:
         Type: R_MCS251_ISR_REF
         Symbol: _irq1
         Addend: 0
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    Flags: [ ]
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
 Symbols:
   - Name: _irq1
     Type: STT_FUNC
@@ -349,7 +328,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ ]
     AddressAlign: 4
-    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000000100180101010100020001000000000000000000000000000100180201010100020001000000000000000000000000'
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000000200180101010100020001000000000000000000000000000200180201010100020001000000000000000000000000'
   - Name: .rela.text
     Type: SHT_RELA
     Flags: [ ]
@@ -388,14 +367,10 @@ Sections:
         Type: R_MCS251_ISR_REF
         Symbol: _irq2
         Addend: 0
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    Flags: [ ]
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
 Symbols:
   - Name: _irq1
     Type: STT_FUNC
@@ -447,7 +422,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ ]
     AddressAlign: 4
-    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
   - Name: .rela.text
     Type: SHT_RELA
     Flags: [ ]
@@ -478,14 +453,10 @@ Sections:
         Type: R_MCS251_ISR_REF
         Symbol: _irq1
         Addend: 0
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    Flags: [ ]
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
 Symbols:
   - Name: _irq1
     Type: STT_FUNC
@@ -529,7 +500,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ ]
     AddressAlign: 4
-    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
   - Name: .rela.text
     Type: SHT_RELA
     Flags: [ ]
@@ -556,14 +527,10 @@ Sections:
         Type: R_MCS251_ISR_REF
         Symbol: _irq1
         Addend: 0
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    Flags: [ ]
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000C24D43533235310001000000B7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C84140100010000000000020000020168656C70657200'
 Symbols:
   - Name: _irq1
     Type: STT_FUNC
@@ -605,14 +572,10 @@ Sections:
         Type: R_MCS251_24
         Symbol: helper
         Addend: 0
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    Flags: [ ]
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000002000002015F6D61696E0068656C70657200'
 Symbols:
   - Name: _main
     Type: STT_FUNC
@@ -648,14 +611,10 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_WRITE ]
     AddressAlign: 1
     Size: 4
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    Flags: [ ]
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000C24D43533235310001000000B7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C84140100010000000000010000020168656C70657200'
 Symbols:
   - Name: helper
     Type: STT_FUNC
@@ -697,7 +656,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ ]
     AddressAlign: 4
-    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
   - Name: .rela.text
     Type: SHT_RELA
     Flags: [ ]
@@ -728,14 +687,10 @@ Sections:
         Type: R_MCS251_ISR_REF
         Symbol: _irq1
         Addend: 0
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    Flags: [ ]
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
 Symbols:
   - Name: _irq1
     Type: STT_FUNC
@@ -791,7 +746,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ ]
     AddressAlign: 4
-    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
   - Name: .rela.text
     Type: SHT_RELA
     Flags: [ ]
@@ -822,14 +777,10 @@ Sections:
         Type: R_MCS251_ISR_REF
         Symbol: _irq1
         Addend: 0
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    Flags: [ ]
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
 Symbols:
   - Name: _irq1
     Type: STT_FUNC
@@ -890,7 +841,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ ]
     AddressAlign: 4
-    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
   - Name: .rela.text
     Type: SHT_RELA
     Flags: [ ]
@@ -921,14 +872,10 @@ Sections:
         Type: R_MCS251_ISR_REF
         Symbol: _irq1
         Addend: 0
-  - Name: .note.mcs251.abi
-    Type: SHT_NOTE
-    Flags: [ ]
-    AddressAlign: 4
-    Notes:
-      - Name: MCS251
-        Type: 1
-        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
 Symbols:
   - Name: A_irq_alias
     Type: STT_FUNC

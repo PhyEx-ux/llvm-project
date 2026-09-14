@@ -571,12 +571,42 @@ def verify_identity(path, expected_sha256):
 # Map parsing (T07 map format)
 #
 # The map contains two kinds of lines consumed here:
-#   IRQ lines (frozen by the T07 card): "IRQ NN 0xADDR TAG [SYMBOL]"
+#   IRQ lines (frozen by the T07 card): "IRQ NNN 0xADDR TAG [SYMBOL]"
 #   Section lines (LinkerCore::buildMap): "path:name 0xADDR +0xSIZE"
+#
+# G1 (PM ruling 2026-09-13) widened the profile to 127 slots, so the slot
+# field is one to THREE decimal digits and 100..126 are three wide.  The
+# pattern is a shape check only: the accepted number is validated against
+# the profile and the address against the frozen formula, and any line whose
+# first token is "IRQ" but that does not parse is an error rather than a
+# silently dropped row (a two-digit-only pattern used to discard all 27
+# high slots without a word).
 # ---------------------------------------------------------------------------
 
+# G1 profile geometry and classification, independently restated here so this
+# qualification harness never imports the product table it is checking.
+ISR_VECTOR_BASE = 0xFF0003
+ISR_VECTOR_STRIDE = 8
+ISR_VECTOR_COUNT = 127
+ISR_VECTOR_MAX_SLOT = ISR_VECTOR_COUNT - 1  # 126
+
+# The 18 in-profile non-legal slots: 16 Reserved + 2 System.
+ISR_SYSTEM_SLOTS = frozenset({14, 15})
+ISR_NON_LEGAL_SLOTS = frozenset({7, 13, 14, 15, 22, 23, 32, 33, 34, 35,
+                                 81, 92, 93, 94, 95, 100, 101, 113})
+
+IRQ_MAP_TAG_ISR = "ISR"
+IRQ_MAP_TAG_DEFAULT = "DEFAULT"
+IRQ_MAP_TAG_RESERVED = "RESERVED"
+IRQ_MAP_TAG_SYSTEM = "SYSTEM"
+IRQ_MAP_TAGS = frozenset({IRQ_MAP_TAG_ISR, IRQ_MAP_TAG_DEFAULT,
+                          IRQ_MAP_TAG_RESERVED, IRQ_MAP_TAG_SYSTEM})
+# Tags that name a registered/unregistered handler and therefore carry a
+# symbol; the reserved/system rows carry none.
+IRQ_MAP_SYMBOL_TAGS = frozenset({IRQ_MAP_TAG_ISR, IRQ_MAP_TAG_DEFAULT})
+
 _IRQ_MAP_LINE = re.compile(
-    r"^IRQ\s+(\d{1,2})\s+0x([0-9a-fA-F]+)\s+(\S+)(?:\s+(\S+))?\s*$"
+    r"^IRQ\s+(\d{1,3})\s+0x([0-9a-fA-F]+)\s+(\S+)(?:\s+(\S+))?\s*$"
 )
 _MAP_SECTION_LINE = re.compile(
     r"^(\S+?):(\S+)\s+0x([0-9a-fA-F]+)\s+\+0x([0-9a-fA-F]+)\s*$"
@@ -584,23 +614,109 @@ _MAP_SECTION_LINE = re.compile(
 
 
 def parse_irq_map(map_path):
-    """Parse the fixed 52-line IRQ table from the link map.
+    """Parse the IRQ table from the link map, strictly.
 
     Returns {slot: {"addr": int, "tag": str, "symbol": str-or-None}}.
     Note: `addr` is the *vector slot address* (0xFF0003 + 8*slot), never the
     target function address.
+
+    G1: every row is validated as it is read and the first bad row raises
+    CaseEnvironmentError, so a malformed map can never be silently reduced to
+    a smaller table.  A two-digit-only slot field used to drop all 27 of the
+    100..126 rows without a word; the checks below are what make that
+    impossible now:
+
+      * a line whose first token is ``IRQ`` must match the frozen shape
+        (one to three decimal digits, ``0x``-prefixed address, known tag),
+      * the slot must be inside the G1 profile (0..126),
+      * the tag must be one of ISR / DEFAULT / RESERVED / SYSTEM,
+      * a RESERVED/SYSTEM row must carry no symbol while an ISR/DEFAULT row
+        must carry one,
+      * the tag must agree with the frozen G1 classification: a
+        Reserved/System slot is a RESERVED/SYSTEM row (and specifically 14
+        and 15 are SYSTEM), every other slot is a handler row,
+      * the address must satisfy the frozen ``0xFF0003 + 8*slot`` formula,
+      * a slot may appear once; a repeated slot is an error rather than a
+        silent dictionary overwrite (a wrong tag on a duplicate would
+        otherwise hide the first row entirely).
+
+    Row-count completeness is deliberately NOT enforced here: a caller that
+    needs the whole 127-row table checks the returned length (the image
+    checker owns that assertion), while the self-test exercises the parser
+    on short synthetic maps.
     """
     table = {}
     with open(map_path, "r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
+        for lineno, line in enumerate(handle, 1):
+            stripped = line.strip()
+            if not stripped:
+                continue
             match = _IRQ_MAP_LINE.match(line)
-            if match:
-                slot = int(match.group(1))
-                table[slot] = {
-                    "addr": int(match.group(2), 16),
-                    "tag": match.group(3),
-                    "symbol": match.group(4),
-                }
+            if match is None:
+                # Only complain about lines that claim to be IRQ rows; other
+                # map content is somebody else's business.
+                if stripped.split(None, 1)[0] == "IRQ":
+                    raise CaseEnvironmentError(
+                        "%s:%d: malformed IRQ row (want \"IRQ NNN 0xADDR "
+                        "TAG [SYMBOL]\" with one to three slot digits): %r"
+                        % (map_path, lineno, stripped)
+                    )
+                continue
+            slot = int(match.group(1))
+            addr = int(match.group(2), 16)
+            tag = match.group(3)
+            symbol = match.group(4)
+            if not 0 <= slot <= ISR_VECTOR_MAX_SLOT:
+                raise CaseEnvironmentError(
+                    "%s:%d: IRQ row slot %d is outside the G1 profile 0-%d"
+                    % (map_path, lineno, slot, ISR_VECTOR_MAX_SLOT)
+                )
+            if tag not in IRQ_MAP_TAGS:
+                raise CaseEnvironmentError(
+                    "%s:%d: IRQ row %d has unknown tag %r (want one of %s)"
+                    % (map_path, lineno, slot, tag,
+                       "/".join(sorted(IRQ_MAP_TAGS)))
+                )
+            if (tag in IRQ_MAP_SYMBOL_TAGS) != (symbol is not None):
+                raise CaseEnvironmentError(
+                    "%s:%d: IRQ row %d tag %s must %s a symbol"
+                    % (map_path, lineno, slot, tag,
+                       "carry" if tag in IRQ_MAP_SYMBOL_TAGS else "not carry")
+                )
+            # The tag must agree with the frozen classification, so a map
+            # cannot relabel a Reserved slot as a handler (or vice versa)
+            # without being caught here.
+            expected_tag = (
+                IRQ_MAP_TAG_SYSTEM if slot in ISR_SYSTEM_SLOTS
+                else IRQ_MAP_TAG_RESERVED if slot in ISR_NON_LEGAL_SLOTS
+                else None
+            )
+            if expected_tag is not None:
+                if tag != expected_tag:
+                    raise CaseEnvironmentError(
+                        "%s:%d: IRQ row %d is a non-legal slot and must be "
+                        "%s, got %s"
+                        % (map_path, lineno, slot, expected_tag, tag)
+                    )
+            elif tag not in IRQ_MAP_SYMBOL_TAGS:
+                raise CaseEnvironmentError(
+                    "%s:%d: IRQ row %d is a legal slot and must carry a "
+                    "handler tag, got %s"
+                    % (map_path, lineno, slot, tag)
+                )
+            expected_addr = vector_addr(slot)
+            if addr != expected_addr:
+                raise CaseEnvironmentError(
+                    "%s:%d: IRQ row %d address 0x%x violates the frozen "
+                    "formula 0xFF0003 + 8*slot = 0x%x"
+                    % (map_path, lineno, slot, addr, expected_addr)
+                )
+            if slot in table:
+                raise CaseEnvironmentError(
+                    "%s:%d: IRQ row %d appears more than once"
+                    % (map_path, lineno, slot)
+                )
+            table[slot] = {"addr": addr, "tag": tag, "symbol": symbol}
     return table
 
 
@@ -639,7 +755,7 @@ def protected_crt_ranges(map_sections):
 def default_slots(irq_map):
     """Slots the map classifies as DEFAULT (unregistered legal slots)."""
     return sorted(slot for slot, entry in irq_map.items()
-                  if entry["tag"] == "DEFAULT")
+                  if entry["tag"] == IRQ_MAP_TAG_DEFAULT)
 
 
 # ---------------------------------------------------------------------------
@@ -714,10 +830,13 @@ class FakeIsrModel:
       * fault injection via `faults` for detection coverage.
     """
 
-    CRT_LOOP = (0x00FF0210, 0x00FF0212)
-    MAIN_LOOP = (0x00FF0400, 0x00FF0402)
-    ISR_ENTRY = {1: 0x00FF0500, 3: 0x00FF0600}
-    DEFAULT_ENTRY = 0x00FF0700
+    # Placeholder self-test addresses, re-spaced for the G1 layout: they
+    # must not collide with each other.  The real CRT default is taken from
+    # the symbol/map, never from here.
+    CRT_LOOP = (0x00FF0500, 0x00FF0502)
+    MAIN_LOOP = (0x00FF0700, 0x00FF0702)
+    ISR_ENTRY = {1: 0x00FF0800, 3: 0x00FF0900}
+    DEFAULT_ENTRY = 0x00FF0A00
     REGISTERED = (1, 3)
     SAVE_NAMES = ("DR0", "DR4", "DR8", "DR12", "DR16", "DR20", "DR24",
                   "DR28", "DPX")
@@ -748,7 +867,13 @@ class FakeIsrModel:
         if "deferred-accept-2" in self.faults:
             self.defer_left = 2
         self.rom = {}
-        for slot in range(52):
+        # G1: fill the whole profile, but only Legal slots carry an EJMP; a
+        # Reserved/System slot is a NOBITS hole with no payload, exactly as
+        # the linker synthesizes it.  The class comes from the module-level
+        # G1 restatement, never from a second local literal.
+        for slot in range(ISR_VECTOR_COUNT):
+            if slot in ISR_NON_LEGAL_SLOTS:
+                continue
             target = (self.ISR_ENTRY[slot] if slot in self.REGISTERED
                       else self.DEFAULT_ENTRY)
             self.rom[vector_addr(slot)] = 0x8A
@@ -1746,11 +1871,15 @@ class SelfTest:
                     "other line\n"
                     "MCS251 map\n"
                     "crt-irq.o:.mcs251.HOME 0xff0000 +0x3\n"
-                    "crt-irq.o:.mcs251.BOOT 0xff0210 +0x9a\n"
-                    "fw.o:.mcs251.CSEG 0xff0400 +0x100\n"
+                    "crt-irq.o:.mcs251.BOOT 0xff0500 +0x106\n"
+                    "fw.o:.mcs251.CSEG 0xff0700 +0x100\n"
                     "IRQ 00 0xff0003 ISR _irq0\n"
                     "IRQ 01 0xff000b DEFAULT __mcs251_isr_unhandled\n"
                     "IRQ 07 0xff003b RESERVED\n"
+                    "IRQ 14 0xff0073 SYSTEM\n"
+                    "IRQ 100 0xff0323 RESERVED\n"
+                    "IRQ 102 0xff0333 ISR _irq102\n"
+                    "IRQ 126 0xff03f3 DEFAULT __mcs251_isr_unhandled\n"
                 )
             table = parse_irq_map(path)
             _check(table[0] == {"addr": 0xFF0003, "tag": "ISR",
@@ -1760,30 +1889,116 @@ class SelfTest:
                    and table[1]["symbol"] == "__mcs251_isr_unhandled",
                    "DEFAULT map line parsed wrong")
             _check(table[7]["symbol"] is None, "RESERVED must have no symbol")
+            _check(table[14]["tag"] == "SYSTEM" and table[14]["symbol"] is None,
+                   "SYSTEM row parsed wrong: %r" % table.get(14))
+            # G1: the slot field spans one to three digits. A two-digit-only
+            # pattern silently dropped every 100..126 row; these three cover
+            # the high Reserved row, an ISR row and the profile maximum.
+            _check(table[100] == {"addr": 0xFF0323, "tag": "RESERVED",
+                                  "symbol": None},
+                   "three-digit RESERVED row 100 parsed wrong: %r"
+                   % table.get(100))
+            _check(table[102] == {"addr": 0xFF0333, "tag": "ISR",
+                                  "symbol": "_irq102"},
+                   "three-digit ISR row 102 parsed wrong: %r"
+                   % table.get(102))
+            _check(table[126] == {"addr": 0xFF03F3, "tag": "DEFAULT",
+                                  "symbol": "__mcs251_isr_unhandled"},
+                   "profile-max row 126 parsed wrong: %r" % table.get(126))
+            _check(len(table) == 7,
+                   "all seven rows (including the three 100+ ones) must be "
+                   "parsed, got %d: %r" % (len(table), sorted(table)))
             # The map's addr column is the *vector slot address*; the
             # DEFAULT function address is resolved at runtime through the
             # vector EJMP targets, never from this column.
-            _check(default_slots(table) == [1],
+            _check(default_slots(table) == [1, 126],
                    "DEFAULT slot classification wrong: %r"
                    % default_slots(table))
-            _check(table[1]["addr"] == vector_addr(1),
+            _check(table[1]["addr"] == vector_addr(1)
+                   and table[126]["addr"] == vector_addr(126),
                    "DEFAULT map addr must be the vector slot address")
             sections = parse_map_sections(path)
             _check(sections == [
                 {"path": "crt-irq.o", "name": ".mcs251.HOME",
                  "addr": 0xFF0000, "size": 0x3},
                 {"path": "crt-irq.o", "name": ".mcs251.BOOT",
-                 "addr": 0xFF0210, "size": 0x9A},
+                 "addr": 0xFF0500, "size": 0x106},
                 {"path": "fw.o", "name": ".mcs251.CSEG",
-                 "addr": 0xFF0400, "size": 0x100},
+                 "addr": 0xFF0700, "size": 0x100},
             ], "map section lines parsed wrong: %r" % sections)
             protected = protected_crt_ranges(sections)
             _check(protected == [(0xFF0000, 0xFF0003),
-                                 (0xFF0210, 0xFF02AA)],
+                                 (0xFF0500, 0xFF0606)],
                    "protected CRT ranges wrong: %r" % protected)
-            _check(_addr_in_ranges(0xFF0210, protected)
-                   and not _addr_in_ranges(0xFF0400, protected),
+            _check(_addr_in_ranges(0xFF0500, protected)
+                   and not _addr_in_ranges(0xFF0700, protected),
                    "boundary exclusion ranges misjudge CRT vs CSEG")
+
+    def check_map_parsing_rejects_malformed_rows(self):
+        """A bad IRQ row stops the case instead of shrinking the table.
+
+        G1 regression: the old two-digit slot field dropped every 100..126
+        row silently, so a malformed or truncated map could still look like
+        a valid short table. Each case below must raise, and each must be the
+        *only* defect in an otherwise valid map so the raise can only come
+        from the intended check.
+        """
+        import tempfile
+
+        def parse_text(text):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "fw.map")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(text)
+                return parse_irq_map(path)
+
+        head = ("MCS251 map\n"
+                "crt-irq.o:.mcs251.HOME 0xff0000 +0x3\n"
+                "crt-irq.o:.mcs251.BOOT 0xff0500 +0x106\n"
+                "IRQ 01 0xff000b ISR _irq1\n")
+
+        # Baseline: this exact head parses, so every failure below is caused
+        # by the one mutated row.
+        _check(parse_text(head + "IRQ 02 0xff0013 ISR _irq2\n")[2]["tag"]
+               == "ISR", "baseline map must parse")
+
+        cases = [
+            ("IRQ 127 0xff03fb ISR _irq127\n", "slot outside the profile"),
+            ("IRQ 999 0xff1f3b ISR _irq999\n", "four-digit slot"),
+            ("IRQ 02 0xff0014 ISR _irq2\n", "address off the frozen formula"),
+            ("IRQ 02 0xff0013 WRONG _irq2\n", "unknown tag"),
+            ("IRQ 02 0xff0013 ISR\n", "ISR tag without a symbol"),
+            ("IRQ 09 0xff004b DEFAULT\n", "DEFAULT tag without a symbol"),
+            ("IRQ 07 0xff003b RESERVED _oops\n",
+             "reserved row with a symbol"),
+            ("IRQ 02 0xff0013\n", "missing tag"),
+            ("IRQ 02 0XFF0013 ISR _irq2\n", "upper-case 0X prefix"),
+            ("IRQ 1 0xff000b ISR _irq1\n", "duplicate slot 1"),
+            ("IRQ 07 0xff003b ISR _irq7\n",
+             "Reserved slot relabelled as a handler"),
+            ("IRQ 14 0xff0073 RESERVED\n",
+             "System slot relabelled as Reserved"),
+            ("IRQ 02 0xff0013 RESERVED\n",
+             "legal slot relabelled as Reserved"),
+        ]
+        for row, what in cases:
+            raised = None
+            try:
+                parse_text(head + row)
+            except CaseEnvironmentError as exc:
+                raised = str(exc)
+            _check(raised is not None,
+                   "malformed IRQ row must raise (%s): %r" % (what, row))
+            _check("fw.map" in raised and "IRQ" in raised,
+                   "malformed-row error must name the map and the row "
+                   "(%s): %r" % (what, raised))
+
+        # Non-IRQ lines stay ignored; only a line whose first token is IRQ is
+        # held to the frozen shape.
+        _check(parse_text("MCS251 map\n"
+                          "IRQ_TABLE = 0x03f8\n"
+                          "IRQ 01 0xff000b ISR _irq1\n")[1]["symbol"]
+               == "_irq1", "non-IRQ map lines must be ignored")
 
     @staticmethod
     def _manifest_doc():
@@ -2183,15 +2398,17 @@ class SelfTest:
     FAKE_MAP = (
         "MCS251 map\n"
         "crt-irq.o:.mcs251.HOME 0xff0000 +0x3\n"
-        "crt-irq.o:.mcs251.BOOT 0xff0210 +0x100\n"
-        "fw.o:.mcs251.CSEG 0xff0400 +0x100\n"
+        "crt-irq.o:.mcs251.BOOT 0xff0500 +0x106\n"
+        "fw.o:.mcs251.CSEG 0xff0700 +0x100\n"
         "IRQ 01 0xff000b ISR _irq1\n"
         "IRQ 03 0xff001b ISR _irq3\n"
         "IRQ 06 0xff0033 DEFAULT __mcs251_isr_unhandled\n"
     )
 
     def _protected(self):
-        return [(0xFF0000, 0xFF0003), (0xFF0210, 0xFF0310)]
+        # Home/vector floor plus the placeholder CRT loop range used by the
+        # self-test fake model (the real CRT ranges come from the map).
+        return [(0xFF0000, 0xFF0003), (0xFF0500, 0xFF0503)]
 
     def _fake_clients(self, model):
         deadline = CASE_DEADLINE_SOURCE() + 300
@@ -3184,9 +3401,10 @@ MAX_ISR_STEPS = 4000
 # Acceptance is decided on the FIRST single-step after injection (rework
 # ruling b, closure condition 2); there is no multi-step acceptance budget.
 
-# A5 frozen vector geometry.
-ISR_VECTOR_BASE = 0xFF0003
-ISR_VECTOR_STRIDE = 8
+# A5 frozen vector geometry lives next to the map parser (see the G1 profile
+# block above): ISR_VECTOR_BASE / ISR_VECTOR_STRIDE / ISR_VECTOR_COUNT /
+# ISR_VECTOR_MAX_SLOT are defined there, once, so the parser and every
+# consumer share one restatement of the profile.
 
 
 def vector_addr(slot):

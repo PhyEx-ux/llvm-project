@@ -28,9 +28,25 @@
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/object.ll -o %t.o
 ; RUN: llvm-readobj --file-headers --sections --symbols --relocations %t.o | FileCheck %s
 ; RUN: llvm-objcopy --dump-section=.mcs251.isr=%t.meta %t.o
-; RUN: %python -c "import pathlib,struct,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert len(b)==48; a=[struct.unpack('>HHBBBBHHIII',b[i:i+24]) for i in (0,24)]; assert a==[(1,24,1,1,1,1,1,1,0,0,0),(1,24,2,1,1,1,1,1,0,0,0)],a" %t.meta
+; RUN: %python -c "import pathlib,struct,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert len(b)==48; a=[struct.unpack('>HHBBBBHHIII',b[i:i+24]) for i in (0,24)]; assert a==[(2,24,1,1,1,1,1,1,0,0,0),(2,24,2,1,1,1,1,1,0,0,0)],a" %t.meta
 ; RUN: llvm-readobj --symbols %t.o | FileCheck %s --check-prefix=SYM
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj %t/object.ll -o %t.rel 2>&1 | FileCheck %s --check-prefix=REL
+
+; G1-1: high-slot persistence. Slot 126 (the new upper bound) and slot 31
+; (reclassified Legal) pass ContractCheck and the AsmPrinter object boundary
+; and persist as four records in definition order (ENTRY+REGISTER each).
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/high.ll -o %t/high.o
+; RUN: llvm-objcopy --dump-section=.mcs251.isr=%t/high.meta %t/high.o
+; RUN: %python -c "import pathlib,struct,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert len(b)==96; a=[struct.unpack('>HHBBBBHHIII',b[i:i+24]) for i in range(0,96,24)]; assert a==[(2,24,1,1,1,1,126,1,0,0,0),(2,24,2,1,1,1,126,1,0,0,0),(2,24,1,1,1,1,31,1,0,0,0),(2,24,2,1,1,1,31,1,0,0,0)],a" %t/high.meta
+
+; G1-1: each checking layer rejects an out-of-profile slot ON ITS OWN. The
+; upstream layers are skipped explicitly (-disable-verify skips the IR
+; Verifier; -start-before=mcs251-asm-printer with a MIR input starts past
+; ContractCheck), so removing either layer's own slot re-check makes the
+; corresponding RUN pass an invalid slot through and fail.
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob.mir > %t/ap-oob.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 
 ; Rework R1: the minimal ISR object must not reserve REG_BANK_0 storage and
 ; must not carry DSEG/XINIT data sections (the keepalive root is metadata).
@@ -110,6 +126,8 @@
 ; ESCAPE: outside the registered A4 v2 object identity
 ; V1USED: defined global data requires
 ; NOTUSED: non-registration use
+; CCOOB: MCS251 contract violation: MCS251 ISR: vector is not a legal slot in profile 0-126
+; APOOB: MCS251 ISR: vector is not a legal slot in profile 0-126
 ; ISRERET: must return with RETI
 ; ORDRETI: RETI is only valid inside an interrupt service routine
 ; TPSEUDO: unexpanded target pseudo instruction 'ADJCALLSTACKDOWN'
@@ -485,3 +503,65 @@ body: |
     KILL implicit $r0
     RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
 ...
+
+;--- high.ll
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [2 x ptr] [ptr addrspacecast (ptr addrspace(4) @dma to ptr), ptr addrspacecast (ptr addrspace(4) @t5 to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @dma() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="126" }
+define internal mcs251_intrcc void @t5() addrspace(4) #1 {
+  ret void
+}
+attributes #1 = { noinline "mcs251-isr-vector"="31" }
+!mcs251.signatures = !{}
+
+;--- cc-oob.ll
+; ContractCheck-isolated rejection: the IR Verifier is disabled, so the
+; module-level contract check is the only layer that sees slot 127.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="127" }
+!mcs251.signatures = !{}
+
+;--- ap-oob.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="127" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60

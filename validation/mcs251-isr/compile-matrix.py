@@ -29,9 +29,9 @@
 #     >= 5 spill loads and >= 4 distinct frame displacements. A combo
 #     whose final assembly lacks the evidence FAILs (review finding: the
 #     old array/spill bodies optimized the claimed frames/spills away),
-#   - link with the new CRT (crt-irq.yaml, BOOT=0xFF0210, card step 5),
+#   - link with the new CRT (crt-irq.yaml, BOOT=0xFF0500, card step 5),
 #   - image verification: the R4 acceptance basis is this script's own
-#     independent PT_LOAD-level check (39 EJMP formula, reserved holes,
+#     independent PT_LOAD-level check (109 EJMP formula, reserved holes,
 #     frozen default word, exact registered-handler targets = firmware
 #     object symtab st_value + the firmware object's own .text row base
 #     from the map, 3-byte reset into BOOT). Per the T09 review finding 2
@@ -86,6 +86,12 @@ CASES = {
                  [("isr_gnu", 1), ("isr_keil", 2), ("isr_internal", 3),
                   ("isr_early", 4), ("isr_array", 5), ("isr_spill", 6),
                   ("isr_xtu", 8), ("isr_multi", 9)]),
+    # G1 extended profile: the three in-profile reclassifications and a
+    # spread of high slots, one ISR each.
+    "newslots": ([31, 45, 46, 52, 59, 90, 102, 126], False, False,
+                 [("isr_lin2", 31), ("isr_p8", 45), ("isr_p9", 46),
+                  ("isr_dma_ur2t", 52), ("isr_lcm", 59), ("isr_paint", 90),
+                  ("isr_uart5", 102), ("isr_dma_pwmer", 126)]),
 }
 
 HELPER_SYMBOLS = ["helper_ordinary", "helper_multi"]
@@ -95,15 +101,16 @@ CONTRACT = "1,1,32,8,1"  # the clang chain contract (V1 layout, AS0 code)
 # Frozen A4/A5 constants for the independent image check.
 VEC_BASE = 0xFF0003
 VEC_STRIDE = 8
-VEC_COUNT = 52
-NON_LEGAL = frozenset({7, 13, 14, 15, 22, 23, 31, 32, 33, 34, 35, 45, 46})
+VEC_COUNT = 127
+NON_LEGAL = frozenset({7, 13, 14, 15, 22, 23, 32, 33, 34, 35,
+                       81, 92, 93, 94, 95, 100, 101, 113})
 SYSTEM = frozenset({14, 15})
 DEFAULT_WORD = bytes.fromhex("C2AF80FE")
-BOOT_FLOOR = 0xFF0210
+BOOT_FLOOR = 0xFF0500
 FLASH_BASE = 0xFF0000
 FLASH_SIZE = 0x10000
-LINK_AREAS = ["--area-start=HOME=0xff0000", "--area-start=BOOT=0xff0210",
-              "--area-start=CSEG=0xff0400", "--area-start=XINIT=0xff8000",
+LINK_AREAS = ["--area-start=HOME=0xff0000", "--area-start=BOOT=0xff0500",
+              "--area-start=CSEG=0xff0700", "--area-start=XINIT=0xff8000",
               "--area-start=DSEG=0x30"]
 
 # Link layout rationale (recorded in the JSON notes): DSEG starts at 0x30 so
@@ -113,12 +120,24 @@ LINK_AREAS = ["--area-start=HOME=0xff0000", "--area-start=BOOT=0xff0210",
 
 NEGATIVES = [
     ("neg-slot7", "interrupt(7) reserved slot",
-     "MCS251 interrupt vector must be a legal slot in 0-51", """
+     "MCS251 interrupt vector must be a legal slot in 0-126", """
 void bad(void) __attribute__((interrupt(7)));
 """),
-    ("neg-slot52", "interrupt(52) out of profile",
-     "MCS251 interrupt vector must be a legal slot in 0-51", """
-void bad(void) __attribute__((interrupt(52)));
+    ("neg-slot127", "interrupt(127) out of profile",
+     "MCS251 interrupt vector must be a legal slot in 0-126", """
+void bad(void) __attribute__((interrupt(127)));
+"""),
+    ("neg-slot81", "interrupt(81) header-only reserved slot",
+     "MCS251 interrupt vector must be a legal slot in 0-126", """
+void bad(void) __attribute__((interrupt(81)));
+"""),
+    ("neg-slot100", "interrupt(100) no-source reserved slot",
+     "MCS251 interrupt vector must be a legal slot in 0-126", """
+void bad(void) __attribute__((interrupt(100)));
+"""),
+    ("neg-slot14", "interrupt(14) system slot",
+     "MCS251 interrupt vector must be a legal slot in 0-126", """
+void bad(void) __attribute__((interrupt(14)));
 """),
     ("neg-late", "attribute after a plain first declaration",
      "identity must be established on the first declaration", """
@@ -367,7 +386,7 @@ def check_object(obj_path, isr_syms, symbol_prefix="_"):
         facts["records"].append(
             {"index": r, "kind": kind, "entry_kind": entry, "hw": hw,
              "save": save, "slot": slot, "asset": asset})
-        if ver != 1 or recsize != 24:
+        if ver != 2 or recsize != 24:
             problems.append("record %d: version/recsize %d/%d" %
                             (r, ver, recsize))
         if kind not in (1, 2):

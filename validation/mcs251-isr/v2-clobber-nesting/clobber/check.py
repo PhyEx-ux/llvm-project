@@ -42,7 +42,7 @@ def blob(a, n):
     return bytes(mem[a+i] for i in range(n))
 
 # Reset vector: 3-byte ljmp into BOOT.  Timer0 slot 1: EJMP to _timer0.
-assert blob(0xff0000, 3) == b'\x02\x02\x10'
+assert blob(0xff0000, 3) == b'\x02\x05\x00'
 assert blob(0xff000b, 1) == b'\x8a'
 assert blob(0xff000c, 3) == isr.to_bytes(3, 'big')
 

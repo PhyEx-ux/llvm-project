@@ -8,13 +8,13 @@
 #
 # Checks, all from the frozen A4/A5 constants (hardcoded copies):
 #   - the 13 non-legal slots occupy no PT_LOAD payload at all,
-#   - every one of the 39 legal slots holds an EJMP at the address formula,
+#   - every one of the 109 legal slots holds an EJMP at the address formula,
 #   - legal-slot tail 4 bytes carry no payload,
 #   - all unregistered legal slots jump to one shared default target whose
 #     machine bytes are the frozen C2AF80FE fail-stop word,
 #   - the reset at the entry point is exactly 3 bytes (ljmp) abutting the
-#     vector base and jumping into the BOOT range (>= 0xFF0210),
-#   - the map's 52 IRQ rows agree with the formula and classification.
+#     vector base and jumping into the BOOT range (>= 0xFF0500),
+#   - the map's 127 IRQ rows agree with the formula and classification.
 
 import re
 import struct
@@ -22,12 +22,13 @@ import sys
 
 BASE = 0xFF0003
 STRIDE = 8
-COUNT = 52
+COUNT = 127
 HANDLER_STRIDE = 41  # fixture convention: one 41-byte handler per slot
-NON_LEGAL = frozenset({7, 13, 14, 15, 22, 23, 31, 32, 33, 34, 35, 45, 46})
+NON_LEGAL = frozenset({7, 13, 14, 15, 22, 23, 32, 33, 34, 35,
+                         81, 92, 93, 94, 95, 100, 101, 113})
 SYSTEM = frozenset({14, 15})
 DEFAULT_BYTES = bytes.fromhex('C2AF80FE')
-BOOT_FLOOR = 0xFF0210
+BOOT_FLOOR = 0xFF0500
 
 
 def die(msg):
@@ -80,8 +81,14 @@ def main():
     for line in open(map_path):
         t = line.split()
         if len(t) >= 4 and t[0] == 'IRQ':
-            rows[int(t[1])] = (int(t[2], 16), t[3],
-                               t[4] if len(t) > 4 else '')
+            slot_no = int(t[1])
+            # A repeated slot number must fail loudly: with a plain dict
+            # store a duplicate plus a missing slot would still pass the
+            # len(rows) == COUNT check below.
+            if slot_no in rows:
+                die('duplicate IRQ map row for slot %d' % slot_no)
+            rows[slot_no] = (int(t[2], 16), t[3],
+                             t[4] if len(t) > 4 else '')
         # The fixture is the only input with a plain .text section; the map's
         # section row gives its independent load address (R4: precise handler
         # entry evidence, not derived from the EJMP bytes themselves).

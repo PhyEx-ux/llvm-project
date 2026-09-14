@@ -5,8 +5,9 @@
 # reservation, the two 24-byte .mcs251.isr asset records, and every
 # relocation/symbol are preserved byte-for-byte from the frozen v1 fixture
 # crt-irq.yaml.  The ISR metadata ProtocolVersion stays 1: the ISR record
-# protocol and the ELF object identity are two different protocols, and the
-# ISR protocol bump belongs to the G1 campaign, not to A4 (W7 card).
+# protocol and the ELF object identity are two different protocols.  The ISR
+# records now carry protocol_version=2 (G1, PM ruling 2026-09-13); the ELF
+# object identity is the A4 v2 carrier.
 #
 # The ONLY changes are the object identity:
 #   - e_flags 0x00000102, installed by gen-crt-v2.sh after yaml2obj
@@ -66,7 +67,7 @@ Sections:
     Size: 16
   # New ISR metadata: exactly two asset records for this CRT object, no ALLOC,
   # no address payload. All fields big-endian (A3.2):
-  #   protocol_version=0001  record_size=0018
+  #   protocol_version=0002  record_size=0018
   #   IRQ_DEFAULT: kind=03 entry=02 hw=01 save=00 slot=FFFF caps=0001
   #                symbol_reference=00000000 (R_MCS251_ISR_REF) asset=00000001
   #                reserved=00000000
@@ -77,7 +78,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ ]
     AddressAlign: 4
-    Content: '0001001803020100FFFF00010000000000000001000000000001001804030000FFFF0001000000000000000100000000'
+    Content: '0002001803020100FFFF00010000000000000001000000000002001804030000FFFF0001000000000000000100000000'
   - Name: .rela.mcs251.HOME
     Type: SHT_RELA
     Link: .symtab

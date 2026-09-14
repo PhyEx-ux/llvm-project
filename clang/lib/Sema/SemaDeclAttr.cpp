@@ -6760,9 +6760,14 @@ static void handleMCS251InterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
     FD->setInvalidDecl();
     return;
   }
-  if (Vector->isNegative() || Vector->ugt(51) ||
+  // Negative first (a signed APSInt must never be reinterpreted), then the
+  // shared upper bound, then the shared legality table (which rejects
+  // reserved/system slots inside the profile as well as out-of-range ones).
+  if (Vector->isNegative() ||
+      Vector->ugt(llvm::MCS251ISR::ISRVectorMaxSlot) ||
       !llvm::MCS251ISR::isLegalISRSlot(Vector->getZExtValue())) {
-    S.Diag(AL.getLoc(), diag::err_mcs251_isr_vector_not_legal);
+    S.Diag(AL.getLoc(), diag::err_mcs251_isr_vector_not_legal)
+        << llvm::MCS251ISR::ISRVectorMaxSlot;
     FD->setInvalidDecl();
     return;
   }

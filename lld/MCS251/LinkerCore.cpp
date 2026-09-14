@@ -22,6 +22,7 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -1135,11 +1136,13 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
       }
       if (R.Kind == MCS251ISR::RK_ISR_ENTRY ||
           R.Kind == MCS251ISR::RK_ISR_REGISTER) {
-        // A4: only the 39 legal slots are user-assignable; reserved, system
-        // and out-of-profile numbers (including FFFF) are rejected.
+        // G1: only the 109 legal slots are user-assignable; reserved, system
+        // and out-of-profile numbers (including FFFF) are rejected.  The
+        // bound comes from the shared profile so it cannot drift.
         if (R.Slot == MCS251ISR::NoSlot || !MCS251ISR::isLegalISRSlot(R.Slot))
           return fail(Err, Path + ": MCS251 ISR: vector is not a legal slot "
-                             "in profile 0-51");
+                             "in profile 0-" +
+                             Twine(MCS251ISR::ISRVectorMaxSlot));
       } else if (R.Slot != MCS251ISR::NoSlot) {
         return fail(Err, Path + ": MCS251 ISR: default/reset record must not "
                              "claim a slot");
@@ -1517,7 +1520,10 @@ private:
   InputSymbol *DefaultSym = nullptr;
   InputSymbol *ResetSym = nullptr;
   std::set<InputSymbol *> IsrSymbols;    // Exact registered ISR identities.
-  InputSymbol *SlotSym[52] = {};         // Registered handler per legal slot.
+  // Registered handler per legal slot.  Sized by the shared profile count and
+  // zero-initialized, so a change to the profile can never leave a stale
+  // literal here and a high slot is never an out-of-bounds access.
+  std::array<InputSymbol *, MCS251ISR::ISRVectorCount> SlotSym{};
   std::vector<std::unique_ptr<InputSection>> OwnedSynth;
   std::vector<InputSection *> SynthSections;
   std::vector<std::pair<InputSection *, uint32_t>> SynthExpect;
@@ -3033,8 +3039,10 @@ bool Linker::validateIRQReservedRangesAndCRT() {
       return fail(Err, "MCS251 ISR: CODE range [0x" +
                            Twine::utohexstr(U.Start) + ",0x" +
                            Twine::utohexstr(U.End) +
-                           ") overlaps the reserved vector area "
-                           "[0xff0003,0xff01a3)");
+                           ") overlaps the reserved vector area [0x" +
+                           Twine::utohexstr(MCS251ISR::ISRVectorBase) +
+                           ",0x" +
+                           Twine::utohexstr(MCS251ISR::ISRVectorEnd) + ")");
   }
   // T07 step 10 / R2: HOME must sit exactly at 0xff0000 so the reset abuts
   // the vector base, and must be exactly a 3-byte ljmp, never a 4-byte EJMP.
@@ -3076,14 +3084,15 @@ bool Linker::validateIRQReservedRangesAndCRT() {
                            Twine::utohexstr(Def->Address +
                                             static_cast<uint32_t>(R.Addend)));
   }
-  // T07 step 11: the CRT BOOT must start at or above 0xff0210 (the T08 asset
-  // default); FF0100-era BOOTs are a legacy-layout conflict in IRQ mode.
+  // T07 step 11: the CRT BOOT must start at or above the shared floor.  The
+  // whole vector area is reserved, so a BOOT that reaches into it (the old
+  // 0xff0210 default, or a FF0100-era layout) is a conflict in IRQ mode.
   for (InputSection *S : AllSections)
     if (S->File == CrtFile && S->Region == "BOOT" && S->Size &&
-        S->Address < 0xFF0210)
-      return fail(Err, "MCS251 ISR: CRT BOOT must start at or above 0xff0210, "
-                       "got 0x" +
-                           Twine::utohexstr(S->Address));
+        S->Address < MCS251ISR::ISRBootMinAddress)
+      return fail(Err, "MCS251 ISR: CRT BOOT must start at or above 0x" +
+                           Twine::utohexstr(MCS251ISR::ISRBootMinAddress) +
+                           ", got 0x" + Twine::utohexstr(S->Address));
   return true;
 }
 
@@ -3399,7 +3408,8 @@ bool Linker::validateBitAddrFields() {
   return true;
 }
 
-// Apply the 52 synthesized vector slots: R_MCS251_24 semantics against the
+// Apply the synthesized vector slots (shared ISRVectorCount):
+// R_MCS251_24 semantics against the
 // exact vetted entry symbol of the slot (registered handler or the CRT
 // default fail-stop entry for unregistered legal slots).
 bool Linker::applyVectorJumps() {
@@ -4219,9 +4229,11 @@ void Linker::buildMap(raw_ostream &Out) const {
           << '\n';
     }
   }
-  // T07 steps 17-19: in IRQ mode the map carries exactly the 52 synthesized
-  // vector rows (slot as two decimal digits, address as 6 lowercase hex
-  // digits). No ISR-safe, stack or priority fields exist anywhere.
+  // T07 steps 17-19: in IRQ mode the map carries exactly the 127
+  // synthesized vector rows (slot as at least two decimal digits, so
+  // 100..126 are three wide; address as 0x + 6 lowercase hex digits, the
+  // format_hex width 8 counting the 0x prefix). No ISR-safe, stack or
+  // priority fields exist anywhere.
   if (IrqMode) {
     for (unsigned Slot = 0; Slot < MCS251ISR::ISRVectorCount; ++Slot) {
       const uint32_t Base =
