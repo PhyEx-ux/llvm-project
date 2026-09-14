@@ -3491,7 +3491,11 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
   if (const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(CurCodeDecl)) {
     if (FD->hasImplicitReturnZero()) {
       QualType RetTy = FD->getReturnType().getUnqualifiedType();
-      llvm::Type *LLVMTy = CGM.getTypes().ConvertType(RetTy);
+      // An MCS-251 bit return slot holds the normalized i8 carrier (P09
+      // §4.2), not the i1 expression type.
+      llvm::Type *LLVMTy = RetTy->isMCS251BitType()
+                               ? CGM.getTypes().ConvertTypeForMem(RetTy)
+                               : CGM.getTypes().ConvertType(RetTy);
       llvm::Constant *Zero = llvm::Constant::getNullValue(LLVMTy);
       Builder.CreateStore(Zero, ReturnValue);
     }
@@ -3606,6 +3610,22 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
     case ABIArgInfo::Direct: {
       auto AI = Fn->getArg(FirstIRArg);
       llvm::Type *LTy = ConvertType(Arg->getType());
+
+      // MCS-251 bit parameter entry (P09 §4.2 callee decode, §3.2): the ABI
+      // value is the full normalized i8; decode it to the call-private i1
+      // here, at the earliest program point -- before any helper call could
+      // overwrite a later parameter's static slot. This is an explicit bit
+      // unmarshal point: the generic coercion-by-memory path below would
+      // round-trip through a byte temp instead.
+      if (Arg->getType().getUnqualifiedType()->isMCS251BitType()) {
+        assert(NumIRArgs == 1 && ArgI.getDirectOffset() == 0 &&
+               ArgI.getCoerceToType()->isIntegerTy(8) &&
+               "bit parameter must be a single direct i8");
+        llvm::Value *V = Builder.CreateICmpNE(
+            AI, llvm::ConstantInt::get(AI->getType(), 0), "bit.param");
+        ArgVals.push_back(ParamValue::forDirect(V));
+        break;
+      }
 
       // Prepare parameter attributes. So far, only attributes for pointer
       // parameters are prepared. See
@@ -4455,6 +4475,23 @@ void CodeGenFunction::EmitFunctionEpilog(
 
   case ABIArgInfo::Extend:
   case ABIArgInfo::Direct:
+    // MCS-251 bit return (P09 §4.2): the return carrier is the normalized
+    // i8 slot written by EmitReturnStmt (or the implicit zero store). Elide
+    // the load through a dominating store when possible; the returned value
+    // is always the full byte, never the private i1.
+    if (RetTy.getUnqualifiedType()->isMCS251BitType()) {
+      assert(RetAI.getCoerceToType()->isIntegerTy(8) &&
+             RetAI.getDirectOffset() == 0 && "bit return must be a direct i8");
+      if (llvm::StoreInst *SI = findDominatingStoreToReturnValue(*this)) {
+        if (EmitRetDbgLoc && !AutoreleaseResult)
+          RetDbgLoc = SI->getDebugLoc();
+        RV = SI->getValueOperand();
+        SI->eraseFromParent();
+      } else {
+        RV = Builder.CreateLoad(ReturnValue, "bit.retval");
+      }
+      break;
+    }
     if (RetAI.getCoerceToType() == ConvertType(RetTy) &&
         RetAI.getDirectOffset() == 0) {
       // The internal return value temp always will have pointer-to-return-type
@@ -5128,6 +5165,22 @@ void CodeGenFunction::EmitCallArgs(
     ArgTypes.push_back(IsVariadic ? getVarArgType(A) : A->getType());
   assert((int)ArgTypes.size() == (ArgRange.end() - ArgRange.begin()));
 
+  // P09 §6.3 N13/N14 CodeGen backstop: the bit value ABI needs a known,
+  // complete prototype. A bit argument through `...` (whose identity default
+  // promotion would otherwise erase) or through an unprototyped callee has no
+  // defined DPL/`_PARM_n` position. The target Sema gates already reject
+  // these; stay fail-closed here too.
+  if (IsVariadic || !Prototype.P) {
+    for (unsigned I = 0, E = ArgTypes.size(); I != E; ++I) {
+      if (ArgTypes[I].getUnqualifiedType()->isMCS251BitType()) {
+        CGM.ErrorUnsupported(*(ArgRange.begin() + I),
+                             IsVariadic ? "MCS251 bit variadic argument"
+                                        : "MCS251 bit no-prototype argument");
+        break;
+      }
+    }
+  }
+
   // We must evaluate arguments from right to left in the MS C++ ABI,
   // because arguments are destroyed left to right in the callee. As a special
   // case, there are certain language constructs that require left-to-right
@@ -5283,14 +5336,13 @@ void CodeGenFunction::EmitCallArg(CallArgList &args, const Expr *E,
     return;
   }
 
-  // An MCS-251 bit actual argument crosses the P01 explicit-i8 ABI boundary,
-  // which is a later slice. Fail closed rather than emitting a zeroext i1
-  // argument (the message matches the other MCS-251 bit CodeGen gates).
-  if (type.getUnqualifiedType()->isMCS251BitType()) {
-    CGM.ErrorUnsupported(E, "MCS251 bit argument");
-    return args.add(RValue::get(llvm::UndefValue::get(ConvertType(type))),
-                    type);
-  }
+  // An MCS-251 bit actual argument (P09 §4.2) evaluates like any scalar: the
+  // value is already the normalized private i1 (Sema's int->bit conversion is
+  // an IntegralToBoolean in the original width). The i1 -> i8 boundary
+  // extension happens at the single marshal point in EmitCall, so nothing
+  // here may truncate or widen it first. The varargs / no-prototype call
+  // forms are rejected by the target Sema gates (with a CodeGen backstop in
+  // EmitCallArgs).
 
   assert(type->isReferenceType() == E->isGLValue() &&
          "reference binding to unmaterialized r-value!");
@@ -5968,6 +6020,25 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
 
     case ABIArgInfo::Extend:
     case ABIArgInfo::Direct: {
+      // MCS-251 bit argument marshal (P09 §4.2 caller boundary): the private
+      // i1 value was normalized when the call argument expression was
+      // evaluated; zero-extend it to the ABI's full i8 here, before the
+      // value reaches DPL or a `_callee_PARM_n` static slot store. Never
+      // truncate a wider source integer through this boundary.
+      if (info_it->type.getTypePtr()->isMCS251BitType()) {
+        assert(NumIRArgs == 1 && ArgInfo.getDirectOffset() == 0 &&
+               ArgInfo.getCoerceToType()->isIntegerTy(8) &&
+               "bit argument must be a single direct i8");
+        llvm::Value *V = I->getKnownRValue().getScalarVal();
+        assert(V->getType()->isIntegerTy() && "bit argument not a scalar?");
+        if (!V->getType()->isIntegerTy(1))
+          V = Builder.CreateICmpNE(
+              V, llvm::Constant::getNullValue(V->getType()), "bit.nz");
+        IRCallArgs[FirstIRArg] =
+            Builder.CreateZExt(V, ArgInfo.getCoerceToType(), "bit.abi");
+        break;
+      }
+
       if (!isa<llvm::StructType>(ArgInfo.getCoerceToType()) &&
           ArgInfo.getCoerceToType() == ConvertType(info_it->type) &&
           ArgInfo.getDirectOffset() == 0) {
@@ -6733,6 +6804,17 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
 
       case ABIArgInfo::Extend:
       case ABIArgInfo::Direct: {
+        // MCS-251 bit return decode (P09 §4.2 caller use): the call returns
+        // the full normalized i8 in DPL; compare it non-zero to obtain the
+        // private i1. This applies to direct and indirect callees alike and
+        // keeps the i8 call even when the result is discarded.
+        if (RetTy.getUnqualifiedType()->isMCS251BitType()) {
+          assert(CI->getType()->isIntegerTy(8) &&
+                 "bit call must return a full i8");
+          return RValue::get(Builder.CreateICmpNE(
+              CI, llvm::ConstantInt::get(CI->getType(), 0), "bit.call"));
+        }
+
         llvm::Type *RetIRTy = ConvertType(RetTy);
         if (RetAI.getCoerceToType() == RetIRTy &&
             RetAI.getDirectOffset() == 0) {

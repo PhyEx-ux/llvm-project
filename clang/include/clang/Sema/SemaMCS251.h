@@ -69,6 +69,15 @@ public:
   /// Returns true if a diagnostic was emitted.
   bool CheckMCS251ControlledBitDirectiveClauses(Stmt *Directive);
 
+  /// P09 §6.3 N13-N15: check a call site against the frozen bit call-form
+  /// exclusions. \p FnType is the callee's function type after decay;
+  /// \p IsIndirect is true when the call goes through a function pointer
+  /// (no resolved FunctionDecl). Emits err_mcs251_bit_call_unsupported with
+  /// the frozen category ("variadic", "no-prototype" or "multi-argument
+  /// indirect") and returns true when the call form is rejected.
+  bool CheckMCS251BitCallForm(const FunctionType *FnType, bool IsIndirect,
+                              SourceLocation Loc, SourceRange Range);
+
   //===--------------------------------------------------------------------===//
   // MCS251 OpenMP/OpenACC construct restriction context (P08 revision,
   // Alice ruling plan B).

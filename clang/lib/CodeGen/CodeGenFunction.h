@@ -4496,6 +4496,20 @@ public:
   /// reference has no fixed address and is a later M2 slice (P09 handle).
   LValue EmitMCS251ControlledBitLValue(const Expr *E);
 
+  /// Return the Symbolic controlled bit l-value for a reference to a
+  /// persistent/static `bit` object (P09 §2.6.2): the unique i8 handle global
+  /// of the canonical VarDecl, carrying the declared QualType as-is (no
+  /// implicit volatile). The handle always exists; an unsupported storage
+  /// form has already been diagnosed (build fails closed) and yields the
+  /// plain safely-shaped handle.
+  LValue EmitMCS251PersistentBitLValue(const VarDecl *VD, QualType Ty);
+
+  /// The toggle identity target (P09 §2.6.6): a fixed reference first (an
+  /// sbit also has bit type; Fixed wins over Object), then a persistent bit
+  /// object DeclRef. Automatic/parameter bit objects are not toggle targets
+  /// (P-2 value semantics). Returns an invalid LValue for anything else.
+  LValue EmitMCS251ToggleBitLValue(const Expr *E);
+
   /// Read a controlled bit l-value (a single sample). Emits
   /// llvm.mcs251.bit.read and materialises a 0/1 value of the l-value's type.
   RValue EmitLoadOfMCS251BitLValue(LValue LV, SourceLocation Loc);
@@ -4509,8 +4523,9 @@ public:
   /// `X ^= 1` / `X = !X` discarded-value forms.
   void EmitToggleMCS251BitLValue(LValue Dst);
 
-  /// The unique bit-address operand of an MCS-251 bit l-value, as an i32 value
-  /// suitable for the llvm.mcs251.bit.* intrinsic's immediate operand.
+  /// The unique bit-address operand of an MCS-251 bit l-value: an i32 value
+  /// for the fixed llvm.mcs251.bit.* family, or the bit-object handle global
+  /// itself (never ptrtoint'ed) for the symbolic obj family (P09 §2.6.4).
   llvm::Value *EmitMCS251BitAddressOperand(LValue LV);
 
   /// Like EmitLoadOfLValue but also handles complex and aggregate types.

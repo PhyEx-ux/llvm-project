@@ -1256,7 +1256,13 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
     ReturnValue = Address(Addr, ConvertType(RetTy),
                           CGM.getNaturalTypeAlignment(RetTy), KnownNonNull);
   } else {
-    ReturnValue = CreateIRTempWithoutCast(RetTy, "retval");
+    // An MCS-251 bit return value lives in its normalized i8 carrier for the
+    // whole return path (P09 §4.2): EmitReturnStmt zero-extends the private
+    // i1 when storing, and the epilogue returns the full i8.
+    if (RetTy->isMCS251BitType())
+      ReturnValue = CreateMemTempWithoutCast(RetTy, "retval");
+    else
+      ReturnValue = CreateIRTempWithoutCast(RetTy, "retval");
 
     // Tell the epilog emitter to autorelease the result.  We do this
     // now so that various specialized functions can suppress it

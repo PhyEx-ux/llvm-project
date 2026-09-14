@@ -57,6 +57,7 @@
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/BinaryFormat/MCS251Bit.h"
 #include "llvm/IR/AttributeMask.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DataLayout.h"
@@ -127,6 +128,11 @@ createTargetCodeGenInfo(CodeGenModule &CGM) {
 
   case llvm::Triple::m68k:
     return createM68kTargetCodeGenInfo(CGM);
+  case llvm::Triple::mcs251:
+    // P09 §4.2: the only signature rule specific to this target is the `bit`
+    // scalar (explicit direct i8 for parameters and return); every other type
+    // is classified by DefaultABIInfo unchanged.
+    return createMCS251TargetCodeGenInfo(CGM);
   case llvm::Triple::mips:
   case llvm::Triple::mipsel:
     if (Triple.getOS() == llvm::Triple::Win32)
@@ -4894,6 +4900,19 @@ void CodeGenModule::EmitGlobal(GlobalDecl GD) {
     return;
   }
 
+  // A persistent bit-object file-scope definition (P09 §2.1.4) is always
+  // emitted, even when never referenced: the deferred-global mechanism
+  // decides existence from later references, which would drop an unused
+  // internal/const/volatile static definition before its forced llvm.used
+  // entry exists.
+  if (const auto *BVD = dyn_cast<VarDecl>(Global))
+    if (BVD->isFileVarDecl() &&
+        BVD->getType().getUnqualifiedType()->isMCS251BitType()) {
+      EmitGlobalDefinition(GD);
+      addEmittedDeferredDecl(GD);
+      return;
+    }
+
   // If we're deferring emission of a C++ variable with an
   // initializer, remember the order in which it appeared in the file.
   if (getLangOpts().CPlusPlus && isa<VarDecl>(Global) &&
@@ -5620,14 +5639,11 @@ llvm::Constant *CodeGenModule::GetOrCreateLLVMFunction(
 
   std::string NameWithoutMultiVersionMangling;
   if (const FunctionDecl *FD = cast_or_null<FunctionDecl>(D)) {
-    // An MCS-251 bit return type crosses the P01 explicit-i8 ABI boundary,
-    // which is a later slice. Fail closed rather than emitting a zeroext i1
-    // return (the message matches the other MCS-251 bit CodeGen gates).
-    // Builtins are exempt: the controlled fixed-bit lvalue builtin itself is
-    // declared `__bit(...)` and is intercepted before a real call exists.
-    if (FD->getBuiltinID() == 0 &&
-        FD->getReturnType().getUnqualifiedType()->isMCS251BitType())
-      ErrorUnsupported(FD, "MCS251 bit return type");
+    // An MCS-251 bit return type is a P01/P09 §4 value-ABI form: the LLVM
+    // signature comes from the arranged CGFunctionInfo, whose MCS251 ABI
+    // classification makes it an explicit direct i8 (full DPL 0/1). The old
+    // fail-closed gate here is migrated; varargs / no-prototype signatures
+    // are rejected by the target Sema call gates.
 
     // For the device mark the function as one that should be emitted.
     if (getLangOpts().OpenMPIsTargetDevice && OpenMPRuntime &&
@@ -6279,6 +6295,12 @@ llvm::Constant *CodeGenModule::GetAddrOfGlobalVar(const VarDecl *D,
                                            ForDefinition_t IsForDefinition) {
   assert(D->hasGlobalStorage() && "Not a global variable");
   QualType ASTTy = D->getType();
+  // A persistent bit object is always referenced through its bit-object
+  // handle global (P09 §2.6), never through an ordinary byte global of the
+  // memory type: this intercept also covers callers other than the DeclRef
+  // route (debug info, OpenMP/HLSL plumbing, ...).
+  if (ASTTy.getUnqualifiedType()->isMCS251BitType())
+    return GetOrCreateMCS251BitGlobalVar(D);
   if (!Ty)
     Ty = getTypes().ConvertTypeForMem(ASTTy);
 
@@ -6310,6 +6332,15 @@ void CodeGenModule::EmitTentativeDefinition(const VarDecl *D) {
   // definition).
   if (GV && !GV->isDeclaration())
     return;
+
+  // A persistent bit-object tentative definition is always a real definition
+  // in this TU (P09 §2.1.4): never park it in the deferred table, where an
+  // unreferenced object would be dropped before the llvm.used keepalive is
+  // established.
+  if (D->getType().getUnqualifiedType()->isMCS251BitType()) {
+    EmitGlobalVarDefinition(D);
+    return;
+  }
 
   // If we have not seen a reference to this variable yet, place it into the
   // deferred declarations table to be emitted if needed later.
@@ -6517,6 +6548,121 @@ const ABIInfo &CodeGenModule::getABIInfo() {
 }
 
 /// Pass IsTentative as true if you want to create a tentative definition.
+llvm::GlobalVariable *
+CodeGenModule::GetOrCreateMCS251BitGlobalVar(const VarDecl *D) {
+  // Same-TU identity is the canonical VarDecl (P09 §2.2): extern->definition
+  // and repeated tentative declarations all resolve to this one handle.
+  const VarDecl *Canon = D->getCanonicalDecl();
+  auto It = MCS251BitGlobalMap.find(Canon);
+  if (It != MCS251BitGlobalMap.end())
+    return It->second;
+
+  // Fail closed on storage forms outside the §2.1 supported set (alias/ifunc/
+  // weakref are caught even earlier in EmitGlobal; TLS/weak/section are
+  // diagnosed here, never silently degraded to an ordinary global or to a
+  // weak/section-tagged handle). The diagnostic fails the build; a plain,
+  // safely-shaped handle is still created and returned so every later
+  // reference -- and the debug/OMP plumbing that goes through
+  // GetAddrOfGlobalVar -- sees a valid bit-object global instead of codegen
+  // crashing on a null/invalid lvalue after the error.
+  if (D->getTLSKind() != VarDecl::TLS_None)
+    ErrorUnsupported(D, "MCS251 bit TLS object");
+  else if (D->hasAttr<WeakAttr>() || D->hasAttr<SectionAttr>())
+    ErrorUnsupported(D, "MCS251 bit weak/section object");
+
+  // Handle name: file-scope objects take the mangled name. A function-local
+  // static is context-qualified exactly like CGDecl's getStaticDeclName
+  // (mangled function name + "." + source name), so two same-named statics in
+  // different functions never collide; an asm label keeps its label name.
+  std::string Name;
+  if (D->isStaticLocal()) {
+    if (D->hasAttr<AsmLabelAttr>())
+      Name = getMangledName(D).str();
+    else if (const auto *FD = dyn_cast<FunctionDecl>(D->getDeclContext()))
+      Name = (getMangledName(FD) + "." + D->getNameAsString()).str();
+    else {
+      ErrorUnsupported(D, "MCS251 bit object storage form");
+      Name = getMangledName(D).str();
+    }
+  } else {
+    Name = getMangledName(D).str();
+  }
+
+  // §2.1.1: the handle is an ordinary default-address-space (AS0) i8 global
+  // with alignment 1 and the structural "mcs251-bit-object" attribute. It is
+  // object identity only, never 1 byte of storage; the linkage/initializer
+  // are finalized by the definition path. No section, no COMDAT, no TLS, no
+  // unnamed_addr, and the source const/volatile never become IR properties.
+  auto *GV = new llvm::GlobalVariable(
+      getModule(), llvm::Type::getInt8Ty(getLLVMContext()),
+      /*isConstant=*/false, llvm::GlobalValue::ExternalLinkage,
+      /*Init=*/nullptr, Name, /*InsertBefore=*/nullptr,
+      llvm::GlobalVariable::NotThreadLocal, /*AddressSpace=*/0);
+  GV->setAlignment(llvm::Align(1));
+  GV->addAttribute(llvm::MCS251Bit::BitObjectAttrName);
+  MCS251BitGlobalMap[Canon] = GV;
+  return GV;
+}
+
+void CodeGenModule::EmitMCS251BitGlobalVarDefinition(const VarDecl *D) {
+  // The linkage the ordinary definition path would assign (P09 section 2.2):
+  // under -fcommon a plain tentative external bit object would actually
+  // become a COMMON symbol (an explicitly __attribute__((common)) bit under
+  // -fno-common would too). Diagnose that instead of silently emitting an
+  // external strong definition that masks the user option; an
+  // explicitly-initialized strong definition and an internal static are never
+  // COMMON and must not be mis-rejected. Any other linkage is likewise
+  // outside the section 2.1 form (external definition/declaration or
+  // internal), so it fails closed as well.
+  llvm::GlobalValue::LinkageTypes Linkage = getLLVMLinkageVarDefinition(D);
+  if (Linkage == llvm::GlobalValue::CommonLinkage) {
+    ErrorUnsupported(D, "MCS251 bit COMMON tentative definition");
+    return;
+  }
+  if (Linkage != llvm::GlobalValue::ExternalLinkage &&
+      Linkage != llvm::GlobalValue::InternalLinkage) {
+    ErrorUnsupported(D, "MCS251 bit weak/linkonce definition");
+    return;
+  }
+
+  llvm::GlobalVariable *GV = GetOrCreateMCS251BitGlobalVar(D);
+  if (GV->hasInitializer())
+    // The definition for this canonical object was already emitted (e.g. a
+    // strong definition preceding a tentative redeclaration).
+    return;
+
+  // §2.1.3: let constant evaluation compute the initializer expression at the
+  // full source type first, then normalize value != 0 -> i1 -> zext i8, so
+  // 0 -> 0 and 1/2/-1/top-bit -> 1. A static object without an explicit
+  // initializer is 0. A non-constant static initializer is rejected by Sema
+  // (err_init_element_not_constant); fail closed here regardless. Multiple
+  // declarators each evaluate and emit their own definition.
+  uint8_t InitVal = 0;
+  if (const Expr *Init = D->getAnyInitializer()) {
+    std::optional<llvm::APSInt> V =
+        Init->IgnoreParenImpCasts()->getIntegerConstantExpr(getContext());
+    if (!V) {
+      ErrorUnsupported(D, "MCS251 bit non-constant static initializer");
+      return;
+    }
+    InitVal = V->isZero() ? 0 : 1;
+  }
+  GV->setInitializer(llvm::ConstantInt::get(
+      llvm::Type::getInt8Ty(getLLVMContext()), InitVal));
+
+  GV->setLinkage(Linkage);
+  setDSOLocal(GV);
+
+  // §2.1.4: every emitted persistent bit definition is forced into the module
+  // and into llvm.used (appending/AS0/[N x ptr]/"llvm.metadata", element the
+  // handle itself) through the standard keepalive mechanism, so an unused
+  // internal/const/volatile definition cannot disappear. Registered exactly
+  // once per canonical object: the hasInitializer guard above makes this
+  // whole function idempotent.
+  addUsedGlobal(GV);
+}
+
+/// Pass IsTentative as true if you want to create a tentative definition.
 void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D,
                                             bool IsTentative) {
   // OpenCL global variables of sampler type are translated to function calls,
@@ -6525,17 +6671,21 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D,
   if (getLangOpts().OpenCL && ASTTy->isSamplerT())
     return;
 
-  // Fail closed on MCS-251 bit objects. A `bit` global (or an old-style `sbit`
-  // fixed reference) is program state with a controlled bit-location identity
-  // that must not be silently emitted as an ordinary byte global. The storage
-  // and initialization protocol (global/static bit slots, cross-TU packing,
-  // CRT) is a later capability (M2/S3); until it exists, error rather than
-  // degrade to a plain i8 global.
-  if (ASTTy.getUnqualifiedType()->isMCS251BitType() ||
-      D->hasAttr<MCS251BitAddressAttr>()) {
-    ErrorUnsupported(D, D->hasAttr<MCS251BitAddressAttr>()
-                            ? "MCS251 fixed bit reference definition"
-                            : "MCS251 bit global");
+  // MCS-251 persistent bit objects (P09 §2.1): a `bit` global/static/tentative
+  // definition emits its dedicated i8 bit-object handle (structural attribute,
+  // normalized 0/1 initializer, forced llvm.used keepalive) instead of an
+  // ordinary byte global. This single funnel covers the early (eager), the
+  // deferred, and the end-of-TU tentative emission entries (§4.4).
+  if (ASTTy.getUnqualifiedType()->isMCS251BitType()) {
+    EmitMCS251BitGlobalVarDefinition(D);
+    return;
+  }
+
+  // An old-style `sbit` fixed reference is not a stored object: the fixed bit
+  // address IS its identity, so a definition-shaped declaration still fails
+  // closed instead of degrading to an ordinary byte global.
+  if (D->hasAttr<MCS251BitAddressAttr>()) {
+    ErrorUnsupported(D, "MCS251 fixed bit reference definition");
     return;
   }
 

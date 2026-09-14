@@ -96,19 +96,88 @@ getMCS251FixedBitAddress(const Expr *E, ASTContext &Ctx) {
   return std::nullopt;
 }
 
-/// Is \p E a controlled MCS-251 fixed bit lvalue?
-static bool isMCS251ControlledBitLValue(const Expr *E, ASTContext &Ctx) {
-  return getMCS251FixedBitAddress(E, Ctx).has_value();
+/// The controlled MCS-251 bit identity denoted by \p E (P09 §2.3): either a
+/// fixed bit location -- an old-style `sbit` declaration (MCS251BitAddress
+/// attribute) or a __builtin_mcs251_bit_lvalue call -- or a `bit` object,
+/// identified by its canonical VarDecl (ParmVarDecl included). None for
+/// anything else. Fixed has priority over Object: an `sbit` also has bit
+/// type, and a Fixed and an Object identity are never equal.
+struct MCS251BitIdentity {
+  enum Kind { None, Fixed, Object };
+  Kind K = None;
+  /// Fixed: the resolved constant bit address.
+  llvm::APSInt Address;
+  /// Object: the canonical declaration.
+  const VarDecl *VD = nullptr;
+};
+
+static MCS251BitIdentity getMCS251BitIdentity(const Expr *E,
+                                              ASTContext &Ctx) {
+  MCS251BitIdentity Id;
+  if (std::optional<llvm::APSInt> A = getMCS251FixedBitAddress(E, Ctx)) {
+    Id.K = MCS251BitIdentity::Fixed;
+    Id.Address = std::move(*A);
+    return Id;
+  }
+  if (E)
+    E = stripToFixedBitDenotation(E->IgnoreParenImpCasts());
+  if (const auto *DRE = dyn_cast_or_null<DeclRefExpr>(E)) {
+    const auto *VD = dyn_cast<VarDecl>(DRE->getDecl());
+    // Object identity: a reference to a `bit` VarDecl (ParmVarDecl included)
+    // whose canonical unqualified type is the bit scalar. A fixed reference
+    // is never an Object, even when its attribute address did not fold to a
+    // constant (that declaration is rejected at parse; here it simply has no
+    // Object identity either).
+    if (VD && !VD->hasAttr<MCS251BitAddressAttr>() &&
+        VD->getType().getUnqualifiedType()->isMCS251BitType()) {
+      Id.K = MCS251BitIdentity::Object;
+      Id.VD = VD->getCanonicalDecl();
+    }
+  }
+  return Id;
 }
 
-/// Do \p A and \p B denote the same fixed bit location? Identity is by
-/// resolved constant bit address, so a `sbit` at 0x24 aliases the builtin at
-/// 0x24, and two distinct `sbit` names bound to the same address alias too.
-static bool isSameMCS251FixedBit(const Expr *A, const Expr *B,
-                                 ASTContext &Ctx) {
-  std::optional<llvm::APSInt> AA = getMCS251FixedBitAddress(A, Ctx);
-  std::optional<llvm::APSInt> AB = getMCS251FixedBitAddress(B, Ctx);
-  return AA && AB && *AA == *AB;
+/// Is \p E a controlled MCS-251 bit lvalue subject to the physical bit
+/// operation rules (P09 §2.3)? That is a fixed reference, or a `bit` object
+/// with static storage duration (file scope, file static, function-local
+/// static, block-scope extern). Automatic locals and parameter copies are in
+/// the identity domain -- so cross-identity distinctions hold -- but are NOT
+/// subject to the physical forced-operation table (P-2 value semantics), and
+/// TLS is excluded (rejected by the declaration gates).
+static bool requiresMCS251PhysicalBitRules(const Expr *E, ASTContext &Ctx) {
+  MCS251BitIdentity Id = getMCS251BitIdentity(E, Ctx);
+  switch (Id.K) {
+  case MCS251BitIdentity::Fixed:
+    return true;
+  case MCS251BitIdentity::Object:
+    return Id.VD->getStorageDuration() == SD_Static &&
+           Id.VD->getTLSKind() == VarDecl::TLS_None;
+  case MCS251BitIdentity::None:
+    return false;
+  }
+  llvm_unreachable("covered switch");
+}
+
+static bool isMCS251ControlledBitLValue(const Expr *E, ASTContext &Ctx) {
+  return requiresMCS251PhysicalBitRules(E, Ctx);
+}
+
+/// Do \p A and \p B denote the same controlled bit target? Tagged equality
+/// (P09 §2.3): two fixed references compare their resolved constant bit
+/// addresses (two distinct `sbit` names bound to the same address alias, and
+/// the builtin at that address aliases them too); two Objects compare their
+/// canonical VarDecls (redeclarations are one object; same-named shadowing
+/// variables are distinct objects); a Fixed and an Object are never equal,
+/// whatever their number or future link-time position.
+static bool isSameMCS251ControlledBit(const Expr *A, const Expr *B,
+                                      ASTContext &Ctx) {
+  MCS251BitIdentity IA = getMCS251BitIdentity(A, Ctx);
+  MCS251BitIdentity IB = getMCS251BitIdentity(B, Ctx);
+  if (IA.K != IB.K || IA.K == MCS251BitIdentity::None)
+    return false;
+  if (IA.K == MCS251BitIdentity::Fixed)
+    return IA.Address == IB.Address;
+  return IA.VD == IB.VD;
 }
 
 /// Is \p E the integer constant 1 (the only RHS for which `X ^= RHS` is the
@@ -665,9 +734,12 @@ enum class UseKind {
 namespace {
 
 /// Walks an expression/statement tree enforcing the DIALECT-FRONTEND-DESIGN
-/// §7.5 controlled fixed bit operation rules. It is evaluation-aware: which
-/// sub-expressions are evaluated at all, and whether their values are consumed,
-/// determines whether a CPL toggle is legal and whether a self-read RMW exists.
+/// §7.5 / P09 §2.3-§2.4 controlled bit operation rules on the targets subject
+/// to the physical rules: fixed references and static-storage `bit` objects.
+/// It is evaluation-aware: which sub-expressions are evaluated at all, and
+/// whether their values are consumed, determines whether a CPL toggle is
+/// legal and whether a self-read RMW exists. Automatic/parameter bit objects
+/// are in the identity domain but follow ordinary value rules (P-2).
 struct ControlledBitChecker {
   SemaMCS251 &Self;
   ASTContext &Ctx;
@@ -688,13 +760,16 @@ struct ControlledBitChecker {
 
 } // namespace
 
-/// The assignment whose LHS is a controlled fixed bit lvalue, or nullptr.
-static const BinaryOperator *asFixedBitAssignment(const Expr *E,
-                                                  ASTContext &Ctx) {
+/// The assignment whose LHS is a controlled bit lvalue subject to the
+/// physical rules (a fixed reference or a static-storage `bit` object, P09
+/// §2.3), or nullptr. Selecting by RequiresPhysicalBitRules -- not merely by
+/// bit type -- keeps automatic/parameter targets on the ordinary value rules.
+static const BinaryOperator *asControlledBitAssignment(const Expr *E,
+                                                       ASTContext &Ctx) {
   const auto *BO = dyn_cast<BinaryOperator>(E);
   if (!BO || !BO->isAssignmentOp())
     return nullptr;
-  if (!isMCS251ControlledBitLValue(BO->getLHS(), Ctx))
+  if (!requiresMCS251PhysicalBitRules(BO->getLHS(), Ctx))
     return nullptr;
   return BO;
 }
@@ -777,10 +852,11 @@ bool ControlledBitChecker::checkAssignment(const BinaryOperator *BO,
 
   // Plain `X = RHS`.
   const Expr *RHS = BO->getRHS();
-  // `X = !X` (same fixed bit) is the allowed CPL toggle only where discarded.
+  // `X = !X` (same controlled bit target, tagged identity) is the allowed CPL
+  // toggle only where discarded.
   if (const auto *UO = dyn_cast<UnaryOperator>(RHS->IgnoreParenImpCasts());
       UO && UO->getOpcode() == UO_LNot &&
-      isSameMCS251FixedBit(UO->getSubExpr(), LHS, Ctx)) {
+      isSameMCS251ControlledBit(UO->getSubExpr(), LHS, Ctx)) {
     if (Use == UseKind::Used) {
       Self.Diag(BO->getOperatorLoc(), diag::err_mcs251_bit_lvalue_result_used)
           << BO->getSourceRange();
@@ -806,8 +882,10 @@ bool ControlledBitChecker::checkExpr(const Expr *E, UseKind Use) {
   if (!E)
     return false;
 
-  // A controlled fixed bit lvalue used as an inc/dec target is a self-reading
-  // RMW.
+  // A controlled bit lvalue subject to the physical rules (fixed reference or
+  // static-storage `bit` object, P09 §2.3) used as an inc/dec target is a
+  // self-reading RMW; an automatic/parameter target keeps its ordinary value
+  // rules.
   if (const auto *UO = dyn_cast<UnaryOperator>(E)) {
     if ((UO->getOpcode() == UO_PreInc || UO->getOpcode() == UO_PostInc ||
          UO->getOpcode() == UO_PreDec || UO->getOpcode() == UO_PostDec) &&
@@ -819,7 +897,7 @@ bool ControlledBitChecker::checkExpr(const Expr *E, UseKind Use) {
   }
 
   // The node itself as an assignment target.
-  if (const auto *BO = asFixedBitAssignment(E, Ctx))
+  if (const auto *BO = asControlledBitAssignment(E, Ctx))
     return checkAssignment(BO, Use);
 
   // _Generic: the controlling expression is not evaluated; only the selected
@@ -1176,9 +1254,11 @@ const Expr *ControlledBitChecker::findRead(const Expr *E, const Expr *LHS) {
   if (!E)
     return nullptr;
 
-  // A controlled fixed bit reference to the same address used as a value is a
-  // read.
-  if (isMCS251ControlledBitLValue(E, Ctx) && isSameMCS251FixedBit(E, LHS, Ctx))
+  // A reference to the same controlled bit target (tagged identity, P09
+  // §2.3) used as a value is a read. The target of the enclosing assignment
+  // scan is always physical (fixed or static-storage object); an automatic
+  // or parameter bit has a different object identity and never matches.
+  if (isSameMCS251ControlledBit(E, LHS, Ctx))
     return E;
 
   if (isa<UnaryExprOrTypeTraitExpr>(E))
@@ -1484,8 +1564,53 @@ bool SemaMCS251::CheckMCS251ControlledBitRMW(Expr *E, bool DiscardedValue) {
   return checkControlledBitExpr(E, /*ResultUsed=*/!DiscardedValue);
 }
 
-bool SemaMCS251::CheckMCS251ControlledBitDirectiveClauses(Stmt *Directive) {
-  // P08 revision (plan B): same as CheckMCS251ControlledBitRMW -- the
+bool SemaMCS251::CheckMCS251BitCallForm(const FunctionType *FnType,
+                                        bool IsIndirect, SourceLocation Loc,
+                                        SourceRange Range) {
+  // P09 §6.3 N13-N15 (frozen diagnostic categories; see
+  // err_mcs251_bit_call_unsupported). The bit value ABI assigns every source
+  // parameter a definite DPL/`_callee_PARM_n` position and returns the full
+  // DPL byte, which requires a complete, non-variadic prototype; indirect
+  // calls are additionally limited to zero/single-parameter signatures (the
+  // backend has no named callee to derive static slots from).
+  if (!isMCS251Target(SemaRef.Context))
+    return false;
+
+  const auto *Proto = dyn_cast<FunctionProtoType>(FnType);
+  if (!Proto) {
+    // N14: an unprototyped callee -- return value or any as-written argument
+    // -- has no declared i8 slot positions.
+    if (FnType->getReturnType()->isMCS251BitType()) {
+      SemaRef.Diag(Loc, diag::err_mcs251_bit_call_unsupported)
+          << "no-prototype" << Range;
+      return true;
+    }
+    return false;
+  }
+
+  bool AnyBitParam = llvm::any_of(
+      Proto->param_types(), [](QualType PT) { return PT->isMCS251BitType(); });
+
+  if (Proto->isVariadic() && (AnyBitParam ||
+                              FnType->getReturnType()->isMCS251BitType())) {
+    // N13 (declaration-side rejections happen in ParseFunctionDeclarator;
+    // this catches calls through typedef'd/typeof'd variadic signatures).
+    SemaRef.Diag(Loc, diag::err_mcs251_bit_call_unsupported)
+        << "variadic" << Range;
+    return true;
+  }
+
+  if (IsIndirect && AnyBitParam && Proto->getNumParams() > 1) {
+    // N15: a multi-argument indirect call with bit in the signature has no
+    // named callee for the `_PARM_n` static slots.
+    SemaRef.Diag(Loc, diag::err_mcs251_bit_call_unsupported)
+        << "multi-argument indirect" << Range;
+    return true;
+  }
+  return false;
+}
+
+bool SemaMCS251::CheckMCS251ControlledBitDirectiveClauses(Stmt *Directive) {  // P08 revision (plan B): same as CheckMCS251ControlledBitRMW -- the
   // construct gate owns every bit capability inside a directive, so the
   // clause-evaluation classification is suppressed there (kept for
   // non-construct input and for review history).

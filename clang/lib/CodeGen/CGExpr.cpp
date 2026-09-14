@@ -2263,11 +2263,28 @@ llvm::Value *CodeGenFunction::EmitLoadOfScalar(Address Addr, bool Volatile,
 }
 
 /// Converts a scalar value from its primary IR type (as returned
-/// by ConvertType) to its load/store type (as returned by
-/// convertTypeForLoadStore).
+/// by ConvertType) to its load/store type (as returned
+/// by convertTypeForLoadStore).
 llvm::Value *CodeGenFunction::EmitToMemory(llvm::Value *Value, QualType Ty) {
   if (auto *AtomicTy = Ty->getAs<AtomicType>())
     Ty = AtomicTy->getValueType();
+
+  // An MCS-251 `bit` memory object (automatic local, parameter copy, ABI
+  // temps) is one normalized i8 byte: every defined source write compares
+  // the value non-zero in its original width and only then zero-extends
+  // (P09 §3.1). The generic path below would CreateIntCast a wider value
+  // down to i8 -- truncating 2 to 0 -- so normalize here instead.
+  if (Ty->isMCS251BitType()) {
+    // The carrier is exactly one normalized byte (a `bit` object has a 1-byte
+    // ABI payload even though its value is 1 bit).
+    llvm::IntegerType *StoreTy = llvm::IntegerType::get(
+        getLLVMContext(), (unsigned)getContext().getTypeSize(Ty));
+    if (Value->getType()->isIntegerTy(1))
+      return Builder.CreateZExt(Value, StoreTy, "bit.store");
+    llvm::Value *NZ = Builder.CreateICmpNE(
+        Value, llvm::Constant::getNullValue(Value->getType()), "bit.nz");
+    return Builder.CreateZExt(NZ, StoreTy, "bit.store");
+  }
 
   if (Ty->isExtVectorBoolType() || Ty->isConstantMatrixBoolType()) {
     llvm::Type *StoreTy = convertTypeForLoadStore(Ty, Value->getType());
@@ -2302,6 +2319,13 @@ llvm::Value *CodeGenFunction::EmitToMemory(llvm::Value *Value, QualType Ty) {
 llvm::Value *CodeGenFunction::EmitFromMemory(llvm::Value *Value, QualType Ty) {
   if (auto *AtomicTy = Ty->getAs<AtomicType>())
     Ty = AtomicTy->getValueType();
+
+  // An MCS-251 `bit` value loaded from its i8 carrier is decoded by comparing
+  // the full byte against zero (P09 §3.1); the generic boolean-representation
+  // path would truncate to i1, giving the byte's low bit (odd/even) instead.
+  if (Ty->isMCS251BitType())
+    return Builder.CreateICmpNE(
+        Value, llvm::Constant::getNullValue(Value->getType()), "bit.load");
 
   if (Ty->isPackedVectorBoolType(getContext())) {
     const auto *RawIntTy = Value->getType();
@@ -3645,15 +3669,30 @@ LValue CodeGenFunction::EmitDeclRefLValue(const DeclRefExpr *E) {
     if (VD->hasAttr<MCS251BitAddressAttr>())
       return EmitMCS251ControlledBitLValue(E);
 
-    // A persistent/static `bit` object has no fixed address; its P09 handle
-    // lowering is a later M2 slice, so fail closed rather than degrade to an
-    // ordinary i8 object.
+    // Three-way routing for MCS-251 bit lvalues (P09 §2.6): (1) a fixed
+    // reference (old-style `sbit` / __builtin_mcs251_bit_lvalue) lowers to
+    // the fixed-address bit intrinsics; (2) a persistent/static `bit` object
+    // lowers to a Symbolic controlled-bit l-value over its unique handle
+    // global, preserving the declared QualType (no implicit volatile); (3)
+    // an automatic/parameter copy is the P-2 private value: an ordinary
+    // i8 memory lvalue (call-private alloca / parameter .addr) whose loads
+    // and stores are normalized by EmitFromMemory/EmitToMemory. A bit
+    // DeclRef never falls back to an ordinary byte global; __block escapes
+    // and other non-ordinary automatic storage stay fail-closed.
     if (VD->getType().getUnqualifiedType()->isMCS251BitType()) {
-      CGM.ErrorUnsupported(E, "MCS251 bit object");
-      return MakeAddrLValue(
-          Address(llvm::UndefValue::get(DefaultPtrTy),
-                  ConvertType(E->getType()), CharUnits::One()),
-          E->getType());
+      if (VD->getStorageDuration() == SD_Static &&
+          VD->getTLSKind() == VarDecl::TLS_None)
+        return EmitMCS251PersistentBitLValue(VD, E->getType());
+      if (!(VD->getStorageDuration() == SD_Automatic &&
+            VD->getTLSKind() == VarDecl::TLS_None) ||
+          VD->isEscapingByref() || VD->hasAttr<BlocksAttr>()) {
+        CGM.ErrorUnsupported(E, "MCS251 bit object");
+        return MakeAddrLValue(
+            Address(llvm::UndefValue::get(DefaultPtrTy),
+                    ConvertType(E->getType()), CharUnits::One()),
+            E->getType());
+      }
+      // P-2: fall through to the ordinary local-value handling below.
     }
 
     // Global Named registers access via intrinsics only
@@ -6540,16 +6579,13 @@ RValue CodeGenFunction::EmitCallExpr(const CallExpr *E,
   if (E->getCallee()->getType()->isBlockPointerType())
     return EmitBlockCallExpr(E, ReturnValue, CallOrInvoke);
 
-  // An MCS-251 bit return type through an indirect callee never passes
-  // CodeGenModule::GetOrCreateLLVMFunction, so the ABI gate there would be
-  // bypassed; fail closed here with the same message instead of emitting a
-  // zeroext i1 call. The controlled fixed-bit lvalue builtin is exempt (it
-  // is intercepted as an lvalue, never a real call).
-  if (!E->getDirectCallee() &&
-      E->getType().getUnqualifiedType()->isMCS251BitType()) {
-    CGM.ErrorUnsupported(E, "MCS251 bit return type");
-    return GetUndefRValue(E->getType());
-  }
+  // An MCS-251 bit return type through an indirect callee (P09 §4.4 gate
+  // migration): the CGFunctionInfo arranged from the callee's function
+  // pointer type carries the same MCS251 explicit-i8 classification, and
+  // EmitCall decodes the returned full byte to the private i1, so the
+  // generic indirect path is now correct. Zero/single-parameter bit
+  // signatures are the supported indirect forms; the multi-argument
+  // indirect form is rejected by the target Sema call gate.
 
   if (const auto *CE = dyn_cast<CXXMemberCallExpr>(E))
     return EmitCXXMemberCallExpr(CE, ReturnValue, CallOrInvoke);

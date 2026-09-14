@@ -5495,10 +5495,11 @@ llvm::Value *CodeGenFunction::EmitWithOriginalRHSBitfieldAssignment(
   return EmitScalarExpr(E->getRHS());
 }
 
-/// Is \p E the MCS-251 controlled-bit toggle form on a single controlled
-/// fixed bit reference? The §7.5 forms are `X ^= 1` (RHS exactly the integer
-/// constant 1) and `X = !X` (RHS the logical not of the same controlled
-/// reference). Identity is by resolved constant bit address, matching Sema.
+/// Is \p E the MCS-251 controlled-bit toggle form on a single controlled bit
+/// target (fixed reference or persistent bit object, P09 §2.4)? The §7.5
+/// forms are `X ^= 1` (RHS exactly the integer constant 1) and `X = !X` (RHS
+/// the logical not of the same controlled target). Same-target identity for
+/// the `!` form is checked separately by the caller (tagged, §2.6.6).
 static bool isMCS251BitToggleRHS(const BinaryOperator *E, const Expr *LHS,
                                  ASTContext &Ctx) {
   // X ^= 1
@@ -5531,26 +5532,39 @@ bool ScalarExprEmitter::tryEmitMCS251BitToggle(const Expr *E) {
   const auto *BO = dyn_cast<BinaryOperator>(E);
   if (!BO)
     return false;
-  // The LHS must be a controlled fixed bit reference; the persistent/static
-  // `bit` object toggle is a later M2 slice and stays on the generic path.
-  LValue LHSLV = CGF.EmitMCS251ControlledBitLValue(BO->getLHS());
+  // The LHS must be a controlled bit toggle target: a fixed reference (sbit /
+  // __builtin_mcs251_bit_lvalue) or a persistent/static `bit` object (P09
+  // §2.6.6). Automatic/parameter bit objects have value semantics (P-2) and
+  // are never toggled through the physical CPL.
+  LValue LHSLV = CGF.EmitMCS251ToggleBitLValue(BO->getLHS());
   if (!LHSLV.isMCS251Bit())
     return false;
   if (!isMCS251BitToggleRHS(BO, BO->getLHS(), CGF.getContext()))
     return false;
-  // `X = !X`: the RHS must denote the same controlled reference, otherwise it
-  // is an ordinary copy (handled as read+write, not a toggle).
+  // `X = !X`: the RHS must denote the same controlled object, otherwise it
+  // is an ordinary copy (handled as read+write, not a toggle). Identity is
+  // tagged (P09 §2.6.6): two symbolic handles are the same object iff they
+  // are the same handle global (one per canonical VarDecl); two fixed
+  // references iff their resolved constant addresses are equal; a fixed
+  // reference and a symbolic handle are never the same object.
   if (BO->getOpcode() == BO_Assign) {
     const auto *UO = cast<UnaryOperator>(BO->getRHS()->IgnoreParenImpCasts());
-    LValue RHSLV = CGF.EmitMCS251ControlledBitLValue(UO->getSubExpr());
+    LValue RHSLV = CGF.EmitMCS251ToggleBitLValue(UO->getSubExpr());
     if (!RHSLV.isMCS251Bit())
       return false;
-    llvm::Value *A = LHSLV.getMCS251BitAddress();
-    llvm::Value *B = RHSLV.getMCS251BitAddress();
-    auto *CA = dyn_cast<llvm::ConstantInt>(A);
-    auto *CB = dyn_cast<llvm::ConstantInt>(B);
-    if (!CA || !CB || CA->getZExtValue() != CB->getZExtValue())
+    if (LHSLV.isMCS251BitSymbolic() != RHSLV.isMCS251BitSymbolic())
       return false;
+    if (LHSLV.isMCS251BitSymbolic()) {
+      if (LHSLV.getMCS251BitAddress() != RHSLV.getMCS251BitAddress())
+        return false;
+    } else {
+      llvm::Value *A = LHSLV.getMCS251BitAddress();
+      llvm::Value *B = RHSLV.getMCS251BitAddress();
+      auto *CA = dyn_cast<llvm::ConstantInt>(A);
+      auto *CB = dyn_cast<llvm::ConstantInt>(B);
+      if (!CA || !CB || CA->getZExtValue() != CB->getZExtValue())
+        return false;
+    }
   }
   CGF.EmitToggleMCS251BitLValue(LHSLV);
   return true;

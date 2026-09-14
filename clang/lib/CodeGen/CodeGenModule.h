@@ -470,6 +470,12 @@ private:
   /// values along with the corresponding globals, for opportunistic reuse.
   llvm::DenseMap<const VarDecl*, llvm::GlobalVariable*> InitializerConstants;
 
+  /// MCS251 persistent bit-object handles (P09 §2.1/§2.2): the unique i8
+  /// bit-object placeholder global per canonical VarDecl. extern->definition
+  /// merging within the TU resolves through this map, so every reference to
+  /// the same object yields the same handle global.
+  llvm::DenseMap<const VarDecl *, llvm::GlobalVariable *> MCS251BitGlobalMap;
+
   /// Set of global decls for which we already diagnosed mangled name conflict.
   /// Required to not issue a warning (on a mangling conflict) multiple times
   /// for the same decl.
@@ -1102,6 +1108,25 @@ public:
                                      llvm::Type *Ty = nullptr,
                                      ForDefinition_t IsForDefinition
                                        = NotForDefinition);
+
+  /// The unique i8 bit-object handle global of a persistent/static MCS-251
+  /// `bit` object (P09 §2.1): AS0, align 1, structural attribute
+  /// "mcs251-bit-object". Created once per canonical VarDecl; a reference to
+  /// an extern-only object materializes it as an initializer-less external
+  /// declaration. Unsupported storage forms (TLS/weak/section) are
+  /// diagnosed here and still yield the plain safely-shaped handle, so the
+  /// build fails closed without crashing later codegen paths.
+  llvm::GlobalVariable *GetOrCreateMCS251BitGlobalVar(const VarDecl *D);
+
+  /// Dedicated emission of a persistent/static MCS-251 `bit` object
+  /// definition (P09 §2.1): normalizes the source initializer to the constant
+  /// i8 0/1, sets the linkage, and forces the definition into the module and
+  /// llvm.used exactly once per canonical declaration -- even when the object
+  /// is never referenced. Fail-closed on unsupported storage forms (TLS,
+  /// weak, section) and on definitions whose ordinary linkage would not be
+  /// plain external or internal (a tentative that would actually become
+  /// COMMON under -fcommon, an explicit common attribute, weak-ish forms).
+  void EmitMCS251BitGlobalVarDefinition(const VarDecl *D);
 
   /// Return the address of the given function. If Ty is non-null, then this
   /// function will use the specified type if it has to create it.

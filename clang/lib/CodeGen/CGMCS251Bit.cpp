@@ -104,21 +104,115 @@ LValue CodeGenFunction::EmitMCS251ControlledBitLValue(const Expr *E) {
                                Ctx.getVolatileType(Ctx.MCS251BitTy));
 }
 
+LValue CodeGenFunction::EmitMCS251PersistentBitLValue(const VarDecl *VD,
+                                                      QualType Ty) {
+  // P09 §2.6.2: a persistent/static `bit` object reference lowers to its
+  // unique handle global as a Symbolic controlled-bit l-value. The declared
+  // QualType is preserved as-is (the source keeps its own const/volatile
+  // qualification); the fixed-reference implicit volatile does not apply.
+  // The handle always exists: GetOrCreateMCS251BitGlobalVar diagnoses any
+  // unsupported storage form and still returns a safely-shaped handle, so
+  // codegen continues after the (build-failing) diagnostic.
+  llvm::GlobalVariable *GV = CGM.GetOrCreateMCS251BitGlobalVar(VD);
+  return LValue::MakeMCS251Bit(GV, /*Symbolic=*/true, Ty);
+}
+
+/// The DeclRefExpr denoted by \p E if \p E strips (parentheses, implicit
+/// casts, resolved _Generic/__builtin_choose_expr -- the same transparent set
+/// as getMCS251FixedBitAddress and the Sema identity rule) down to a
+/// DeclRefExpr to a static-storage-duration bit object. ParmVarDecl/automatic
+/// objects are the P-2 value slice and are not toggle identities here.
+/// Returns the reference itself (not just the VarDecl) so callers can keep
+/// its declared QualType without re-stripping with a narrower helper.
+static const DeclRefExpr *getMCS251PersistentBitObjectRef(const Expr *E) {
+  while (E) {
+    if (isa<ParenExpr>(E) || isa<ImplicitCastExpr>(E)) {
+      E = cast<Expr>(*E->child_begin());
+      continue;
+    }
+    if (auto *GSE = dyn_cast<GenericSelectionExpr>(E)) {
+      if (GSE->isResultDependent())
+        return nullptr;
+      E = GSE->getResultExpr();
+      continue;
+    }
+    if (auto *CE = dyn_cast<ChooseExpr>(E)) {
+      E = CE->getChosenSubExpr();
+      continue;
+    }
+    break;
+  }
+  if (!E)
+    return nullptr;
+  const auto *DRE = dyn_cast<DeclRefExpr>(E);
+  if (!DRE)
+    return nullptr;
+  const auto *VD = dyn_cast<VarDecl>(DRE->getDecl());
+  if (!VD || !VD->getType().getUnqualifiedType()->isMCS251BitType())
+    return nullptr;
+  if (VD->getStorageDuration() != SD_Static ||
+      VD->getTLSKind() != VarDecl::TLS_None)
+    return nullptr;
+  return DRE;
+}
+
+LValue CodeGenFunction::EmitMCS251ToggleBitLValue(const Expr *E) {
+  // Fixed identity first (§2.3: an sbit also has bit type, and Fixed takes
+  // priority over Object), then the persistent-object handle. The reference
+  // may have been forwarded through parens/implicit casts/_Generic/choose;
+  // the stripped DeclRefExpr's own QualType is the declared type to keep.
+  if (LValue Fixed = EmitMCS251ControlledBitLValue(E); Fixed.isMCS251Bit())
+    return Fixed;
+  if (const DeclRefExpr *DRE = getMCS251PersistentBitObjectRef(E))
+    return EmitMCS251PersistentBitLValue(cast<VarDecl>(DRE->getDecl()),
+                                         DRE->getType());
+  return LValue();
+}
+
 llvm::Value *CodeGenFunction::EmitMCS251BitAddressOperand(LValue LV) {
   assert(LV.isMCS251Bit() && "not an MCS-251 bit lvalue");
   llvm::Value *Addr = LV.getMCS251BitAddress();
-  assert(!LV.isMCS251BitSymbolic() &&
-         "symbolic bit-object handle lowering is a later M2 slice");
+  if (LV.isMCS251BitSymbolic()) {
+    // P09 §2.6.4: the symbolic operand is the handle global itself (object
+    // identity, always an AS0 i8 bit-object global). It is never narrowed to
+    // an integer address and never ptrtoint'ed; the bit number is resolved
+    // by the linker from the BITADDR8 relocation.
+    assert(isa_and_nonnull<llvm::GlobalVariable>(Addr) &&
+           "symbolic bit handle must be the bit-object global");
+    return Addr;
+  }
   if (Addr->getType() != Int32Ty)
     Addr =
         Builder.CreateIntCast(Addr, Int32Ty, /*isSigned=*/false, "bit.addr");
   return Addr;
 }
 
+/// The intrinsic family for a controlled-bit access: the fixed i32-ImmArg
+/// family for a fixed bit address, the obj (handle) family for a symbolic
+/// persistent bit object (P09 §1.1 / §2.6.5).
+static llvm::Intrinsic::ID mcs251BitIntrinsic(llvm::Intrinsic::ID FixedID,
+                                              LValue LV) {
+  if (!LV.isMCS251BitSymbolic())
+    return FixedID;
+  switch (FixedID) {
+  case llvm::Intrinsic::mcs251_bit_read:
+    return llvm::Intrinsic::mcs251_bit_obj_read;
+  case llvm::Intrinsic::mcs251_bit_set:
+    return llvm::Intrinsic::mcs251_bit_obj_set;
+  case llvm::Intrinsic::mcs251_bit_clear:
+    return llvm::Intrinsic::mcs251_bit_obj_clear;
+  case llvm::Intrinsic::mcs251_bit_toggle:
+    return llvm::Intrinsic::mcs251_bit_obj_toggle;
+  default:
+    llvm_unreachable("not an MCS-251 bit intrinsic");
+  }
+}
+
 RValue CodeGenFunction::EmitLoadOfMCS251BitLValue(LValue LV,
                                                   SourceLocation Loc) {
   llvm::Value *Addr = EmitMCS251BitAddressOperand(LV);
-  llvm::Function *F = CGM.getIntrinsic(llvm::Intrinsic::mcs251_bit_read);
+  llvm::Function *F = CGM.getIntrinsic(
+      mcs251BitIntrinsic(llvm::Intrinsic::mcs251_bit_read, LV));
   llvm::Value *Bit = Builder.CreateCall(F, Addr);
   // The intrinsic returns i1; the source value is the MCS-251 `bit` scalar,
   // which is an i1 in expressions (the normalized i8 is only the ABI/object
@@ -140,8 +234,10 @@ void CodeGenFunction::EmitStoreThroughMCS251BitLValue(RValue Src, LValue Dst) {
   // no carry round-trip.
   if (auto *CI = dyn_cast<llvm::ConstantInt>(Val)) {
     bool One = !CI->isZero();
-    llvm::Function *F = CGM.getIntrinsic(
-        One ? llvm::Intrinsic::mcs251_bit_set : llvm::Intrinsic::mcs251_bit_clear);
+    llvm::Function *F = CGM.getIntrinsic(mcs251BitIntrinsic(
+        One ? llvm::Intrinsic::mcs251_bit_set
+            : llvm::Intrinsic::mcs251_bit_clear,
+        Dst));
     Builder.CreateCall(F, Addr);
     return;
   }
@@ -162,16 +258,21 @@ void CodeGenFunction::EmitStoreThroughMCS251BitLValue(RValue Src, LValue Dst) {
   llvm::BasicBlock *ContBB = createBasicBlock("mcs251.bit.cont", Fn);
   Builder.CreateCondBr(Bit, SetBB, ClrBB);
   Builder.SetInsertPoint(SetBB);
-  Builder.CreateCall(CGM.getIntrinsic(llvm::Intrinsic::mcs251_bit_set), Addr);
+  Builder.CreateCall(CGM.getIntrinsic(mcs251BitIntrinsic(
+                         llvm::Intrinsic::mcs251_bit_set, Dst)),
+                     Addr);
   Builder.CreateBr(ContBB);
   Builder.SetInsertPoint(ClrBB);
-  Builder.CreateCall(CGM.getIntrinsic(llvm::Intrinsic::mcs251_bit_clear), Addr);
+  Builder.CreateCall(CGM.getIntrinsic(mcs251BitIntrinsic(
+                         llvm::Intrinsic::mcs251_bit_clear, Dst)),
+                     Addr);
   Builder.CreateBr(ContBB);
   Builder.SetInsertPoint(ContBB);
 }
 
 void CodeGenFunction::EmitToggleMCS251BitLValue(LValue Dst) {
   llvm::Value *Addr = EmitMCS251BitAddressOperand(Dst);
-  Builder.CreateCall(CGM.getIntrinsic(llvm::Intrinsic::mcs251_bit_toggle),
+  Builder.CreateCall(CGM.getIntrinsic(mcs251BitIntrinsic(
+                         llvm::Intrinsic::mcs251_bit_toggle, Dst)),
                      Addr);
 }

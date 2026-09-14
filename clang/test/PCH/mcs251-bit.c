@@ -36,10 +36,14 @@ void use_fixed(void) {
 }
 
 //--- header-gen.c
-// CodeGen-side PCH payload: only declarations that have a CodeGen lowering
-// (the fixed bit reference). The ordinary bit global of header.c has no
-// lowering yet and is intentionally not part of this round-trip.
+// CodeGen-side PCH payload: the fixed bit reference and, since P-1b, the
+// persistent bit objects (a definition with a normalized initializer, a
+// tentative definition, and an extern declaration) survive the round-trip
+// with the same canonical identity and lowering.
 sbit FIXED = 0x88 ^ 3;
+__bit pch_def = 2;   // -> normalized i8 1
+__bit pch_tent;      // tentative -> i8 0
+extern __bit pch_ext;
 
 //--- use-codegen.c
 // CodeGen after the PCH round-trip is the fixed-bit intrinsic lowering: the
@@ -73,6 +77,16 @@ sbit FIXED = 0x88 ^ 3;
 // half-open byte intervals and balanced switch/call continuations share the
 // checker regressions run by CodeGen/mcs251-bit-fixed-ref.c. va_arg is parsed
 // as an instruction and conservatively models its in-memory list update.
+// Persistent bit objects through the PCH round-trip (P-1b): the definition's
+// initializer is normalized (2 -> 1), the tentative completes to 0, and both
+// definitions are registered in llvm.used. The unreferenced extern-only
+// declaration is not materialized at all (P09 section 2.1.6). (No second
+// function is added here: the structure-check RUN below pins that the
+// payload TU defines exactly one function.)
+// IR: @pch_def = global i8 1, align 1 #{{[0-9]+}}
+// IR: @pch_tent = global i8 0, align 1
+// IR: @llvm.used = appending global [2 x ptr] [ptr @pch_def, ptr @pch_tent], section "llvm.metadata"
+// IR-NOT: @pch_ext
 // IR-LABEL: define {{.*}}@use_fixed_codegen(
 // IR: entry:
 // IR-NOT: {{br |ret |switch |indirectbr |invoke |resume |unreachable|^define|^[A-Za-z0-9_.$]+:}}

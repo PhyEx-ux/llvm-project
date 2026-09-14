@@ -1700,6 +1700,13 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
         EmitStoreOfScalar(Ret, MakeAddrLValue(ReturnValue, RV->getType()),
                           /*isInit*/ true);
       } else {
+        // MCS-251 bit return (P09 §4.2): the expression was fully evaluated
+        // once and normalized to the private i1; zero-extend it into the
+        // normalized i8 return carrier before the store, so the epilogue's
+        // `ret i8` carries the full 0/1 byte.
+        if (Ret->getType()->isIntegerTy(1) &&
+            FnRetTy.getUnqualifiedType()->isMCS251BitType())
+          Ret = Builder.CreateZExt(Ret, ConvertTypeForMem(FnRetTy), "bit.ret");
         auto *I = Builder.CreateStore(Ret, ReturnValue);
         addInstToCurrentSourceAtom(I, I->getValueOperand());
       }

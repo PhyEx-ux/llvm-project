@@ -51,4 +51,34 @@ let TargetPrefix = "mcs251" in { // All intrinsics start with "llvm.mcs251.".
                                        [IntrHasSideEffects, ImmArg<ArgIndex<0>>]>;
   def int_mcs251_bit_toggle : Intrinsic<[], [llvm_i32_ty],
                                         [IntrHasSideEffects, ImmArg<ArgIndex<0>>]>;
+
+  // Symbolic persistent bit-object access (P09-BIT-CODEGEN-DESIGN section 1).
+  // Keil `typedef bit BOOL` compatibility: a persistent/static `bit` object
+  // reaches the backend as an i8 GlobalVariable handle carrying the structural
+  // attribute "mcs251-bit-object" (see MCS251BitObject.h); these four are the
+  // ONLY consumers of that handle. The single parameter is the handle itself
+  // (llvm_ptr_ty = fixed AS0 opaque pointer, NOT llvm_anyptr_ty): object
+  // identity, never a byte address. The bit number is resolved by the linker
+  // from R_MCS251_BITADDR8, so the handle is a legal constant operand but not
+  // an integer immediate -- deliberately no ImmArg.
+  //
+  // Not overloaded, not vararg, exactly one parameter. Signature contract:
+  //   read -> i1 (ptr)    set/clear/toggle -> void (ptr)
+  //
+  // Effect model (section 1.2): identical conservatism to the fixed family
+  // above -- [IntrHasSideEffects] and nothing else. read may also write any
+  // memory, the writers are not writeonly, and the pointer parameter is an
+  // identity tag rather than a backing address, so argmemonly/readonly/
+  // noalias/dereferenceable narrowing is never expressible or permitted.
+  // Symbolic objects only ever name RAM bits 0..127; SFR/fixed-ABS accesses
+  // keep using the fixed i32 ImmArg family above. set/clear do not read the
+  // logical old value first; toggle is one CPL and returns nothing.
+  def int_mcs251_bit_obj_read : Intrinsic<[llvm_i1_ty], [llvm_ptr_ty],
+                                          [IntrHasSideEffects]>;
+  def int_mcs251_bit_obj_set : Intrinsic<[], [llvm_ptr_ty],
+                                         [IntrHasSideEffects]>;
+  def int_mcs251_bit_obj_clear : Intrinsic<[], [llvm_ptr_ty],
+                                           [IntrHasSideEffects]>;
+  def int_mcs251_bit_obj_toggle : Intrinsic<[], [llvm_ptr_ty],
+                                            [IntrHasSideEffects]>;
 }

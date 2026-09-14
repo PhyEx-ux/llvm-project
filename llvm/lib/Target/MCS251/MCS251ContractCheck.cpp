@@ -35,6 +35,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsMCS251.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/RuntimeLibcalls.h"
@@ -546,16 +547,250 @@ static bool isFullyKeepaliveConstant(const Constant *C) {
   return true;
 }
 
+//===----------------------------------------------------------------------===//
+// P09 section 1.3: symbolic bit-access intrinsics (llvm.mcs251.bit.obj.*).
+//
+// The whitelist is bidirectional and identity-based, never name-based:
+//   A. from the four intrinsic declarations/call sites -- so a bad operand on
+//      a call that uses NO marked global is still caught;
+//   B. from every Use of every handle -- so a legal consumer never masks an
+//      escape on another path.
+// Family identity is ONLY Function::getIntrinsicID() against the four exact
+// generated enums; a same-looking name that is not the registered intrinsic,
+// and a registered name with a wrong signature, are distinguished by A.2's
+// explicit signature check (which also covers the -disable-verify entry).
+//===----------------------------------------------------------------------===//
+
+static bool isMCS251SymbolicBitIntrinsic(Intrinsic::ID IID) {
+  switch (IID) {
+  case Intrinsic::mcs251_bit_obj_read:
+  case Intrinsic::mcs251_bit_obj_set:
+  case Intrinsic::mcs251_bit_obj_clear:
+  case Intrinsic::mcs251_bit_obj_toggle:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// The frozen section 1.1 signature: `i1 (ptr)` for read, `void (ptr)` for the
+// three writers -- always exactly one AS0 opaque-pointer parameter, never
+// vararg. Types are context-uniqued, so pointer identity IS exact equality.
+static FunctionType *getMCS251BitObjFunctionType(Intrinsic::ID IID,
+                                                 LLVMContext &Ctx) {
+  Type *Ret = IID == Intrinsic::mcs251_bit_obj_read
+                  ? Type::getInt1Ty(Ctx)
+                  : Type::getVoidTy(Ctx);
+  return FunctionType::get(Ret, {PointerType::get(Ctx, 0)},
+                           /*isVarArg=*/false);
+}
+
+// Section 1.3 A.5: no narrowing of the section 1.2 worst-case effect model.
+// A generated ID proves nothing about the attributes that were actually
+// written on the declaration or the call site, so the EFFECTIVE attributes of
+// both are checked: any memory(...) narrower than unknown (read/write/argmem/
+// inaccessiblemem -- the legacy readonly/readnone spellings fold into this),
+// speculatable, and per-parameter noalias / dereferenceable promises.
+static bool hasIncompatibleBitObjEffects(const AttributeList &AL) {
+  if (AL.getFnAttrs().hasAttribute(Attribute::Speculatable))
+    return true;
+  if (AL.getFnAttrs().getMemoryEffects() != MemoryEffects::unknown())
+    return true;
+  AttributeSet Param = AL.getParamAttrs(0);
+  if (Param.hasAttribute(Attribute::NoAlias) ||
+      Param.hasAttribute(Attribute::Dereferenceable) ||
+      Param.hasAttribute(Attribute::DereferenceableOrNull))
+    return true;
+  return false;
+}
+
+// Section 1.3 direction A. Verifies the declarations (even unused ones), then
+// every call site -- call form first, then the operand, then effects (the
+// section 1.4 diagnostic order) -- and finally that the intrinsic functions
+// themselves are only ever the direct callee of a whitelisted call. Fills
+// \p ValidObjCalls with each fully validated CallInst; direction B admits
+// exactly these as the sole legal consumers of a handle.
+static Error verifyMCS251SymbolicBitIntrinsics(
+    const Module &M, unsigned ProgramAS,
+    SmallPtrSetImpl<const CallBase *> &ValidObjCalls) {
+  auto SigReject = [] {
+    return reject("MCS251 symbolic bit intrinsic: invalid declaration or "
+                  "call signature");
+  };
+  auto FormReject = [] {
+    return reject("MCS251 symbolic bit intrinsic: only direct unbundled "
+                  "calls are supported");
+  };
+  auto OperandReject = [] {
+    return reject("MCS251 symbolic bit intrinsic: operand must be a direct "
+                  "AS0 bit-object global");
+  };
+  auto EffectsReject = [] {
+    return reject("MCS251 symbolic bit intrinsic: incompatible effects or "
+                  "pointer attributes");
+  };
+
+  // A.2: the four declarations. A resolved ID does not prove the signature,
+  // so the exact FunctionType, declaration-only form, C calling convention
+  // and the module's program address space are all checked explicitly. This
+  // also fires for an unused wrong-signature declaration.
+  SmallVector<const Function *, 4> IntrinsicDecls;
+  for (const Function &F : M) {
+    if (!isMCS251SymbolicBitIntrinsic(F.getIntrinsicID()))
+      continue;
+    if (F.getFunctionType() !=
+            getMCS251BitObjFunctionType(F.getIntrinsicID(), M.getContext()) ||
+        F.isVarArg() || !F.isDeclaration() ||
+        F.getCallingConv() != CallingConv::C ||
+        F.getAddressSpace() != ProgramAS)
+      return SigReject();
+    if (hasIncompatibleBitObjEffects(F.getAttributes()))
+      return EffectsReject();
+    IntrinsicDecls.push_back(&F);
+  }
+
+  // Collect the family's call sites: identity comes from the callee operand
+  // being directly one of the four Functions (getCalledFunction() does not
+  // strip casts; a bitcast callee never enters this list and is rejected
+  // below as an identity escape).
+  SmallVector<const CallBase *, 8> FamilyCalls;
+  for (const Function &F : M) {
+    if (F.isDeclaration())
+      continue;
+    for (const BasicBlock &BB : F)
+      for (const Instruction &I : BB) {
+        const auto *CB = dyn_cast<CallBase>(&I);
+        if (!CB)
+          continue;
+        const Function *Callee = dyn_cast<Function>(CB->getCalledOperand());
+        if (!Callee || !isMCS251SymbolicBitIntrinsic(Callee->getIntrinsicID()))
+          continue;
+        FamilyCalls.push_back(CB);
+      }
+  }
+
+  // A.3: the only legal call node is a plain, direct, non-tail, unbundled
+  // CallInst with the exact callsite signature and C convention.
+  for (const CallBase *CB : FamilyCalls) {
+    if (!isa<CallInst>(CB))
+      return FormReject(); // invoke / callbr
+    const auto *CI = cast<CallInst>(CB);
+    if (CI->isTailCall() || CI->isMustTailCall() || CB->hasOperandBundles())
+      return FormReject();
+    if (CB->getCallingConv() != CallingConv::C)
+      return SigReject();
+    if (CB->getFunctionType() !=
+            getMCS251BitObjFunctionType(
+                cast<Function>(CB->getCalledOperand())->getIntrinsicID(),
+                M.getContext()) ||
+        CB->arg_size() != 1)
+      return SigReject();
+  }
+
+  // A.4: the single argument must dyn_cast DIRECTLY to a module
+  // GlobalVariable in AS0 carrying the structural bit-object attribute. No
+  // cast stripping, no inttoptr/GEP/select/PHI/alloca/parameter/null forms;
+  // the full object-structure rules (placement, i8, initializer) were already
+  // checked for every marked global by the structural phase.
+  for (const CallBase *CB : FamilyCalls) {
+    Value *Op0 = CB->getArgOperand(0);
+    const auto *GV = dyn_cast<GlobalVariable>(Op0);
+    if (!GV || GV->getAddressSpace() != 0 ||
+        !GV->hasAttribute(MCS251Bit::BitObjectAttrName))
+      return OperandReject();
+  }
+
+  // A.5: the effective callsite attributes and alias metadata. The handle is
+  // identity, not a disjoint memory location: !alias.scope / !noalias must
+  // not buy the controlled access any optimization discount.
+  for (const CallBase *CB : FamilyCalls) {
+    if (hasIncompatibleBitObjEffects(CB->getAttributes()))
+      return EffectsReject();
+    if (CB->getMetadata(LLVMContext::MD_alias_scope) ||
+        CB->getMetadata(LLVMContext::MD_noalias))
+      return EffectsReject();
+    ValidObjCalls.insert(CB);
+  }
+
+  // A.6: the intrinsic function identity itself may only appear as the direct
+  // callee of a whitelisted call. Taking its address, exporting it to an
+  // initializer, or handing it to another function is rejected (a bitcast
+  // callee dies here too, which is why it never entered FamilyCalls).
+  for (const Function *F : IntrinsicDecls)
+    for (const User *U : F->users()) {
+      const auto *CB = dyn_cast<CallBase>(U);
+      if (CB && ValidObjCalls.contains(CB))
+        continue;
+      return FormReject();
+    }
+
+  return Error::success();
+}
+
 // A bit-object placeholder is object identity only: it must never be used as
 // ordinary storage. Reject every escape the frozen handle contract forbids
-// (ordinary load/store, GEP, cast, ptrtoint, a call argument, alias/ifunc, or a
-// constant expression / initializer export). The only accepted use of a handle
-// is the verified keepalive registration that keeps it alive; there is no
-// symbolic bit-access intrinsic yet (the frontend handle contract P09 is not
-// frozen), so a call or operand-bundle use is always an escape today. This runs
-// in the target entry pass, so it also applies with the generic verifier
-// disabled.
-static Error verifyMCS251BitObjects(const Module &M) {
+// (ordinary load/store, GEP, cast, ptrtoint, a call argument, alias/ifunc, or
+// a constant expression / initializer export). The accepted uses of a handle
+// are exactly two: the verified keepalive registration that keeps it alive,
+// and the argument-0 use of a whitelisted symbolic bit-intrinsic call (P09
+// section 1.3 B). A validated call has exactly one argument, no operand
+// bundles and a direct marked-handle argument, so any OTHER use of the handle
+// through that call node is impossible; every call-shaped user outside the
+// whitelist -- ordinary call, pseudo intrinsic, operand bundle, callee use,
+// llvm.assume/lifetime/debug intrinsic -- is rejected. This runs in the
+// target entry pass, so it also applies with the generic verifier disabled.
+static Error
+verifyMCS251BitObjectUses(const Module &M,
+                          const SmallPtrSetImpl<const CallBase *> &ValidCalls) {
+  auto bitReject = [](const GlobalVariable &GV, StringRef What) {
+    return reject(
+        (Twine("MCS251 bit object '") + GV.getName() + "'" + What).str());
+  };
+  for (const GlobalVariable &GV : M.globals()) {
+    if (!isMCS251BitObjectGlobal(GV))
+      continue;
+    for (const User *U : GV.users()) {
+      if (isa<GlobalAlias>(U) || isa<GlobalIFunc>(U))
+        return bitReject(GV, ": handle must not escape through alias/ifunc");
+      if (const auto *CB = dyn_cast<CallBase>(U))
+        if (ValidCalls.contains(CB))
+          // Section 1.3 B.2: the ONLY whitelisted call consumer. A validated
+          // call has exactly one argument, no operand bundles and this exact
+          // marked global as its direct argument, so any Use of the handle
+          // through it is necessarily the argument-0 use; a callee or bundle
+          // use could not have passed direction A.
+          continue;
+      if (isa<CallBase>(U))
+        return bitReject(GV, ": handle must not be used by a non-whitelisted "
+                             "call or operand bundle");
+      if (isa<Instruction>(U))
+        return bitReject(GV,
+                         ": handle escape (ordinary load/store/GEP/cast/"
+                         "ptrtoint/instruction use); a bit object has no byte "
+                         "address");
+      if (const auto *C = dyn_cast<Constant>(U)) {
+        // Require every use path of this constant to stay inside verified
+        // keepalive registration; a shared aggregate with a second, ordinary
+        // branch is not exempt.
+        if (isFullyKeepaliveConstant(C))
+          continue;
+        return bitReject(GV,
+                         ": handle must not escape through a constant expression "
+                         "or initializer");
+      }
+      return bitReject(GV,
+                       ": handle escape; a bit object has no byte address");
+    }
+  }
+  return Error::success();
+}
+
+// BT12: structural rules of every marked bit-object placeholder (placement,
+// linkage, i8 value type, constant 0/1 initializer). The use-side escape gate
+// is verifyMCS251BitObjectUses; the split keeps the section 1.4 diagnostic
+// order: structure first, then declaration signature / call form / operand /
+// effects, then the remaining escapes.
+static Error verifyMCS251BitObjectStructure(const Module &M) {
   auto bitReject = [](const GlobalVariable &GV, StringRef What) {
     return reject(
         (Twine("MCS251 bit object '") + GV.getName() + "'" + What).str());
@@ -577,37 +812,6 @@ static Error verifyMCS251BitObjects(const Module &M) {
       const auto *CI = dyn_cast<ConstantInt>(GV.getInitializer());
       if (!CI || CI->getValue().ugt(1))
         return bitReject(GV, ": initializer must be the constant 0 or 1");
-    }
-    for (const User *U : GV.users()) {
-      if (isa<GlobalAlias>(U) || isa<GlobalIFunc>(U))
-        return bitReject(GV, ": handle must not escape through alias/ifunc");
-      // A call or an operand-bundle use is rejected outright: no target
-      // intrinsic consumes a bit-object pointer handle yet, and a name-prefix
-      // test is not an intrinsic identity. A same-named declaration that is
-      // not a real intrinsic, and a real intrinsic carrying the handle in an
-      // operand bundle, are both escapes.
-      if (isa<CallBase>(U))
-        return bitReject(GV,
-                         ": handle must not be used by a call or operand "
-                         "bundle; no symbolic bit intrinsic consumes a handle "
-                         "yet");
-      if (isa<Instruction>(U))
-        return bitReject(GV,
-                         ": handle escape (ordinary load/store/GEP/cast/"
-                         "ptrtoint/instruction use); a bit object has no byte "
-                         "address");
-      if (const auto *C = dyn_cast<Constant>(U)) {
-        // Require every use path of this constant to stay inside verified
-        // keepalive registration; a shared aggregate with a second, ordinary
-        // branch is not exempt.
-        if (isFullyKeepaliveConstant(C))
-          continue;
-        return bitReject(GV,
-                         ": handle must not escape through a constant expression "
-                         "or initializer");
-      }
-      return bitReject(GV,
-                       ": handle escape; a bit object has no byte address");
     }
   }
   return Error::success();
@@ -792,8 +996,20 @@ Error llvm::MCS251::verifyModuleContract(const Module &M,
   if (Error Err = verifyMCS251ISRStructure(M))
     return Err;
 
-  // BT12: persistent bit-object placeholder structure and escape gate.
-  if (Error Err = verifyMCS251BitObjects(M))
+  // BT12 + P09 section 1.3/1.4: the bit-object contract is checked in the
+  // frozen diagnostic order -- placeholder STRUCTURE first, then the symbolic
+  // intrinsic family's declaration signature, call form, operand and effects
+  // (direction A), then the remaining handle escapes (direction B, which
+  // admits exactly direction A's whitelisted calls as the sole consumers).
+  // All of it runs on every invocation of this pass (structural pre-pass and
+  // post-optimization arithmetic pass alike), even with the generic verifier
+  // turned off.
+  if (Error Err = verifyMCS251BitObjectStructure(M))
+    return Err;
+  SmallPtrSet<const CallBase *, 16> ValidObjCalls;
+  if (Error Err = verifyMCS251SymbolicBitIntrinsics(M, ProgramAS, ValidObjCalls))
+    return Err;
+  if (Error Err = verifyMCS251BitObjectUses(M, ValidObjCalls))
     return Err;
 
   SmallPtrSet<const Type *, 32> Seen;

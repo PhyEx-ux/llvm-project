@@ -429,3 +429,326 @@ int fold_used_toggle_dead(void) {
   // The used toggle is in the dead branch of a constant if.
   return ({ if (0) return (X ^= 1); 0; });
 }
+
+// ---------------------------------------------------------------------------
+// P09 object matrix (design sections 2.3-2.5): the same physical
+// forced-operation rules on persistent bit objects. Every RMW rule is
+// instantiated for the extern+global merged object (OE/OG), the file static
+// (FS), and the function-local static (L; a same-named static in each
+// function is a *different* object, which doubles as the shadowing-distinct
+// identity test). The fixed form is the whole file above. Automatic and
+// parameter bit objects close the matrix as positive controls: they are in
+// the identity domain but NOT subject to the physical table (P-2 value
+// semantics), so none of the errors below may fire for them.
+// ---------------------------------------------------------------------------
+
+extern __bit OE;
+__bit OG;               // extern + definition: one canonical object
+static __bit FS = 1;    // file static
+__bit OTHER1 = 1;       // different object, same initial value
+__bit OTHER2 = 1;
+int dyn(void);
+void g(int);
+
+// --- extern+global form: the section 2.4 forced table ---
+
+void obj_allowed(void) {
+  OG = 0;
+  OG = 1;
+  OG = dyn();           // dynamic RHS: one write, no MOV bit,C
+  OE = dyn();
+  OG = !OTHER1;         // different identity: source read + dest write
+  OG = OTHER2;          // plain copy from a different object
+  OG ^= 1;              // CPL toggle, discarded
+  OG = !OG;             // CPL toggle, discarded
+  (void)(OG ^= 1);
+  OG = (OE = dyn());    // nested write, result reused, no read-back
+  if (OG) OG = 0;       // one test + one path write (no JBC merge)
+  if (!OG) { OG = 1; }
+}
+int obj_read_value(void) {
+  int r = OG;
+  r += OG + OE;
+  return OG ? 1 : 0;
+}
+int obj_assign_result(void) {
+  int r = (OG = dyn()); // the assignment result reuses the RHS, no read-back
+  return r;
+}
+
+void obj_rmw_not(void) {
+  OG = ~OG; // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_rmw_add(void) {
+  OG = OG + 1; // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_rmw_self(void) {
+  OG = OG; // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_rmw_or(void) {
+  OG |= 1; // expected-error {{read-modify-write '|=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_rmw_add_assign(void) {
+  OG += 1; // expected-error {{read-modify-write '+=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_rmw_xor_zero(void) {
+  OG ^= 0; // expected-error {{read-modify-write '^=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_rmw_xor_two(void) {
+  OG ^= 2; // expected-error {{read-modify-write '^=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_rmw_xor_var(int v) {
+  OG ^= v; // expected-error {{read-modify-write '^=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_inc(void) {
+  ++OG; // expected-error {{read-modify-write '++' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_dec(void) {
+  OG--; // expected-error {{read-modify-write '--' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+int obj_used_toggle(void) {
+  return (OG ^= 1); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
+}
+int obj_used_not_toggle(void) {
+  return (OG = !OG); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
+}
+void obj_used_toggle_arg(void) {
+  g(OE ^= 1); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
+}
+void obj_extern_same_object(void) {
+  // The file-scope extern OE and its definition below are one canonical
+  // object: a self-read through either spelling is the same self-read.
+  OE = ~OE; // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+__bit OE; // the definition that merges with the extern above
+void obj_block_scope_extern(void) {
+  // A block-scope extern merges with the file-scope object (one identity).
+  extern __bit OG;
+  OG = !OG; // the discarded toggle is fine through the inner declaration
+}
+void obj_block_scope_extern_bad(void) {
+  extern __bit OG;
+  OG = ~OG; // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+
+// --- extern+global form: the section 2.5 evaluation-aware rows ---
+
+void obj_fold_dead(int c) {
+  OG = (0 && OG);
+  OG = (1 || OG);
+  OG = (1 ? 0 : OG);
+  0 && (OG ^= 1);
+  1 || (OG ^= 1);
+  // Dead branches *inside a full expression* (statement expression): the
+  // constant-false branch is never evaluated, so neither a read nor a
+  // physical RMW inside it is diagnosed.
+  ({ if (0) { OG = ~OG; } 0; });
+  ({ while (0) { OG |= 1; } 0; });
+  (void)c;
+}
+// Boundary (parity with the fixed form): a *statement-level* constant-false
+// branch is outside the full-expression evaluation framework -- the inner
+// assignment is its own full expression -- so the physical RMW is diagnosed
+// there, for objects exactly as for fixed references.
+void obj_stmt_level_dead_branch(void) {
+  if (0) { OG = ~OG; } // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_fold_live(int c) {
+  OG = (c && OG); // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_fold_cond_live(int c) {
+  OG = (c ? 0 : OG); // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_used_toggle_live(int c) {
+  c && (OG ^= 1); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
+}
+void obj_discarded_forms(int c) {
+  (OG ^= 1, 0);
+  for (; c; OG ^= 1) { }
+  do { OG ^= 1; } while (c);
+  switch (c) { case 0: OG ^= 1; break; default: break; }
+}
+void obj_stmtexpr_discarded(void) {
+  ({ OG ^= 1; });
+}
+int obj_stmtexpr_used(void) {
+  return ({ OG ^= 1; }); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
+}
+int obj_stmtexpr_inner_discarded(void) {
+  int r = ({ OG ^= 1; 0; });
+  return r;
+}
+void obj_stmtexpr_dead_read(void) {
+  OG = ({ if (0) { int y = OG; (void)y; } 1; });
+}
+void obj_stmtexpr_live_read(int c) {
+  OG = ({ if (c) { int y = OG; (void)y; } 1; }); // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_stmtexpr_nested_write(void) {
+  OG = ({ OG = 0; 1; }); // a nested write is not a read
+}
+void obj_asm_used(void) {
+  __asm__("" : : "r"(OG ^= 1)); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
+}
+void obj_asm_readwrite_self(void) {
+  OG = ({ __asm__("" : "+r"(OG)); 1; }); // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void obj_asm_unevaluated(void) {
+  sizeof(+({ __asm__("" : : "r"(OG ^= 1)); 0; }));
+}
+void obj_unevaluated_builtin(void) {
+  OG = __builtin_constant_p(OG);
+  __builtin_constant_p(OG |= 1);
+}
+
+// --- file-static form: the section 2.4 forced table ---
+
+void fs_allowed(void) {
+  FS = 0;
+  FS = dyn();
+  FS ^= 1;
+  FS = !FS;
+  FS = !OG;   // cross-form copy: object read + object write
+  FS = !X;    // Fixed/Object mixed identities: never a toggle, source read + write
+  (void)FS;
+}
+void fs_rmw_not(void) {
+  FS = ~FS; // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void fs_rmw_or(void) {
+  FS |= 1; // expected-error {{read-modify-write '|=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void fs_rmw_xor_two(void) {
+  FS ^= 2; // expected-error {{read-modify-write '^=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void fs_inc(void) {
+  ++FS; // expected-error {{read-modify-write '++' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+int fs_used_toggle(void) {
+  return (FS ^= 1); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
+}
+void fs_fold_dead(void) {
+  FS = (0 && FS);
+  if (0) { FS ^= 1; }
+}
+void fs_fold_live(int c) {
+  FS = (c && FS); // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void fs_stmtexpr_used(void) {
+  int r = ({ FS ^= 1; }); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
+  (void)r;
+}
+
+// --- local-static form: the section 2.4 forced table (one static per
+// function; same-named statics in different functions are distinct objects,
+// so no cross-function false identity may fire) ---
+
+void ls_allowed(void) {
+  static __bit L;
+  L = 1;
+  L = dyn();
+  L ^= 1;
+  L = !L;
+  L = !OG;
+  (void)L;
+}
+void ls_rmw_not(void) {
+  static __bit L;
+  L = ~L; // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void ls_rmw_self(void) {
+  static __bit L;
+  L = L; // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void ls_rmw_xor_var(int v) {
+  static __bit L;
+  L ^= v; // expected-error {{read-modify-write '^=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void ls_dec(void) {
+  static __bit L;
+  --L; // expected-error {{read-modify-write '--' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+int ls_used_toggle(void) {
+  static __bit L;
+  return (L ^= 1); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
+}
+void ls_fold_live(int c) {
+  static __bit L;
+  L = (c ? L : 0); // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void ls_fold_dead(int c) {
+  static __bit L;
+  L = (0 ? L : 1);
+  ({ if (0) { L = ~L; } 0; }); // dead branch inside a full expression: silent
+  (void)c;
+}
+// Cross-object reads between two different local statics are never
+// self-reads (each function's L is a distinct object).
+void ls_cross_ok(void) {
+  static __bit L1;
+  static __bit L2;
+  L1 = ~L2; // L2 read is a different object: allowed
+  L2 = !L1;
+}
+
+// --- shadowing and identity boundaries ---
+
+__bit SH; // the global shadowed below
+void set_global_sh(void);
+void shadow_static(void) {
+  static __bit SH; // a distinct object that shadows the global
+  SH = ~SH; // expected-error {{read-modify-write '=' of a controlled MCS251 bit is not supported; sample the bit into an ordinary value first}}
+}
+void shadow_static_cross(void) {
+  static __bit SH; // the local static, not the global: a write to the global
+  SH = ({ set_global_sh(); 1; }); // inside the RHS is a cross-object write, not a self-read
+}
+void set_global_sh(void) { SH = 0; } // this function sees the file-scope SH
+
+// Different objects with the same initial value never merge identities.
+void same_init_distinct(void) {
+  OTHER1 = ~OTHER2; // allowed: distinct objects
+}
+
+// Fixed/Object mixed identities: a fixed reference and an object are never
+// the same target, in either direction.
+void fixed_object_mix(void) {
+  X = !OG;  // allowed: RHS is an object read, not the fixed target
+  OG = !X;  // allowed: RHS is a fixed read, not the object target
+  X = ~OG;  // allowed: the RHS reads a different target
+}
+
+// --- automatic/parameter positive controls (P-2 value semantics): the
+// physical table must NOT fire for them, including for the used toggle. ---
+
+void auto_control(void) {
+  __bit a = OG;        // initialized from a physical read: fine
+  a = ~a;              // ordinary value rules
+  a = a + 1;
+  a = a;
+  a += 1;
+  a |= 1;
+  a ^= 0;
+  a ^= 2;
+  a ^= OG;
+  ++a;
+  a--;
+  int r = (a ^= 1);    // the used toggle is legal for an automatic value
+  (void)r;
+  r = (a = !a);
+  (void)r;
+  a = ({ a ^= 1; });   // statement-expression result used: fine
+  (void)a;
+}
+void param_control(__bit p) {
+  p = ~p;
+  p = p + 1;
+  p |= 1;
+  p ^= 2;
+  ++p;
+  p--;
+  int r = (p ^= 1);
+  (void)r;
+  p = ({ p ^= 1; });
+  (void)p;
+}

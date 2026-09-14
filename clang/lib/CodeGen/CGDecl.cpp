@@ -213,14 +213,31 @@ void CodeGenFunction::EmitVarDecl(const VarDecl &D) {
     // Don't emit it now, allow it to be emitted lazily on its first use.
     return;
 
-  // MCS-251 bit objects (including old-style `sbit` fixed references) are a
-  // controlled capability whose storage/lowering is not yet implemented (M2).
-  // Fail closed rather than emitting an ordinary byte alloca/global for them.
-  if (D.getType().getUnqualifiedType()->isMCS251BitType() ||
-      D.hasAttr<MCS251BitAddressAttr>()) {
-    CGM.ErrorUnsupported(&D, D.hasAttr<MCS251BitAddressAttr>()
-                                 ? "MCS251 fixed bit reference"
-                                 : "MCS251 bit object");
+  // MCS-251 bit objects. A persistent/static `bit` object (P09 §2.1) emits
+  // its dedicated handle global here -- the definition, its normalized 0/1
+  // initializer, and the forced llvm.used keepalive -- and later references
+  // resolve to the same handle, never to an ordinary byte global. The
+  // automatic/register form is the P-2 call-private value (§3.1): an ordinary
+  // align-1 i8 alloca whose initialized writes and all reads are normalized
+  // by EmitToMemory/EmitFromMemory; at -O1+ it may simply live as SSA.
+  // Non-ordinary automatic storage (__block) and any other form stay
+  // fail-closed, as does an old-style `sbit` fixed reference (not a stored
+  // object).
+  if (D.getType().getUnqualifiedType()->isMCS251BitType()) {
+    if (D.getStorageDuration() == SD_Static &&
+        D.getTLSKind() == VarDecl::TLS_None) {
+      CGM.EmitMCS251BitGlobalVarDefinition(&D);
+      return;
+    }
+    if (D.getStorageDuration() == SD_Automatic && !D.isEscapingByref() &&
+        !D.hasAttr<BlocksAttr>() && !D.isExceptionVariable()) {
+      return EmitAutoVarDecl(D);
+    }
+    CGM.ErrorUnsupported(&D, "MCS251 bit object");
+    return;
+  }
+  if (D.hasAttr<MCS251BitAddressAttr>()) {
+    CGM.ErrorUnsupported(&D, "MCS251 fixed bit reference");
     return;
   }
 
@@ -2696,14 +2713,15 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
   assert((isa<ParmVarDecl>(D) || isa<ImplicitParamDecl>(D)) &&
          "Invalid argument to EmitParmDecl");
 
-  // MCS-251 bit parameters are not lowered yet (M2 covers the i8 ABI and the
-  // parameter-local object path). Fail closed rather than materializing an i1
-  // parameter and a byte alloca/store for a real bit object.
-  if (D.getType().getUnqualifiedType()->isMCS251BitType()) {
-    CGM.ErrorUnsupported(&D, "MCS251 bit parameter");
-    return;
-  }
-
+  // MCS-251 bit parameters (P09 §3.2/§4.2): the incoming ABI value is a full
+  // normalized i8 (DPL for the first source parameter, the original-position
+  // `_callee_PARM_n` static slot afterwards). EmitFunctionProlog already
+  // decoded it to the call-private i1 with one `icmp ne i8 incoming, 0` at
+  // the earliest program point -- before any helper call could overwrite a
+  // static slot. The generic path below stores that private value into the
+  // parameter's own i8 `.addr` alloca (EmitToMemory zexts), so every later
+  // read/write touches only the private copy.
+  //
   // Set the name of the parameter's initial value to make IR easier to
   // read. Don't modify the names of globals.
   if (!isa<llvm::GlobalValue>(Arg.getAnyValue()))

@@ -1076,6 +1076,14 @@ void Sema::checkVariadicArgument(const Expr *E, VariadicCallType CT) {
 
 ExprResult Sema::DefaultVariadicArgumentPromotion(Expr *E, VariadicCallType CT,
                                                   FunctionDecl *FDecl) {
+  // P09 §6.3 N13: a bit actual argument through `...` has no defined ABI
+  // slot. Check before the default argument promotion below, which would
+  // otherwise erase the bit identity by promoting it to int.
+  if (E->getType()->isMCS251BitType())
+    return ExprError(
+        Diag(E->getExprLoc(), diag::err_mcs251_bit_call_unsupported)
+        << "variadic" << E->getSourceRange());
+
   if (const BuiltinType *PlaceholderTy = E->getType()->getAsPlaceholderType()) {
     // Strip the unbridged-cast placeholder expression off, if applicable.
     if (PlaceholderTy->getKind() == BuiltinType::ARCUnbridgedCast &&
@@ -7298,6 +7306,23 @@ ExprResult Sema::BuildResolvedCallExpr(Expr *Fn, NamedDecl *NDecl,
   // in the call expression.
   const auto *Proto = dyn_cast_or_null<FunctionProtoType>(FuncT);
   unsigned NumParams = Proto ? Proto->getNumParams() : 0;
+
+  // P09 §6.3 N13-N15: the frozen bit call-form exclusions (variadic /
+  // no-prototype / multi-argument indirect). An unprototyped callee also
+  // rejects as-written bit arguments here: default argument promotion would
+  // otherwise silently turn them into ints. Everything routes through this
+  // single point (BuildCallExpr delegates here).
+  if (FuncT && !Proto) {
+    bool AnyBitArg = llvm::any_of(
+        Args, [](Expr *A) { return A && A->getType()->isMCS251BitType(); });
+    if (FuncT->getReturnType()->isMCS251BitType() || AnyBitArg)
+      return ExprError(Diag(LParenLoc, diag::err_mcs251_bit_call_unsupported)
+                       << "no-prototype" << Fn->getSourceRange());
+  } else if (FuncT && MCS251().CheckMCS251BitCallForm(
+                          FuncT, /*IsIndirect=*/!FDecl, LParenLoc,
+                          Fn->getSourceRange())) {
+    return ExprError();
+  }
 
   CallExpr *TheCall;
   if (Config) {

@@ -101,14 +101,16 @@
 ;AGGRET: MCS251 contract violation: MCS251 bit object 'flag': handle must not escape through a constant expression or initializer
 ;CASTSH: LLVM ERROR: MCS251 contract violation: MCS251 bit object 'flag': handle must not escape through a constant expression or initializer
 
-; A call or operand-bundle use is never a legitimate consumer: no intrinsic
-; consumes a bit-object handle yet, and a name-prefix test is not an intrinsic
-; identity. A same-named non-intrinsic declaration and a real intrinsic with
-; the handle in an operand bundle are both rejected.
+; A call or operand-bundle use is only legitimate as the argument-0 use of a
+; fully validated symbolic bit-intrinsic call (P09 section 1.3 B; the positive
+; form is covered by bit-intrinsics-obj.ll). Everything else -- a same-named
+; non-intrinsic declaration, a real intrinsic carrying the handle in an
+; operand bundle, an ordinary call -- is rejected with the frozen P09
+; section 1.4 diagnostic.
 ;RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/fake-intrinsic.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
 ;RUN: not --crash llc -mtriple=mcs251 -O2 -filetype=obj -mcs251-object-format=elf %t/fake-intrinsic.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
 ;RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bundle-intrinsic.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
-;CALL: MCS251 contract violation: MCS251 bit object 'flag': handle must not be used by a call or operand bundle
+;CALL: MCS251 contract violation: MCS251 bit object 'flag': handle must not be used by a non-whitelisted call or operand bundle
 
 ; The bit-object protocol is ELF-only: REL objects and asm text reject it.
 ;RUN: not --crash llc -mtriple=mcs251 -filetype=obj %t/def.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL

@@ -5344,7 +5344,16 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
               D.setInvalidType();
             }
           } else if (!FTI.hasPrototype) {
-            if (Context.isPromotableIntegerType(ParamTy)) {
+            if (ParamTy->isMCS251BitType()) {
+              // P09 §6.3 N14: an old-style (K&R) definition has no prototype,
+              // so a bit parameter has no declared DPL/`_PARM_n` position;
+              // the default integer promotion below would silently turn it
+              // into an int parameter. Reject the form instead.
+              S.Diag(FTI.Params[i].IdentLoc,
+                     diag::err_mcs251_bit_call_unsupported)
+                  << "no-prototype";
+              D.setInvalidType(true);
+            } else if (Context.isPromotableIntegerType(ParamTy)) {
               ParamTy = Context.getPromotedIntegerType(ParamTy);
               Param->setKNRPromoted(true);
             } else if (const BuiltinType *BTy = ParamTy->getAs<BuiltinType>()) {
@@ -5450,6 +5459,18 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
               (ASIdx == LangAS::Default ? S.getDefaultCXXMethodAddrSpace()
                                         : ASIdx);
           EPI.TypeQuals.addAddressSpace(AS);
+        }
+        // P09 §6.3 N13: the bit value ABI defines no position for a bit in a
+        // variadic signature (`...` has no DPL/`_PARM_n` slot), so reject the
+        // declaration itself -- parameter or return -- rather than letting a
+        // later call discover the missing slot.
+        if (EPI.Variadic &&
+            (T->isMCS251BitType() || llvm::any_of(ParamTys, [](QualType PT) {
+               return PT->isMCS251BitType();
+             }))) {
+          S.Diag(D.getBeginLoc(), diag::err_mcs251_bit_call_unsupported)
+              << "variadic" << D.getSourceRange();
+          D.setInvalidType(true);
         }
         T = Context.getFunctionType(T, ParamTys, EPI);
       }

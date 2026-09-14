@@ -2,6 +2,7 @@
 
 #include "MCS251ISelLowering.h"
 #include "MCS251.h"
+#include "MCS251BitObject.h"
 #include "MCS251LocalInterp.h"
 #include "MCS251Subtarget.h"
 #include "llvm/ADT/APInt.h"
@@ -351,6 +352,10 @@ SDValue MCS251TargetLowering::LowerShift(SDValue Op, SelectionDAG &DAG) const {
   return V;
 }
 
+// Defined with the controlled bit-access lowering below (P09 section 2.4).
+static SDValue tryLowerDirectBitBranch(SDValue Op, SelectionDAG &DAG,
+                                       SDNode *StaleChainUser = nullptr);
+
 SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
                                              SelectionDAG &DAG) const {
   // DF0 task 2: f32/f64/i64 arithmetic, comparison and conversion ops are
@@ -444,12 +449,27 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
   case ISD::SRA:
     return LowerShift(Op, DAG);
   case ISD::BRCOND: {
+    // P09 section 2.4: `if (B)` / `if (!B)` is one JB/JNB bit test. The DAG
+    // combiner reaches this case with EITHER polarity: a xor-inverted
+    // condition is canonicalised into a swapped BRCOND(cond, false-block)
+    // plus trailing BR(true-block), so the raw cond here can already be the
+    // non-inverted sample. Try the direct bit-branch shape on the wrapped
+    // BR_CC first -- tolerating this BRCOND itself as one stale chain user
+    // of the sample, because the node is still live until the legalizer
+    // replaces it with the returned JB/JNB -- and keep LowerBR_CC's own hook
+    // for the BR_CC nodes the combiner produces directly. Anything that does
+    // not trace back to a single glued bit sample falls through to the
+    // generic compare path.
     SDLoc DL(Op);
     SDValue Cond = Op.getOperand(1);
-    return LowerBR_CC(DAG.getNode(
+    SDValue BRCC = DAG.getNode(
         ISD::BR_CC, DL, MVT::Other, Op.getOperand(0),
         DAG.getCondCode(ISD::SETNE), Cond,
-        DAG.getConstant(0, DL, Cond.getValueType()), Op.getOperand(2)), DAG);
+        DAG.getConstant(0, DL, Cond.getValueType()), Op.getOperand(2));
+    if (SDValue JB = tryLowerDirectBitBranch(BRCC, DAG,
+                                             /*StaleChainUser=*/Op.getNode()))
+      return JB;
+    return LowerBR_CC(BRCC, DAG);
   }
   case ISD::SETCC: {
     SDLoc DL(Op);
@@ -485,6 +505,9 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     case Intrinsic::mcs251_bit_set:
     case Intrinsic::mcs251_bit_clear:
     case Intrinsic::mcs251_bit_toggle:
+    case Intrinsic::mcs251_bit_obj_set:
+    case Intrinsic::mcs251_bit_obj_clear:
+    case Intrinsic::mcs251_bit_obj_toggle:
       return LowerBitIntrinsic(Op, DAG);
     default:
       report_fatal_error("MCS251: unsupported target intrinsic");
@@ -1184,17 +1207,67 @@ static unsigned getBitIntrinsicAddr(const SDNode *N, unsigned OpNo) {
   return unsigned(V);
 }
 
+// The bit-address machine operand of an access, in either spelling (P09
+// section 1.1): the fixed family carries an immarg i32 constant in [0, 255];
+// the obj family carries the identity handle -- an AS0 GlobalAddress of an
+// i8 GlobalVariable marked "mcs251-bit-object", at zero offset. The symbolic
+// handle is routed through a target GlobalAddress so the normal GlobalAddress
+// lowering never materialises it as a DR byte pointer; the bit number itself
+// is resolved by the linker from R_MCS251_BITADDR8.
+struct BitAccessOperand {
+  unsigned Addr = 0;    // fixed family only; always [0, 255]
+  bool Symbolic = false;
+  SDValue MachineOp;    // target constant / target global address
+};
+
+static BitAccessOperand getBitIntrinsicOperand(SDNode *N, unsigned OpNo,
+                                               SelectionDAG &DAG) {
+  SDValue Op = N->getOperand(OpNo);
+  if (auto *GA = dyn_cast<GlobalAddressSDNode>(Op.getNode())) {
+    if (Op.getResNo() != 0)
+      report_fatal_error("MCS251: symbolic bit intrinsic operand must be the "
+                         "bit-object global itself");
+    auto *GV = dyn_cast<GlobalVariable>(GA->getGlobal());
+    // The IR contract verifier (MCS251ContractCheck) already guarantees the
+    // direct marked-handle form; this is the backend's own loud guard, and it
+    // also covers the MIR entry path that skips the IR verifier.
+    if (!GV || GV->getAddressSpace() != 0 || !MCS251::isBitObjectGlobal(*GV))
+      report_fatal_error("MCS251: symbolic bit intrinsic operand must be a "
+                         "direct AS0 bit-object global");
+    if (GA->getOffset() != 0)
+      report_fatal_error("MCS251: bit object '" + GV->getName() +
+                         "' bit-address operand must have no addend");
+    SDLoc DL(Op);
+    BitAccessOperand Res;
+    Res.Symbolic = true;
+    Res.MachineOp =
+        DAG.getTargetGlobalAddress(GV, DL, MVT::i16, /*Offset=*/0);
+    return Res;
+  }
+  unsigned BitAddr = getBitIntrinsicAddr(N, OpNo);
+  SDLoc DL(Op);
+  BitAccessOperand Res;
+  Res.Addr = BitAddr;
+  Res.MachineOp = DAG.getTargetConstant(BitAddr, DL, MVT::i16);
+  return Res;
+}
+
 // The bit instruction for a set/clear/toggle request. Bit address 0xd7 is
 // PSW.CY, so it routes to the flag-bearing C form (the bit-address form would
-// not declare the PSW def/use the virtual flags register needs).
-static unsigned getBitWriteOpcode(unsigned IID, unsigned BitAddr) {
-  const bool Carry = BitAddr == 0xd7;
+// not declare the PSW def/use the virtual flags register needs). A symbolic
+// handle never names PSW.CY (RAM bits only, P09 section 1.1), so it always
+// takes the bit-address form.
+static unsigned getBitWriteOpcode(unsigned IID, const BitAccessOperand &Op) {
+  const bool Carry = !Op.Symbolic && Op.Addr == 0xd7;
   switch (IID) {
   case Intrinsic::mcs251_bit_set:
+  case Intrinsic::mcs251_bit_obj_set:
     return Carry ? MCS251::SETBC : MCS251::SETBBIT;
   case Intrinsic::mcs251_bit_clear:
+  case Intrinsic::mcs251_bit_obj_clear:
     return Carry ? MCS251::CLRC : MCS251::CLRBIT;
   case Intrinsic::mcs251_bit_toggle:
+  case Intrinsic::mcs251_bit_obj_toggle:
     return Carry ? MCS251::CPLC : MCS251::CPLBIT;
   default:
     llvm_unreachable("unexpected MCS251 bit intrinsic");
@@ -1207,14 +1280,15 @@ SDValue MCS251TargetLowering::LowerBitIntrinsic(SDValue Op,
   SDLoc DL(Op);
   SDValue Chain = N->getOperand(0);
   unsigned IID = N->getConstantOperandVal(1);
-  unsigned BitAddr = getBitIntrinsicAddr(N, 2);
-  unsigned Opc = getBitWriteOpcode(IID, BitAddr);
+  BitAccessOperand Bit = getBitIntrinsicOperand(N, 2, DAG);
+  unsigned Opc = getBitWriteOpcode(IID, Bit);
   // The C forms take no bit-address operand (the mnemonic names the carry).
   // The address is emitted as an i16 target constant so values >= 0x80 are
-  // not sign-extended to a negative i8 immediate (see getBitIntrinsicAddr).
+  // not sign-extended to a negative i8 immediate (see getBitIntrinsicAddr);
+  // the symbolic handle is a target global address at offset zero.
   SmallVector<SDValue, 2> Ops;
-  if (BitAddr != 0xd7)
-    Ops.push_back(DAG.getTargetConstant(BitAddr, DL, MVT::i16));
+  if (!(!Bit.Symbolic && Bit.Addr == 0xd7))
+    Ops.push_back(Bit.MachineOp);
   Ops.push_back(Chain);
   return SDValue(DAG.getMachineNode(Opc, DL, MVT::Other, Ops), 0);
 }
@@ -1224,6 +1298,10 @@ SDValue MCS251TargetLowering::LowerBitIntrinsic(SDValue Op,
 // result is promoted. Build the whole sample group here and hand the generic
 // promotion machinery a TRUNCATE(i1) of the i8 the group produces; the
 // truncate is then promoted back to the i8 vreg, which already holds 0/1.
+// Both families arrive here (P09 section 1.1): the fixed immarg constant and
+// the symbolic bit-object handle share the machine path, the latter carried
+// by the same target operand (global address, zero offset) that
+// LowerBitIntrinsic emits for the writers.
 void MCS251TargetLowering::ReplaceBitReadResults(
     SDNode *N, SmallVectorImpl<SDValue> &Results, SelectionDAG &DAG) const {
   assert(N->getOpcode() == ISD::INTRINSIC_W_CHAIN &&
@@ -1231,13 +1309,13 @@ void MCS251TargetLowering::ReplaceBitReadResults(
          "unexpected bit-read legalization request");
   SDLoc DL(N);
   SDValue Chain = N->getOperand(0);
-  unsigned BitAddr = getBitIntrinsicAddr(N, 2);
+  BitAccessOperand Bit = getBitIntrinsicOperand(N, 2, DAG);
 
   // mov c, bit -- sample the bit into CY. This is the side-effecting access:
   // it consumes and produces the memory chain.
   SDValue MovC(DAG.getMachineNode(
                    MCS251::MOVCBIT, DL, DAG.getVTList(MVT::Other, MVT::Glue),
-                   {DAG.getTargetConstant(BitAddr, DL, MVT::i16), Chain}),
+                   {Bit.MachineOp, Chain}),
                0);
   SDValue Sample = MovC.getValue(0);
   // mov a, #0 ; rlc a ; mov <dst>, a -- A = CY in {0, 1}.
@@ -1254,6 +1332,139 @@ void MCS251TargetLowering::ReplaceBitReadResults(
   // promoted value is Byte itself. The chain result is returned unchanged.
   Results.push_back(DAG.getNode(ISD::TRUNCATE, DL, MVT::i1, Byte));
   Results.push_back(Sample);
+}
+
+// P09 section 2.4: a DIRECT condition (`if (B)` / `if (!B)`) is exactly one
+// JB/JNB bit test, not a materialised byte plus a second re-test of that
+// byte. LowerBR_CC calls this before the generic compare path; both bit
+// families share it.
+//
+// By the time operation legalization sees the branch, the generic BRCOND
+// expansion has produced BR_CC(SETNE, LHS, 0) where LHS is the promoted i1
+// sample: the type legalizer's zero-or-one mask AND(MOV8ra-byte, 1),
+// optionally nested inside the `if (!B)` inversion XOR(..., 1). The condition
+// is traced back to the exact glued sample group built by
+// ReplaceBitReadResults:
+//
+//   mov c, bit -> mov a, #0 -> rlc a -> mov <byte>, a ; [xor byte, 1] ; and byte, 1
+//
+// The rewrite is only sound when the branch is the sample's ONLY value AND
+// chain user: then replacing the branch with JB (consuming the chain that fed
+// mov c) keeps the access exactly once, in place, with the same ordering
+// relative to every other memory operation. Anything else falls back to the
+// generic compare path (fail closed, never a duplicated access).
+static SDValue tryLowerDirectBitBranch(SDValue Op, SelectionDAG &DAG,
+                                       SDNode *StaleChainUser) {
+  SDNode *N = Op.getNode();
+  assert(Op.getOpcode() == ISD::BR_CC && "direct bit branch is a BR_CC shape");
+  // The branch fires when CC(sample-masked-byte, 0) holds; with the byte
+  // being exactly 0/1, only the two boolean tests are meaningful:
+  // SETNE -> branch when the bit is 1 (JB), SETEQ -> when it is 0 (JNB).
+  // (The DAG combiner canonicalises the test to SETEQ-with-zero, so both
+  // spellings must be accepted.)
+  ISD::CondCode CC = cast<CondCodeSDNode>(N->getOperand(1))->get();
+  bool Invert;
+  if (CC == ISD::SETNE)
+    Invert = false;
+  else if (CC == ISD::SETEQ)
+    Invert = true;
+  else
+    return SDValue();
+  SDValue Chain = N->getOperand(0);
+  SDValue Cond = N->getOperand(2); // LHS
+  auto *RHS = dyn_cast<ConstantSDNode>(N->getOperand(3));
+  if (!RHS || !RHS->isZero())
+    return SDValue();
+  SDValue Dest = N->getOperand(4);
+
+  auto IsConstOne = [](SDValue V) {
+    auto *C = dyn_cast<ConstantSDNode>(V);
+    return C && C->getZExtValue() == 1;
+  };
+  auto IsConstZero = [](SDValue V) {
+    auto *C = dyn_cast<ConstantSDNode>(V);
+    return C && C->isZero();
+  };
+  auto IsConstAllOnes = [](SDValue V) {
+    auto *C = dyn_cast<ConstantSDNode>(V);
+    return C && C->isAllOnes();
+  };
+  // The i1 zero-or-one mask `and x, 1` (constant canonicalised to the RHS),
+  // inserted both by i1 promotion and by the generic BRCOND->BR_CC rewrite.
+  auto StripMask = [&](SDValue V) {
+    if (V.getOpcode() == ISD::AND && IsConstOne(V.getOperand(1)))
+      return V.getOperand(0);
+    return V;
+  };
+
+  // Peel the outer mask, then an optional `if (!B)` inversion (xor with 1,
+  // or a logical NOT's all-ones xor), then the promotion mask again. The
+  // inversion toggles the SETNE/SETEQ polarity above.
+  Cond = StripMask(Cond);
+  if (!Cond.getNode()->hasNUsesOfValue(1, Cond.getResNo()))
+    return SDValue();
+  if (Cond.getOpcode() == ISD::XOR &&
+      (IsConstOne(Cond.getOperand(1)) || IsConstAllOnes(Cond.getOperand(1)))) {
+    if (!Cond.getNode()->hasNUsesOfValue(1, Cond.getResNo()))
+      return SDValue();
+    Invert = !Invert;
+    Cond = StripMask(Cond.getOperand(0));
+  }
+  if (!Cond.getNode()->hasNUsesOfValue(1, Cond.getResNo()))
+    return SDValue();
+
+  // Trace the glued sample group: MOV8ra <- RLCA <- MOVAI#0 <- MOVCBIT.
+  auto Mov8ra = dyn_cast<MachineSDNode>(Cond.getNode());
+  if (!Mov8ra || Cond.getResNo() != 0 ||
+      Mov8ra->getMachineOpcode() != MCS251::MOV8ra ||
+      Mov8ra->getNumOperands() != 1)
+    return SDValue();
+  auto Rlc = dyn_cast<MachineSDNode>(Mov8ra->getOperand(0).getNode());
+  if (!Rlc || Mov8ra->getOperand(0).getResNo() != 0 ||
+      Rlc->getMachineOpcode() != MCS251::RLCA || Rlc->getNumOperands() != 1)
+    return SDValue();
+  auto Zero = dyn_cast<MachineSDNode>(Rlc->getOperand(0).getNode());
+  if (!Zero || Rlc->getOperand(0).getResNo() != 0 ||
+      Zero->getMachineOpcode() != MCS251::MOVAI || Zero->getNumOperands() != 2)
+    return SDValue();
+  if (!IsConstZero(Zero->getOperand(0)))
+    return SDValue();
+  auto MovC = dyn_cast<MachineSDNode>(Zero->getOperand(1).getNode());
+  if (!MovC || Zero->getOperand(1).getResNo() != 1 ||
+      MovC->getMachineOpcode() != MCS251::MOVCBIT || MovC->getNumOperands() != 2)
+    return SDValue();
+
+  // The branch must consume the sample's chain result directly: no other
+  // memory operation may sit between the sample and its test (section 1.2:
+  // no reordering across ordered memory accesses), and no other user may
+  // depend on the sample's chain or byte, or the access would be duplicated.
+  if (Chain != SDValue(MovC, 0))
+    return SDValue();
+  // The sample's chain result may have exactly TWO users while this runs: the
+  // BR_CC being lowered and -- when called from the BRCOND custom lowering --
+  // that BRCOND itself, which is still live until the legalizer swaps it for
+  // the JB/JNB returned here and whose chain use disappears with it. Any
+  // OTHER chain user (a call, a store, a second branch) means the access
+  // would be duplicated or reordered; fail closed.
+  for (const SDUse &U : MovC->uses()) {
+    if (U.getResNo() != 0)
+      continue; // the glue consumer is the sample group itself
+    SDNode *U2 = const_cast<SDNode *>(U.getUser());
+    if (U2 == N || U2 == StaleChainUser)
+      continue;
+    return SDValue();
+  }
+
+  SDLoc DL(N);
+  unsigned BrOpc = Invert ? MCS251::JNB : MCS251::JB;
+  // Operand 0 is the branch target, operand 1 the bit address (the exact
+  // target constant / bit-object handle of the sampled mov c); the trailing
+  // chain takes the place of the removed sample and keeps the branch ordered
+  // against everything that preceded it.
+  return SDValue(DAG.getMachineNode(BrOpc, DL, MVT::Other,
+                                    {Dest, MovC->getOperand(0),
+                                     MovC->getOperand(1)}),
+                 0);
 }
 
 // Low 32 bits of (AH:AL)*(BH:BL): AL*BL + ((AH*BL + AL*BH) << 16).
@@ -1357,6 +1568,11 @@ static SDValue canonicalizePointer32(SDValue Value, const SDLoc &DL,
 // which the frame now provides; the entry-block COPY shape below no longer
 // needs any special care.
 SDValue MCS251TargetLowering::LowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
+  // P09 section 2.4: a direct bit condition is one JB/JNB. Try the
+  // sample-trace rewrite first; anything that is not exactly a single glued
+  // controlled bit sample falls through to the generic compare path.
+  if (SDValue JB = tryLowerDirectBitBranch(Op, DAG, /*StaleChainUser=*/nullptr))
+    return JB;
   SDValue Chain = Op.getOperand(0);
   ISD::CondCode CC = cast<CondCodeSDNode>(Op.getOperand(1))->get();
   SDValue LHS = Op.getOperand(2);

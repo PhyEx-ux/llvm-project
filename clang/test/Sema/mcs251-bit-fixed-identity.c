@@ -2,10 +2,8 @@
 // RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -fmcs251-keil -fsyntax-only -verify %t/redecl.c
 // RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -fmcs251-keil -emit-llvm -o /dev/null -verify=codegen %t/codegen-sbit.c
 // RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -emit-llvm -o /dev/null -verify=codegen %t/codegen-global.c
-// RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -emit-llvm -o /dev/null -verify=object %t/codegen-local.c
 // RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -emit-llvm -o /dev/null -verify=cl %t/codegen-compound.c
 // RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -emit-llvm -o /dev/null -verify=clw %t/codegen-compound-write.c
-// RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -emit-llvm -o /dev/null -verify=param %t/codegen-param.c
 // RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -emit-llvm -o /dev/null -verify=ci %t/codegen-constinit.c
 // RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -emit-llvm -o /dev/null -verify=cis %t/codegen-constinit-static.c
 // RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -emit-llvm -o /dev/null -verify=cia %t/codegen-constinit-array.c
@@ -50,19 +48,14 @@ sbit Z = 0x88 ^ 3;
 void use_z(void) { Z = 1; }
 
 //--- codegen-global.c
-// An ordinary bit global must fail closed rather than emit a byte global.
-// codegen-error@+1 {{cannot compile this MCS251 bit global yet}}
+// An ordinary bit global is a persistent P-1b bit object: it compiles to its
+// i8 bit-object handle global (the structural IR assertions live in
+// CodeGen/mcs251-bit-objects.c); no byte global and no fail-closed error.
+// codegen-no-diagnostics
 __bit G;
 
-//--- codegen-local.c
-// A bit local must fail closed rather than lower to a byte alloca/store. Both
-// the declaration and the use report (neither produces byte storage).
-void local_bit(void) {
-  // object-error@+1 {{cannot compile this MCS251 bit object yet}}
-  __bit b = 1;
-  // object-error@+1 {{cannot compile this MCS251 bit object yet}}
-  (void)b;
-}
+// (codegen-local removed: auto bit locals are SUPPORTED since P-2; positive
+// coverage in CodeGen/mcs251-bit-local.c.)
 
 //--- codegen-compound.c
 // A bit compound literal is a real bit object and must fail closed.
@@ -77,11 +70,7 @@ void compound_write(void) {
   (__bit){0} = 1;
 }
 
-//--- codegen-param.c
-// A bit parameter must fail closed instead of materializing an i1 param plus a
-// byte alloca/store, even when the parameter is otherwise unused.
-// param-error@+1 {{cannot compile this MCS251 bit parameter yet}}
-void unused_param(__bit p) {}
+// (codegen-param removed: bit formal parameters are SUPPORTED since P-3.)
 
 //--- codegen-constinit.c
 // A bit compound literal inside a constant initializer must not be folded away

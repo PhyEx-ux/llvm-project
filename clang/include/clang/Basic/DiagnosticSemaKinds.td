@@ -12778,6 +12778,12 @@ def err_mcs251_bit_rmw_unsupported
 def err_mcs251_sbit_ordinary_redecl
     : Error<"%0 was declared as a controlled MCS251 fixed bit reference; it "
             "cannot be redeclared as an ordinary object">;
+// P09 §6.1 item 4 / §6.3 N13-N15: the bit value ABI only defines complete,
+// non-variadic prototypes and zero/single-parameter indirect calls. The
+// category strings are frozen ("variadic", "no-prototype",
+// "multi-argument indirect").
+def err_mcs251_bit_call_unsupported
+    : Error<"MCS251 bit call form '%0' is not supported">;
 // P08 revision (Alice ruling, plan B): the first slice rejects every MCS251 bit
 // capability (bit types/objects, sbit, L1 fixed-bit references) *inside* an
 // enabled OpenMP/OpenACC construct: directive arguments, clauses, associated
