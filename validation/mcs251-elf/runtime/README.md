@@ -13,7 +13,7 @@
 | `gen-crt-elf.sh` | 生成器：冻结 yaml2obj 造对象 + 冻结 llvm-readobj 冒烟校验 |
 | `crt.o` | 生成物（3096 字节；可用生成器随时重现） |
 | `crt-xdata-init-walker.asm` | X4 XDATA_INIT 遍历器的 sdas251 汇编证据源（不参与链接） |
-| `crt-irq.yaml` / `gen-crt-irq.sh` / `check-crt-irq.py` | T08 IRQ 模式 fixture（独立 checker 20 项断言，含 X4 遍历器） |
+| `crt-irq.yaml` / `gen-crt-irq.sh` / `check-crt-irq.py` | T08 IRQ 模式 fixture（独立 checker 20 项断言，含 X4 遍历器；G1-2 起 `--chain` 再验发布配方链接链） |
 
 ## 路线裁定：yaml2obj 手造（路 A），不采用 C + fork-clang（路 B）
 
@@ -136,6 +136,43 @@ llvm-readobj --file-headers --sections --symbols --relocations <out.o>
   /home/liu/LLVM_STC32/MCS251/validation/mcs251-elf/runtime/crt-xdata-init-walker.asm
 # IRQ 模式 fixture 独立验收（20 项断言）
 python3 check-crt-irq.py <crt-irq.o>
+```
+
+### G1-2 IRQ 发布配方与链接链验收（2026-09-14 登记）
+
+设计 `G1-ISR-PROFILE-EXTENSION-DESIGN.md` §2/§4（PM 裁定 2026-09-13）落地的
+IRQ 发布配方与 CRT 链接链验收。上文的 selfstart 旧地址（BOOT 0xff0100 等）
+保留其**非 IRQ** 语境不变。
+
+- **发布配方**：HOME=0xff0000（3B LJMP，reset 机器字节 `02 05 00`）、
+  VECS 整段 `[0xff0003,0xff03fb)`（127 槽 × 8B，0x3F8）禁占、
+  **BOOT=0xff0500**（共享常量 `ISRBootMinAddress`，最低地址即配方值）、
+  **CSEG=0xff0700**（发布配方，lld 不对用户链接硬编码该值）、
+  XINIT=0xff8000 不变。旧配方被拒：BOOT=0xff0210（含 CSEG 用新地址时）因
+  占用完整 VECS 区间（槽 65 尾洞不可用）拒绝；BOOT<floor（如 0xff0400）命中
+  显式 floor 错误。
+- **CRT 资产**：`crt-irq.yaml` / `crt-irq-v2.yaml` 的 ISR 记录 version=2；
+  BOOT 内容保持 0x106B 冻结形状不变（只挪位置，不重建内容）；默认入口
+  = BOOT+0x102 = 0xff0602（`C2 AF 80 FE`）。
+- **链接链验收**（`check-crt-irq.py --chain IMAGE.elf MAP`，纯 stdlib、
+  不导入产品表）：以零用户注册（CRT + 仅定义 `_main` 的普通 v2 对象）链接，
+  断言 127 槽镜像（109 DEFAULT EJMP 全指向 0xff0602、18 非 Legal 行无载荷）、
+  HOME→BOOT→main 链（`ecall globals_init`=BOOT+0x4A → `ecall xdata_init`
+  =BOOT+0xA0 → `ecall _main` 落在 CSEG 配方区）、BOOT 0x106 字节与冻结模板
+  在 12 个重定位字段之外逐字节一致、每个重定位字段从 map 证据独立复算。
+  map 需带 `--keep-symbols` 生成（`FUNC _main` 行是 `_main` 地址的独立证据）。
+- 同步测试：`lld/test/MCS251/isr-crt.test`（对象级 + 链接链 + 旧配方负例）、
+  `lld/test/MCS251/isr-vectors.test`（配方 map 断言、VECS 整段探针、
+  旧配方负例）。
+
+```sh
+# 链接链示例（lld 为 -flavor mcs251 或 mcs251-lld 别名）
+ld.lld -flavor mcs251 <crt-irq-v2.o(e_flags=0x102)> <mainonly.o> \
+  --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+  --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+  --flash-base=0xff0000 --flash-size=0x10000 --keep-symbols \
+  --map=chain.map -o chain.elf
+python3 check-crt-irq.py --chain chain.elf chain.map
 ```
 
 实测指纹（2026-09-07 建档，2026-09-12 X4 后复测；冻结 yaml2obj/llvm-readobj）：

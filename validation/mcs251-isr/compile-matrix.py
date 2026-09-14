@@ -173,6 +173,73 @@ NEG_KEIL_NOFLAG = ("neg-keil-noflag",
                    "Keil suffix without -fmcs251-keil must not compile", None,
                    "void bad() interrupt 1 {}\n")
 
+# G1-4 preparation: the 13 G1-blocked demos and every interrupt slot their
+# official sources use (design doc G1-ISR-PROFILE-EXTENSION-DESIGN.md
+# section 6.3, PM ruling D1-D7 of 2026-09-13).  This is an ACCOUNTING
+# pre-check only, run via --demo-ledger with no tools: after the D7-approved
+# demo41 LCM_Interrupt site rewrite (13 -> 59) every required slot must lie
+# in the Legal set restated above, so G1-4's rewrite package can attribute
+# any remaining demo failure to a non-slot gap instead of re-deriving the
+# slot classification.  It does NOT claim these demos compile, link or run,
+# and it must never grow a "13" entry: slot 13 stays Reserved.
+# Scope (review G1-3a item 8): the deduplicated set below -- 36 distinct
+# slots drawn from the 77 actual interrupt() sites in the 13 demos'
+# rewritten sources (G1-4-PRESCAN, 2026-09-14) -- is the G1-relevant dedup
+# subset ONLY, i.e. the slots these 13 demos need.  It is not the interrupt
+# slot inventory of the whole teaching-demo corpus and not the 127-slot
+# profile inventory (109 Legal / 16 Reserved / 2 System).
+DEMO_SLOT_LEDGER = {
+    "02-13-timers":            [67, 96, 97, 98, 99],
+    "13-8-uart":               [102, 103, 104, 105],
+    # The official LCD.c writes LCM_Interrupt as interrupt 13; D7 approves
+    # exactly that site's rewrite to the true LCM source 59.
+    "41-ili9341-lcm":          [59],
+    "45.1-lin-master-slave":   [31],
+    "45.2-lin-autobaud":       [31, 45],
+    "48-lin2-slave":           [31],
+    "49-lin2-master":          [31],
+    "50-lin1-lin2-dual-slave": [31],
+    "59-dma-uart":             [52, 53, 54, 55, 56, 57,
+                                82, 83, 84, 85, 86, 87, 88, 89,
+                                102, 103, 104, 105],
+    "60-dma-i2c":              [60, 61],
+    "61-dma-lcm":              [58, 59],
+    "68-io-wakeup":            [45, 46, 90, 91],
+    "82-canfd-dma":            [117, 118, 119, 120],
+}
+
+
+def demo_ledger_problems():
+    """Every ledger slot must be Legal in the restated G1 profile."""
+    legal = set(range(VEC_COUNT)) - set(NON_LEGAL)
+    problems = []
+    for demo in sorted(DEMO_SLOT_LEDGER):
+        for slot in DEMO_SLOT_LEDGER[demo]:
+            if slot in NON_LEGAL:
+                problems.append("demo %s needs slot %d: Reserved/System in "
+                                "the G1 profile" % (demo, slot))
+            elif not 0 <= slot < VEC_COUNT:
+                problems.append("demo %s needs slot %d: outside the G1 "
+                                "profile 0-%d" % (demo, slot, VEC_COUNT - 1))
+    return problems
+
+
+def print_demo_ledger():
+    legal = set(range(VEC_COUNT)) - set(NON_LEGAL)
+    used = {}
+    print("G1 demo slot ledger (accounting pre-check for G1-4):")
+    for demo in sorted(DEMO_SLOT_LEDGER):
+        slots = DEMO_SLOT_LEDGER[demo]
+        status = ("all %d slots Legal" % len(slots)
+                  if all(s in legal for s in slots) else "HAS NON-LEGAL SLOTS")
+        print("  %-26s slots %-40s %s"
+              % (demo, ",".join(str(s) for s in slots), status))
+        for slot in slots:
+            used.setdefault(slot, []).append(demo)
+    print("distinct slots required: %d (%s)"
+          % (len(used), ",".join(str(s) for s in sorted(used))))
+    return used
+
 
 def die(msg):
     sys.exit("compile-matrix: FAIL: " + msg)
@@ -786,14 +853,38 @@ def check_image(elf_path, map_path, registered, isr_syms, fw_obj_path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--clang", required=True)
-    ap.add_argument("--llc", required=True)
-    ap.add_argument("--opt", required=True)
-    ap.add_argument("--lld", required=True)
-    ap.add_argument("--yaml2obj", required=True)
-    ap.add_argument("--readobj", required=True)
-    ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--clang")
+    ap.add_argument("--llc")
+    ap.add_argument("--opt")
+    ap.add_argument("--lld")
+    ap.add_argument("--yaml2obj")
+    ap.add_argument("--readobj")
+    ap.add_argument("--out-dir")
+    ap.add_argument("--demo-ledger", action="store_true",
+                    help="print the G1 demo slot accounting, verify every "
+                         "required slot is Legal, and exit; no tools needed")
     args = ap.parse_args()
+
+    if args.demo_ledger:
+        print_demo_ledger()
+        problems = demo_ledger_problems()
+        if problems:
+            for problem in problems:
+                print("FAIL: " + problem)
+            sys.exit(1)
+        print("demo slot ledger: all %d demos resolved to Legal slots"
+              % len(DEMO_SLOT_LEDGER))
+        return
+
+    missing = [flag for flag, value in
+               (("--clang", args.clang), ("--llc", args.llc),
+                ("--opt", args.opt), ("--lld", args.lld),
+                ("--yaml2obj", args.yaml2obj),
+                ("--readobj", args.readobj), ("--out-dir", args.out_dir))
+               if not value]
+    if missing:
+        die("missing required arguments: %s (or pass --demo-ledger for the "
+            "tool-free accounting pre-check)" % " ".join(missing))
 
     out = args.out_dir
     if not os.path.isabs(out):

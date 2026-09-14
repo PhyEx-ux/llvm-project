@@ -4,10 +4,16 @@
 # XINIT/XDATA walkers + IRQ default entry), the 16-byte BSEG_BYTES
 # reservation, the two 24-byte .mcs251.isr asset records, and every
 # relocation/symbol are preserved byte-for-byte from the frozen v1 fixture
-# crt-irq.yaml.  The ISR metadata ProtocolVersion stays 1: the ISR record
-# protocol and the ELF object identity are two different protocols.  The ISR
-# records now carry protocol_version=2 (G1, PM ruling 2026-09-13); the ELF
-# object identity is the A4 v2 carrier.
+# crt-irq.yaml.  The ISR records carry protocol_version=2 (G1, PM ruling
+# 2026-09-13): the ISR record protocol and the ELF object identity are two
+# different protocols, so this v2-identity object also carries the raised
+# ISR records, exactly like crt-irq.yaml.  The ELF object identity is the
+# A4 v2 carrier.
+#
+# G1-2 published link recipe (design 2.2): BOOT=0xff0500 / CSEG=0xff0700,
+# HOME 0xff0000 (reset bytes 02 05 00), default entry at BOOT+0x102 =
+# 0xff0602.  The asset itself stays ET_REL with all addresses zero; the
+# recipe is applied by the link and verified by check-crt-irq.py --chain.
 #
 # The ONLY changes are the object identity:
 #   - e_flags 0x00000102, installed by gen-crt-v2.sh after yaml2obj

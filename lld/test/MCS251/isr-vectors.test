@@ -32,6 +32,18 @@
 # RUN: not mcs251-lld --print-input %t.v2.o 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=VERSION
 
+# G1-2 recipe witnesses (design 2.2/5.4): the published IRQ recipe places
+# BOOT=0xff0500 / CSEG=0xff0700; the 127-slot VECS reservation is 0x3F8 bytes
+# and the CRT BOOT keeps its frozen 0x106 shape at the new address. The map
+# emits the s_/l_ lines sorted, then the per-file section rows, then the IRQ
+# rows, so these assertions follow the file's own order.
+# MAP: l_BOOT = 0x0106
+# MAP: l_VECS = 0x03f8
+# MAP: s_BOOT = 0xff0500
+# MAP: s_CSEG = 0xff0700
+# MAP: s_VECS = 0xff0003
+# MAP: crt.o:.mcs251.HOME 0xff0000 +0x3
+# MAP: crt.o:.mcs251.BOOT 0xff0500 +0x106
 # MAP: IRQ 00 0xff0003 ISR
 # MAP: IRQ 01 0xff000b DEFAULT
 # MAP: IRQ 06 0xff0033 ISR
@@ -40,6 +52,12 @@
 # MAP: IRQ 14 0xff0073 SYSTEM
 # MAP: IRQ 15 0xff007b SYSTEM
 # MAP: IRQ 51 0xff019b ISR
+# Three-digit slot rows keep their numeric order and exact classification
+# (design 5.3.4): 81/100/113 are Reserved, 126 is the last mirror row.
+# MAP: IRQ 81 0xff028b RESERVED
+# MAP: IRQ 100 0xff0323 RESERVED
+# MAP: IRQ 113 0xff038b RESERVED
+# MAP: IRQ 126 0xff03f3 DEFAULT __mcs251_isr_unhandled
 # SLOT: MCS251 ISR: vector is not a legal slot in profile 0-126
 # VERSION: MCS251 ISR: unsupported metadata version
 
@@ -1201,21 +1219,42 @@
 # WTCHK: registered slot 1 EJMP target 0xff0429 is not its handler entry
 
 # -------------------------------------------------------------------------
-# R5: isolated reserved-range probes. A 2-byte CSEG dropped entirely into
-# the slot-31 hole, and one dropped entirely into the slot-0 tail, must
-# each be rejected with no other payload present.
+# R5: isolated reserved-range probes. A 2-byte CSEG dropped entirely into a
+# Reserved slot body (slot 32 at 0xff0103, slot 100 at 0xff0323), one dropped
+# entirely into the slot-0 tail, one into the slot-126 tail (the last mirror
+# row), and one starting at VECS End - 1 must each be rejected with no other
+# payload present; the whole [0xff0003,0xff03fb) reservation is enforced, not
+# just the written EJMP bytes (design 2.1/5.5).
 # -------------------------------------------------------------------------
 # RUN: %python %S/Inputs/isr-fixture.py --out %t.small.yaml --slots 1
 # RUN: %python -c "import pathlib; p='%t.small.yaml'; s=pathlib.Path(p).read_text(); k=s.index('Content:'); q1=s.index(chr(39),k); q2=s.index(chr(39),q1+1); s=s[:q1+1]+'80FE'+s[q2:]; s=s.replace('Size: 41','Size: 2'); s=s.replace('Value: 0x29','Value: 0x0'); pathlib.Path(p).write_text(s)"
 # RUN: yaml2obj %t.small.yaml -o %t.small.o
 # RUN: %python %S/Inputs/isr-v2flags.py %t.small.o
-# RUN: not mcs251-lld %t.crt.o %t.small.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0103 --area-start=XINIT=0xff8000 -o %t.hole31.elf 2>&1 | \
-# RUN:   FileCheck %s --check-prefix=HOLE31
-# HOLE31: CODE overlap for .mcs251.VECS
+# RUN: not mcs251-lld %t.crt.o %t.small.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0103 --area-start=XINIT=0xff8000 -o %t.hole32.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=HOLE32
+# HOLE32: CODE overlap for .mcs251.VECS
 
 # RUN: not mcs251-lld %t.crt.o %t.small.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0007 --area-start=XINIT=0xff8000 -o %t.holetail.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=HOLETAIL
 # HOLETAIL: CODE overlap for .mcs251.VECS
+
+# High reserved slot 100 body (0xff0323): three-digit rows reserve their full
+# 8 bytes just like the low ones.
+# RUN: not mcs251-lld %t.crt.o %t.small.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0323 --area-start=XINIT=0xff8000 -o %t.hole100.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=HOLE100
+# HOLE100: CODE overlap for .mcs251.VECS
+
+# The last mirror row's tail (slot 126 tail 0xff03f7) and the half-open end
+# boundary: a section starting at End - 1 still overlaps, one starting exactly
+# at End = 0xff03fb is accepted elsewhere in this file's layout.
+# RUN: not mcs251-lld %t.crt.o %t.small.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff03f7 --area-start=XINIT=0xff8000 -o %t.hole126tail.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=HOLE126
+# HOLE126: CODE overlap for .mcs251.VECS
+# RUN: not mcs251-lld %t.crt.o %t.small.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff03fa --area-start=XINIT=0xff8000 -o %t.endm1.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=ENDM1
+# ENDM1: CODE overlap for .mcs251.VECS
+# RUN: mcs251-lld %t.crt.o %t.small.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff03fb --area-start=XINIT=0xff8000 -o %t.endok.elf
+# RUN: test -f %t.endok.elf
 
 # -------------------------------------------------------------------------
 # Matrix: forged default name; default machine code replaced by ERET.
@@ -1249,9 +1288,20 @@
 # RUN:   FileCheck %s --check-prefix=OLDVECS
 
 # -------------------------------------------------------------------------
-# Matrix: BOOT conflicts. FF0100 collides with the reserved holes; a
-# non-colliding floor violation (FF01B0) hits the explicit BOOT check.
+# Matrix: BOOT conflicts / old recipes (design 5.5). The pre-G1 default
+# BOOT=0xff0210 (even with the NEW CSEG 0xff0700) lands in the slot-65 tail
+# hole and is rejected by the full-interval reservation - the tail has no
+# PT_LOAD bytes but is still not BOOT space. The FF0100-era layout collides
+# the same way; a non-colliding below-floor BOOT (0xff0430, and the old CSEG
+# value 0xff0400 as a BOOT start) hits the explicit shared-constant floor
+# check.
 # -------------------------------------------------------------------------
+# RUN: not mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.bootold2.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=BOOTOLD2
+# BOOTOLD2: CODE overlap for .mcs251.VECS
+
 # RUN: not mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff0000 \
 # RUN:   --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0400 \
 # RUN:   -o %t.bootold.elf 2>&1 | FileCheck %s --check-prefix=BOOTOLD
@@ -1262,6 +1312,12 @@
 # RUN:   --area-start=XINIT=0xff8000 -o %t.bootfloor.elf 2>&1 | \
 # RUN:   FileCheck %s --check-prefix=BOOTFLOOR
 # BOOTFLOOR: MCS251 ISR: CRT BOOT must start at or above 0xff0500
+
+# RUN: not mcs251-lld %t.crt.o %t.p01.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0400 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.bootfloor2.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=BOOTFLOOR2
+# BOOTFLOOR2: MCS251 ISR: CRT BOOT must start at or above 0xff0500, got 0xff0400
 
 # CSEG is not secretly pinned to the published 0xFF0700 recipe: a 2-byte CSEG
 # that ends exactly at the BOOT end (0xFF0606) is accepted, while one that

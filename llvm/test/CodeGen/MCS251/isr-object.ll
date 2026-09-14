@@ -39,6 +39,25 @@
 ; RUN: llvm-objcopy --dump-section=.mcs251.isr=%t/high.meta %t/high.o
 ; RUN: %python -c "import pathlib,struct,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert len(b)==96; a=[struct.unpack('>HHBBBBHHIII',b[i:i+24]) for i in range(0,96,24)]; assert a==[(2,24,1,1,1,1,126,1,0,0,0),(2,24,2,1,1,1,126,1,0,0,0),(2,24,1,1,1,1,31,1,0,0,0),(2,24,2,1,1,1,31,1,0,0,0)],a" %t/high.meta
 
+; G1-3: a six-entry module covering both digit widths and the reclassified
+; slots (0, 8, 31, 45, 46, 126), defined in deliberately scrambled order.
+; The twelve records persist in DEFINITION order (ENTRY+REGISTER per
+; function), not in sorted slot order; the six bodies are byte-identical
+; 41-byte units and each ends on its own RETI (final byte 0x32), with the
+; function symbols laid out in the same definition order.
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/multi.ll -o %t/multi.o
+; RUN: llvm-objcopy --dump-section=.mcs251.isr=%t/multi.meta %t/multi.o
+; RUN: %python -c "import pathlib,struct,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert len(b)==288; want=[(2,24,k,1,1,1,s,1,0,0,0) for s in (126,0,45,8,46,31) for k in (1,2)]; a=[struct.unpack('>HHBBBBHHIII',b[i:i+24]) for i in range(0,288,24)]; assert a==want,a" %t/multi.meta
+; RUN: llvm-objcopy --dump-section=.text=%t/multi.bin %t/multi.o
+; RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); u=b[:41]; assert len(b)==246 and b==u*6 and u[-1]==0x32 and u.hex()=='c0d0ca0bca1bca2bca3bca4bca5bca6bca7bcaebdaebda7bda6bda5bda4bda3bda2bda1bda0bd0d032',(len(b),u.hex())" %t/multi.bin
+; RUN: llvm-readobj --symbols %t/multi.o | FileCheck %s --check-prefix=MULTISYM
+; MULTISYM: Name: _f126
+; MULTISYM: Name: _f0
+; MULTISYM: Name: _f45
+; MULTISYM: Name: _f8
+; MULTISYM: Name: _f46
+; MULTISYM: Name: _f31
+
 ; G1-1: each checking layer rejects an out-of-profile slot ON ITS OWN. The
 ; upstream layers are skipped explicitly (-disable-verify skips the IR
 ; Verifier; -start-before=mcs251-asm-printer with a MIR input starts past
@@ -47,6 +66,57 @@
 ; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob.mir > %t/ap-oob.gen.mir
 ; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+;
+; G1-3a review B2: the same two harnesses carry the completed slot matrix.
+; In-profile Reserved 81 (HeaderOnly), 100 (NoSource) and 13
+; (LegacySpecial), System 14, and every non-canonical text form (the empty
+; string, the leading zero "0126" -- probed 2026-09-14: refused, not
+; silently re-read as 126 --, "+45", "-0", " 45", "45 ", "4x5", "abc" and
+; a 40-digit overflow string) are each fed through ContractCheck isolation
+; and AsmPrinter isolation. Every form was probed to reach BOTH layer
+; re-checks with that layer's own message (the ContractCheck wrapper /
+; the bare AsmPrinter text below): none is caught earlier by the .ll or
+; .mir attribute parsers, so none of these RUNs depends on the disabled
+; Verifier.
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-res81.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-res100.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-res13.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-sys14.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-empty.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-leadzero.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-plus45.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-minus0.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-leadspace.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-trailspace.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-junk4x5.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-alpha.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-overflow40.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-res81.mir > %t/ap-oob-res81.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-res81.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-res100.mir > %t/ap-oob-res100.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-res100.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-res13.mir > %t/ap-oob-res13.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-res13.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-sys14.mir > %t/ap-oob-sys14.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-sys14.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-empty.mir > %t/ap-oob-empty.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-empty.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-leadzero.mir > %t/ap-oob-leadzero.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-leadzero.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-plus45.mir > %t/ap-oob-plus45.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-plus45.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-minus0.mir > %t/ap-oob-minus0.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-minus0.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-leadspace.mir > %t/ap-oob-leadspace.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-leadspace.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-trailspace.mir > %t/ap-oob-trailspace.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-trailspace.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-junk4x5.mir > %t/ap-oob-junk4x5.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-junk4x5.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-alpha.mir > %t/ap-oob-alpha.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-alpha.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-overflow40.mir > %t/ap-oob-overflow40.gen.mir
+; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-overflow40.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 
 ; Rework R1: the minimal ISR object must not reserve REG_BANK_0 storage and
 ; must not carry DSEG/XINIT data sections (the keepalive root is metadata).
@@ -565,3 +635,685 @@ body: |
     ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
     ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
     RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-res81.ll
+; ContractCheck-isolated rejection of in-profile Reserved slot, HeaderOnly
+; evidence (header macro, no manual row): the IR Verifier is disabled, so the
+; module-level contract check is the only layer that sees the attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="81" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-res81.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="81" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-res100.ll
+; ContractCheck-isolated rejection of in-profile Reserved slot, NoSource
+; evidence (neither header nor manual row): the IR Verifier is disabled, so the
+; module-level contract check is the only layer that sees the attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="100" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-res100.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="100" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-res13.ll
+; ContractCheck-isolated rejection of in-profile Reserved slot, LegacySpecial
+; evidence (the transfer slot): the IR Verifier is disabled, so the module-level
+; contract check is the only layer that sees the attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="13" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-res13.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="13" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-sys14.ll
+; ContractCheck-isolated rejection of in-profile System slot: the IR Verifier is
+; disabled, so the module-level contract check is the only layer that sees the
+; attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="14" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-sys14.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="14" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-empty.ll
+; ContractCheck-isolated rejection of the empty attribute value: the IR Verifier
+; is disabled, so the module-level contract check is the only layer that sees
+; the attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-empty.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-leadzero.ll
+; ContractCheck-isolated rejection of a leading zero (probed: refused, not re-
+; read as 126): the IR Verifier is disabled, so the module-level contract check
+; is the only layer that sees the attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="0126" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-leadzero.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="0126" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-plus45.ll
+; ContractCheck-isolated rejection of an explicit plus sign: the IR Verifier is
+; disabled, so the module-level contract check is the only layer that sees the
+; attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="+45" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-plus45.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="+45" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-minus0.ll
+; ContractCheck-isolated rejection of a signed zero: the IR Verifier is
+; disabled, so the module-level contract check is the only layer that sees the
+; attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="-0" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-minus0.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="-0" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-leadspace.ll
+; ContractCheck-isolated rejection of leading whitespace: the IR Verifier is
+; disabled, so the module-level contract check is the only layer that sees the
+; attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"=" 45" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-leadspace.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"=" 45" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-trailspace.ll
+; ContractCheck-isolated rejection of trailing whitespace: the IR Verifier is
+; disabled, so the module-level contract check is the only layer that sees the
+; attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="45 " }
+!mcs251.signatures = !{}
+
+;--- ap-oob-trailspace.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="45 " }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-junk4x5.ll
+; ContractCheck-isolated rejection of an embedded non-digit: the IR Verifier is
+; disabled, so the module-level contract check is the only layer that sees the
+; attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="4x5" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-junk4x5.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="4x5" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-alpha.ll
+; ContractCheck-isolated rejection of letters only: the IR Verifier is disabled,
+; so the module-level contract check is the only layer that sees the attribute
+; text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="abc" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-alpha.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="abc" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- cc-oob-overflow40.ll
+; ContractCheck-isolated rejection of a 40-digit value past every field width:
+; the IR Verifier is disabled, so the module-level contract check is the only
+; layer that sees the attribute text.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="9999999999999999999999999999999999999999" }
+!mcs251.signatures = !{}
+
+;--- ap-oob-overflow40.mir
+;MIRHEADER
+  target triple = "mcs251-unknown-none"
+  @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
+  define internal mcs251_intrcc void @irq() addrspace(4) #0 {
+    ret void
+  }
+  attributes #0 = { noinline "mcs251-isr-vector"="9999999999999999999999999999999999999999" }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
+...
+---
+name: irq
+tracksRegLiveness: false
+body: |
+  bb.0:
+    ISR_PUSH_PSW implicit-def $dr60, implicit $psw, implicit $dr60
+    ISR_PUSH_DR0 implicit-def $dr60, implicit $dr0, implicit $dr60
+    ISR_PUSH_DR4 implicit-def $dr60, implicit $dr4, implicit $dr60
+    ISR_PUSH_DR8 implicit-def $dr60, implicit $dr8, implicit $a, implicit $b, implicit $dr60
+    ISR_PUSH_DR12 implicit-def $dr60, implicit $dr12, implicit $dr60
+    ISR_PUSH_DR16 implicit-def $dr60, implicit $dr16, implicit $dr60
+    ISR_PUSH_DR20 implicit-def $dr60, implicit $dr20, implicit $dr60
+    ISR_PUSH_DR24 implicit-def $dr60, implicit $dr24, implicit $dr60
+    ISR_PUSH_DR28 implicit-def $dr60, implicit $dr28, implicit $dr60
+    ISR_PUSH_DPX implicit-def $dr60, implicit $dr56, implicit $dpl, implicit $dph, implicit $dptr, implicit $dpxl, implicit $dr60
+    ISR_POP_DPX implicit-def $dr56, implicit-def $dpl, implicit-def $dph, implicit-def $dptr, implicit-def $dpxl, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR28 implicit-def $dr28, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR24 implicit-def $dr24, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR20 implicit-def $dr20, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR16 implicit-def $dr16, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR12 implicit-def $dr12, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR8 implicit-def $dr8, implicit-def $a, implicit-def $b, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
+    ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
+    ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
+    RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
+
+;--- multi.ll
+; G1-3 six-entry module: the profile maximum, the legacy low slots and the
+; three reclassified slots, scrambled so record order must follow the
+; definition order rather than any sorted-slot assumption.
+target triple = "mcs251-unknown-none"
+@llvm.used = appending global [6 x ptr] [ptr addrspacecast (ptr addrspace(4) @f126 to ptr), ptr addrspacecast (ptr addrspace(4) @f0 to ptr), ptr addrspacecast (ptr addrspace(4) @f45 to ptr), ptr addrspacecast (ptr addrspace(4) @f8 to ptr), ptr addrspacecast (ptr addrspace(4) @f46 to ptr), ptr addrspacecast (ptr addrspace(4) @f31 to ptr)], section "llvm.metadata"
+define internal mcs251_intrcc void @f126() addrspace(4) #0 {
+  ret void
+}
+attributes #0 = { noinline "mcs251-isr-vector"="126" }
+define internal mcs251_intrcc void @f0() addrspace(4) #1 {
+  ret void
+}
+attributes #1 = { noinline "mcs251-isr-vector"="0" }
+define internal mcs251_intrcc void @f45() addrspace(4) #2 {
+  ret void
+}
+attributes #2 = { noinline "mcs251-isr-vector"="45" }
+define internal mcs251_intrcc void @f8() addrspace(4) #3 {
+  ret void
+}
+attributes #3 = { noinline "mcs251-isr-vector"="8" }
+define internal mcs251_intrcc void @f46() addrspace(4) #4 {
+  ret void
+}
+attributes #4 = { noinline "mcs251-isr-vector"="46" }
+define internal mcs251_intrcc void @f31() addrspace(4) #5 {
+  ret void
+}
+attributes #5 = { noinline "mcs251-isr-vector"="31" }
+!mcs251.signatures = !{}

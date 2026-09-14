@@ -2000,6 +2000,120 @@ class SelfTest:
                           "IRQ 01 0xff000b ISR _irq1\n")[1]["symbol"]
                == "_irq1", "non-IRQ map lines must be ignored")
 
+    def check_fake_model_g1_fill(self):
+        """Pin the G1 fill semantics of the self-test fake model.
+
+        The model must mirror the link-time image exactly: 109 Legal slots
+        carry a 4-byte EJMP (plus 4 bytes of NOBITS tail), the 18
+        Reserved/System slots carry NO payload at all, and every EJMP
+        decodes to its registered handler or to the one shared fail-stop
+        default entry.  Without this check a regression back to the legacy
+        52-slot fill, or the "EJMP for every number" form the G1 design
+        explicitly warns about (section 0.1 item 5), would still pass every
+        other self-test method because the low-slot cases never look at the
+        high half of the table.
+        """
+        model = FakeIsrModel()
+        legal = set(range(ISR_VECTOR_COUNT)) - set(ISR_NON_LEGAL_SLOTS)
+        _check(len(legal) == 109,
+               "the G1 profile must have 109 Legal slots, restated %d"
+               % len(legal))
+        _check(len(ISR_NON_LEGAL_SLOTS) == 18,
+               "the G1 profile must have 18 non-Legal slots (16 Reserved + "
+               "2 System), restated %d" % len(ISR_NON_LEGAL_SLOTS))
+        ejmp_slots = set()
+        for slot in range(ISR_VECTOR_COUNT):
+            base = vector_addr(slot)
+            payload = [model.rom.get(base + i) for i in range(8)]
+            if slot in ISR_NON_LEGAL_SLOTS:
+                _check(all(byte is None for byte in payload),
+                       "Reserved/System slot %d must be an 8-byte no-payload "
+                       "hole, model carries %r" % (slot, payload))
+                continue
+            _check(payload[0] == 0x8A,
+                   "Legal slot %d must start with the EJMP opcode 0x8A, "
+                   "model carries %r" % (slot, payload))
+            _check(all(byte is None for byte in payload[4:]),
+                   "Legal slot %d tail must stay NOBITS (no payload past the "
+                   "4-byte EJMP), model carries %r" % (slot, payload))
+            target = ((model.ISR_ENTRY[slot] if slot in model.REGISTERED
+                       else model.DEFAULT_ENTRY))
+            decoded = int.from_bytes(bytes(payload[1:4]), "big")
+            _check(decoded == target,
+                   "slot %d EJMP decodes to 0x%06x, want handler/default "
+                   "0x%06x" % (slot, decoded, target))
+            if slot not in model.REGISTERED:
+                _check(decoded == model.DEFAULT_ENTRY,
+                       "unregistered Legal slot %d must target the shared "
+                       "fail-stop default, got 0x%06x" % (slot, decoded))
+            ejmp_slots.add(slot)
+        _check(ejmp_slots == legal,
+               "the EJMP-bearing slots must be exactly the Legal set; "
+               "missing %r, extra %r"
+               % (sorted(legal - ejmp_slots), sorted(ejmp_slots - legal)))
+        _check(list(model.rom[model.DEFAULT_ENTRY + i]
+                    for i in range(4)) == list(DEFAULT_ENTRY_BYTES),
+               "default entry must be the frozen C2 AF 80 FE fail-stop "
+               "bytes, got %r"
+               % [model.rom.get(model.DEFAULT_ENTRY + i) for i in range(4)])
+
+    def check_fake_model_high_slot_fail_stop(self):
+        """An injected high Legal slot routes to the fail-stop default.
+
+        The injection numbers used by the qualification cases are low (1/3/6);
+        this walks three high Legal slots (a three-digit one included) through
+        the same qtest-edge + single-step path the real cases use, and one
+        shared-timer-slot representative (96, TMR5_TMR6).  Each must be
+        accepted, land on the one shared default entry, clear EA once and
+        halt forever: the PC never leaves the 4-byte entry, the layer never
+        RETIs and the software-save ledger stays empty.
+        """
+        for slot in (52, 96, 102, 126):
+            model = FakeIsrModel()
+            _check(slot not in model.REGISTERED and slot not in
+                   ISR_NON_LEGAL_SLOTS,
+                   "probe slot %d must be an unregistered Legal slot" % slot)
+            spx_before = model.spx
+            # The real cases negotiate Qqemu.sstep=1 (SSTEP_ENABLE only)
+            # before injecting; without clearing NOIRQ the model never
+            # accepts a pending line, so mirror that negotiation here.
+            model.sstep_mask = SSTEP_ENABLE
+            model.set_irq_line(slot, 1)
+            model.step()  # accept: 4B hardware frame, PC at the vector
+            _check(len(model.layers) == 1,
+                   "slot %d must be accepted into one ISR layer" % slot)
+            _check(model.pc == vector_addr(slot),
+                   "slot %d acceptance must stop at the vector, PC=0x%06x"
+                   % (slot, model.pc))
+            _check(model.spx == spx_before + 4,
+                   "slot %d must push exactly the 4-byte hardware frame" % slot)
+            model.step()  # EJMP: PC to the decoded target
+            _check(model.pc == model.DEFAULT_ENTRY,
+                   "unregistered high slot %d must vector to the shared "
+                   "default entry, PC=0x%06x" % (slot, model.pc))
+            _check(model.ie & IE_EA_BIT,
+                   "EA must still be set before the default's first "
+                   "instruction executes")
+            model.step()  # clr EA
+            _check(model.ie & IE_EA_BIT == 0,
+                   "the fail-stop default must clear EA on entry (slot %d)"
+                   % slot)
+            _check(model.pc == model.DEFAULT_ENTRY + 2,
+                   "clr EA must advance to the halt loop (slot %d)" % slot)
+            halted = set()
+            for _ in range(16):
+                model.step()
+                halted.add(model.pc)
+            _check(halted == {model.DEFAULT_ENTRY + 2},
+                   "the fail-stop default must halt forever at the sjmp "
+                   "loop, slot %d visited %r" % (slot, sorted(halted)))
+            _check(len(model.layers) == 1 and model.layers[0]["saved"] == {},
+                   "the fail-stop default performs no software save and "
+                   "never RETIs (slot %d)" % slot)
+            _check(model.spx == spx_before + 4,
+                   "the hardware frame of a fail-stop entry is never popped "
+                   "(slot %d)" % slot)
+
     @staticmethod
     def _manifest_doc():
         return {

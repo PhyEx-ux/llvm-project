@@ -4,6 +4,24 @@
 # records with asset_profile=1, R_MCS251_ISR_REF associations, no VECS, no IP
 # init, no SETB EA), and expose the frozen fingerprint through llvm-readobj.
 #
+# G1-2 additionally accepts the CRT through a full LINK CHAIN at the published
+# recipe (design G1-ISR-PROFILE-EXTENSION-DESIGN 2.2): the v2-identity twin
+# (crt-irq-v2.yaml, same frozen bytes) plus a plain v2 object that only
+# defines _main (zero user ISR registrations) links to HOME=0xff0000 /
+# BOOT=0xff0500 / CSEG=0xff0700, synthesizes the complete 127-slot mirror
+# (109 DEFAULT rows, 18 non-legal rows with no payload), and the linked image
+# passes check-crt-irq.py --chain, which re-derives the HOME->BOOT->main
+# chain, the whole 0x106 BOOT byte shape (identical to the frozen template
+# outside the 12 relocation fields) and every relocation field from the map.
+# The _main end of the chain is additionally CLOSED against the image itself
+# (review fix B1: the ECALL field and the map FUNC row agreeing with each
+# other is not acceptance): exactly one GLOBAL STT_FUNC _main symbol in the
+# ELF symbol table, owned by the actual CSEG region section, equal to the map
+# FUNC row, and its entry covered by the file bytes of an executable PT_LOAD.
+# Old recipes are rejected: the pre-G1 BOOT=0xff0210 lands in the slot-65
+# tail hole of the full [0xff0003,0xff03fb) reservation, and a BOOT below the
+# shared floor (0xff0400) hits the explicit BOOT floor check.
+#
 # RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o %t.o
 # RUN: %python %S/../../../validation/mcs251-elf/runtime/check-crt-irq.py %t.o
 # RUN: llvm-readobj --file-headers --sections --symbols --relocations %t.o | FileCheck %s
@@ -14,3 +32,142 @@
 # CHECK: Name: .mcs251.isr
 # CHECK: R_MCS251_ISR_REF
 # CHECK: R_MCS251_ISR_REF
+
+# --- G1-2 link chain -------------------------------------------------------
+# RUN: rm -rf %t-seed && split-file %s %t-seed
+# RUN: yaml2obj %t-seed/mainonly.yaml -o %t.mainonly.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.mainonly.o
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml -o %t.crt2.o
+# RUN: %python -c "import pathlib; p='%t.crt2.o'; b=bytearray(pathlib.Path(p).read_bytes()); b[36:40]=bytes.fromhex('00000102'); pathlib.Path(p).write_bytes(bytes(b))"
+# RUN: mcs251-lld %t.crt2.o %t.mainonly.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 --flash-base=0xff0000 --flash-size=0x10000 --keep-symbols --map=%t-chain.map -o %t-chain.elf
+# RUN: FileCheck %s --check-prefix=CHAINMAP < %t-chain.map
+# RUN: %python %S/../../../validation/mcs251-elf/runtime/check-crt-irq.py --chain %t-chain.elf %t-chain.map
+
+# Review-fix B1: the --chain acceptance must not close on witnesses that only
+# agree with each other. Two tampered copies of the GOOD image/map (built by
+# the mutate-b1.py seed below) must FAIL:
+#   A: _main's executable PT_LOAD is deleted (PT_NULL). The BOOT+0x45 ECALL
+#      field and the map FUNC _main row still agree on 0xff0700, but no file
+#      bytes back the entry any more.
+#   B: the ECALL _main field and the map FUNC _main row are moved TOGETHER to
+#      0xff0710, an unloaded address inside the CSEG recipe area; only the
+#      image's own symbol table still carries the real _main.
+# RUN: %python %t-seed/mutate-b1.py A %t-chain.elf %t-mutA.elf
+# RUN: not %python %S/../../../validation/mcs251-elf/runtime/check-crt-irq.py --chain %t-mutA.elf %t-chain.map 2>&1 | FileCheck %s --check-prefix=MUTDEL
+# MUTDEL: check-crt-irq: FAIL: _main entry 0xff0700 is not covered by the file bytes of an executable PT_LOAD
+# RUN: %python %t-seed/mutate-b1.py B %t-chain.elf %t-chain.map %t-mutB.elf %t-mutB.map
+# RUN: not %python %S/../../../validation/mcs251-elf/runtime/check-crt-irq.py --chain %t-mutB.elf %t-mutB.map 2>&1 | FileCheck %s --check-prefix=MUTMOVE
+# MUTMOVE: check-crt-irq: FAIL: image _main symbol 0xff0700 != map FUNC _main 0xff0710
+
+# CHAINMAP: l_BOOT = 0x0106
+# CHAINMAP: l_VECS = 0x03f8
+# CHAINMAP: s_BOOT = 0xff0500
+# CHAINMAP: s_CSEG = 0xff0700
+# CHAINMAP: crt2.o:.mcs251.HOME 0xff0000 +0x3
+# CHAINMAP: crt2.o:.mcs251.BOOT 0xff0500 +0x106
+# CHAINMAP: mainonly.o:.text 0xff0700 +0x2
+# CHAINMAP: FUNC 0xff0000 +0x3 __mcs251_reset
+# CHAINMAP: FUNC 0xff0602 +0x4 __mcs251_isr_unhandled
+# CHAINMAP: FUNC 0xff0700 +0x2 _main
+# CHAINMAP: IRQ 00 0xff0003 DEFAULT __mcs251_isr_unhandled
+# CHAINMAP: IRQ 13 0xff006b RESERVED
+# CHAINMAP: IRQ 100 0xff0323 RESERVED
+# CHAINMAP: IRQ 126 0xff03f3 DEFAULT __mcs251_isr_unhandled
+
+# Old recipe: pre-G1 BOOT=0xff0210 even with the NEW CSEG address is rejected
+# by the full-interval reservation (slot-65 tail hole is not BOOT space).
+# RUN: not mcs251-lld %t.crt2.o %t.mainonly.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 -o %t-oldboot.elf 2>&1 | FileCheck %s --check-prefix=OLDRECIPE
+# OLDRECIPE: CODE overlap for .mcs251.VECS
+
+# Old recipe: a BOOT below the shared floor (the old CSEG value used as a
+# BOOT start) hits the explicit floor check with the exact address printed.
+# RUN: not mcs251-lld %t.crt2.o %t.mainonly.o --area-start=HOME=0xff0000 --area-start=BOOT=0xff0400 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 -o %t-floor.elf 2>&1 | FileCheck %s --check-prefix=OLDFLOOR
+# OLDFLOOR: MCS251 ISR: CRT BOOT must start at or above 0xff0500, got 0xff0400
+
+#--- mainonly.yaml
+# A plain v2-identity object whose only definition is a 2-byte `_main`
+# (sjmp self) in ordinary CSEG. No .mcs251.isr, no VECS: the chain therefore
+# registers ZERO user ISRs and every legal slot must default. The
+# .mcs251.attributes carrier is the same frozen P-4 blob the ISR fixtures
+# use (it records exactly this `_main` definition).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '80FE'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    Flags: [ ]
+    AddressAlign: 1
+    Content: '41000000C14D43533235310001000000B6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8413010001000000000001000002015F6D61696E00'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 2
+
+#--- mutate-b1.py
+# Build the two G1-2 review-fix B1 mutants from the GOOD chain image/map.
+# Every witness the PRE-fix checker compared still agrees with itself in the
+# mutants (the BOOT+0x45 ECALL field and the map FUNC _main row); only the
+# fixed checker's image-side closure can reject them.
+#
+#   usage: mutate-b1.py A IMAGE OUT
+#          mutate-b1.py B IMAGE MAP OUT OUTMAP
+import struct
+import sys
+
+CSEG = 0xFF0700         # published recipe CSEG start (== _main in this chain)
+MOVED = 0xFF0710        # unloaded address still inside the CSEG recipe area
+ECALL_FIELD = 0xFF0545  # BOOT 0xff0500 + 0x45: the ecall _main target field
+
+mode = sys.argv[1]
+d = bytearray(open(sys.argv[2], "rb").read())
+assert d[:4] == b"\x7fELF" and d[4] == 1 and d[5] == 2, "not ELF32/MSB"
+phoff = struct.unpack(">I", d[28:32])[0]
+phentsize, phnum = struct.unpack(">HH", d[42:46])
+
+def find_load(addr, need_cover=False):
+    for i in range(phnum):
+        p = phoff + i * phentsize
+        p_type, p_offset, p_vaddr = struct.unpack(">3I", d[p:p + 12])
+        p_filesz = struct.unpack(">I", d[p + 16:p + 20])[0]
+        if p_type != 1:
+            continue
+        if p_vaddr == addr or (
+                need_cover and p_vaddr <= addr < p_vaddr + p_filesz):
+            return p, p_offset, p_vaddr
+    raise AssertionError("no PT_LOAD for 0x%x" % addr)
+
+if mode == "A":
+    # Delete _main's executable PT_LOAD (PT_NULL): the ECALL field and the
+    # map FUNC row still agree, but nothing backs the entry.
+    p, _, vaddr = find_load(CSEG)
+    assert vaddr == CSEG
+    d[p:p + 4] = struct.pack(">I", 0)
+    open(sys.argv[3], "wb").write(bytes(d))
+elif mode == "B":
+    # Move the ECALL _main field and the map FUNC row together to MOVED.
+    # argv: IMAGE MAP OUT OUTMAP
+    p, p_offset, p_vaddr = find_load(ECALL_FIELD, need_cover=True)
+    fo = p_offset + (ECALL_FIELD - p_vaddr)
+    assert d[fo:fo + 3] == bytes.fromhex("FF0700"), "ECALL field not at 0xff0700"
+    d[fo:fo + 3] = struct.pack(">I", MOVED)[1:4]
+    open(sys.argv[4], "wb").write(bytes(d))
+    m = open(sys.argv[3]).read()
+    m2 = m.replace("FUNC 0xff0700 +0x2 _main",
+                   "FUNC %s +0x2 _main" % hex(MOVED))
+    assert m2 != m, "map has no FUNC _main row at 0xff0700"
+    open(sys.argv[5], "w").write(m2)
+else:
+    raise AssertionError("mode must be A or B")

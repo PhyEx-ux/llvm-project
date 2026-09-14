@@ -22,6 +22,13 @@
 ; text) and the reserved/system/header-only spots are rejected with the
 ; shared-constant message; the new upper bound and the reclassified slots
 ; 31/45/46 verify clean.
+; G1-3a review B2 completes the matrix: the remaining in-profile reserved
+; evidence class (NoSource 100) and every non-canonical text shape. Each
+; form was probed first (2026-09-14): all of them pass the .ll attribute
+; parser untouched and are rejected by the Verifier itself with the shared
+; message, so every one is pinned negative here. Notably "0126" is NOT
+; silently re-read as 126 -- the canonical parser refuses non-shortest
+; spellings (a single "0" is the only legal leading zero).
 ; RUN: not llvm-as %t/oob127.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
 ; RUN: not llvm-as %t/oob133.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
 ; RUN: not llvm-as %t/oob255.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
@@ -31,6 +38,16 @@
 ; RUN: not llvm-as %t/sys14.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
 ; RUN: not llvm-as %t/reserved13.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
 ; RUN: not llvm-as %t/headeronly81.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
+; RUN: not llvm-as %t/nosource100.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
+; RUN: not llvm-as %t/text-empty.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
+; RUN: not llvm-as %t/text-leadzero.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
+; RUN: not llvm-as %t/text-plus.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
+; RUN: not llvm-as %t/text-minuszero.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
+; RUN: not llvm-as %t/text-leadspace.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
+; RUN: not llvm-as %t/text-trailspace.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
+; RUN: not llvm-as %t/text-junk.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
+; RUN: not llvm-as %t/text-alpha.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
+; RUN: not llvm-as %t/text-overflow40.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SLOT
 ; RUN: llvm-as %t/high126-ok.ll -o /dev/null
 ; RUN: llvm-as %t/reclass-ok.ll -o /dev/null
 ; RUN: llvm-as %t/blockaddress-ordinary-ok.ll -o /dev/null
@@ -233,6 +250,45 @@ declare cc 128 void @irq() "mcs251-isr-vector"="13"
 ; HeaderOnly evidence (no manual row) stays Reserved pending further proof.
 ;--- headeronly81.ll
 declare cc 128 void @irq() "mcs251-isr-vector"="81"
+
+; NoSource evidence (neither header nor manual row) is Reserved too; 100
+; completes the three reserved evidence classes above 13's LegacySpecial
+; and 81's HeaderOnly.
+;--- nosource100.ll
+declare cc 128 void @irq() "mcs251-isr-vector"="100"
+
+; The empty attribute value parses as a string attribute but is not a
+; canonical slot spelling.
+;--- text-empty.ll
+declare cc 128 void @irq() "mcs251-isr-vector"=""
+
+; Probed: rejected, not re-read as the value 126. "0" is the only legal
+; leading-zero spelling; non-shortest forms never reach the value check.
+;--- text-leadzero.ll
+declare cc 128 void @irq() "mcs251-isr-vector"="0126"
+
+;--- text-plus.ll
+declare cc 128 void @irq() "mcs251-isr-vector"="+45"
+
+;--- text-minuszero.ll
+declare cc 128 void @irq() "mcs251-isr-vector"="-0"
+
+;--- text-leadspace.ll
+declare cc 128 void @irq() "mcs251-isr-vector"=" 45"
+
+;--- text-trailspace.ll
+declare cc 128 void @irq() "mcs251-isr-vector"="45 "
+
+;--- text-junk.ll
+declare cc 128 void @irq() "mcs251-isr-vector"="4x5"
+
+;--- text-alpha.ll
+declare cc 128 void @irq() "mcs251-isr-vector"="abc"
+
+; A 40-digit value: the parser bounds before the multiply, so no digit
+; width can wrap or truncate into a legal slot (u32 max is covered above).
+;--- text-overflow40.ll
+declare cc 128 void @irq() "mcs251-isr-vector"="9999999999999999999999999999999999999999"
 
 ; The new upper bound verifies clean end to end.
 ;--- high126-ok.ll

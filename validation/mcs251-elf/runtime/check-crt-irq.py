@@ -22,9 +22,41 @@
 #     record and deliberately not restored (DESIGN-SUPPLEMENT section 3:
 #     CRT startup has no DPXL obligation).
 #
-# Usage: check-crt-irq.py FILE.o
+# Usage:
+#   check-crt-irq.py FILE.o
+#   check-crt-irq.py --chain IMAGE.elf MAP
+#
 # Exit 0 with one PASS line per check; exit 1 with FAIL:<detail> otherwise.
+#
+# The --chain mode is the G1-2 link-chain acceptance (design
+# G1-ISR-PROFILE-EXTENSION-DESIGN §2/§4): given a FINAL image linked from this
+# CRT (plus, at most, plain objects with no .mcs251.isr) under the published
+# G1 recipe, it re-verifies everything the object mode cannot see, still with
+# stdlib only and still importing no product table:
+#   - the full 127-slot synthesized mirror exists at the frozen formula
+#     (109 legal EJMP rows all pointing at the one default entry, 18
+#     non-legal rows with no payload at all);
+#   - the chain HOME(0xff0000, 3B ljmp) -> BOOT entry(0xff0500) -> ...
+#     ecall __mcs251_globals_init(BOOT+0x4A) -> ecall __mcs251_xdata_init
+#     (BOOT+0xA0) -> ecall _main (inside the CSEG recipe area), where the
+#     _main target is CLOSED against the image itself (review fix B1: the
+#     ECALL field and the map FUNC row agreeing with each other is not
+#     acceptance - they can move together to an unloaded address, and the
+#     load carrying main can be deleted): the image symbol table must hold
+#     exactly one GLOBAL STT_FUNC _main whose owning section is the actual
+#     CSEG region section (executable PROGBITS inside [s_CSEG,s_XINIT), not
+#     XINIT), the symbol value must equal the map FUNC row, and the entry
+#     address must sit inside the file-byte window [p_offset,p_offset+
+#     p_filesz) of an executable PT_LOAD;
+#   - the BOOT content byte shape is IDENTICAL to the frozen 0x106 template
+#     except at the 12 frozen relocation fields, and every one of those
+#     fields is re-derived from the map witnesses (stack base, the two
+#     internal walker entries, _main, s_/l_XINIT, s_/l_XDATA_INIT);
+#   - the recipe witnesses s_BOOT=0xff0500 / s_CSEG=0xff0700 / l_VECS=0x3f8 /
+#     l_BOOT=0x106 agree between the map and the image.
+# The map must be produced with --keep-symbols so the FUNC rows exist.
 
+import re
 import struct
 import sys
 
@@ -270,6 +302,33 @@ FROZEN_HOME_RELOCS = {
     0x01: (R_MCS251_J16, "__mcs251_selfstart_boot"),
 }
 
+# ---------------------------------------------------------------------------
+# G1-2 link-chain constants (published recipe, design §2.2; independent
+# copies, same discipline as the lld test checker isr-check-image.py: never
+# import the product table as the oracle).
+# ---------------------------------------------------------------------------
+
+CHAIN_ENTRY = 0xFF0000        # HOME base == ELF entry, 3-byte ljmp
+CHAIN_VECS_BASE = 0xFF0003
+CHAIN_VECS_STRIDE = 8
+CHAIN_VECS_COUNT = 127        # 0..126, G144K246 evidence profile
+CHAIN_NON_LEGAL = frozenset(
+    {7, 13, 14, 15, 22, 23, 32, 33, 34, 35, 81, 92, 93, 94, 95, 100, 101, 113})
+CHAIN_SYSTEM = frozenset({14, 15})
+CHAIN_BOOT = 0xFF0500         # published recipe == shared ISRBootMinAddress
+CHAIN_CSEG = 0xFF0700         # published recipe (not pinned by lld itself)
+CHAIN_EJMP = 0x8A
+CHAIN_FLASH_TOP = 0x1000000
+
+# The 12 frozen BOOT relocation fields as byte spans. Everything else in the
+# 0x106 BOOT must be byte-identical to the frozen template after linking.
+CHAIN_BOOT_RELOC_SPAN = set()
+for _off, _w in ((0x0A, 2), (0x3D, 3), (0x41, 3), (0x45, 3),
+                 (0x4C, 1), (0x4D, 1), (0x51, 1), (0x54, 2),
+                 (0xA2, 1), (0xA3, 1), (0xA7, 1), (0xAA, 2)):
+    CHAIN_BOOT_RELOC_SPAN |= set(range(_off, _off + _w))
+del _off, _w
+
 
 class Fail(Exception):
     pass
@@ -286,6 +345,11 @@ def ok(msg):
 def require(cond, msg):
     if not cond:
         raise Fail(msg)
+
+
+def fmt_hex(v):
+    """0x-hex for a map witness value ('?' when absent)."""
+    return "0x%x" % v if isinstance(v, int) else "?"
 
 
 # ---------------------------------------------------------------------------
@@ -783,10 +847,17 @@ def check_symbols(data, eh, sections, symbols, boot_sec, home_sec):
 
 
 def main():
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    if args and args[0] == "--chain":
+        if len(args) != 3:
+            print("usage: check-crt-irq.py --chain IMAGE.elf MAP", file=sys.stderr)
+            return 2
+        return check_chain(args[1], args[2])
+    if len(args) != 1:
         print("usage: check-crt-irq.py FILE.o", file=sys.stderr)
+        print("       check-crt-irq.py --chain IMAGE.elf MAP", file=sys.stderr)
         return 2
-    path = sys.argv[1]
+    path = args[0]
     with open(path, "rb") as f:
         data = f.read()
     eh = parse_elf(data)
@@ -811,6 +882,289 @@ def main():
     check_symbols(data, eh, sections, symbols, boot_sec,
                   by_name(sections, ".mcs251.HOME"))
     print("check-crt-irq: PASS (%d checks) %s" % (CHECKS[0], path))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# G1-2 link-chain mode (design §2/§4): final image + map acceptance for the
+# published recipe, independent of every product table.
+# ---------------------------------------------------------------------------
+
+PF_X = 0x1
+
+
+def parse_loads(data):
+    """Parse the ELF32/MSB ET_EXEC PT_LOADs into ({addr: byte}, [ranges]).
+
+    Returns (entry, mem, segs, xsegs): segs lists every PT_LOAD as a
+    (vaddr, filesz) range; xsegs lists the EXECUTABLE (PF_X) PT_LOADs as
+    (vaddr, filesz, offset) with the file window [offset, offset+filesz)
+    validated against the actual file size, so "covered by xsegs" always
+    means covered by real file bytes, never by a bare address claim.
+    """
+    require(data[:4] == b"\x7fELF" and data[4] == 1 and data[5] == 2,
+            "chain image is not ELF32/MSB")
+    (e_type, e_machine) = struct.unpack(">HH", data[16:20])
+    entry, phoff = struct.unpack(">II", data[24:32])
+    (phentsize, phnum) = struct.unpack(">HH", data[42:46])
+    require(e_type == 2, "chain image e_type %d is not ET_EXEC" % e_type)
+    require(e_machine == EM_MCS251,
+            "chain image e_machine 0x%04X is not EM_MCS251" % e_machine)
+    mem = {}
+    segs = []
+    xsegs = []
+    for i in range(phnum):
+        p = phoff + i * phentsize
+        (p_type, p_offset, p_vaddr, _, p_filesz, _, p_flags) = \
+            struct.unpack(">7I", data[p:p + 28])
+        if p_type != 1:
+            continue
+        require(p_offset + p_filesz <= len(data),
+                "PT_LOAD at 0x%x claims file bytes past EOF "
+                "(0x%x+0x%x > 0x%x)" % (p_vaddr, p_offset, p_filesz, len(data)))
+        segs.append((p_vaddr, p_filesz))
+        if p_flags & PF_X:
+            xsegs.append((p_vaddr, p_filesz, p_offset))
+        for j in range(p_filesz):
+            a = p_vaddr + j
+            require(a not in mem, "overlapping PT_LOAD bytes at 0x%x" % a)
+            mem[a] = data[p_offset + j]
+    return entry, mem, segs, xsegs
+
+
+def parse_chain_map(path):
+    """Witness parse: s_/l_ + stack lines, section rows, FUNC rows, IRQ rows."""
+    synth = {}
+    secrows = {}
+    funcs = {}
+    irq = {}
+    for line in open(path):
+        t = line.split()
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*) = 0x([0-9a-f]+)$", line.rstrip("\n"))
+        if m:
+            synth[m.group(1)] = int(m.group(2), 16)
+        m = re.match(r"^.*:(\S+) 0x([0-9a-f]+) \+0x([0-9a-f]+)$", line.rstrip("\n"))
+        if m:
+            secrows.setdefault(m.group(1), []).append(
+                (int(m.group(2), 16), int(m.group(3), 16)))
+        m = re.match(r"^FUNC 0x([0-9a-f]+) \+0x([0-9a-f]+) (.+)$", line.rstrip("\n"))
+        if m:
+            funcs.setdefault(m.group(3), []).append(
+                (int(m.group(1), 16), int(m.group(2), 16)))
+        if len(t) >= 4 and t[0] == "IRQ":
+            slot = int(t[1])
+            require(slot not in irq, "duplicate IRQ map row for slot %d" % slot)
+            irq[slot] = (int(t[2], 16), t[3], t[4] if len(t) > 4 else "")
+    return synth, secrows, funcs, irq
+
+
+def check_chain(image_path, map_path):
+    data = open(image_path, "rb").read()
+    entry, mem, segs, xsegs = parse_loads(data)
+    synth, secrows, funcs, irq = parse_chain_map(map_path)
+
+    def covered(lo, hi):
+        return any(sa < hi and lo < sa + sz for (sa, sz) in segs)
+
+    def rd(off, n, base=0):
+        require(base + off + n <= CHAIN_FLASH_TOP and
+                all(base + off + i in mem for i in range(n)),
+                "no payload at 0x%x..0x%x" % (base + off, base + off + n - 1))
+        return int.from_bytes(bytes(mem[base + off + i] for i in range(n)), "big")
+
+    # --- recipe witnesses (map side) ----------------------------------------
+    require(synth.get("s_HOME") == CHAIN_ENTRY,
+            "map s_HOME %s, expected 0x%x"
+            % (fmt_hex(synth.get("s_HOME")), CHAIN_ENTRY))
+    require(synth.get("s_VECS") == CHAIN_VECS_BASE,
+            "map s_VECS %s violates the frozen vector base"
+            % fmt_hex(synth.get("s_VECS")))
+    require(synth.get("l_VECS") == CHAIN_VECS_STRIDE * CHAIN_VECS_COUNT,
+            "map l_VECS %s, expected 0x3f8 (127 x 8)"
+            % fmt_hex(synth.get("l_VECS")))
+    require(synth.get("s_BOOT") == CHAIN_BOOT,
+            "map s_BOOT %s is not the published recipe 0x%x "
+            "(old-recipe image must not pass)"
+            % (fmt_hex(synth.get("s_BOOT")), CHAIN_BOOT))
+    require(synth.get("l_BOOT") == BOOT_SIZE,
+            "map l_BOOT %s, expected the frozen 0x%x shape"
+            % (fmt_hex(synth.get("l_BOOT")), BOOT_SIZE))
+    require(synth.get("s_CSEG") == CHAIN_CSEG,
+            "map s_CSEG %s is not the published recipe 0x%x"
+            % (fmt_hex(synth.get("s_CSEG")), CHAIN_CSEG))
+    for name in (".mcs251.HOME", ".mcs251.BOOT"):
+        rows = secrows.get(name, [])
+        require(len(rows) == 1, "map section rows for %s: %d" % (name, len(rows)))
+    require(secrows[".mcs251.HOME"] == [(CHAIN_ENTRY, HOME_SIZE)],
+            "map HOME row %s is not 0xff0000 +0x3" % (secrows[".mcs251.HOME"],))
+    require(secrows[".mcs251.BOOT"] == [(CHAIN_BOOT, BOOT_SIZE)],
+            "map BOOT row %s is not 0xff0500 +0x106" % (secrows[".mcs251.BOOT"],))
+    require(funcs.get("_main"), "map has no FUNC _main row "
+            "(link the chain with --keep-symbols)")
+    require(len(funcs["_main"]) == 1,
+            "map has %d FUNC _main rows, expected exactly one"
+            % len(funcs["_main"]))
+    main_addr = funcs["_main"][0][0]
+    require(synth.get("s_CSEG", 0) <= main_addr < synth.get("s_XINIT", CHAIN_FLASH_TOP),
+            "FUNC _main 0x%x is not inside the CSEG area" % main_addr)
+    ok("recipe witnesses: s_BOOT=0xff0500 s_CSEG=0xff0700 l_VECS=0x3f8 "
+       "l_BOOT=0x106; map HOME/BOOT rows exact")
+
+    # --- HOME -> BOOT -------------------------------------------------------
+    require(entry == CHAIN_ENTRY, "entry 0x%x is not the HOME base 0xff0000" % entry)
+    require(rd(0, 3, CHAIN_ENTRY) == 0x020500,
+            "HOME bytes %06x are not the 3-byte ljmp 02 05 00 to the recipe BOOT"
+            % rd(0, 3, CHAIN_ENTRY))
+    ok("chain HOME: entry 0xff0000 holds exactly 02 05 00 (ljmp -> BOOT 0xff0500)")
+
+    # --- BOOT byte shape + relocation re-derivation -------------------------
+    boot = bytes(mem[CHAIN_BOOT + i] for i in range(BOOT_SIZE))
+    require(len(boot) == BOOT_SIZE and covered(CHAIN_BOOT, CHAIN_BOOT + BOOT_SIZE),
+            "BOOT [0xff0500,0xff0606) is not fully covered by PT_LOAD")
+    for off, length, hexbytes, label in FROZEN_BOOT_TEMPLATE:
+        for i in range(length):
+            a = off + i
+            if a in CHAIN_BOOT_RELOC_SPAN:
+                continue
+            require(boot[a] == bytes.fromhex(hexbytes)[i],
+                    "BOOT 0x%02x (%s) byte changed: got %02x, expected %02x "
+                    "- the frozen content shape must not change, only move"
+                    % (a, label, boot[a], bytes.fromhex(hexbytes)[i]))
+    require(boot[DEFAULT_OFF:DEFAULT_OFF + DEFAULT_SIZE] == DEFAULT_BYTES,
+            "default entry bytes changed")
+    stack_base = synth.get("__mcs251_stack_base")
+    require(stack_base is not None, "map has no __mcs251_stack_base line")
+    require(rd(0x0A, 2, CHAIN_BOOT) == stack_base,
+            "stack base field 0x%04x != map __mcs251_stack_base 0x%04x"
+            % (rd(0x0A, 2, CHAIN_BOOT), stack_base))
+    require(rd(0x3D, 3, CHAIN_BOOT) == CHAIN_BOOT + WALKER_OFF,
+            "ecall globals_init target 0x%x is not BOOT+0x4a"
+            % rd(0x3D, 3, CHAIN_BOOT))
+    require(rd(0x41, 3, CHAIN_BOOT) == CHAIN_BOOT + XWALKER_OFF,
+            "ecall xdata_init target 0x%x is not BOOT+0xa0"
+            % rd(0x41, 3, CHAIN_BOOT))
+    main_field = rd(0x45, 3, CHAIN_BOOT)
+    require(main_field == main_addr,
+            "ecall _main target 0x%x != map FUNC _main 0x%x"
+            % (main_field, main_addr))
+    for off, want in ((0x4C, (synth.get("s_XINIT", 0) >> 8) & 0xFF),
+                      (0x4D, synth.get("s_XINIT", 0) & 0xFF),
+                      (0x51, (synth.get("s_XINIT", 0) >> 16) & 0xFF)):
+        require(rd(off, 1, CHAIN_BOOT) == want,
+                "XINIT walker field @0x%02x: got 0x%02x, expected s_XINIT byte "
+                "0x%02x" % (off, rd(off, 1, CHAIN_BOOT), want))
+    require(rd(0x54, 2, CHAIN_BOOT) == synth.get("l_XINIT", -1),
+            "XINIT walker count @0x54 != map l_XINIT")
+    for off, want in ((0xA2, (synth.get("s_XDATA_INIT", 0) >> 8) & 0xFF),
+                      (0xA3, synth.get("s_XDATA_INIT", 0) & 0xFF),
+                      (0xA7, (synth.get("s_XDATA_INIT", 0) >> 16) & 0xFF)):
+        require(rd(off, 1, CHAIN_BOOT) == want,
+                "XDATA walker field @0x%02x: got 0x%02x, expected s_XDATA_INIT "
+                "byte 0x%02x" % (off, rd(off, 1, CHAIN_BOOT), want))
+    require(rd(0xAA, 2, CHAIN_BOOT) == synth.get("l_XDATA_INIT", -1),
+            "XDATA walker count @0xaa != map l_XDATA_INIT")
+    ok("BOOT shape: 0x106 bytes byte-identical to the frozen template outside "
+       "the 12 relocation fields; every field re-derived from the map "
+       "(stack base, walker entries, _main, s_/l_XINIT, s_/l_XDATA_INIT)")
+
+    # --- BOOT -> main chain ---------------------------------------------------
+    # B1 closure (review fix): agreeing the ECALL field with the map FUNC row
+    # alone does not close the chain - the two witnesses can be moved together
+    # to an unloaded address, and the load carrying main can be deleted. The
+    # image itself must independently confirm the target:
+    #   (1) the ELF symbol table holds EXACTLY ONE _main, GLOBAL STT_FUNC,
+    #       and its owning section is the actual CSEG region section
+    #       (ALLOC|EXECINSTR PROGBITS inside [s_CSEG, s_XINIT)) - not an
+    #       XINIT/data carrier and not an absolute witness symbol;
+    #   (2) that symbol's value equals the map FUNC row (map <-> image
+    #       agreement) and lies inside its owning section;
+    #   (3) the entry address is inside [p_vaddr, p_vaddr+p_filesz) of an
+    #       EXECUTABLE PT_LOAD whose file window [p_offset, p_offset+p_filesz)
+    #       is backed by real file bytes, so actual flash content (present in
+    #       the mem image) covers the ECALL target - not a bare section
+    #       address claim.
+    img_eh = parse_elf(data)
+    img_secs = parse_sections(data, img_eh)
+    img_syms = parse_symbols(data, img_eh, img_secs)
+    mains = [s for s in img_syms if s["name"] == "_main"]
+    require(len(mains) == 1,
+            "image symbol table has %d _main symbols, expected exactly one"
+            % len(mains))
+    main_sym = mains[0]
+    require(main_sym["bind"] == STB_GLOBAL and main_sym["type"] == STT_FUNC,
+            "image _main is not a GLOBAL STT_FUNC symbol")
+    require(0 < main_sym["shndx"] < len(img_secs),
+            "image _main shndx 0x%x is not a real section (undefined or "
+            "absolute witness?)" % main_sym["shndx"])
+    msec = img_secs[main_sym["shndx"]]
+    require(msec["type"] == SHT_PROGBITS and
+            msec["flags"] & (SHF_ALLOC | SHF_EXECINSTR) ==
+            (SHF_ALLOC | SHF_EXECINSTR),
+            "_main owning section %r is not executable PROGBITS "
+            "(XINIT/data carrier?)" % msec["name"])
+    cseg_lo = synth.get("s_CSEG", 0)
+    cseg_hi = synth.get("s_XINIT", CHAIN_FLASH_TOP)
+    require(cseg_lo <= msec["addr"] and msec["addr"] + msec["size"] <= cseg_hi,
+            "_main owning section %r [0x%x,+0x%x) is not inside the CSEG "
+            "recipe area [0x%x,0x%x)" % (msec["name"], msec["addr"],
+                                         msec["size"], cseg_lo, cseg_hi))
+    require(msec["addr"] <= main_sym["value"] < msec["addr"] + msec["size"],
+            "image _main 0x%x lies outside its owning section %r [0x%x,+0x%x)"
+            % (main_sym["value"], msec["name"], msec["addr"], msec["size"]))
+    require(main_sym["value"] == main_addr,
+            "image _main symbol 0x%x != map FUNC _main 0x%x (ECALL/map "
+            "witnesses moved together?)"
+            % (main_sym["value"], main_addr))
+    require(any(va <= main_addr < va + fsz for (va, fsz, _off) in xsegs),
+            "_main entry 0x%x is not covered by the file bytes of an "
+            "executable PT_LOAD (deleted load?)" % main_addr)
+    require(main_addr in mem,
+            "_main entry 0x%x has no loaded byte" % main_addr)
+    ok("chain BOOT->main: ecall globals_init 0x%x -> ecall xdata_init 0x%x -> "
+       "ecall _main 0x%x (CSEG recipe 0xff0700); _main closed against the "
+       "image: unique GLOBAL STT_FUNC symbol in CSEG section %r, map FUNC row "
+       "agrees, entry inside an executable PT_LOAD's file bytes"
+       % (rd(0x3D, 3, CHAIN_BOOT), rd(0x41, 3, CHAIN_BOOT), main_field,
+          msec["name"]))
+
+    # --- the 127-slot mirror --------------------------------------------------
+    require(len(irq) == CHAIN_VECS_COUNT,
+            "map has %d IRQ rows, expected %d" % (len(irq), CHAIN_VECS_COUNT))
+    default_target = CHAIN_BOOT + DEFAULT_OFF
+    ejmps = 0
+    for slot in range(CHAIN_VECS_COUNT):
+        base = CHAIN_VECS_BASE + CHAIN_VECS_STRIDE * slot
+        require(irq[slot][0] == base,
+                "map IRQ %d address 0x%x violates the formula" % (slot, irq[slot][0]))
+        if slot in CHAIN_NON_LEGAL:
+            want = "SYSTEM" if slot in CHAIN_SYSTEM else "RESERVED"
+            require(irq[slot][1] == want,
+                    "map IRQ %d is %s, expected %s" % (slot, irq[slot][1], want))
+            require(not any(a in mem for a in range(base, base + CHAIN_VECS_STRIDE)),
+                    "non-legal slot %d carries payload bytes" % slot)
+            require(not covered(base, base + CHAIN_VECS_STRIDE),
+                    "non-legal slot %d is covered by a PT_LOAD" % slot)
+            continue
+        require(irq[slot][1] == "DEFAULT" and irq[slot][2] == "__mcs251_isr_unhandled",
+                "map IRQ %d is not a DEFAULT row (chain mode links zero user "
+                "ISRs): %s" % (slot, irq[slot][1:]))
+        require(rd(0, 1, base) == CHAIN_EJMP,
+                "legal slot %d does not start with the EJMP opcode" % slot)
+        require(rd(1, 3, base) == default_target,
+                "legal slot %d does not jump to the CRT default entry" % slot)
+        require(not any(a in mem for a in range(base + 4, base + CHAIN_VECS_STRIDE)),
+                "legal slot %d tail carries payload" % slot)
+        require(not covered(base + 4, base + CHAIN_VECS_STRIDE),
+                "legal slot %d tail is covered by a PT_LOAD" % slot)
+        ejmps += 1
+    require(ejmps == CHAIN_VECS_COUNT - len(CHAIN_NON_LEGAL),
+            "expected 109 default EJMP vectors, saw %d" % ejmps)
+    ok("127-slot mirror: 109 legal DEFAULT EJMPs to 0x%x, 18 non-legal rows "
+       "with no payload, all rows on the frozen formula"
+       % default_target)
+
+    print("check-crt-irq --chain: PASS (%d checks) %s %s"
+          % (CHECKS[0], image_path, map_path))
     return 0
 
 
