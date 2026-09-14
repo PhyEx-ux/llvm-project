@@ -34,6 +34,10 @@ define void @as4_constant_expr(ptr %p) {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000, !10001}
+!10000 = !{!"_external", i32 2, i32 0}
+!10001 = !{!"_as4_constant_expr", i32 1, i32 0, i32 0}
 ;--- as4-explicit.ll
 target triple = "mcs251"
 
@@ -46,6 +50,10 @@ define void @as4_explicit(ptr %p) {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000, !10001}
+!10000 = !{!"_external", i32 2, i32 0}
+!10001 = !{!"_as4_explicit", i32 1, i32 0, i32 0}
 ;--- as6-constant-expr.ll
 target triple = "mcs251"
 
@@ -55,6 +63,9 @@ define void @as6_constant_expr(ptr %p) {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_as6_constant_expr", i32 1, i32 0, i32 0}
 ;--- as6-explicit.ll
 target triple = "mcs251"
 
@@ -64,3 +75,6 @@ define void @as6_explicit(ptr %p) {
   store volatile i16 %bits, ptr %p, align 1
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_as6_explicit", i32 1, i32 0, i32 0}

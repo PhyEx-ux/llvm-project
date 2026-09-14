@@ -27,6 +27,7 @@
 #define LLVM_BINARYFORMAT_MCS251ATTRIBUTESREADER_H
 
 #include "llvm/BinaryFormat/MCS251Attributes.h"
+#include "llvm/BinaryFormat/MCS251Signatures.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/Error.h"
 #include <cstdint>
@@ -63,6 +64,13 @@ struct Decoded {
   uint32_t VendorSize = 0;
   uint32_t ScopeSize = 0;
   uint32_t PayloadSize = 0;
+
+  /// P-4: the decoded contents of Tag 28, present exactly when the carrier
+  /// holds that tag (which a complete v2 identity always does).  \p
+  /// HasSignatures distinguishes "absent" from a legitimately empty array
+  /// (`01 00 00 00`, which decodes to zero records).
+  bool HasSignatures = false;
+  MCS251Signatures::Table Signatures;
 
   const Record *find(uint32_t Tag) const {
     for (const Record &R : Records)

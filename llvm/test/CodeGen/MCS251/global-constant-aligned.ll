@@ -81,3 +81,5 @@
 ; ELF: Name: _multi3
 ; ELF: Value: 0x1C
 ; ELF: Size: 8
+
+!mcs251.signatures = !{}

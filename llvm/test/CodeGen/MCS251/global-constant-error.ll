@@ -23,16 +23,30 @@
 
 ;--- zero.ll
 @g = constant [4 x i8] zeroinitializer, align 1
+!mcs251.signatures = !{}
+
 ;--- record.ll
 @g = constant {i8, i16} {i8 1, i16 2}, align 1
+!mcs251.signatures = !{}
+
 ;--- reloc.ll
 @ref = external global i8
 @g = constant ptr @ref, align 1
+!mcs251.signatures = !{}
+
 ;--- aligned.ll
 @g = constant i16 4951, align 2
+!mcs251.signatures = !{}
+
 ;--- section.ll
 @g = constant i8 1, section "XSEG", align 1
+!mcs251.signatures = !{}
+
 ;--- weak.ll
 @g = weak constant i8 1, align 1
+!mcs251.signatures = !{}
+
 ;--- undef.ll
 @g = constant [2 x i8] [i8 1, i8 undef], align 1
+!mcs251.signatures = !{}
+

@@ -1,0 +1,470 @@
+#
+# P-4 (freeze 2026-09-14): the function-signature reader rules that lld
+# enforces over the whole input set.  v2-object-identity.test covers the
+# carrier codec and the happy path; this file pins the object-internal
+# association and the per-object coverage rule, which need more than one
+# object or a non-function symbol to exercise.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj defrec.yaml -o defrec.o
+# RUN: yaml2obj noproto.yaml -o noproto.o
+# RUN: yaml2obj noun.yaml -o noun.o
+# RUN: yaml2obj producer.yaml -o producer.o
+# RUN: yaml2obj consumer.yaml -o consumer.o
+# RUN: yaml2obj user.yaml -o user.o
+# RUN: yaml2obj dotl.yaml -o dotl.o
+# RUN: yaml2obj notype-data.yaml -o notype-data.o
+# RUN: yaml2obj def-compatible.yaml -o def-compatible.o
+# RUN: yaml2obj caller-compatible.yaml -o caller-compatible.o
+# RUN: yaml2obj producer-bit.yaml -o producer-bit.o
+# RUN: yaml2obj producer-byte.yaml -o producer-byte.o
+# RUN: yaml2obj obj-decl.yaml -o obj-decl.o
+# RUN: yaml2obj func-def.yaml -o func-def.o
+# RUN: %python setflags.py defrec.o noproto.o noun.o producer.o consumer.o user.o dotl.o notype-data.o def-compatible.o caller-compatible.o producer-bit.o producer-byte.o obj-decl.o func-def.o
+#
+# --- a definition record must name a function definition in its own object
+# --- (a non-function NOTYPE symbol cannot carry a definition signature) ---
+# RUN: not mcs251-lld notype-data.o --area-start=CSEG=0xff0200 -o %t/nd.elf 2>&1 | FileCheck %s --check-prefix=NOTFUNC
+# NOTFUNC: claims a definition, but the symbol is not a function definition in this object
+# RUN: test ! -e %t/nd.elf
+#
+# --- a .L-prefixed GLOBAL STT_FUNC is still an external function and must
+# --- carry a record; the prefix is not an exemption --------------------
+# RUN: not mcs251-lld dotl.o --area-start=CSEG=0xff0200 -o %t/dl.elf 2>&1 | FileCheck %s --check-prefix=DOTL
+# DOTL: external function '.Lgf' with no function-signature record
+# RUN: test ! -e %t/dl.elf
+#
+# --- a definition record must name a real in-object symbol, not invent one ---
+# RUN: not mcs251-lld defrec.o --area-start=CSEG=0xff0200 -o %t/dr.elf 2>&1 | FileCheck %s --check-prefix=NOSYM
+# NOSYM: claims a definition, but this object has no such symbol
+# RUN: test ! -e %t/dr.elf
+#
+# --- a declaration record may have no symbol entry (unused/optimised-away),
+# --- and links when nothing else objects ------------------------------
+# RUN: mcs251-lld noun.o --area-start=CSEG=0xff0200 -o %t/noun.elf
+# RUN: test -f %t/noun.elf
+#
+# --- the per-object coverage rule: the consumer defines nothing and calls
+# --- _user, which its own Tag 28 does not record; the producer's record for
+# --- _user must not stand in, so the link fails on the consumer ---------
+# RUN: not mcs251-lld producer.o consumer.o --area-start=CSEG=0xff0200 -o %t/miss.elf 2>&1 | FileCheck %s --check-prefix=COVER
+# COVER: consumer.o: MCS251 v2 object has an external function '_user' with no function-signature record
+# RUN: test ! -e %t/miss.elf
+#
+# --- the same pair links once the consumer records what it references ---
+# RUN: mcs251-lld producer.o user.o --area-start=CSEG=0xff0200 -o %t/ok.elf
+# RUN: test -f %t/ok.elf
+#
+# --- cross-object bit/non-bit conflict on a name both sides record ---
+# RUN: not mcs251-lld producer-bit.o producer-byte.o --area-start=CSEG=0xff0200 -o %t/bc.elf 2>&1 | FileCheck %s --check-prefix=BITCONF
+# BITCONF: records '_probe' disagree on source parameter 0 bit-ness
+# RUN: test ! -e %t/bc.elf
+#
+# --- K&R no-prototype vs prototyped: definition and caller agree on ret ---
+# RUN: mcs251-lld def-compatible.o caller-compatible.o --area-start=CSEG=0xff0200 -o %t/kr.elf
+# RUN: test -f %t/kr.elf
+#
+# --- a declaration record must name a FUNCTION symbol: an undefined
+# --- STT_OBJECT symbol is valid object input but is DATA, so a signature
+# --- that declares it as a function is refused even when another object
+# --- provides a matching function definition -------------------------
+# RUN: not mcs251-lld obj-decl.o func-def.o --area-start=CSEG=0xff0200 -o %t/obj.elf 2>&1 | FileCheck %s --check-prefix=OBJDECL
+# OBJDECL: signature '_foo' is declared as a function, but its symbol is not a function type in this object
+# RUN: test ! -e %t/obj.elf
+#
+
+#--- setflags.py
+#!/usr/bin/env python3
+"""Rewrite e_flags to the v2 word (yaml2obj only registers the v1 enum)."""
+import pathlib, sys
+OFF = 36
+for name in sys.argv[1:]:
+    p = pathlib.Path(name)
+    b = bytearray(p.read_bytes())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = bytes.fromhex("00000102")
+    p.write_bytes(bytes(b))
+    print(f"{name}: e_flags -> 0x102")
+
+#--- defrec.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C24D43533235310001000000B7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8414010001000000000001000002015F67686F737400
+Symbols:
+  []
+
+#--- noproto.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C64D43533235310001000000BB048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8418010001000000000006000002015F756E757365645F6B7200
+Symbols:
+  []
+
+#--- noun.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C94D43533235310001000000BE048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841B01000100000000000201000002015F756E757365645F6465636C00
+Symbols:
+  []
+
+#--- producer.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C14D43533235310001000000B6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8413010001000000000001000002015F7573657200
+Symbols:
+  - Name: _user
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_FUNC
+
+#--- consumer.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _user
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _user
+    Binding: STB_GLOBAL
+
+#--- user.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _user
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C14D43533235310001000000B6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8413010001000000000002000002015F7573657200
+Symbols:
+  - Name: _user
+    Binding: STB_GLOBAL
+
+#--- dotl.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: .Lgf
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_FUNC
+
+#--- notype-data.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C84D43533235310001000000BD048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841A010001000000000001000002015F6E6F747970655F6461746100
+Symbols:
+  - Name: _notype_data
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_NOTYPE
+
+#--- def-compatible.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BF4D43533235310001000000B4048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841101000100000000000101000002015F6600
+Symbols:
+  - Name: _f
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_FUNC
+
+#--- caller-compatible.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _f
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BF4D43533235310001000000B4048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841101000100000000000201000002015F6600
+Symbols:
+  - Name: _f
+    Binding: STB_GLOBAL
+
+#--- producer-bit.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C34D43533235310001000000B8048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841501000100000000000101010002015F70726F626500
+Symbols:
+  - Name: _probe
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_FUNC
+
+#--- producer-byte.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _probe
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C34D43533235310001000000B8048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841501000100000000000201000002015F70726F626500
+Symbols:
+  - Name: _probe
+    Binding: STB_GLOBAL
+
+
+#--- obj-decl.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C04D43533235310001000000B5048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8412010001000000000002000002015F666F6F00
+Symbols:
+  - Name: _foo
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+
+#--- func-def.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C04D43533235310001000000B5048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8412010001000000000001000002015F666F6F00
+Symbols:
+  - Name: _foo
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_FUNC

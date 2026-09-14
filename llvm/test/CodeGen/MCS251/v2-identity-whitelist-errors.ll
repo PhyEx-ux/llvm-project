@@ -22,7 +22,7 @@
 ;
 ; NO-SLOTS-V2: Flags [ (0x102)
 ; NO-SLOTS-V2: Name: .mcs251.attributes
-; NO-SLOTS-V2: Size: 172
+; NO-SLOTS-V2: Size: 204
 ; NO-SLOTS-V2-NOT: .note.mcs251.abi
 
 ;--- slots.ll
@@ -30,6 +30,9 @@ define void @fill(i8 %v, ptr %buf) local_unnamed_addr {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_fill", i32 1, i32 0, i32 0, i32 0}
 ;--- alias.ll
 @g = global i8 7
 @a = alias i8, ptr @g
@@ -37,6 +40,9 @@ define void @fill(i8 %v, ptr %buf) local_unnamed_addr {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_fill", i32 1, i32 0, i32 0, i32 0}
 ;--- ifunc.ll
 @f = ifunc void (i8, ptr), ptr addrspace(4) @resolver
 define ptr addrspace(4) @resolver() {
@@ -49,6 +55,10 @@ define void @impl(i8 %v, ptr %buf) {
 ; W3b: an AS4 function pointer used for an indirect call is an existing
 ; lowering and a REGISTERED v2 capability; with the identity chosen by the
 ; contract (not content), this slot-less module is a regular v2 object.
+
+!mcs251.signatures = !{!10000, !10001}
+!10000 = !{!"_resolver", i32 1, i32 0, i32 0}
+!10001 = !{!"_impl", i32 1, i32 0, i32 0, i32 0}
 ;--- no-slots-as4-call.ll
 define void @call_indirect(ptr addrspace(4) %fn) addrspace(4) {
   call addrspace(4) void %fn()
@@ -58,9 +68,15 @@ define void @call_indirect(ptr addrspace(4) %fn) addrspace(4) {
 ; Static pointer initializer algebra next to legal slots: the X3 leaf rules
 ; stay exactly as they are in v2 (N8 keeps rejecting the addrspacecast
 ; initializer; CP-A is not landed).
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_call_indirect", i32 1, i32 0, i32 0}
 ;--- static-pointer-init.ll
 @g = addrspace(4) global [2 x i8] zeroinitializer
 @p = global ptr addrspacecast (ptr addrspace(4) @g to ptr), align 1
 define void @fill(i8 %v, ptr %buf) local_unnamed_addr {
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_fill", i32 1, i32 0, i32 0, i32 0}

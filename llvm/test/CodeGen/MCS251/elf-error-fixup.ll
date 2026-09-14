@@ -9,3 +9,6 @@ define void @f() prefix i32 ptrtoint (ptr @external to i32) {
 }
 
 ; CHECK: LLVM ERROR: MCS251 ELF: unsupported relocation fixup
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}

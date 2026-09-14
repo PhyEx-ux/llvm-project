@@ -58,14 +58,16 @@ define void @caller() {
 ; V2-ELF-NOT: .note.mcs251.abi
 ; V2-ELF: Name: .text
 ; V2-ELF: AddressAlignment: 1
-; The registered v2 identity carrier (the 172-byte XSmall envelope+payload;
+; The registered v2 identity carrier (the 250-byte XSmall envelope+payload;
 ; see elf-v2-identity.ll for the byte-pinned variant). readelf -n has no
 ; note to print: the v2 object carries none.
 ; V2-ELF: Name: .mcs251.attributes
 ; V2-ELF: Type: Unknown (0x70000003)
-; V2-ELF: Size: 172
+; V2-ELF: Size: 250
 ; V2-ELF: AddressAlignment: 1
-; V2-ELF: 0000: 41000000 AB4D4353 32353100 01000000
+; V2-ELF: 0000: 41000000 F94D4353 32353100 01000000
+; Envelope: 0x41, VendorSize 0xF9 (249 = 16+233), "MCS251\0", scope 1,
+; ScopeSize 0xEE (238 = 5+233). The P-4 Tag 28 record follows Tag 27.
 ; V2-ELF: Relocations [
 ; V2-ELF-DAG: R_MCS251_MID8 _gv 0x0
 ; V2-ELF-DAG: R_MCS251_LO8 _gv 0x0
@@ -94,3 +96,9 @@ define void @caller() {
 ; V1-ELF: 0010: 35310000 00000001 00000001 00000000
 ; V1-ELF: 0020: 00000002 0000F3FF 00000007 00000000
 ; V1-ELF: 0030: 00000000
+
+!mcs251.signatures = !{!10000, !10001, !10002, !10003}
+!10000 = !{!"_external", i32 2, i32 0}
+!10001 = !{!"_address", i32 1, i32 0}
+!10002 = !{!"_callee", i32 1, i32 0}
+!10003 = !{!"_caller", i32 1, i32 0}

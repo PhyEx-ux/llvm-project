@@ -18,6 +18,9 @@
   @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
   define mcs251_intrcc void @irq() addrspace(4) #0 { ret void }
   attributes #0 = { noinline "mcs251-isr-vector"="1" }
+
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
 ...
 ---
 name: irq

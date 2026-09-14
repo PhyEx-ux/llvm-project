@@ -50,3 +50,9 @@ define void @word_prefix() prefix i16 ptrtoint (ptr @external to i16) {
 ; NAMED: R_MCS251_MID8 _local 0x2
 ; NAMED-NEXT: R_MCS251_LO8 _local 0x2
 ; NAMED-NEXT: R_MCS251_HI8 _local 0x2
+
+!mcs251.signatures = !{!10000, !10001, !10002, !10003}
+!10000 = !{!"_positive", i32 1, i32 0}
+!10001 = !{!"_negative", i32 1, i32 0}
+!10002 = !{!"_local_address", i32 1, i32 0}
+!10003 = !{!"_word_prefix", i32 1, i32 0}

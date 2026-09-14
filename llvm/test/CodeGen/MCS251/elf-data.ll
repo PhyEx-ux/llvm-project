@@ -78,3 +78,9 @@ define i16 @nonleaf(i16 %a, i16 %b) noinline {
 ; ELF: Value: 0x0
 ; ELF: Size: 2
 ; ELF: Type: Object
+
+!mcs251.signatures = !{!10000, !10001, !10002, !10003}
+!10000 = !{!"_sink", i32 2, i32 0}
+!10001 = !{!"_leaf", i32 1, i32 0, i32 0, i32 0}
+!10002 = !{!"_wide", i32 1, i32 0, i32 0, i32 0, i32 0}
+!10003 = !{!"_nonleaf", i32 1, i32 0, i32 0, i32 0}

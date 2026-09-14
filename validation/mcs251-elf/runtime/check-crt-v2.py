@@ -102,14 +102,19 @@ HOME_BYTES = bytes.fromhex("020000")                 # ljmp placeholder
 
 # ---------------------------------------------------------------------------
 # A4 v2 identity carrier: the registered XSmall payload (design sections
-# 2/3.1, PM ruling 2026-09-13).  172 bytes total = 17-byte envelope + 155.
+# 2/3.1, PM ruling 2026-09-13), plus the P-4 Tag 28 function-signature array
+# (freeze 2026-09-14).  The 21 U32/MIX required tags are the frozen baseline;
+# Tag 28 is appended after them, so the envelope length is NOT constant and
+# the byte-exact comparison below covers the fixed prefix only.
 # ---------------------------------------------------------------------------
 
-# The frozen 172-byte production payload (17-byte envelope + 155-byte body).
-# Cross-verified at W7 time against a live llc -filetype=obj emission AND the
-# frozen bytes of lld/test/MCS251/v2-object-identity.test xs.yaml; the tag
-# table below re-derives every field so a hex typo cannot pass silently.
-CARRIER_HEX = (
+# The frozen 21-tag production payload (17-byte envelope + 155-byte body),
+# WITHOUT the P-4 Tag 28.  Cross-verified at W7 time against a live
+# llc -filetype=obj emission AND the frozen bytes of
+# lld/test/MCS251/v2-object-identity.test xs.yaml; the tag table below
+# re-derives every field so a hex typo cannot pass silently.  The full
+# carrier carries Tag 28 after this prefix (P4_TAG28_PREFIX).
+CARRIER_PREFIX_HEX = (
     "41000000AB4D43533235310001000000A0"
     "04810400000002"
     "05810400000002"
@@ -133,7 +138,8 @@ CARRIER_HEX = (
     "1A810400000020"
     "1B810400000000"
 )
-assert len(CARRIER_HEX) // 2 == 172, "frozen carrier literal is not 172 bytes"
+assert len(CARRIER_PREFIX_HEX) // 2 == 172, \
+    "frozen carrier prefix literal is not 172 bytes"
 
 # tag -> (name, kind, value).  kind "u32" or "mix" (two U32 atoms).
 CARRIER_TAGS = [
@@ -160,7 +166,16 @@ CARRIER_TAGS = [
     (26, "code_pointer_bits",          "u32", 32),
     (27, "object_protocol_minor",      "u32", 0),
 ]
-REQUIRED_TAG_COUNT = 21
+REQUIRED_TAG_COUNT = 22   # 21 A4 required tags + the P-4 Tag 28
+
+# P-4 (freeze 2026-09-14): Tag 28 function_signatures is VT_BYTES and is NOT
+# part of the fixed-value table; its internal value is validated separately
+# (P4_VERSION/record grammar) and its per-CRT record set is supplied by the
+# caller (the two CRT variants carry different function sets).
+P4_TAG = 28
+P4_VALUE_VERSION = 1
+P4_HEADER_SIZE = 4          # version u8, flags u8, count u16le
+P4_RECORD_FIXED = 9         # name_off u32le + role + param_count + ret + abi2
 
 # ---------------------------------------------------------------------------
 # selfstart variant (crt-selfstart-v2.yaml): frozen template of the v1
@@ -580,7 +595,101 @@ def check_identity(data, eh):
     ok("v2 identity: ELFCLASS32/MSB/ET_REL/EM_MCS251/e_flags=0x102")
 
 
-def check_carrier(data, eh, sections):
+# P-4 (freeze 2026-09-14): the per-variant expected Tag 28 record set.  The
+# freeze requires the CRTs to carry REAL function entries, never a uniform
+# count=0, so each variant pins the exact (name, is-definition) pairs its
+# source/CRT contract declares.
+P4_EXPECTED = {
+    "selfstart": [
+        ("__mcs251_selfstart_boot", True),
+        ("__mcs251_isr_unhandled", True),
+        ("__mcs251_globals_init", True),
+        ("__mcs251_xdata_init", True),
+        ("_main", False),
+    ],
+    "irq": [
+        ("__mcs251_reset", True),
+        ("__mcs251_isr_unhandled", True),
+        ("__mcs251_selfstart_boot", True),
+        ("__mcs251_globals_init", True),
+        ("__mcs251_xdata_init", True),
+        ("_main", False),
+    ],
+}
+
+
+def validate_p4_tag28(value, expected_records):
+    """Independently decode the P-4 Tag 28 value (freeze 2026-09-14).
+
+    Grammar: version u8, flags u8, count u16 LE, then `count` records of
+    name_off u32 LE, role u8, param_count u8, ceil(param_count/8) bitmap
+    bytes, ret u8, call_abi_major u8, call_abi_minor u8, followed by the
+    NUL-terminated name blob in record order.
+    """
+    require(len(value) >= P4_HEADER_SIZE,
+            "Tag 28 is shorter than its 4-byte header (%d)" % len(value))
+    require(value[0] == P4_VALUE_VERSION,
+            "Tag 28 version %d, expected %d" % (value[0], P4_VALUE_VERSION))
+    require(value[1] == 0, "Tag 28 reserved flags %d, expected 0" % value[1])
+    count = int.from_bytes(value[2:4], "little")
+    require(count == len(expected_records),
+            "Tag 28 count %d, expected %d CRT functions"
+            % (count, len(expected_records)))
+
+    pos = P4_HEADER_SIZE
+    records = []
+    for i in range(count):
+        require(pos + P4_RECORD_FIXED <= len(value),
+                "Tag 28 record %d truncated before its fixed fields" % i)
+        name_off = int.from_bytes(value[pos:pos + 4], "little")
+        role = value[pos + 4]
+        param_count = value[pos + 5]
+        pos += 6
+        blen = (param_count + 7) // 8
+        require(pos + blen + 3 <= len(value),
+                "Tag 28 record %d truncated in its bitmap/tail" % i)
+        bitmap = value[pos:pos + blen]
+        pos += blen
+        ret = value[pos]
+        abi_major = value[pos + 1]
+        abi_minor = value[pos + 2]
+        pos += 3
+        require(role & 0x80 == 0 and role & 0xF0 == 0,
+                "Tag 28 record %d sets reserved role bits 0x%02X" % (i, role))
+        require(role & 0x03 in (1, 2),
+                "Tag 28 record %d has illegal role combination 0x%02X"
+                % (i, role & 0x03))
+        require(ret in (0, 1), "Tag 28 record %d ret %d" % (i, ret))
+        require((abi_major, abi_minor) == (2, 1),
+                "Tag 28 record %d call_abi %d.%d, expected 2.1"
+                % (i, abi_major, abi_minor))
+        records.append((name_off, role, param_count, bytes(bitmap)))
+
+    blob = value[pos:]
+    cursor = 0
+    decoded = []
+    for i, (name_off, role, param_count, bitmap) in enumerate(records):
+        require(name_off == cursor,
+                "Tag 28 record %d name_off %d does not point at its string "
+                "(expected %d)" % (i, name_off, cursor))
+        nul = blob.find(b"\x00", cursor)
+        require(nul != -1, "Tag 28 record %d name is not NUL-terminated" % i)
+        require(nul > cursor, "Tag 28 record %d has an empty name" % i)
+        name = blob[cursor:nul].decode("ascii")
+        cursor = nul + 1
+        decoded.append((name, role & 0x03))
+    require(cursor == len(blob),
+            "Tag 28 blob has %d trailing bytes" % (len(blob) - cursor))
+
+    want = [(n, 1 if d else 2) for n, d in expected_records]
+    require(decoded == want,
+            "Tag 28 records %r do not match the CRT's declared functions %r"
+            % (decoded, want))
+    ok("carrier: P-4 Tag 28 present, %d real function record(s), "
+       "call_abi 2.1, LE value format" % count)
+
+
+def check_carrier(data, eh, sections, expected_records):
     """The .mcs251.attributes carrier, decoded independently (design 3.1)."""
     attrs = [s for s in sections if s["name"] == ".mcs251.attributes"]
     require(len(attrs) == 1,
@@ -594,11 +703,22 @@ def check_carrier(data, eh, sections):
     require(sec["entsize"] == 0 and sec["link"] == 0 and sec["info"] == 0,
             "carrier entsize/link/info must all be 0")
     blob = content(data, sec)
-    require(blob == bytes.fromhex(CARRIER_HEX),
-            "carrier bytes are not the frozen 172-byte production payload "
+    prefix = bytes.fromhex(CARRIER_PREFIX_HEX)
+    require(len(blob) >= len(prefix),
+            "carrier is only %d bytes, shorter than the frozen %d-byte "
+            "prefix" % (len(blob), len(prefix)))
+    # VendorSize/ScopeSize (offsets 1..4 and 13..16) grow with the appended
+    # Tag 28, so the byte-exact comparison pins the FORMAT bytes (0x41, the
+    # vendor string, the scope tag) and the 155-byte payload; the two length
+    # fields are checked by the envelope arithmetic below.
+    require(blob[0] == prefix[0] and blob[5:13] == prefix[5:13],
+            "carrier format bytes differ from the frozen envelope "
+            "(0x41 / MCS251\\0 / scope 1)")
+    require(blob[17:17 + len(prefix) - 17] == prefix[17:],
+            "carrier does not start with the frozen 155-byte 21-tag payload "
             "(first difference at %s)"
-            % next((i for i in range(min(len(blob), 172))
-                    if blob[i] != bytes.fromhex(CARRIER_HEX)[i]), "len"))
+            % next((i for i in range(len(prefix) - 17)
+                    if blob[17 + i] != prefix[17 + i]), "len"))
 
     # Identity exclusivity: no v1 note anywhere (design 3.2/4.2).
     require(not any(s["name"] == ".note.mcs251.abi" for s in sections),
@@ -617,8 +737,8 @@ def check_carrier(data, eh, sections):
     require(scope_tag == 1, "scope tag %d, expected 1 (File)" % scope_tag)
     require(scope_size == 5 + len(payload),
             "ScopeSize %d, expected 5+%d" % (scope_size, len(payload)))
-    ok("carrier: 172B envelope exact (0x41, VendorSize 171, MCS251\\0, "
-       "scope 1, ScopeSize 160, 155B payload); no v1 note anywhere")
+    ok("carrier: 21-tag frozen prefix exact (0x41, MCS251\\0, scope 1, "
+       "155B body); Tag 28 appended; no v1 note anywhere")
 
     # TLV decode: shortest-form ULEB, strictly increasing, 21 required tags.
     def uleb(buf, pos, what):
@@ -672,6 +792,11 @@ def check_carrier(data, eh, sections):
             require(p == len(val), "tag %d MIX atoms do not end exactly at "
                     "the record end" % tag)
             values[tag] = tuple(atoms)
+        elif vt == 0x04:            # VT_BYTES (P-4 Tag 28)
+            require(tag == P4_TAG,
+                    "tag %d uses VT_BYTES but only Tag %d is BYTES"
+                    % (tag, P4_TAG))
+            values[tag] = val        # raw bytes, validated after the walk
         else:
             raise Fail("tag %d has unregistered value type 0x%02X" % (tag, vt))
         require(crit, "tag %d is not Critical (all required tags are)" % tag)
@@ -694,6 +819,9 @@ def check_carrier(data, eh, sections):
                     "tag %d (%s) not a two-atom MIX" % (tag, name))
             require(got == tuple(want), "tag %d (%s) = %r, expected %r"
                     % (tag, name, got, want))
+    require(P4_TAG in values,
+            "the P-4 Tag 28 (function_signatures) is missing")
+    validate_p4_tag28(values[P4_TAG], expected_records)
     for tag in (21, 22, 23):
         require(tag not in values,
                 "reserved tag %d present; the registered payload omits 21-23"
@@ -1041,17 +1169,15 @@ def main():
         require(is_selfstart != is_irq,
                 "cannot classify variant: VECS=%s isr=%s"
                 % (is_selfstart, is_irq))
+        variant = "selfstart" if is_selfstart else "irq"
         check_identity(data, eh)
-        check_carrier(data, eh, sections)
+        check_carrier(data, eh, sections, P4_EXPECTED[variant])
         symbols = parse_symbols(data, eh, sections)
+        check_home(data, sections)
         if is_selfstart:
-            check_home(data, sections)
             check_selfstart(data, eh, sections, symbols)
-            variant = "selfstart"
         else:
-            check_home(data, sections)
             check_irq(data, eh, sections, symbols)
-            variant = "irq"
         print("check-crt-v2: PASS (%d checks, %s) %s"
               % (CHECKS[0], variant, path))
     return 0

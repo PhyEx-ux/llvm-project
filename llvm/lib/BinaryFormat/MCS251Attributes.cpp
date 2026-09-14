@@ -20,6 +20,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/BinaryFormat/MCS251AttributesReader.h"
+#include "llvm/BinaryFormat/MCS251Signatures.h"
 #include "llvm/BinaryFormat/MCS251AttributesWriter.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -223,10 +224,24 @@ std::string Writer::render(bool IsBigEndian) const {
 
 std::string MCS251Attributes::renderRegisteredIdentity(uint32_t AS0Bits,
                                                        uint32_t Placement) {
-  // The A4 minimal registration set (design §2.2): all 21 RequiredTags in
-  // canonical order, tags 21-23 omitted.  Only the XSmall (32,8) and Small
-  // (32,1) profiles are approved for production emission; every other
-  // frozen profile fails closed here instead of reaching an object.
+  // The v1-era caller has no signature set to offer.  Every v2 object must
+  // carry Tag 28, so emitting the empty registered identity here would
+  // produce an object the reader rejects; route such a call through the
+  // signature-aware overload instead.
+  report_fatal_error(
+      "MCS251 attributes: renderRegisteredIdentity without function "
+      "signatures cannot produce a legal v2 identity (Tag 28 is required); "
+      "use the signature-aware overload");
+}
+
+std::string MCS251Attributes::renderRegisteredIdentity(
+    uint32_t AS0Bits, uint32_t Placement,
+    const MCS251Signatures::Table &Signatures) {
+  // The A4 minimal registration set (design §2.2): all 21 RequiredTags, plus
+  // the P-4 Tag 28, in canonical order, tags 21-23 omitted.  Only the XSmall
+  // (32,8) and Small (32,1) profiles are approved for production emission;
+  // every other frozen profile fails closed here instead of reaching an
+  // object.
   if (!isRegisteredA4Profile(AS0Bits, Placement))
     report_fatal_error(
         "MCS251 attributes: the (as0_pointer_bits, default_placement) pair (" +
@@ -257,6 +272,15 @@ std::string MCS251Attributes::renderRegisteredIdentity(uint32_t AS0Bits,
   W.addU32(Tag_CodeModelProfile, CodeModelProfile);
   W.addU32(Tag_CodePointerBits, CodePointerBits);
   W.addU32(Tag_ObjectProtocolMinor, ObjectProtocolMinor);
+  // P-4 Tag 28: the function-signature array is VT_BYTES and Critical.  Its
+  // value carries its own little-endian layout, independent of the envelope's
+  // target byte order.  The freeze also requires the embedded call_abi
+  // generation to agree with this object's identity (Tag 5/6).
+  if (llvm::Error E = MCS251Signatures::checkABIGeneration(
+          Signatures, uint8_t(CallABIMajor), uint8_t(CallABIMinor)))
+    report_fatal_error(Twine("MCS251 attributes: ") + toString(std::move(E)));
+  W.addBytes(Tag_FunctionSignatures, MCS251Signatures::encode(Signatures),
+             /*Critical=*/true);
   // The MCS-251 ELF target is big-endian; the envelope u32 lengths and the
   // U32 record values are always serialized MSB-first.
   return W.render(/*IsBigEndian=*/true);
@@ -671,6 +695,30 @@ llvm::Error MCS251Attributes::decode(StringRef Bytes, bool IsBigEndian,
           OS << " must be zero, got " << V;
         });
       R.Scalar = V;
+    } else if (R.Tag == Tag_FunctionSignatures) {
+      // P-4: Tag 28 is VT_BYTES and Critical.  Its payload is the frozen
+      // signature value; the strict sub-decoder below enforces every
+      // format-level rule.  The object-identity CallABI agreement is checked
+      // once all records are known (after this loop).
+      if (R.ValueType != VT_BYTES)
+        return makeError([&](raw_ostream &OS) {
+          printTag(OS, R.Tag);
+          OS << " must be BYTES, got ";
+          printValueType(OS, R.ValueType);
+        });
+      if (!R.Critical)
+        return makeError([&](raw_ostream &OS) {
+          OS << "required ";
+          printTag(OS, R.Tag);
+          OS << " must be Critical";
+        });
+      StringRef Payload(reinterpret_cast<const char *>(R.Value.data()),
+                        R.Value.size());
+      MCS251Signatures::Table SigTable;
+      if (llvm::Error E = MCS251Signatures::decode(Payload, SigTable))
+        return E;
+      Out.HasSignatures = true;
+      Out.Signatures = std::move(SigTable);
     } else {
       // Registered but not yet assigned a concrete type rule.
       if (R.Critical)
@@ -768,6 +816,15 @@ llvm::Error MCS251Attributes::decode(StringRef Bytes, bool IsBigEndian,
         OS << Name << " must be " << Registered << ", got " << getU32(T)
            << " (the A4-registered value is the only approved value)";
       });
+
+  // P-4: every signature record's call_abi generation must equal the object
+  // identity's own (Tag 5 / Tag 6).  This is the one Tag 28 rule the value
+  // sub-decoder cannot enforce on its own.
+  if (Out.HasSignatures)
+    if (llvm::Error E = MCS251Signatures::checkABIGeneration(
+            Out.Signatures, uint8_t(getU32(Tag_CallABIMajor)),
+            uint8_t(getU32(Tag_CallABIMinor))))
+      return E;
 
   uint32_t AS0 = getU32(Tag_AS0PointerBits);
   if (AS0 != AS0PointerBits16 && AS0 != AS0PointerBits32)

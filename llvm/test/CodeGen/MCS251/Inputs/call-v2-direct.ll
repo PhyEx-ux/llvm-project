@@ -27,3 +27,10 @@ define void @write_sbuf() addrspace(4) {
   store volatile i8 86, ptr addrspace(6) inttoptr (i16 153 to ptr addrspace(6)), align 1
   ret void
 }
+
+!mcs251.signatures = !{!10000, !10001, !10002, !10003, !10004}
+!10000 = !{!"_external", i32 2, i32 0}
+!10001 = !{!"_local", i32 1, i32 0}
+!10002 = !{!"_call_external", i32 1, i32 0}
+!10003 = !{!"_call_local", i32 1, i32 0}
+!10004 = !{!"_write_sbuf", i32 1, i32 0}

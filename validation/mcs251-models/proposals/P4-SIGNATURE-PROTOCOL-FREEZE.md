@@ -4,6 +4,33 @@
 三轮 APPROVED，2026-09-14）。PM 裁定 #3 录于下节。writer/reader 实施批次按本
 文件执行。
 
+## 实施记录（2026-09-14，冻结后同批落地）
+
+线格式与拒绝规则按上文冻结内容实现，writer/reader 同批交付：
+
+- **共享编解码**：新增 `llvm/include/llvm/BinaryFormat/MCS251Signatures.h` 与
+  `llvm/lib/BinaryFormat/MCS251Signatures.cpp`（严格 decoder、自检 encoder、
+  `compareRecords` 冻结比较语义、bitmap/role 辅助、`!mcs251.signatures`
+  元数据线格式常量）。
+- **writer**：`clang` 在 `Targets/MCS251.cpp::emitTargetMetadata` 从
+  CGFunctionInfo/FunctionDecl 产生 `!mcs251.signatures`（源类型 `bit` 判定，
+  不得从 i8 反猜）；`llc` 在 `MCS251AsmPrinter` 读取该元数据、校验完整覆盖、
+  对后端生成的外部 libcall 按 `MCS251HelperABI.h` 登记 ABI 自动补记录（未登记
+  ABI 硬错），并经 `renderRegisteredIdentity(..., Signatures)` 发射 Tag 28。
+- **reader（lld 三级时机）**：`MCS251Attributes::decode` 内严格解码 + call_abi
+  与对象身份核对；`validateFileSignatures` 在 `resolveSymbols` 后做对象内符号
+  关联（bit0 必须为本对象定义、函数入口按 STT_FUNC 或"链接级被代码重定位引用"
+  的 STT_NOTYPE 识别；bit1 允许无符号条目，有则为外部未定义）；`validateSignatureSet`
+  做跨对象逐字段核对与逐对象缺条目检查，均在布局前完成。Tag 28 不加入
+  `V2ComparedTags`。
+- **夹具影响面**：`llvm/test/CodeGen/MCS251` 全部 v2 ELF 输出的 .ll/.mir 补
+  `!mcs251.signatures`；`lld/test/MCS251/v2-object-identity.test` 与
+  `crt-v2.test` 的全部 carrier 补 Tag 28（含畸形单故障基线，原故障不变）；
+  `crt-selfstart-v2.yaml`/`crt-irq-v2.yaml` 携带真实函数记录；
+  `check-crt-v2.py` 改为按 Tag 28 内部格式独立验证各 CRT 的签名集与变长载体。
+- **验证**：`BinaryFormatTests` MCS251 套件 53/53；`CodeGen/MCS251` lit 149/149；
+  `v2-object-identity.test` 140 条 RUN、`crt-v2.test` 33 条 RUN 全通过。
+
 ## PM 裁定 #3（2026-09-14，用户四项选择）
 
 | # | 裁定点 | 裁定 |

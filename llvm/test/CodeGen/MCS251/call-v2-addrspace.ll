@@ -56,3 +56,10 @@ define void @call_indirect(ptr addrspace(4) %fn) addrspace(4) {
 ; OBJECT-INDIRECT: Flags [ (0x102)
 ; OBJECT-INDIRECT: Name: .mcs251.attributes
 ; OBJECT-INDIRECT-NOT: .note.mcs251.abi
+
+!mcs251.signatures = !{!10000, !10001, !10002, !10003, !10004}
+!10000 = !{!"_external", i32 2, i32 0}
+!10001 = !{!"_local", i32 1, i32 0}
+!10002 = !{!"_call_external", i32 1, i32 0}
+!10003 = !{!"_call_local", i32 1, i32 0}
+!10004 = !{!"_call_indirect", i32 1, i32 0, i32 0}

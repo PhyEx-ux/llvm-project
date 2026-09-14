@@ -152,9 +152,13 @@ enum Tag : uint32_t {
   Tag_CodeModelProfile        = 25, ///< U32, required, registered A4: 1
   Tag_CodePointerBits         = 26, ///< U32, required, ruled: 32
   Tag_ObjectProtocolMinor     = 27, ///< U32, required, registered A4: 0
+  // P-4 (freeze 2026-09-14): the function-signature array.  VT_BYTES, one
+  // per v2 object, Critical, and a member of RequiredTags.  Its internal
+  // value format is owned by MCS251Signatures.h.
+  Tag_FunctionSignatures      = 28, ///< BYTES, required, Critical
 
   Tag_FirstAllocated = Tag_ObjectProtocolVersion,
-  Tag_LastRegistered = Tag_ObjectProtocolMinor,
+  Tag_LastRegistered = Tag_FunctionSignatures,
 };
 
 /// Tags that are required for a first-slice v2 identity.  Every entry must
@@ -170,7 +174,7 @@ inline constexpr Tag RequiredTags[] = {
     Tag_RequiredCapabilitiesLo,   Tag_RequiredCapabilitiesHi,
     Tag_ABIOptions,               Tag_MemoryModelProfile,
     Tag_CodeModelProfile,         Tag_CodePointerBits,
-    Tag_ObjectProtocolMinor,
+    Tag_ObjectProtocolMinor,      Tag_FunctionSignatures,
 };
 
 /// Tags 21-23 are optional reserved words; when present they must be zero.
@@ -291,6 +295,7 @@ inline StringRef tagName(uint32_t T) {
   case Tag_CodeModelProfile:         return "code_model_profile";
   case Tag_CodePointerBits:          return "code_pointer_bits";
   case Tag_ObjectProtocolMinor:      return "object_protocol_minor";
+  case Tag_FunctionSignatures:       return "function_signatures";
   default:                           return StringRef();
   }
 }

@@ -285,24 +285,48 @@ define void @ordered(i8 %v) {
 ; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj %t/externuse.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ELFONLY
 ;ELFONLY: MCS251 bit object requires ELF object output
 
+
+!mcs251.signatures = !{!10000, !10001, !10002, !10003, !10004, !10005, !10006, !10007, !10008, !10009, !10010}
+!10000 = !{!"_set_obj", i32 1, i32 0}
+!10001 = !{!"_clear_obj", i32 1, i32 0}
+!10002 = !{!"_toggle_obj", i32 1, i32 0}
+!10003 = !{!"_read_obj", i32 1, i32 0}
+!10004 = !{!"_order_writes", i32 1, i32 0}
+!10005 = !{!"_unused_read", i32 1, i32 0}
+!10006 = !{!"_cond_direct", i32 1, i32 0}
+!10007 = !{!"_cond_inverted", i32 1, i32 0}
+!10008 = !{!"_double_set", i32 1, i32 0}
+!10009 = !{!"_two_unused_reads", i32 1, i32 0}
+!10010 = !{!"_ordered", i32 1, i32 0, i32 0}
 ;--- badret.ll
 target triple = "mcs251"
 declare i8 @llvm.mcs251.bit.obj.read(ptr)
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- badparam.ll
 target triple = "mcs251"
 declare i1 @llvm.mcs251.bit.obj.read(i32)
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- vararg.ll
 target triple = "mcs251"
 declare i1 @llvm.mcs251.bit.obj.read(ptr, ...)
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- defined.ll
 target triple = "mcs251"
 define i1 @llvm.mcs251.bit.obj.read(ptr %p) {
 entry:
   ret i1 false
 }
+!mcs251.signatures = !{}
+
 ;--- coldcc.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -312,6 +336,9 @@ define void @f() {
   call coldcc void @llvm.mcs251.bit.obj.set(ptr @flag)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- invoke.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -327,6 +354,9 @@ bad:
   landingpad { ptr, i32 } cleanup
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- tail.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -336,6 +366,9 @@ define void @f() {
   tail call void @llvm.mcs251.bit.obj.set(ptr @flag)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- musttail.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -345,6 +378,9 @@ define void @f() {
   musttail call void @llvm.mcs251.bit.obj.set(ptr @flag)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- bundle.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -354,6 +390,9 @@ define void @f() {
   call void @llvm.mcs251.bit.obj.set(ptr @flag) [ "deopt"(ptr @flag) ]
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- addrtaken.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -363,6 +402,9 @@ declare void @llvm.mcs251.bit.obj.set(ptr)
 define void @f() {
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- escapebundle.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -372,6 +414,10 @@ define void @f() {
   call void @g() [ "deopt"(ptr @flag) ]
   ret void
 }
+
+!mcs251.signatures = !{!10000, !10001}
+!10000 = !{!"_g", i32 2, i32 0}
+!10001 = !{!"_f", i32 1, i32 0}
 ;--- nullarg.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -381,6 +427,9 @@ define void @f() {
   call void @llvm.mcs251.bit.obj.set(ptr null)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- undefarg.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -390,6 +439,9 @@ define void @f() {
   call void @llvm.mcs251.bit.obj.set(ptr undef)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- plainarg.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -400,6 +452,9 @@ define void @f() {
   call void @llvm.mcs251.bit.obj.set(ptr @plain)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- geparg.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -409,6 +464,9 @@ define void @f() {
   call void @llvm.mcs251.bit.obj.set(ptr getelementptr (i8, ptr @flag, i16 1))
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- selectarg.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -419,6 +477,9 @@ define void @f(i1 %c) {
   call void @llvm.mcs251.bit.obj.set(ptr %p)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0, i32 0}
 ;--- phiarg.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -436,6 +497,9 @@ m:
   call void @llvm.mcs251.bit.obj.set(ptr %p)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0, i32 0}
 ;--- allocaarg.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -446,6 +510,9 @@ define void @f() {
   call void @llvm.mcs251.bit.obj.set(ptr %a)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- paramhandle.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -459,6 +526,10 @@ define void @f() {
   call void @g(ptr @flag)
   ret void
 }
+
+!mcs251.signatures = !{!10000, !10001}
+!10000 = !{!"_g", i32 1, i32 0, i32 0}
+!10001 = !{!"_f", i32 1, i32 0}
 ;--- deadcode.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -472,6 +543,9 @@ dead:
 ok:
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_live", i32 1, i32 0}
 ;--- callmemattr.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -482,6 +556,9 @@ define void @f() {
   ret void
 }
 attributes #1 = { memory(argmem: read) }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- noaliasarg.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -491,6 +568,9 @@ define void @f() {
   call void @llvm.mcs251.bit.obj.set(ptr noalias @flag)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- derefarg.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -500,6 +580,9 @@ define void @f() {
   call void @llvm.mcs251.bit.obj.set(ptr dereferenceable(1) @flag)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- aliasmd.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -511,6 +594,9 @@ define void @f() {
 }
 !0 = !{!1}
 !1 = distinct !{!1, !"some scope"}
+
+!mcs251.signatures = !{!2}
+!2 = !{!"_f", i32 1, i32 0}
 ;--- noaliasmd.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -522,6 +608,9 @@ define void @f() {
 }
 !0 = !{!1}
 !1 = distinct !{!1, !"some scope"}
+
+!mcs251.signatures = !{!2}
+!2 = !{!"_f", i32 1, i32 0}
 ;--- externuse.ll
 target triple = "mcs251"
 @ext = external global i8 #0
@@ -531,3 +620,6 @@ define void @f() {
   call void @llvm.mcs251.bit.obj.clear(ptr @ext)
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}

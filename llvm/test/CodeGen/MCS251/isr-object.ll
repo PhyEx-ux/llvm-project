@@ -126,6 +126,8 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 {
 }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
 
+!mcs251.signatures = !{}
+
 ;--- minimal.ll
 ; Rework R1 probe: an ISR module whose only global is the verified keepalive
 ; root must produce exactly the code, ABI note and .mcs251.isr sections --
@@ -137,6 +139,8 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 {
 }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
 
+!mcs251.signatures = !{}
+
 ;--- ordinary-used-v2.ll
 ; Rework R2 probe (V2): a standard AS4-cast llvm.used root over ordinary
 ; functions, with no ISR definition in the module. The keepalive exemption
@@ -145,6 +149,9 @@ target triple = "mcs251-unknown-none"
 @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @plain to ptr)], section "llvm.metadata"
 define void @plain() addrspace(4) { ret void }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_plain", i32 1, i32 0}
 ;--- ordinary-used-v1.ll
 ; Rework R2 probe (V1): an ordinary AS0 llvm.used root under the v1 layout.
 ; The keepalive routing does not apply; the original global-data-emission
@@ -153,6 +160,9 @@ target triple = "mcs251-unknown-none"
 @llvm.used = appending global [1 x ptr] [ptr @plain], section "llvm.metadata"
 define void @plain() { ret void }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_plain", i32 1, i32 0}
 ;--- as4-escape.ll
 ; An ordinary AS4 code pointer escaping through an ordinary global is not a
 ; keepalive item; the v1 object gate still rejects it.
@@ -162,6 +172,9 @@ define void @codefn() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_codefn", i32 1, i32 0}
 ;--- shared-dual.ll
 ; The @codefn cast constant is shared between the verified keepalive root and
 ; an ordinary escaped global. The step-8 exemption is per member path; the
@@ -177,6 +190,9 @@ define void @codefn() {
 }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_codefn", i32 1, i32 0}
 ;--- shared-aggregate.ll
 ; Shared aggregate constant feeding the keepalive root and an ordinary
 ; escaped global (used container first). Not a keepalive item; rejected.
@@ -185,6 +201,9 @@ target triple = "mcs251-unknown-none"
 @leak = global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @plain to ptr)]
 define void @plain() addrspace(4) { ret void }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_plain", i32 1, i32 0}
 ;--- shared-aggregate-reverse.ll
 ; Same dual path with the reversed global ordering; the verdict must not
 ; depend on the order.
@@ -193,6 +212,9 @@ target triple = "mcs251-unknown-none"
 @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @plain to ptr)], section "llvm.metadata"
 define void @plain() addrspace(4) { ret void }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_plain", i32 1, i32 0}
 ;--- shared-isr-aggregate.ll
 ; The identical aggregate reaches both the verified root and ordinary storage.
 ; Unlike the ordinary baseline above, this module has an ISR definition.
@@ -203,6 +225,9 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 { ret void }
 define void @plain() addrspace(4) { ret void }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_plain", i32 1, i32 0}
 ;--- shared-isr-aggregate-reverse.ll
 ; Reverse the terminals of the same shared constant use graph.
 target triple = "mcs251-unknown-none"
@@ -212,6 +237,9 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 { ret void }
 define void @plain() addrspace(4) { ret void }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_plain", i32 1, i32 0}
 ;--- compiler-used.ll
 ; llvm.compiler.used is not a registration root (A2.2 rule 5).
 target triple = "mcs251-unknown-none"
@@ -220,6 +248,8 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 {
   ret void
 }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
+
+!mcs251.signatures = !{}
 
 ;--- bad-root.ll
 ; A malformed llvm.used container (missing the "llvm.metadata" section) is
@@ -231,6 +261,8 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 {
 }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
 
+!mcs251.signatures = !{}
+
 ;--- mixed-member.ll
 ; One verified ISR member plus one ordinary AS4 data member: the container is
 ; never exempted as a whole table.
@@ -241,6 +273,8 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 {
   ret void
 }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
+
+!mcs251.signatures = !{}
 
 ;--- mixed-functions.ll
 ; Legal mixed members: an ISR member next to an ordinary AS4 function member
@@ -254,6 +288,9 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 {
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
 define void @plain() addrspace(4) { ret void }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_plain", i32 1, i32 0}
 ;--- direct.ll
 ; The A2.2 "AS4 direct" root form (no container conversion) is a verified
 ; keepalive shape.
@@ -263,6 +300,8 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 {
   ret void
 }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
+
+!mcs251.signatures = !{}
 
 ;--- two-hop.ll
 ; A no-op pointer-cast chain through an intermediate address space stays a
@@ -274,6 +313,8 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 {
 }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
 
+!mcs251.signatures = !{}
+
 ;--- three-hop.ll
 ; Same as two-hop.ll with one more intermediate address space.
 target triple = "mcs251-unknown-none"
@@ -283,6 +324,8 @@ define internal mcs251_intrcc void @irq() addrspace(4) #0 {
 }
 attributes #0 = { noinline "mcs251-isr-vector"="1" }
 
+!mcs251.signatures = !{}
+
 ;--- ordinary.ll
 ; An ordinary module without any keepalive root.
 target triple = "mcs251-unknown-none"
@@ -290,12 +333,18 @@ define void @plain() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_plain", i32 1, i32 0}
 ;--- isr-eret.mir
 ;MIRHEADER
   target triple = "mcs251-unknown-none"
   @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
   define mcs251_intrcc void @irq() addrspace(4) #0 { ret void }
   attributes #0 = { noinline "mcs251-isr-vector"="1" }
+
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
 ...
 ---
 name: irq
@@ -324,11 +373,13 @@ body: |
     ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
     ERET
 ...
-
 ;--- ordinary-reti.mir
 ;MIRHEADER
   target triple = "mcs251-unknown-none"
   define void @irq() addrspace(4) { ret void }
+
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
 ...
 ---
 name: irq
@@ -357,13 +408,15 @@ body: |
     ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
     RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
 ...
-
 ;--- target-pseudo.mir
 ;MIRHEADER
   target triple = "mcs251-unknown-none"
   @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
   define mcs251_intrcc void @irq() addrspace(4) #0 { ret void }
   attributes #0 = { noinline "mcs251-isr-vector"="1" }
+
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
 ...
 ---
 name: irq
@@ -394,13 +447,15 @@ body: |
     ADJCALLSTACKUP 0, 0
     RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
 ...
-
 ;--- generic-pseudo.mir
 ;MIRHEADER
   target triple = "mcs251-unknown-none"
   @llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq to ptr)], section "llvm.metadata"
   define mcs251_intrcc void @irq() addrspace(4) #0 { ret void }
   attributes #0 = { noinline "mcs251-isr-vector"="1" }
+
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_irq", i32 1, i32 0}
 ...
 ---
 name: irq

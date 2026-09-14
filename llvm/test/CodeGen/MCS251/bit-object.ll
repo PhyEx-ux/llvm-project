@@ -151,32 +151,50 @@ target triple = "mcs251"
 @ext = external global i8 #0
 attributes #0 = { "mcs251-bit-object" }
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- bad-init.ll
 target triple = "mcs251"
 @flag = global i8 2 #0
 attributes #0 = { "mcs251-bit-object" }
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- bad-type.ll
 target triple = "mcs251"
 @flag = global i16 1 #0
 attributes #0 = { "mcs251-bit-object" }
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- bad-tls.ll
 target triple = "mcs251"
 @flag = thread_local global i8 1 #0
 attributes #0 = { "mcs251-bit-object" }
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- extern-only.ll
 target triple = "mcs251"
 @ext = external global i8 #0
 attributes #0 = { "mcs251-bit-object" }
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- keepalive.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
 @llvm.used = appending global [1 x ptr] [ptr @flag], section "llvm.metadata"
 attributes #0 = { "mcs251-bit-object" }
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- keepalive-mixed.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -184,6 +202,9 @@ target triple = "mcs251"
 @llvm.used = appending global [2 x ptr] [ptr @flag, ptr @ordinary], section "llvm.metadata"
 attributes #0 = { "mcs251-bit-object" }
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- escape-load.ll
 target triple = "mcs251"
 @flag = global i8 1 #0
@@ -192,6 +213,9 @@ define i8 @f() {
   %v = load i8, ptr @flag
   ret i8 %v
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- escape-gep.ll
 target triple = "mcs251"
 @flag = global i8 1 #0
@@ -199,18 +223,27 @@ attributes #0 = { "mcs251-bit-object" }
 define ptr @f() {
   ret ptr getelementptr (i8, ptr @flag, i16 1)
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- escape-ptrtoint.ll
 target triple = "mcs251"
 @flag = global i8 1 #0
 attributes #0 = { "mcs251-bit-object" }
 @alias = global i16 ptrtoint (ptr @flag to i16)
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- aggregate-return.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
 attributes #0 = { "mcs251-bit-object" }
 @llvm.used = appending global [1 x ptr] [ptr @flag], section "llvm.metadata"
 define [1 x ptr] @f() { ret [1 x ptr] [ptr @flag] }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- aggregate-export.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -218,12 +251,18 @@ attributes #0 = { "mcs251-bit-object" }
 @llvm.used = appending global [1 x ptr] [ptr @flag], section "llvm.metadata"
 @export = global [1 x ptr] [ptr @flag]
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- cast-shared.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
 attributes #0 = { "mcs251-bit-object" }
 @llvm.used = appending addrspace(1) global [1 x ptr addrspace(1)] [ptr addrspace(1) addrspacecast (ptr @flag to ptr addrspace(1))], section "llvm.metadata"
 define ptr addrspace(1) @f() { ret ptr addrspace(1) addrspacecast (ptr @flag to ptr addrspace(1)) }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0, i32 0}
 ;--- fake-intrinsic.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -231,6 +270,9 @@ attributes #0 = { "mcs251-bit-object" }
 declare void @llvm.mcs251.bit.fake(ptr)
 define void @f() { call void @llvm.mcs251.bit.fake(ptr @flag)
   ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- bundle-intrinsic.ll
 target triple = "mcs251"
 @flag = global i8 0 #0
@@ -238,7 +280,13 @@ attributes #0 = { "mcs251-bit-object" }
 declare void @llvm.mcs251.bit.set(i32)
 define void @f() { call void @llvm.mcs251.bit.set(i32 7) [ "escape"(ptr @flag) ]
   ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- ordinary.ll
 target triple = "mcs251"
 @ordinary = global i8 7
 define void @f() { ret void }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}

@@ -13,6 +13,7 @@
 #include "llvm/BinaryFormat/MCS251Attributes.h"
 #include "llvm/BinaryFormat/MCS251AttributesReader.h"
 #include "llvm/BinaryFormat/MCS251ISR.h"
+#include "llvm/BinaryFormat/MCS251Signatures.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Endian.h"
@@ -181,6 +182,13 @@ struct InputFile {
   // BT12: at most one `.mcs251.bit` per object.
   InputSection *BitSection = nullptr;
   std::vector<BitRecord> BitRecords;
+  // P-4 (freeze 2026-09-14): the decoded Tag 28 signature table.  Present for
+  // every v2 object (the codec rejects a v2 identity without it), so
+  // HasSignatures distinguishes the pre-P4 object the freeze makes a hard
+  // error.  The symbol association and cross-object checks run after the
+  // symbol table is loaded (validateV2Identity only sees the section bytes).
+  bool HasSignatures = false;
+  MCS251Signatures::Table Signatures;
 };
 
 // E3: one occupied DATA range plus its provenance.  The owner string is the
@@ -774,6 +782,21 @@ static bool validateV2Identity(InputFile &F, const InputSection *Attrs,
                                                D.size()),
                                    /*IsBigEndian=*/true, F.V2Identity))
     return fail(Err, F.Path + ": " + toString(std::move(E)));
+
+  // P-4 (freeze 2026-09-14): every v2 object must carry Tag 28.  The codec
+  // already decodes the value strictly (version, reserved bits, record
+  // length, role combinations, bitmap tail, ret domain, name_off, empty
+  // name, duplicate name, trailing blob, call_abi generation), so this stage
+  // only lifts the decoded table into the file for the later symbol and
+  // cross-object passes.
+  if (!F.V2Identity.HasSignatures)
+    return fail(Err, F.Path + ": MCS251 v2 object is missing required " +
+                         MCS251Attributes::tagName(
+                             MCS251Attributes::Tag_FunctionSignatures) +
+                         " (Tag 28); objects produced before P-4 must be "
+                         "rebuilt with the new toolchain");
+  F.HasSignatures = true;
+  F.Signatures = F.V2Identity.Signatures;
 
   // Design §4.2: Tag 4 and the header must agree.  Both are pinned to the
   // registered protocol version; this check makes the agreement explicit and
@@ -1439,9 +1462,31 @@ private:
   uint32_t areaStart(StringRef Name, uint32_t Default) const;
   bool hasAreaStart(StringRef Name) const;
   bool validateIdentitySet();
+
+  // P-4 (freeze 2026-09-14): the object-internal symbol association and the
+  // cross-object consistency passes.  declared here (next to the other
+  // per-set validators) because they run as a pair after resolveSymbols().
+  bool validateFileSignatures(InputFile &F);
+  bool validateSignatureSet();
+
+  /// The set of names this object references through a CODE-target
+  /// relocation (R_MCS251_24 / R_MCS251_J16 / R_MCS251_J11).  This is the
+  /// freeze's "被函数重定位引用" boundary that distinguishes a NOTYPE
+  /// function entry from NOTYPE data (a parameter slot, a stack/range
+  /// marker, a bit handle), all of which are reached through the data-address
+  /// channels R_MCS251_16 and MID8/LO8/HI8.
+  static std::set<StringRef> functionReferencedNames(const InputFile &F);
   bool rejectInputVecs();
   bool resolveSymbols();
   bool buildBitIdentities();
+
+  /// The link-wide set of names reached through a CODE-target relocation
+  /// (R_MCS251_24 / R_MCS251_J16 / R_MCS251_J11) in ANY input object.  Built
+  /// once by validateSignatureSet's caller before the per-file signature
+  /// checks, because the freeze's NOTYPE function-entry boundary is a
+  /// property of the link (a callee may be referenced only by another
+  /// object).
+  std::set<StringRef> LinkFunctionReferenced;
   bool allocateBitSlots();
   bool validateISRIdentitiesAndRegistrations();
   bool synthesizeIRQVectors();
@@ -1705,6 +1750,226 @@ bool Linker::validateIdentitySet() {
        << "; a required capability must be supported before an object that "
           "needs it can be linked";
     return fail(Err, OS.str());
+  }
+  return true;
+}
+
+//===----------------------------------------------------------------------===//
+// P-4 (freeze 2026-09-14): function-signature object-internal and cross-object
+// validation.
+//
+// Three stages, exactly the freeze's reader split:
+//   1. strict Tag 28 value decoder        -- inside MCS251Attributes::decode,
+//      reached from validateV2Identity at load time;
+//   2. object-internal symbol association -- this file, after the symbol table
+//      is loaded (loadFile parses symbols before it returns);
+//   3. cross-object consistency           -- validateSignatureSet(), next to
+//      (and after) validateIdentitySet and before layout.
+//===----------------------------------------------------------------------===//
+
+/// Object-internal rule set: a role=definition record must name a definition
+/// of THIS object (st_shndx != UND), identified as a function entry either by
+/// STT_FUNC or -- because the MCS251 producer emits CRT entries as NOTYPE --
+/// by a NOTYPE symbol that is actually referenced as a function.  A
+/// role=declaration record may have no symbol-table entry at all (an
+/// unreferenced or optimised-away declaration), but if an entry exists it must
+/// be an undefined external function.
+std::set<StringRef>
+Linker::functionReferencedNames(const InputFile &F) {
+  std::set<StringRef> Names;
+  for (const auto &S : F.Sections)
+    for (const Relocation &R : S->Relocs) {
+      if (R.Sym >= F.Symbols.size())
+        continue;
+      const InputSymbol &IS = F.Symbols[R.Sym];
+      if (IS.Name.empty())
+        continue;
+      // Function-entry references are the CODE-target channels:
+      // R_MCS251_24 (the 24-bit code address used by `ecall`/EJMP and code
+      // pointers) and the jump relocations R_MCS251_J16/J11.  The 16-bit
+      // R_MCS251_16 and the MID8/LO8/HI8 byte trio address DATA (a range
+      // boundary, a stack base, an XINIT/XSEG slot), so they must never let
+      // a NOTYPE data symbol masquerade as a function entry.
+      if (R.Type == ELF::R_MCS251_24 || R.Type == ELF::R_MCS251_J16 ||
+          R.Type == ELF::R_MCS251_J11)
+        Names.insert(IS.Name);
+    }
+  return Names;
+}
+
+bool Linker::validateFileSignatures(InputFile &F) {
+  if (!F.IsV2 || !F.HasSignatures)
+    return true;
+
+  // The freeze's NOTYPE boundary is "名字在签名域内且被函数重定位引用":
+  // the name must be referenced as a code target.  The reference may live in
+  // ANOTHER object (the CRT's `ecall _main` targets a `_main` defined in the
+  // demo object), so the set is the link-wide union, not this file's own
+  // relocations.
+  const std::set<StringRef> &FunctionReferenced = LinkFunctionReferenced;
+
+  for (const MCS251Signatures::Record &Rec : F.Signatures.Records) {
+    const std::string &Name = Rec.Name;
+
+    // Find every symbol-table entry with this exact name.  Duplicate
+    // definitions are rejected by resolveSymbols; here we only need enough
+    // evidence to classify the name.
+    std::vector<const InputSymbol *> Entries;
+    for (const InputSymbol &IS : F.Symbols)
+      if (IS.Name == Name)
+        Entries.push_back(&IS);
+
+    if (MCS251Signatures::isDefinitionRole(Rec.Role)) {
+      // A definition record must name a function definition in THIS object.
+      bool FoundDef = false;
+      bool SeenUndefined = false;
+      bool SeenNonFunction = false;
+      for (const InputSymbol *IS : Entries) {
+        if (!IS->Defined) {
+          SeenUndefined = true;
+          continue;
+        }
+        if (IS->Type != ELF::STT_FUNC && IS->Type != ELF::STT_NOTYPE) {
+          SeenNonFunction = true;
+          continue;
+        }
+        if (IS->Type == ELF::STT_NOTYPE &&
+            !FunctionReferenced.count(IS->Name)) {
+          // A NOTYPE symbol that is never a code-relocation target in the
+          // whole link is data (a stack/range boundary, a section marker)
+          // and cannot be the function a definition record names.
+          SeenNonFunction = true;
+          continue;
+        }
+        FoundDef = true;
+      }
+      if (!FoundDef) {
+        if (SeenUndefined)
+          return fail(Err, F.Path + ": MCS251 signature '" + Name +
+                               "' claims a definition, but the symbol is only "
+                               "declared (undefined) in this object");
+        if (SeenNonFunction)
+          return fail(Err, F.Path + ": MCS251 signature '" + Name +
+                               "' claims a definition, but the symbol is not a "
+                               "function definition in this object");
+        return fail(Err, F.Path + ": MCS251 signature '" + Name +
+                             "' claims a definition, but this object has no "
+                             "such symbol");
+      }
+    } else {
+      // A declaration/reference record may name a name with no symbol-table
+      // entry at all.  When an entry exists it must be an external undefined
+      // FUNCTION: a definition here would be a mislabelled role, and a
+      // non-function definition cannot carry a function signature.  The type
+      // is checked as well as the binding: a `STB_GLOBAL + SHN_UNDEF +
+      // STT_OBJECT` symbol is valid object input but is DATA, so a signature
+      // that declares it as a function must be refused.  STT_FUNC is a
+      // function, and STT_NOTYPE is one when the link references it through a
+      // code-target relocation (the same boundary validateFileSignatures and
+      // the coverage pass use) -- otherwise it is data too.
+      for (const InputSymbol *IS : Entries) {
+        if (!IS->Defined) {
+          if (IS->Bind != ELF::STB_GLOBAL)
+            return fail(Err, F.Path + ": MCS251 signature '" + Name +
+                                 "' is declared, but its symbol is not an "
+                                 "external (global) undefined symbol");
+          const bool IsFunction =
+              IS->Type == ELF::STT_FUNC ||
+              (IS->Type == ELF::STT_NOTYPE &&
+               LinkFunctionReferenced.count(IS->Name));
+          if (!IsFunction)
+            return fail(Err, F.Path + ": MCS251 signature '" + Name +
+                                 "' is declared as a function, but its symbol "
+                                 "is not a function type in this object");
+          continue;
+        }
+        return fail(Err, F.Path + ": MCS251 signature '" + Name +
+                             "' is a declaration/reference, but this object "
+                             "defines the symbol");
+      }
+    }
+  }
+  return true;
+}
+
+/// The freeze's per-record comparison semantics applied across every v2
+/// object of the link, plus the per-object coverage rule: each object must
+/// carry a record for every external function definition and every
+/// recognisable external function declaration/reference of its own; a record
+/// in another object must not stand in for a missing one here.
+bool Linker::validateSignatureSet() {
+  const InputFile *V2 = nullptr;
+  for (const auto &F : Files)
+    if (F->IsV2) {
+      V2 = F.get();
+      break;
+    }
+  if (!V2)
+    return true; // no v2 object: nothing to check.
+
+  // Cross-object: for one name, every record found in the link must agree
+  // under compareRecords().  The first v2 object in command-line order is the
+  // reference, exactly like validateIdentitySet, so diagnostics name a stable
+  // pair.
+  std::map<std::string, const InputFile *> Owner;
+  std::map<std::string, const MCS251Signatures::Record *> First;
+  for (const auto &F : Files) {
+    if (!F->IsV2)
+      continue;
+    for (const MCS251Signatures::Record &Rec : F->Signatures.Records) {
+      auto It = First.find(Rec.Name);
+      if (It == First.end()) {
+        First[Rec.Name] = &Rec;
+        Owner[Rec.Name] = F.get();
+        continue;
+      }
+      if (llvm::Error E = MCS251Signatures::compareRecords(
+              *It->second, Rec,
+              Owner[Rec.Name]->Path + " vs " + F->Path))
+        return fail(Err, F->Path + ": " + toString(std::move(E)));
+    }
+  }
+
+  // Per-object coverage.  The record-count zero case is legal only when the
+  // object's own external-function domain is empty.
+  for (const auto &F : Files) {
+    if (!F->IsV2)
+      continue;
+    std::set<std::string> Covered;
+    for (const MCS251Signatures::Record &Rec : F->Signatures.Records)
+      Covered.insert(Rec.Name);
+    // Every STT_FUNC symbol is a function.  A STT_NOTYPE symbol is a function
+    // exactly when the LINK references it through a code-target relocation
+    // (the freeze's "被函数重定位引用"); this holds for a DEFINITION too, so
+    // the test must not be restricted to undefined symbols.  The reference may
+    // live in another object (the CRT's `ecall _main` targets a `_main`
+    // defined in the demo object), hence the link-wide set -- otherwise a
+    // defined NOTYPE function could hide behind another object's call.
+    //
+    // The binding test is the only name-based exemption: a local symbol is
+    // outside the signature domain, while a `.L`-prefixed GLOBAL
+    // STT_FUNC/function-referenced NOTYPE symbol (an explicit asm label) is
+    // NOT, so it must not be skipped by prefix.
+    for (const InputSymbol &IS : F->Symbols) {
+      if (IS.Name.empty() || IS.Bind == ELF::STB_LOCAL)
+        continue;
+      const bool IsFunc = IS.Type == ELF::STT_FUNC;
+      // A static parameter slot (`<callee>_PARM_<n>`) and a symbolic bit
+      // handle are STT_NOTYPE but are DATA: they are addressed as memory /
+      // bit-address operands, never as direct call targets, so they are not
+      // in LinkFunctionReferenced and carry no signature requirement.
+      const bool IsFunctionNotype =
+          IS.Type == ELF::STT_NOTYPE && LinkFunctionReferenced.count(IS.Name);
+      if (!IsFunc && !IsFunctionNotype)
+        continue;
+      if (!Covered.count(IS.Name))
+        return fail(Err, F->Path + ": MCS251 v2 object has an external "
+                             "function '" +
+                             IS.Name +
+                             "' with no function-signature record in its own "
+                             ".mcs251.attributes Tag 28; another object's "
+                             "record must not stand in for a missing one");
+    }
   }
   return true;
 }
@@ -4048,6 +4313,22 @@ bool Linker::run(LinkerResult &Result) {
   if (!validateIdentitySet())
     return false;
   if (!resolveSymbols())
+    return false;
+  // P-4 (freeze 2026-09-14): the signature symbol association needs the
+  // loaded symbol table, and the cross-object consistency pass needs the
+  // per-object verdicts.  Both run after resolveSymbols (which is where the
+  // symbol table becomes final) and before any layout work, matching the
+  // "布局前" timing the freeze names.
+  // The link-wide code-reference set: the freeze's NOTYPE function-entry
+  // evidence may come from another object (the CRT ecall targets a demo's
+  // `_main`), so gather it across every input before the per-file checks.
+  for (const auto &F : Files)
+    for (const StringRef N : functionReferencedNames(*F))
+      LinkFunctionReferenced.insert(N);
+  for (auto &F : Files)
+    if (!validateFileSignatures(*F))
+      return false;
+  if (!validateSignatureSet())
     return false;
   if (!buildBitIdentities())
     return false;

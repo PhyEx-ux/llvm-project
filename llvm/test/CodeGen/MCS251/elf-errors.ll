@@ -16,13 +16,22 @@
 define void @difference() prefix i16 trunc (i32 sub (i32 ptrtoint (ptr @a to i32), i32 ptrtoint (ptr @b to i32)) to i16) {
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_difference", i32 1, i32 0}
 ;--- mutable.ll
 @g = global ptr inttoptr (i32 4096 to ptr), align 1
 define void @f() {
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- align.ll
 @g = constant i16 17, align 2
 define void @f() {
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}

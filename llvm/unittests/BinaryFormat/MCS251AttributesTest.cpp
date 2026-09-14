@@ -19,6 +19,7 @@
 
 #include "llvm/BinaryFormat/MCS251AttributesReader.h"
 #include "llvm/BinaryFormat/MCS251AttributesWriter.h"
+#include "llvm/BinaryFormat/MCS251Signatures.h"
 #include "llvm/Support/Error.h"
 #include <cctype>
 #include <optional>
@@ -67,6 +68,15 @@ constexpr const char *FixtureHex =
 
 class MCS251AttributesTest : public ::testing::Test {};
 
+/// P-4 (freeze 2026-09-14): Tag 28 is now a RequiredTag, so a complete v2
+/// identity always carries it.  The lifecycle tests below use the frozen
+/// empty set (`01 00 00 00`); its value and the encoder/decoder behaviour for
+/// real records live in MCS251SignaturesTest.cpp.
+static const MCS251Signatures::Table &EmptySignatures() {
+  static const MCS251Signatures::Table T;
+  return T;
+}
+
 // A complete first-slice identity with all required tags and the registered
 // values (the XSmall profile: as0_pointer_bits 32, default_placement 8),
 // minus the one tag named by \p Skip (nullopt = complete).  The field values
@@ -103,6 +113,10 @@ static void addCompleteIdentity(Writer &W,
   U32(Tag_CodeModelProfile, CodeModelProfile);
   U32(Tag_CodePointerBits, CodePointerBits);
   U32(Tag_ObjectProtocolMinor, ObjectProtocolMinor);
+  if (Tag_FunctionSignatures != Skip)
+    W.addBytes(Tag_FunctionSignatures,
+               MCS251Signatures::encode(EmptySignatures()),
+               /*Critical=*/true);
 }
 
 TEST_F(MCS251AttributesTest, EnvelopeDecodesFromFixture) {
@@ -345,12 +359,16 @@ TEST_F(MCS251AttributesTest, CompleteIdentityRoundTrips) {
   W.addU32(Tag_CodeModelProfile, CodeModelProfile);
   W.addU32(Tag_CodePointerBits, CodePointerBits);
   W.addU32(Tag_ObjectProtocolMinor, ObjectProtocolMinor);
+  W.addBytes(Tag_FunctionSignatures, MCS251Signatures::encode(EmptySignatures()),
+             /*Critical=*/true);
 
   std::string Bytes = W.render(/*IsBigEndian=*/true);
   Decoded D;
   Error E = decode(Bytes, true, D);
   ASSERT_FALSE(bool(E)) << toString(std::move(E));
 
+  EXPECT_TRUE(D.HasSignatures);
+  EXPECT_TRUE(D.Signatures.empty());
   EXPECT_EQ(D.find(Tag_ObjectProtocolVersion)->Scalar, 2u);
   EXPECT_EQ(D.find(Tag_AS0PointerBits)->Scalar, 32u);
   EXPECT_EQ(D.find(Tag_DefaultPlacement)->Scalar, 8u);
@@ -739,7 +757,8 @@ TEST_F(MCS251AttributesTest, CompleteIdentityEmittedBytesAreFrozen) {
   // pins the exact emitted bytes, not just a decode round-trip:
   //   envelope: 41 | VendorSize=16+P | "MCS251\0" | 01 | ScopeSize=5+P
   //   P = 20 U32 records (7 bytes each) + the MIX record (3 + 12 bytes)
-  //     = 155, so VendorSize = 171 (0xAB) and ScopeSize = 160 (0xA0).
+  //     + the P-4 Tag 28 empty-signature record (3 + 4 bytes) = 162, so
+  //     VendorSize = 178 (0xB2) and ScopeSize = 167 (0xA7).
   // The values are the A4-registered set (PM ruling 2026-09-13): call ABI
   // 2/1, register parameter variant 3, AS layout 2, placement 8, the four
   // subprotocols 2, capabilities 0/0, abi_options 0, code model 1, object
@@ -747,12 +766,12 @@ TEST_F(MCS251AttributesTest, CompleteIdentityEmittedBytesAreFrozen) {
   Writer W;
   addCompleteIdentity(W);
   std::string Bytes = W.render(/*IsBigEndian=*/true);
-  EXPECT_EQ(Bytes.size(), 172u) << "17-byte envelope + P=155";
+  EXPECT_EQ(Bytes.size(), 179u) << "17-byte envelope + P=162";
 
   static const char *ExpectedHex =
       // clang-format off
       // Envelope (big-endian u32 lengths).
-      "41" "000000AB" "4D435332353100" "01" "000000A0"
+      "41" "000000B2" "4D435332353100" "01" "000000A7"
       // Twenty U32 records, tag order 4..20.
       "04810400000002" "05810400000002" "06810400000001"
       "07810400000003" "0881040000F3FF" "09810400000020"
@@ -764,7 +783,10 @@ TEST_F(MCS251AttributesTest, CompleteIdentityEmittedBytesAreFrozen) {
       // + length(1) + value(4) = 6 bytes, so the record length is 12.
       "18830C" "01" "04" "00000020" "01" "04" "00000008"
       // Remaining U32 records, tag order 25..27.
-      "19810400000001" "1A810400000020" "1B810400000000";
+      "19810400000001" "1A810400000020" "1B810400000000"
+      // P-4 Tag 28: VT_BYTES (0x84 Critical), length 4, the frozen empty set
+      // 01 00 00 00 (version=1, flags=0, count=0, empty blob).
+      "1C8404" "01000000";
       // clang-format on
   // toHex emits lowercase; compare case-insensitively.
   std::string Lower(ExpectedHex);
@@ -784,13 +806,15 @@ TEST_F(MCS251AttributesTest, RegisteredIdentityMatchesFrozenBytes) {
   // differ from it in exactly the two placement fields (Tag 13 and the
   // memory_model_profile placement atom).
   std::string XSmall = renderRegisteredIdentity(
-      MemoryModelProfile_XSmall.AS0PointerBits, MemoryModelProfile_XSmall.Placement);
+      MemoryModelProfile_XSmall.AS0PointerBits,
+      MemoryModelProfile_XSmall.Placement, EmptySignatures());
   Writer W;
   addCompleteIdentity(W);
   EXPECT_EQ(XSmall, W.render(/*IsBigEndian=*/true));
 
   std::string Small = renderRegisteredIdentity(
-      MemoryModelProfile_Small.AS0PointerBits, MemoryModelProfile_Small.Placement);
+      MemoryModelProfile_Small.AS0PointerBits,
+      MemoryModelProfile_Small.Placement, EmptySignatures());
   EXPECT_EQ(Small.size(), XSmall.size());
   // The only differences are Tag 13 (default_placement, the 10th record:
   // tag 4 is at payload offset 0, each U32 record is 7 bytes) and the
@@ -834,9 +858,10 @@ TEST_F(MCS251AttributesTest, RegisteredIdentityRejectsUnregisteredProfiles) {
        {MemoryModelProfile_Tiny, MemoryModelProfile_XTiny,
         MemoryModelProfile_Large})
     EXPECT_DEATH(
-        renderRegisteredIdentity(P.AS0PointerBits, P.Placement),
+        renderRegisteredIdentity(P.AS0PointerBits, P.Placement,
+                                 EmptySignatures()),
         "is not registered for A4 v2 object emission");
-  EXPECT_DEATH(renderRegisteredIdentity(32, 3),
+  EXPECT_DEATH(renderRegisteredIdentity(32, 3, EmptySignatures()),
                "is not registered for A4 v2 object emission");
 }
 

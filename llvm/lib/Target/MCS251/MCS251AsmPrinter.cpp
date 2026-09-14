@@ -39,6 +39,7 @@
 
 #include "MCS251.h"
 #include "MCS251BitObject.h"
+#include "MCS251HelperABI.h"
 #include "MCS251InstrInfo.h"
 #include "MCS251MCInstLower.h"
 #include "MCS251TargetMachine.h"
@@ -56,6 +57,7 @@
 #include "llvm/BinaryFormat/MCS251AttributesWriter.h"
 #include "llvm/BinaryFormat/MCS251Bit.h"
 #include "llvm/BinaryFormat/MCS251ISR.h"
+#include "llvm/BinaryFormat/MCS251Signatures.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -65,6 +67,9 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalAlias.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Mangler.h"
+#include "llvm/IR/Metadata.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
@@ -151,6 +156,21 @@ class MCS251AsmPrinter final : public AsmPrinter {
   // writer before initSections, so the v1 note is never emitted) and the
   // `.mcs251.attributes` section in emitEndOfAsmFile.
   bool ModuleV2Identity = false;
+
+  // P-4 (freeze 2026-09-14): the function-signature table assembled for this
+  // compilation.  Built once per module in emitStartOfAsmFile from the
+  // `!mcs251.signatures` named metadata (the producer's source-typed record),
+  // augmented with records for backend-generated external libcalls whose ABI
+  // is registered (MCS251HelperABI.h), and handed to the attributes codec in
+  // emitEndOfAsmFile.  FunctionSignaturesBuilt distinguishes "already
+  // assembled" from "not a v2 object"; it is reset per module.
+  MCS251Signatures::Table FunctionSignatures;
+  StringSet<> FunctionSignatureNames;
+  bool FunctionSignaturesBuilt = false;
+  // Final ELF symbols of backend-generated external libcalls actually seen in
+  // the machine stream, collected during function emission and folded into
+  // FunctionSignatures before the object identity is published.
+  StringSet<> PendingHelperSymbols;
 
   const MCS251TargetMachine &getMCS251TM() const {
     return static_cast<const MCS251TargetMachine &>(TM);
@@ -1337,6 +1357,25 @@ public:
           DeclaredExternalSymbols.insert(Sym->getName()).second)
         OutStreamer->emitSymbolAttribute(Sym, MCSA_Global);
     }
+    // P-4: backend-generated external libcalls surface here as
+    // MO_ExternalSymbol operands of a call (never as an IR function, so the
+    // module-wide coverage check above cannot see them).  Collect the final
+    // ELF symbol name of every external-symbol call target that is not a
+    // static parameter slot; a registered helper ABI becomes a Tag 28 record,
+    // an unregistered one is a hard error at finalization.
+    if (FunctionSignaturesBuilt) {
+      for (const MachineOperand &MO : MI->operands()) {
+        if (!MO.isSymbol())
+          continue;
+        MCSymbol *Sym = GetExternalSymbolSymbol(MO.getSymbolName());
+        StringRef Name = Sym->getName();
+        if (LocalParameterSlots.contains(Name))
+          continue;
+        if (Name.contains("_PARM_"))
+          continue; // a static parameter slot of any callee, never a function
+        PendingHelperSymbols.insert(Name);
+      }
+    }
     MCS251_MC::verifyInstructionPredicates(MI->getOpcode(),
                                            getSubtargetInfo().getFeatureBits());
 
@@ -1431,6 +1470,196 @@ public:
     return V1Compatible;
   }
 
+  //===--------------------------------------------------------------------===//
+  // P-4 (freeze 2026-09-14): function-signature collection.
+  //
+  // clang publishes one `!mcs251.signatures` node per external-linkage
+  // function the TU declares or defines, carrying the SOURCE-typed signature
+  // (the AST still knows `bit` from `unsigned char`).  llc must never
+  // re-derive a signature from the i8 boundary, so this reader is the only
+  // producer of Tag 28 records, plus the registered-helper ABI table for
+  // backend-generated external libcalls.
+  //===--------------------------------------------------------------------===//
+
+  /// Read one i32 operand, or std::nullopt when the operand is missing or not
+  /// an integer constant.  A malformed node is a hard error at the caller.
+  static std::optional<uint64_t> metadataU32(const MDNode &N, unsigned I) {
+    if (I >= N.getNumOperands())
+      return std::nullopt;
+    const auto *CI = mdconst::dyn_extract<ConstantInt>(N.getOperand(I));
+    if (!CI || CI->getBitWidth() > 64)
+      return std::nullopt;
+    return CI->getZExtValue();
+  }
+
+  /// Decode one metadata node into a Table record.  Returns an error string
+  /// (empty on success) so the caller can fold in the node index.
+  std::string decodeMetadataNode(const MDNode &N,
+                                 MCS251Signatures::Record &Out) const {
+    // Mandatory operands are name/role/ret; the source-parameter bit-ness
+    // operands follow, so a zero-parameter function is a legal 3-operand node.
+    if (N.getNumOperands() < MCS251Signatures::MetadataOperandFirstParam)
+      return "node has fewer than the 3 mandatory operands "
+             "(name, role, return bit-ness)";
+    const auto *NameMD = dyn_cast<MDString>(N.getOperand(
+        MCS251Signatures::MetadataOperandName));
+    if (!NameMD || NameMD->getString().empty())
+      return "operand 0 must be a non-empty MDString (the final ELF symbol)";
+    std::optional<uint64_t> Role = metadataU32(
+        N, MCS251Signatures::MetadataOperandRole);
+    std::optional<uint64_t> Ret = metadataU32(
+        N, MCS251Signatures::MetadataOperandRet);
+    if (!Role || *Role > 0xff)
+      return "operand 1 must be an i32 role byte";
+    if (!Ret || *Ret > 1)
+      return "operand 2 must be the i32 return bit-ness (0 or 1)";
+
+    StringRef Name = NameMD->getString();
+    // The name is FINAL: a `\01` asm-label escape is stripped by the producer
+    // (clang's getMangledName returns the bare target name there), so the only
+    // rule llc enforces is that the string is a plain symbol -- never a raw
+    // source spelling and never a second prefix.
+    uint8_t RoleByte = uint8_t(*Role);
+    uint8_t Def = RoleByte & MCS251Signatures::Role_DefinitionMask;
+    if (Def != MCS251Signatures::Role_HasDefinition &&
+        Def != MCS251Signatures::Role_DeclaredNotDefined)
+      return ("role bits 0..1 must be 1 (definition) or 2 (declaration), got " +
+              Twine(unsigned(Def))).str();
+    if (RoleByte & MCS251Signatures::Role_ReservedMask)
+      return "role bits 4..7 are reserved and must be zero";
+
+    const bool NoProto = MCS251Signatures::hasNoPrototype(RoleByte);
+    const bool Variadic = MCS251Signatures::isVariadic(RoleByte);
+    if (NoProto && Variadic)
+      return "a K&R no-prototype record cannot also be variadic";
+
+    const unsigned ParamCount =
+        N.getNumOperands() - MCS251Signatures::MetadataOperandFirstParam;
+    if (ParamCount > 255)
+      return "more than 255 source parameters is not representable";
+    if (NoProto && ParamCount != 0)
+      return "a K&R no-prototype record must carry no source parameters";
+
+    std::vector<uint8_t> Bitmap(MCS251Signatures::bitmapBytes(
+                                    uint8_t(ParamCount)),
+                                0);
+    for (unsigned I = 0; I != ParamCount; ++I) {
+      std::optional<uint64_t> Bit = metadataU32(
+          N, MCS251Signatures::MetadataOperandFirstParam + I);
+      if (!Bit || *Bit > 1)
+        return ("source parameter " + Twine(I) +
+                " must carry an i32 bit-ness (0 or 1)")
+                   .str();
+      MCS251Signatures::bitmapSet(Bitmap, I, *Bit != 0);
+    }
+
+    // The embedded call_abi generation must equal this object's identity.
+    Out = MCS251Signatures::makeRecord(
+        Name, Def == MCS251Signatures::Role_HasDefinition,
+        ParamCount, Bitmap, *Ret != 0, NoProto, Variadic,
+        uint8_t(MCS251Attributes::CallABIMajor),
+        uint8_t(MCS251Attributes::CallABIMinor));
+    return std::string();
+  }
+
+  /// Assemble FunctionSignatures from the module's `!mcs251.signatures`
+  /// metadata plus the registered-helper records, enforcing the freeze's
+  /// "clang 在发射前校验全部源外部声明/定义均已登记" on the llc side too:
+  /// every in-scope external function of the final module must be covered.
+  void buildFunctionSignatures(Module &M) {
+    FunctionSignatures = MCS251Signatures::Table();
+    FunctionSignatureNames.clear();
+    FunctionSignaturesBuilt = true;
+
+    NamedMDNode *MD = M.getNamedMetadata(MCS251Signatures::MetadataName);
+    if (!MD)
+      report_fatal_error(
+          "MCS251: a v2 object requires `!mcs251.signatures` metadata; a "
+          "module without it cannot produce a legal v2 identity (hand-written "
+          "IR authors must provide it explicitly)");
+
+    for (unsigned I = 0, E = MD->getNumOperands(); I != E; ++I) {
+      const MDNode *N = MD->getOperand(I);
+      if (!N)
+        report_fatal_error("MCS251: `!mcs251.signatures` operand " + Twine(I) +
+                           " is null");
+      MCS251Signatures::Record R;
+      std::string Err = decodeMetadataNode(*N, R);
+      if (!Err.empty())
+        report_fatal_error("MCS251: `!mcs251.signatures` node " + Twine(I) +
+                           " is malformed: " + Err);
+      if (!FunctionSignatureNames.insert(R.Name).second)
+        report_fatal_error(Twine("MCS251: `!mcs251.signatures` carries "
+                                 "duplicate function '") +
+                           R.Name + "'");
+      FunctionSignatures.Records.push_back(std::move(R));
+    }
+
+    // Freeze: the metadata must cover EVERY source external-linkage function
+    // the TU declares or defines, not just the ones that survived to a
+    // definition or a call.  llc checks the final module; clang checks the
+    // AST before emitting.  Both must hold, so a node that is dropped or a
+    // declaration the producer forgot is caught here.
+    for (const Function &F : M) {
+      if (F.isIntrinsic())
+        continue;
+      if (!F.hasExternalLinkage())
+        continue; // local/internal functions are outside the signature domain
+      std::string Final = getSymbolName(&F);
+      if (!FunctionSignatureNames.contains(Final))
+        report_fatal_error("MCS251: external function '" + F.getName() +
+                           "' (ELF symbol '" + Final +
+                           "') is missing from `!mcs251.signatures`; every "
+                           "source external declaration and definition must "
+                           "be registered");
+    }
+  }
+
+  /// Fold a backend-generated external libcall into FunctionSignatures.
+  /// \p FinalSymbol is the final ELF symbol; an unregistered ABI is the
+  /// freeze's fail-closed "未登记 ABI 的外部 libcall 硬错".
+  void recordHelperLibcall(StringRef FinalSymbol) {
+    if (FunctionSignatureNames.contains(FinalSymbol))
+      return; // already carried by the source metadata (or a previous helper).
+    const MCS251::HelperABI *H = MCS251::lookupHelperABI(FinalSymbol);
+    if (!H)
+      report_fatal_error(
+          "MCS251: backend-generated external libcall '" + FinalSymbol +
+          "' has no registered helper ABI; refusing to emit a v2 object "
+          "with an unregistered external helper signature");
+    MCS251Signatures::Record R = MCS251Signatures::makeRecord(
+        H->Symbol, /*IsDefinition=*/false, H->ParamCount, /*Bitmap=*/{},
+        /*Ret=*/false, /*NoPrototype=*/false, /*Variadic=*/false,
+        uint8_t(MCS251Attributes::CallABIMajor),
+        uint8_t(MCS251Attributes::CallABIMinor));
+    FunctionSignatureNames.insert(R.Name);
+    FunctionSignatures.Records.push_back(std::move(R));
+  }
+
+  /// Finalize the table just before the carriers are published: append the
+  /// helper records seen in the machine stream.  Names are kept unique.
+  void finalizeFunctionSignatures() {
+    if (!FunctionSignaturesBuilt)
+      return;
+    for (const auto &Entry : PendingHelperSymbols)
+      recordHelperLibcall(Entry.getKey());
+    PendingHelperSymbols.clear();
+  }
+
+  /// The final ELF symbol name of \p GV, exactly as the object will carry it
+  /// (target mangling applied, `\01` escape stripped).  llc never re-prefixes
+  /// a name; it reports what the mangler produced.
+  ///
+  /// Returns an owning std::string: the mangled name is derived into a local
+  /// SmallString, so handing back a StringRef over that buffer would dangle
+  /// (a short name reads freed stack, a long one freed heap).  Callers must
+  /// keep the returned value alive for as long as they use the name.
+  std::string getSymbolName(const GlobalValue *GV) const {
+    SmallString<128> Buf;
+    Mangler::getNameWithPrefix(Buf, GV->getName(), getDataLayout());
+    return std::string(Buf);
+  }
+
   // A4/W2: arm the v2 identity publication for this compilation.  Must run
   // before the ELF streamer's initSections (the codegen path guarantees
   // this: doInitialization classifies before calling the base class) so the
@@ -1463,6 +1692,13 @@ public:
     // through: one entry per placeholder, keyed by its MC symbol. `&flag` in
     // MIR mangles to the same MCContext symbol, so the ExternalSymbol and
     // GlobalAddress spellings of one object converge on one entry here.
+    // P-4: assemble this module's function-signature table.  Only a v2
+    // object carries Tag 28, so the metadata is mandatory exactly there; the
+    // v1 identity and the REL/asm inspection artifacts never read it.
+    if (ModuleV2Identity && getMCS251TM().emitsObjectFile()) {
+      buildFunctionSignatures(M);
+      PendingHelperSymbols.clear();
+    }
     BitObjectSymbols.clear();
     if (ModuleHasBitObjects) {
       for (const GlobalVariable &GV : M.globals())
@@ -1597,8 +1833,13 @@ public:
     if (!Contract || !Contract->isSpecified())
       report_fatal_error("MCS251: the v2 object identity requires a "
                          "specified v2 memory contract");
+    // P-4: fold in the registered-helper records for any backend-generated
+    // external libcall seen in the machine stream; an unregistered helper ABI
+    // fails closed here, before any identity byte is rendered.
+    finalizeFunctionSignatures();
     std::string SectionBytes = MCS251Attributes::renderRegisteredIdentity(
-        Contract->AS0PointerBits, Contract->DefaultPlacement);
+        Contract->AS0PointerBits, Contract->DefaultPlacement,
+        FunctionSignatures);
     MCS251Attributes::Decoded Decoded;
     if (llvm::Error E = MCS251Attributes::decode(SectionBytes,
                                                  /*IsBigEndian=*/true, Decoded)) {

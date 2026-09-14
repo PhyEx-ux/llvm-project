@@ -69,6 +69,9 @@ define void @f() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- tab.ll
 @msg = private unnamed_addr addrspace(4) constant [5 x i8] c"boot\00", align 1
 @plotmodetxt = global [2 x ptr addrspace(4)] [ptr addrspace(4) @msg, ptr addrspace(4) @msg], align 1
@@ -78,6 +81,9 @@ define void @f() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- struct.ll
 @s = addrspace(4) global { i8, i16 } { i8 1, i16 2 }
 
@@ -85,9 +91,15 @@ define void @f() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- scalar-align.ll
 @a = addrspace(4) global i16 4951, align 2
 
 define void @f() {
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}

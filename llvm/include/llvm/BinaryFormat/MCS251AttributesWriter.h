@@ -28,6 +28,7 @@
 #define LLVM_BINARYFORMAT_MCS251ATTRIBUTESWRITER_H
 
 #include "llvm/BinaryFormat/MCS251Attributes.h"
+#include "llvm/BinaryFormat/MCS251Signatures.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -97,6 +98,14 @@ void encodeULEB128Padded(uint64_t Value, unsigned Bytes, std::string &Out);
 /// MCS251 v2 object path.
 std::string renderRegisteredIdentity(uint32_t AS0PointerBits,
                                      uint32_t DefaultPlacement);
+
+/// As above, but with a P-4 Tag 28 whose value is \p Signatures.  This is the
+/// production assembler for a v2 object that carries function signatures; the
+/// payload is re-validated by the strict decoder before it is returned, so an
+/// unencodable signature set fails closed here rather than reaching a section.
+std::string renderRegisteredIdentity(uint32_t AS0PointerBits,
+                                     uint32_t DefaultPlacement,
+                                     const MCS251Signatures::Table &Signatures);
 
 } // end namespace MCS251Attributes
 } // end namespace llvm

@@ -121,6 +121,9 @@ define void @f() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- extern.ll
 @ext = external addrspace(3) global [16 x i8]
 @extc = external addrspace(4) global i8
@@ -129,6 +132,9 @@ define void @g() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_g", i32 1, i32 0}
 ;--- ptrleaf.ll
 @q = addrspace(3) global [2 x i8] zeroinitializer, align 1
 @p = addrspace(3) global ptr addrspace(3) @q, align 1
@@ -137,6 +143,9 @@ define void @h() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_h", i32 1, i32 0}
 ;--- addend.ll
 ; The legal GEP form: base is a GlobalVariable, indices fold to constants.
 @g = addrspace(3) global [8 x i8] zeroinitializer, align 1
@@ -146,6 +155,9 @@ define void @f() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- huge.ll
 @big = addrspace(3) global [65536 x i8] zeroinitializer, align 1
 
@@ -153,6 +165,9 @@ define void @f() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- align.ll
 @a = addrspace(3) global [4 x i8] zeroinitializer, align 2
 
@@ -160,6 +175,9 @@ define void @f() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- gepnull.ll
 ; GEP null: the base is not an object identity, the leaf stays rejected.
 @q = global ptr addrspace(3) getelementptr (i8, ptr addrspace(3) null, i32 4), align 1
@@ -168,6 +186,9 @@ define void @f() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- inttoptr.ll
 ; An absolute integer laundered into a pointer: never a placement leaf.
 @q = global ptr addrspace(3) inttoptr (i32 16 to ptr addrspace(3)), align 1
@@ -176,6 +197,9 @@ define void @f() {
   ret void
 }
 
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
 ;--- ascast.ll
 ; A GEP over an addrspacecast must not launder the AS4 base into an AS3
 ; pointer leaf (the base must be the GlobalVariable itself, no casts).
@@ -185,3 +209,6 @@ define void @f() {
 define void @f() {
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}

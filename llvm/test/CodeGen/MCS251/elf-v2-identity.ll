@@ -9,8 +9,8 @@
 ; The A4 v2 object identity (design §3.1/§3.2, PM ruling 2026-09-13, re-ruled
 ; #2 by W3b): any module under a specified v2 contract emits e_flags=0x102
 ; and exactly one `.mcs251.attributes` whose bytes are the registered
-; minimal identity set (all 21 RequiredTags, tags 21-23 omitted), and it
-; carries NO v1 ABI note. XSmall pins the whole 172-byte section; Small
+; minimal identity set (all 22 RequiredTags, tags 21-23 omitted), and it
+; carries NO v1 ABI note. XSmall pins the whole 195-byte section; Small
 ; differs only in the two placement fields (Tag 13 and the
 ; memory_model_profile placement atom).
 ;
@@ -19,13 +19,13 @@
 ; COMMON-NOT: .note.mcs251.abi
 ; COMMON: Name: .mcs251.attributes
 ; COMMON: Type: Unknown (0x70000003)
-; COMMON: Size: 172
+; COMMON: Size: 195
 ; COMMON: AddressAlignment: 1
 ;
-; Envelope: 0x41 | BE32 VendorSize=0xAB (16+155) | "MCS251\0" | scope 1 |
-; BE32 ScopeSize=0xA0 (5+155).
-; COMMON: 0000: 41000000 AB4D4353 32353100 01000000
-; COMMON-NEXT: 0010: A0048104 00000002 05810400 00000206
+; Envelope: 0x41 | BE32 VendorSize=0xC2 (16+178) | "MCS251\0" | scope 1 |
+; BE32 ScopeSize=0xB7 (5+178).
+; COMMON: 0000: 41000000 C24D4353 32353100 01000000
+; COMMON-NEXT: 0010: B7048104 00000002 05810400 00000206
 ; Tags 4..20, strictly increasing, every record Critical (0x81) with ULEB
 ; length 4. Registered values: object protocol 2, call ABI 2/1 (the minor
 ; value 1 is the sole "static pointer slots" carrier), register parameter
@@ -43,14 +43,21 @@
 ; Tag 24 memory_model_profile MIX: two U32 atoms (32, 8) or (32, 1).
 ; XSMALL-NEXT: 0090: 20010400 00000819 81040000 00011A81
 ; SMALL-NEXT: 0090: 20010400 00000119 81040000 00011A81
-; COMMON-NEXT: 00A0: 04000000 201B8104 00000000
+; The Tag 27 record ends at 0xAB; the P-4 Tag 28 record begins at 0xAC
+; (tag 0x1C, TypeFlags 0x84 Critical, ULEB length 0x14 = 20) and runs to the
+; end. Its frozen value: version=1, flags=0, count=1, one definition record
+; for '_fill' (role 1, param_count 2, no source `bit`, ret non-bit, call_abi
+; 2.1) plus the NUL-terminated name blob.
+; COMMON-NEXT: 00A0: 04000000 201B8104 00000000 1C841401
+; COMMON-NEXT: 00B0: 00010000 00000001 02000002 015F6669
+; COMMON-NEXT: 00C0: 6C6C00
 ;
 ; Per-tag readobj display: every required tag named, Critical, typed and
 ; valued with the registered set.
 ; TAGS: MCS251Attributes {
 ; TAGS: FormatVersion: 0x41
-; TAGS: VendorSize: 0xAB
-; TAGS: ScopeSize: 0xA0
+; TAGS: VendorSize: 0xC2
+; TAGS: ScopeSize: 0xB7
 ; TAGS: Name: object_protocol_version
 ; TAGS-NEXT: Critical: Yes
 ; TAGS-NEXT: ValueType: U32 (1)
@@ -93,6 +100,11 @@
 ; TAGS: Value: 0x20
 ; TAGS: Name: object_protocol_minor
 ; TAGS: Value: 0x0
+; P-4 Tag 28 is displayed as a BYTES record with no decoded scalar value.
+; TAGS: Name: function_signatures
+; TAGS: Critical: Yes
+; TAGS: ValueType: BYTES (4)
+; TAGS: Length: 20
 ;
 ; Out-of-range models keep the fail-closed gate: Large (placement 3) is not
 ; a registered emission profile, and 16-bit contracts never reach objects.
@@ -103,3 +115,6 @@
 define void @fill(i8 %tag, ptr %buf) local_unnamed_addr {
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_fill", i32 1, i32 0, i32 0, i32 0}

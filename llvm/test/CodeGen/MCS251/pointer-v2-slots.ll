@@ -17,12 +17,12 @@
 ; V2-ELF-NOT: .note.mcs251.abi
 ; V2-ELF: Name: .mcs251.attributes
 ; V2-ELF: Type: Unknown (0x70000003)
-; V2-ELF: Size: 172
+; V2-ELF: Size: 240
 ; V2-ELF: AddressAlignment: 1
-; Envelope: 0x41, VendorSize 0xAB (171 = 16+155), "MCS251\0", scope 1,
-; ScopeSize 0xA0 (160 = 5+155).
-; V2-ELF: 0000: 41000000 AB4D4353 32353100 01000000
-; V2-ELF-NEXT: 0010: A0048104 00000002 05810400 00000206
+; Envelope: 0x41, VendorSize 0xEF (239 = 16+223), "MCS251\0", scope 1,
+; ScopeSize 0xE4 (228 = 5+223).
+; V2-ELF: 0000: 41000000 EF4D4353 32353100 01000000
+; V2-ELF-NEXT: 0010: E4048104 00000002 05810400 00000206
 ; The registered A4 value set: object protocol 2, call ABI 2/1 (minor 1 is
 ; the sole "static pointer slots" carrier), register parameter variant 3.
 ; V2-ELF-NEXT: 0020: 81040000 00010781 04000000 03088104
@@ -46,3 +46,7 @@ define void @near_pointer_slot(i8 %tag, ptr addrspace(8) %p) {
 ; CHECK-LABEL: _near_pointer_slot:
   ret void
 }
+
+!mcs251.signatures = !{!10000, !10001}
+!10000 = !{!"_default_pointer_slot", i32 1, i32 0, i32 0, i32 0}
+!10001 = !{!"_near_pointer_slot", i32 1, i32 0, i32 0, i32 0}

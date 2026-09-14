@@ -22,7 +22,13 @@
 @f = external global i8
 @g = external global i8
 @tbl = constant [2 x ptr] [ptr @f, ptr @g], align 16
+!mcs251.signatures = !{}
+
 ;--- mutalign.ll
 @m = global [2 x i16] [i16 1, i16 2], align 4
+!mcs251.signatures = !{}
+
 ;--- sect.ll
 @s = constant [2 x i16] [i16 1, i16 2], section "XSEG", align 16
+!mcs251.signatures = !{}
+

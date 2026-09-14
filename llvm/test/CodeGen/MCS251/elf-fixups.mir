@@ -22,6 +22,10 @@
   target triple = "mcs251"
   declare void @remote()
   define void @f() { ret void }
+
+  !mcs251.signatures = !{!10000, !10001}
+  !10000 = !{!"_remote", i32 2, i32 0}
+  !10001 = !{!"_f", i32 1, i32 0}
 ...
 ---
 name: f
@@ -36,6 +40,9 @@ body: |
   target triple = "mcs251"
   @a = external global i8
   define void @f() { ret void }
+
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_f", i32 1, i32 0}
 ...
 ---
 name: f
@@ -51,6 +58,9 @@ body: |
   target triple = "mcs251"
   @a = external global i8
   define void @f() { ret void }
+
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_f", i32 1, i32 0}
 ...
 ---
 name: f

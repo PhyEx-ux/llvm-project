@@ -18,3 +18,6 @@
 define void @f() {
   ret void
 }
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
