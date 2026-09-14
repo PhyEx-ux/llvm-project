@@ -364,6 +364,8 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   // low nibble 0, no A5 escape).
   case MCS251::MOVXALD:
   case MCS251::MOVXAST:
+  // BRJT: `jmp @a+dptr` (0x73, low nibble 3 < 6, no A5 escape).
+  case MCS251::JMPIAD:
   // CY bit forms: opcode+1 of the single-byte classic bit family.
   case MCS251::SETBC:
   case MCS251::CPLC:
@@ -381,6 +383,8 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case MCS251::CMP16ri:
     return 4;
   case MCS251::MOV8ri:
+  // BRJT: `mov dptr,#jt` = 90 hi lo (QEMU-measured 3-byte 0x90 form).
+  case MCS251::MOVDPTRri:
   case MCS251::MOV8dpl:
   case MCS251::MOV8dph:
   case MCS251::MOV8dpxl:

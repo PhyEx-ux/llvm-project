@@ -147,6 +147,24 @@ static void putExpr24(const MCOperand &Op, unsigned Offset,
   put16(V, CB);
 }
 
+// The 16-bit field of a jump-table object (BRJT S3): the `mov dptr,#jt`
+// immediate.  Unlike the plain 16-bit DATA-channel immediate this carries
+// fixup_mcs251_j16 / R_MCS251_J16 (CODE channel + linker same-bank check),
+// see MCS251InstrInfo.td MOVDPTRri.
+static void putExprJ16(const MCOperand &Op, unsigned Offset,
+                       SmallVectorImpl<char> &CB,
+                       SmallVectorImpl<MCFixup> &Fixups) {
+  if (Op.isExpr()) {
+    Fixups.push_back(MCFixup::create(Offset, Op.getExpr(),
+                                     MCS251::fixup_mcs251_j16));
+    put16(0, CB);
+    return;
+  }
+  if (!Op.isImm())
+    report_fatal_error("MCS251: expected a jump-table address or immediate");
+  put16(unsigned(Op.getImm()), CB);
+}
+
 static void putImm8(const MCOperand &Op, SmallVectorImpl<char> &CB) {
   // Symbolic 8-bit immediates would need the ASxxxx byte-of-24-bit modes
   // (0x103/0x183/0x383), which are deliberately not part of the first object
@@ -383,6 +401,16 @@ void MCS251MCCodeEmitter::encodeInstruction(
   // sdas251 source-mode gold and frozen-QEMU probe: A4 / AD 64.
   case MCS251::MULAB: B(0xa4); break;
   case MCS251::MULW: B(0x1ad); put8(0x64, CB); break;
+
+  // BRJT dispatch primitives (design §3.2.1).  `mov dptr,#jt` = 90 hi lo
+  // (big-endian, QEMU helper.c:982-986), the 16-bit field via the J16
+  // channel.  `jmp @a+dptr` = single bare byte 0x73 (low nibble 3 < 6: no A5
+  // escape; QEMU helper.c:925-929 does the 16-bit DPTR+A sum internally).
+  case MCS251::MOVDPTRri:
+    B(0x90);
+    putExprJ16(MI.getOperand(0), CB.size(), CB, Fixups);
+    break;
+  case MCS251::JMPIAD: B(0x073); break;
 
   // Native arithmetic and logical operations.
   case MCS251::ADD32rr:

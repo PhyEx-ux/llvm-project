@@ -62,6 +62,7 @@
 #include "llvm/CodeGen/MachineConstantPool.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -1031,6 +1032,95 @@ public:
     emitFunctionBody();
     emitISRRecords(MF); // A3.5: ISR definitions, ELF object output only.
     return false;
+  }
+
+  // BRJT (S3, design §3.2.3.4 + §3.2.4 L1): emit each jump table as a
+  // dedicated column of N contiguous 3-byte ljmp entries (`02 hi lo`, the
+  // 16-bit big-endian target field at entry offset +1) immediately after the
+  // function body, in the same CSEG section -- the base AsmPrinter calls
+  // this hook from emitFunctionBody, so the streamer is still positioned at
+  // the end of this function's bytes (the §3.2.4 L3 geometry contract: table
+  // column and function body share the InputSection, table after the body).
+  // The default EK entry emission is deliberately NOT used: emitValue would
+  // produce .word entries through the R_MCS251_16 DATA channel, but these
+  // fields are same-bank CODE control addresses and must go through the
+  // J16 channel (ELF R_MCS251_J16 = 7, reused frozen number; the MC-side
+  // kind is fixup_mcs251_j16).
+  //
+  // L1 (design §3.2.4.3): defensive whole-table span assertion before any
+  // byte is emitted. With E3 in force (entries <= 86 -> 258 bytes) this is
+  // unreachable; it exists so that any future relaxation of E3 fails the
+  // compile loudly instead of handing the linker a table that cannot fit a
+  // single 64K bank (DESIGN.md "single table, single column": a start-offset
+  // fit is a LINK-time judgement (S4/L2); the compile-time bound is entry
+  // count times the 3-byte pitch).
+  void emitJumpTableInfo() override {
+    MachineJumpTableInfo *MJTI = MF->getJumpTableInfo();
+    if (!MJTI)
+      return;
+    const std::vector<MachineJumpTableEntry> &JT = MJTI->getJumpTables();
+    // REL objects have no J16 R-mode (the frozen REL writer carries the
+    // 16/24/lo8/mid8/hi8 modes only). The rejection must be decided by the
+    // OBJECT OUTPUT MODE, never by hasRawTextSupport(): the REL streamer
+    // overrides hasRawTextSupport() to true, so a raw-text probe let REL
+    // objects fall through to emitLjmpTableEntry and die in the REL writer's
+    // generic "expected relocatable expression / unsupported relocation
+    // kind" diagnostics. The established emitsObjectFile() && !ELF idiom
+    // (the same boundary requireELFPointerInitializers and emitISRRecords
+    // use) makes the REL path hit this explicit diagnostic. Two scope rules:
+    // the hook runs for EVERY function, so a module with no jump-table column
+    // must keep compiling on the REL path (only an actual table needs the
+    // J16 channel), and assembly text (no object file) stays legal and
+    // spells the table bytes literally.
+    bool AnyTable = false;
+    for (const MachineJumpTableEntry &Entry : JT)
+      if (!Entry.MBBs.empty())
+        AnyTable = true;
+    if (AnyTable && getMCS251TM().emitsObjectFile() && !usesELFObjects())
+      report_fatal_error(
+          "MCS251 jump tables require ELF object output; the REL object "
+          "writer has no J16 code-address relocation "
+          "(-filetype=obj -mcs251-object-format=elf)");
+    for (unsigned JTI = 0, E = JT.size(); JTI != E; ++JTI) {
+      ArrayRef<MachineBasicBlock *> MBBs = JT[JTI].MBBs;
+      if (MBBs.empty())
+        continue;
+      uint64_t TableBytes = uint64_t(MBBs.size()) * 3;
+      if (TableBytes > 0x10000)
+        report_fatal_error(
+            "MCS251: jump table " + Twine(JTI) + " of function '" +
+            Twine(MF->getName()) + "' spans " + Twine(TableBytes) +
+            " bytes and cannot fit one 64K bank as a single ljmp column "
+            "(BRJT design §3.2.4 L1)");
+      OutStreamer->emitLabel(GetJTISymbol(JTI));
+      for (const MachineBasicBlock *MBB : MBBs)
+        emitLjmpTableEntry(MBB->getSymbol());
+    }
+  }
+
+  // One ljmp table entry: byte 0x02 then the 16-bit big-endian target field
+  // (hi byte first, matching lld's Put(U>>8); Put(U) write order).  ELF
+  // objects emit the field as a zero placeholder plus an R_MCS251_J16
+  // relocation on the entry's offset +1; assembly text spells the same bytes
+  // literally ASxxxx-style (`.db 0x02, (label) >> 8, (label)`), mirroring how
+  // MOVADDR32 splits its object relocations from its text bytes.
+  void emitLjmpTableEntry(const MCSymbol *Target) {
+    OutStreamer->emitIntValue(0x02, 1);
+    if (OutStreamer->hasRawTextSupport()) {
+      const MCExpr *Sym = MCSymbolRefExpr::create(Target, OutContext);
+      OutStreamer->emitValue(MCBinaryExpr::createLShr(
+                                 Sym, MCConstantExpr::create(8, OutContext),
+                                 OutContext),
+                             1);
+      OutStreamer->emitValue(Sym, 1);
+      return;
+    }
+    MCSymbol *Field = OutContext.createTempSymbol();
+    OutStreamer->emitLabel(Field);
+    OutStreamer->emitIntValue(0, 2);
+    OutStreamer->emitRelocDirective(*MCSymbolRefExpr::create(Field, OutContext),
+                                    "R_MCS251_J16",
+                                    MCSymbolRefExpr::create(Target, OutContext));
   }
 
   // Final machine boundary. For ISR definitions every return must be the

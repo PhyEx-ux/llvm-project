@@ -32,6 +32,17 @@ public:
     return MVT::i8;
   }
 
+  // BRJT (design §3.2.6, rev3): backend-independent jump-table qualification
+  // for the `-mcs251-jump-tables` opt-in. Implements predicates E2 (cond is an
+  // integer scalar of 8/16/32 bits), E3 (table entry count Range <= 86, the
+  // 8-bit A-register x3 index invariant) and E5 (density with the upstream
+  // 10/40 optsize tier) WITHOUT the base class's `OptForSize ||` short-circuit
+  // of the range cap, which would let optsize/minsize functions build tables
+  // of any size (measured P9-C/P9-D).
+  bool isSuitableForJumpTable(const SwitchInst *SI, uint64_t NumCases,
+                              uint64_t Range, ProfileSummaryInfo *PSI,
+                              BlockFrequencyInfo *BFI) const override;
+
   // Keep explicit byte ordering and avoid merging across the target-specific
   // SFR-direct versus indirect-address distinction.
   bool canMergeStoresTo(unsigned AS, EVT MemVT,
@@ -47,6 +58,9 @@ public:
                           SelectionDAG &DAG) const override;
   SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerSELECT_CC(SDValue Op, SelectionDAG &DAG) const;
+  // BRJT (design §3.2.1): the fixed `jmp @a+dptr` dispatch sequence for an
+  // E2/E3/E5-qualified jump-table cluster (`-mcs251-jump-tables` opt-in).
+  SDValue LowerBR_JT(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerLoad(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerStore(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerExtend(SDValue Op, SelectionDAG &DAG) const;

@@ -108,6 +108,13 @@ void MCS251MCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
       MCOp = MCOperand::createExpr(
           MCSymbolRefExpr::create(MO.getMBB()->getSymbol(), Ctx));
       break;
+    case MachineOperand::MO_JumpTableIndex:
+      // BRJT (S3): the `mov dptr,#jt` base.  The jump-table column symbol is
+      // defined by MCS251AsmPrinter::emitJumpTableInfo right after the
+      // function body; the MC emitter turns the field into fixup_mcs251_j16.
+      MCOp = MCOperand::createExpr(
+          MCSymbolRefExpr::create(Printer.GetJTISymbol(MO.getIndex()), Ctx));
+      break;
     case MachineOperand::MO_GlobalAddress:
       MCOp = LowerSymbolOperand(MO, GetGlobalAddressSymbol(MO), IsBitAddrPos);
       break;

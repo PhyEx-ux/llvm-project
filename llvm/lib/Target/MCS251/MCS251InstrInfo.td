@@ -708,6 +708,53 @@ let Uses = [PSW], usesCustomInserter = 1 in {
       (ins GPR32:$true, GPR32:$false, i8imm:$cc), "", []>;
 }
 
+//===----------------------------------------------------------------------===//
+//  Jump-table dispatch (BRJT slice S2, design §3.2.1-§3.2.3)
+//===----------------------------------------------------------------------===//
+//
+// Two ISA primitives behind `-mcs251-jump-tables` (D4; default off).  Both
+// encodings are QEMU-measured (probe record /0.1):
+//
+//   * MOVDPTRri = `mov dptr,#imm16` : 3 bytes, 90 hi lo (big-endian), DPTR <-
+//     imm16 (QEMU helper.c:982-986, decode.c:75, disas.c:438).  This is the
+//     ONLY instruction that can establish a symbolic 16-bit CODE address in
+//     DPTR: the register forms MOV8dpl/MOV8dph accept GPR8 sources only and
+//     MOV8ri cannot carry a relocation, so 0x90 is a mandatory S2 addition,
+//     not an optional optimization (design §3.2.1 basis 2).  The 16-bit field
+//     takes fixup_mcs251_j16 / R_MCS251_J16 (7): the table base is a
+//     same-bank CODE control address, exactly the J16 semantic (§3.2.3.2).
+//
+//   * JMPIAD = `jmp @a+dptr` : 1 byte 0x73 (low nibble 3 < 6, so putOpcode
+//     emits it bare).  The hardware computes the full 16-bit sum and jumps:
+//     PC <- (PC & 0xff0000) | ((DPTR + A) & 0xffff) (QEMU helper.c:925-929)
+//     -- the x3 byte arithmetic of the dispatch sequence is done by the
+//     hardware adder, which is why the sequence needs no ADDC (§3.2.1).
+//
+// DPTR lifecycle rules (§3.2.2): the base is established inline at every
+// dispatch point, never cached across blocks or calls; DPL/DPH are pinned via
+// Defs (same mechanism as MOV8dpl/MOV8dph), and hasSideEffects = 1 keeps
+// MachineCSE/MachineLICM from ever merging or hoisting the base store away
+// from its dispatch (mirrors the MOV8dpxl reasoning).  JMPIAD declares its
+// complete A/DPL/DPH uses so no scheduler can move a lane write across it.
+//
+// MOVDPTRri's operand is a jump-table index (MO_JumpTableIndex).  It prints
+// through printImm16's expression arm as `#<jt-label>` and encodes as the J16
+// fixup.  The table itself is emitted per function by
+// MCS251AsmPrinter::emitJumpTableInfo as N contiguous 3-byte ljmp entries
+// `02 hi lo` (§3.2.3), so `mov dptr,#jt` + `jmp @a+dptr` indexes it with
+// 3*idx (E3 keeps 3*idx <= 255, exact in the 8-bit A).
+
+def mcs251_jti : Operand<i32> { let PrintMethod = "printImm16"; }
+
+let Defs = [DPL, DPH], hasSideEffects = 1, isReMaterializable = 0,
+    Size = 3 in
+def MOVDPTRri : MCS251Inst<(outs), (ins mcs251_jti:$jt),
+                            "mov dptr, $jt", []>;
+
+let isBranch = 1, isIndirectBranch = 1, isTerminator = 1, isBarrier = 1,
+    Uses = [A, DPL, DPH], Size = 1 in
+def JMPIAD : MCS251Inst<(outs), (ins), "jmp @a+dptr", []>;
+
 // BRCC pseudo (built by LowerBR_CC, expanded by FinalizeISel): the cmp has
 // already been emitted by LowerBR_CC and glued to this pseudo. $cc is a raw
 // ISD::CondCode.

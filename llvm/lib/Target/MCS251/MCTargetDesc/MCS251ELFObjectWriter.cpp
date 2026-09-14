@@ -57,6 +57,10 @@ public:
       // persistent bit-object symbol. Width 1; the linker resolves the bit
       // number and writes it (the object field is a zero placeholder).
       return ELF::R_MCS251_BITADDR8;
+    case MCS251::fixup_mcs251_j16:
+      // BRJT (S3): jump-table fields reuse the frozen R_MCS251_J16 = 7 (CODE
+      // channel with the per-field same-bank check); no new reloc number.
+      return ELF::R_MCS251_J16;
     default:
       report_fatal_error("MCS251 ELF: unsupported relocation fixup");
     }

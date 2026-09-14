@@ -6,10 +6,13 @@
 #include "MCS251LocalInterp.h"
 #include "MCS251Subtarget.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/Analysis/BlockFrequencyInfo.h"
+#include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/IR/Constants.h"
@@ -23,8 +26,26 @@
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/Utils/SizeOpts.h"
 
 using namespace llvm;
+
+// BRJT (design D4): switch jump tables are opt-in.  The default is the closed
+// gate (comparison chain everywhere); `-mllvm -mcs251-jump-tables` enables the
+// CODE-space ljmp table lowering in eligible clusters (qualification predicates
+// E1-E6, design §3.2.6).  clang passes the flag through verbatim with -mllvm.
+static cl::opt<bool> MCS251JumpTables(
+    "mcs251-jump-tables", cl::Hidden, cl::init(false),
+    cl::desc("MCS-251: emit CODE-space ljmp jump tables for eligible switches "
+             "(default: off, every switch lowers through its comparison "
+             "chain)"));
+
+// BRJT E3 cap (design §3.2.6). The jump-table index travels through the 8-bit
+// accumulator after the x3 sequence `mov rT,rI; add rT,rT; add rT,rI`
+// (§3.2.1): 3*idx <= 255, i.e. idx <= 85. The Range argument of
+// isSuitableForJumpTable is High-Low+1 -- the number of table entries
+// including DefaultMBB-filled holes -- so the cap on entries is 86.
+constexpr uint64_t MaxJumpTableEntries = 86;
 
 // Generated from MCS251CallingConv.td; provides RetCC_MCS251().
 #define GET_CALLING_CONV_IMPL
@@ -45,6 +66,24 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::BR_CC, MVT::i8, Custom);
   setOperationAction(ISD::BR_CC, MVT::i16, Custom);
   setOperationAction(ISD::BRCOND, MVT::Other, Custom);
+
+  // BRJT (design §3.1.1). The action table entry is the areJTsAllowed gate
+  // (TargetLowering.h: areJTsAllowed -> isOperationLegalOrCustom(BR_JT/BRIND)):
+  // the default initActions() state would be Legal, so the upstream jump-table
+  // builder would emit ISD::BR_JT for any switch with >= MinJumpTableEntries
+  // cases and this target would die in "Cannot select: br_jt". Expand closes
+  // the gate: no BR_JT/BRIND node is ever produced, and every switch lowers
+  // through the case-cluster comparison chain above. The `-mllvm
+  // -mcs251-jump-tables` opt-in (D4) re-opens the gate for BR_JT only, with
+  // Custom lowering to the fixed `jmp @a+dptr` dispatch sequence (§3.2.1);
+  // BRIND stays Expand in both modes (no indirectbr pattern by design, R3).
+  if (!MCS251JumpTables) {
+    setOperationAction(ISD::BR_JT, MVT::Other, Expand);
+    setOperationAction(ISD::BRIND, MVT::Other, Expand);
+  } else {
+    setOperationAction(ISD::BR_JT, MVT::Other, Custom);
+    setOperationAction(ISD::BRIND, MVT::Other, Expand);
+  }
 
   // DR has native arithmetic, while logical operations are custom-lowered to
   // the two WR lanes (the ISA has no DR-DR anl/orl/xrl form).
@@ -275,6 +314,111 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::SRA, MVT::i64, Custom);
 }
 
+// BRJT qualification predicates E2/E3/E5 (design §3.2.6, rev3). This is the
+// backend-independent qualification gate: with `-mcs251-jump-tables` on, upstream consults
+// this hook once per candidate cluster (SwitchLoweringUtils.cpp:92 whole-range
+// and :153 per partition). The base implementation must NOT be relied upon:
+// its hard cap is short-circuited by OptForSize
+// (`(OptForSize || Range <= MaxJumpTableSize) && ...`,
+// TargetLoweringBase.cpp:1810) because shouldOptimizeForSize is true for any
+// function with the optsize/minsize attribute, and max-jump-table-size
+// defaults to UINT_MAX -- so under a size attribute the base check would let
+// tables of ANY entry count through. The 8-bit index invariant below is a
+// correctness predicate, not a heuristic, so this override deliberately
+// omits the `OptForSize ||` arm (measured P9-C/P9-D probes: optsize/minsize
+// bypass the base cap and crash br_jt selection on the unmodified backend).
+//
+// E3 semantics note (rev3): the Range argument is High-Low+1, i.e. the number
+// of table entries including the DefaultMBB-filled holes
+// (getJumpTableRange, SwitchLoweringUtils.cpp:24-34; buildJumpTable fills the
+// gaps :218-228) -- not the case count.
+//
+// E4 (>= getMinimumJumpTableEntries cases) stays upstream: it is applied
+// outside this hook at SwitchLoweringUtils.cpp:68-70/:181 and is not subject
+// to the OptForSize short-circuit.
+bool MCS251TargetLowering::isSuitableForJumpTable(
+    const SwitchInst *SI, uint64_t NumCases, uint64_t Range,
+    ProfileSummaryInfo *PSI, BlockFrequencyInfo *BFI) const {
+  // E2: the dispatch sequence consumes an 8-bit index built from the JT
+  // header's cond-Low subtraction, so the original condition must be an
+  // integer scalar of 8/16/32 bits. Wider (i64) or non-integer conditions
+  // would need libcalls or 64-bit sequences in the dispatch path -- refuse
+  // them and the cluster falls back to the comparison chain.
+  const auto *CondTy =
+      dyn_cast<IntegerType>(SI->getCondition()->getType());
+  if (!CondTy)
+    return false;
+  unsigned Width = CondTy->getBitWidth();
+  if (Width != 8 && Width != 16 && Width != 32)
+    return false;
+
+  // E3: table-entry-count cap. The index travels through A (8-bit) after the
+  // ×3 sequence `mov rT,rI; add rT,rT; add rT,rI` (§3.2.1): 3*idx must stay
+  // <= 255, i.e. idx <= 85, i.e. Range (the entry count) <= 86. There is no
+  // runtime check -- an out-of-range index would silently jump to a wrong
+  // table entry, so this predicate is what keeps the sequence exact.
+  if (Range > MaxJumpTableEntries)
+    return false;
+
+  // E5: density. The tier follows the optsize switch (10, or 40 for size
+  // optimization) exactly like the base class -- density is a heuristic and
+  // may vary with the size tier; only the Range cap above is a correctness
+  // predicate and it must have no size-attribute bypass.
+  const bool OptForSize = llvm::shouldOptimizeForSize(SI->getParent(), PSI, BFI);
+  const unsigned MinDensity = getMinimumJumpTableDensity(OptForSize);
+  return NumCases * 100 >= Range * MinDensity;
+}
+
+// BRJT dispatch lowering (design §3.2.1, opt-in via `-mcs251-jump-tables`).
+// The upstream JT header has already produced the index in a virtual register
+// (cond - Low, zero-extended/truncated to the JT register type) and guarded
+// it with the SETUGT range branch; E2/E3 qualified the cluster, so the index
+// is known to be <= 85 and 3*idx <= 255 fits the 8-bit accumulator exactly.
+//
+// The six-slot sequence (all additions go through the 0x73 hardware 16-bit
+// sum -- there is no ADDC in this ISA and the software version would need a
+// carry chain):
+//
+//   mov  rT, rI        ; MOV8rr
+//   add  rT, rT        ; ADD8rr (two-operand accumulate): 2xidx
+//   add  rT, rI        ; ADD8rr: 3xidx
+//   mov  a, rT         ; MOV8a (Defs=[A])
+//   mov  dptr, #jt     ; MOVDPTRri (0x90 hi lo, J16 field; Defs=[DPL,DPH])
+//   jmp  @a+dptr       ; JMPIAD (0x73): PC <- bank:(DPTR+A) & 0xffff
+//
+// Every step after the x3 arithmetic is welded with Glue into one scheduling
+// unit (the same device the MOVX channel uses, design §3.2.2.4): A/DPL/DPH
+// are fixed reserved SFRs, the physical Defs/Uses pins already forbid
+// reordering against their writers, and the glue additionally keeps the
+// whole dispatch atomic against DAG-combiner parallelisation.
+SDValue MCS251TargetLowering::LowerBR_JT(SDValue Op, SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue Chain = Op.getOperand(0);
+  SDValue Table = Op.getOperand(1);
+  SDValue Index = Op.getOperand(2);
+  int JTI = cast<JumpTableSDNode>(Table.getNode())->getIndex();
+
+  // rI: the low byte of the JT header's index register. The qualifier (E3)
+  // guarantees the value fits: idx <= 85, so no information is lost in the
+  // subreg extraction.
+  SDValue Idx = DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, Index);
+
+  SDValue RT = SDValue(DAG.getMachineNode(MCS251::MOV8rr, DL, MVT::i8, Idx), 0);
+  RT = SDValue(DAG.getMachineNode(MCS251::ADD8rr, DL, MVT::i8, {RT, RT}), 0);
+  RT = SDValue(DAG.getMachineNode(MCS251::ADD8rr, DL, MVT::i8, {RT, Idx}), 0);
+
+  SDVTList ChainGlue = DAG.getVTList(MVT::Other, MVT::Glue);
+  SDNode *N = DAG.getMachineNode(MCS251::MOV8a, DL, ChainGlue, {RT, Chain});
+  Chain = SDValue(N, 0);
+  SDValue Glue = SDValue(N, 1);
+  N = DAG.getMachineNode(MCS251::MOVDPTRri, DL, ChainGlue,
+                         {DAG.getTargetJumpTable(JTI, MVT::i32), Chain, Glue});
+  Chain = SDValue(N, 0);
+  Glue = SDValue(N, 1);
+  N = DAG.getMachineNode(MCS251::JMPIAD, DL, MVT::Other, {Chain, Glue});
+  return SDValue(N, 0);
+}
+
 const char *MCS251TargetLowering::getTargetNodeName(unsigned Opcode) const {
   switch (Opcode) {
   case MCS251ISD::ERET:
@@ -402,6 +546,8 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     return LowerMul32(Op, DAG);
   case ISD::BR_CC:
     return LowerBR_CC(Op, DAG);
+  case ISD::BR_JT:
+    return LowerBR_JT(Op, DAG);
   case ISD::ADD:
   case ISD::SUB:
     if (Op.getValueType() == MVT::i32)

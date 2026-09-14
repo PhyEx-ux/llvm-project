@@ -47,6 +47,13 @@ enum Fixups {
   // target fixup (see MCS251AsmBackend::getFixupKind), so the two are kept
   // deliberately separate.
   fixup_mcs251_bitaddr8,
+  // BRJT (S3, design §3.2.3.2): the 16-bit big-endian field of a jump-table
+  // object -- both the table entry target fields (`02 hi lo`, offset +1) and
+  // the `mov dptr,#jt` immediate (offset +1).  Same bank constraint as the
+  // J16 semantic requires (CODE channel; the linker's per-field bank check is
+  // the L3 backstop, LinkerCore.cpp "J16 bank overflow").  ELF reuses the
+  // frozen R_MCS251_J16 = 7; no new relocation number is allocated.
+  fixup_mcs251_j16,
   NumTargetFixupKinds,
 };
 

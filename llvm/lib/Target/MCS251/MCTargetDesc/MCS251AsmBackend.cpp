@@ -101,6 +101,8 @@ public:
       return MCFixupKind(FirstLiteralRelocationKind + ELF::R_MCS251_BIT_REF);
     if (Name == "R_MCS251_24")
       return MCFixupKind(MCS251::fixup_mcs251_24);
+    if (Name == "R_MCS251_J16")
+      return MCFixupKind(MCS251::fixup_mcs251_j16);
     if (Name == "R_MCS251_LO8")
       return MCFixupKind(MCS251::fixup_mcs251_lo8);
     if (Name == "R_MCS251_MID8")
@@ -165,6 +167,7 @@ public:
         break;
       case FK_Data_2:
       case MCS251::fixup_mcs251_16:
+      case MCS251::fixup_mcs251_j16:
         Width = 2;
         break;
       case MCS251::fixup_mcs251_24:
@@ -246,6 +249,7 @@ public:
       Data[0] = uint8_t(V & 0xff);
       return;
     case MCS251::fixup_mcs251_16:
+    case MCS251::fixup_mcs251_j16:
       if (!isIntN(16, static_cast<int64_t>(V)) && !isUIntN(16, V))
         getContext().reportError(Fixup.getLoc(),
                                  "MCS251 16-bit fixup out of range");
@@ -284,6 +288,9 @@ public:
         // The bit-address field is one byte; the producer zero-fills it and the
         // linker rewrites it (R_MCS251_BITADDR8).
         {"fixup_mcs251_bitaddr8", 0, 8, 0},
+        // BRJT jump-table fields: 16-bit big-endian, rewritten by the linker
+        // (R_MCS251_J16 = 7, reused frozen number).
+        {"fixup_mcs251_j16", 0, 16, 0},
     };
     if (Kind < FirstTargetFixupKind)
       return MCAsmBackend::getFixupKindInfo(Kind);
