@@ -2,6 +2,10 @@
 
 状态：2026-09-10，开发验证固件。编译、链接及静态检查通过；遵照用户要求**未运行模拟器**，未运行实板或动态故障注入。不是T09冻结资产资格报告。`release/t10-g12.hex` 是硬件版，真实TI轮询。
 
+## G1 重建登记（2026-09-14）
+
+`release/` 现为 G1 工具链（ISR 记录 ProtocolVersion=2、127 槽 profile、IRQ 配方 BOOT=0xFF0500/CSEG=0xFF0700、reset=LJMP 0xFF0500）按 `build.sh` 重建的资产；check-crt-irq 20/20、check.py 全过。G1 前旧资产（52 槽、BOOT=0xFF0210/CSEG=0xFF0400）原样封存于 `release-pre-g1-20260910/`，旧→新 hash 对照与差异逐条归因见 `REBUILD-20260914.md`。旧 manifest 曾由一份未提交的 main.c（E1 前）构建，现盘 main.c 自 E1 提交后未再变化；工具链对旧 IR 复算结果逐字节一致（证明后端确定、差异不在 llc 层），结合源 diff 将 main 产物差异归因于该源码编辑（前端层逐字节等价未单独证明）。动态项（s/r 实测、故障注入）仍**待真机**，本登记不改变任何 NOT_RUN 结论。
+
 ## 操作
 
 STC32G12K128，STC-ISP IRC=24MHz，UART1 P3.0/RX、P3.1/TX，115200/8N1、无流控。串口TTL TX接P3.0，RX接P3.1，共地。镜像在FF程序Flash，无XINIT负载。
@@ -67,9 +71,9 @@ PSW/PSW1只记录原始值，不参与PASS。DPX只比较DPL/DPH/DPXL，不给�
 bash build.sh /tmp/t10-g12-new
 ```
 
-输出目录必须为空，不会递归删除已有内容。默认工具路径可用CLANG/LLC/LLD/YAML2OBJ/OBJCOPY/SDAS/SDLD覆盖。无LTO，报告辅助函数noinline以避当前后端大函数短分支范围问题。
+输出目录必须为空，不会递归删除已有内容。默认工具路径可用CLANG/LLC/LLD/YAML2OBJ/OBJCOPY/SDAS/SDLD覆盖。无LTO。报告辅助函数的noinline规避已随E1（提交088d95bd7）移除，当前源码不再使用。
 
-`gen-sentinel.py` 汇编内部仅相对跳转的独立模块，提取连续机器码包装为ELF .text；另附ABI note及固定DATA保留。它没有ISR声明，不能替代被测ISR。`check.py` 检查HEX校验和与地址、向量目标、ISR序言/尾声结构、局部栈分配、真实helper调用及ERET/RETI、内存保留和栈容量；CRT另经既有19项字节检查。
+`gen-sentinel.py` 汇编内部仅相对跳转的独立模块，提取连续机器码包装为ELF .text；另附ABI note及固定DATA保留。它没有ISR声明，不能替代被测ISR。`check.py` 检查HEX校验和与地址、向量目标、ISR序言/尾声结构、局部栈分配、真实helper调用及ERET/RETI、内存保留和栈容量；CRT另经既有20项字节检查。
 
 release保留HEX、ELF、map、IR、编译器汇编、sentinel列表和生成源码、manifest及STATIC-CHECKS。manifest记录实际使用工具和输入/产物SHA256；不伪称工具已匹配T09冻结身份。动态正常/负向验证、故障检测有效性均待实板，本次没有运行QEMU。
 
