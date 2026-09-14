@@ -40,7 +40,8 @@ LLC=${LLC:-/home/liu/build-mcs251/bin/llc}
 LLD=${LLD:-/home/liu/build-mcs251-lld/bin/mcs251-lld}
 YAML2OBJ=${YAML2OBJ:-/home/liu/build-mcs251-lld/bin/yaml2obj}
 DUMPBYTES="$REPO/lld/test/MCS251/Inputs/dump-elf-bytes.py"
-CRT_YAML="$REPO/validation/mcs251-elf/runtime/crt-irq.yaml"
+CONTRACT=${CONTRACT:-1,1,32,8,1}
+CRT_YAML=${CRT_YAML:-$REPO/validation/mcs251-elf/runtime/crt-irq.yaml}
 
 rm -rf -- "$OUT"
 mkdir -p -- "$OUT"
@@ -58,16 +59,25 @@ int main(void) {
 EOF
 for tu in tu1 tu2; do
   "$CLANG" -cc1 -triple mcs251-unknown-none -std=c11 -fmcs251-keil \
+    -mcs251-memory-contract="$CONTRACT" \
     -emit-llvm -o "$OUT/$tu.ll" "$ROOT/p1b-$tu.c"
 done
 "$CLANG" -cc1 -triple mcs251-unknown-none -std=c11 -fmcs251-keil \
+  -mcs251-memory-contract="$CONTRACT" \
   -emit-llvm -o "$OUT/fw.ll" "$OUT/fw.c"
 
 for tu in tu1 tu2 fw; do
   "$LLC" -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf \
+    -mcs251-memory-contract="$CONTRACT" \
     "$OUT/$tu.ll" -o "$OUT/$tu.o"
 done
-"$YAML2OBJ" "$CRT_YAML" -o "$OUT/crt.o"
+if [ -n "${CRT_OBJ:-}" ]; then
+  # Pre-built CRT object (e.g. gen-crt-v2.sh --identity v2): yaml2obj cannot
+  # emit the v2 e_flags word, so v2-identity runs pass a finished object.
+  cp "$CRT_OBJ" "$OUT/crt.o"
+else
+  "$YAML2OBJ" "$CRT_YAML" -o "$OUT/crt.o"
+fi
 echo "compile: tu1/tu2/fw clang -cc1 + llc ELF OK"
 
 # --- link (canonical order); run from $OUT so the map names objects by
