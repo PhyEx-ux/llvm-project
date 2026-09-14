@@ -1,0 +1,243 @@
+#
+# W7 (A4 design 6): the v2 CRT fixtures and their link behaviour.
+#
+# crt-selfstart-v2.yaml / crt-irq-v2.yaml (validation/mcs251-elf/runtime/)
+# keep the frozen v1 startup bytes, vectors, stack initialization, segment
+# boundaries, entry, relocations and symbols, and swap ONLY the object
+# identity: e_flags 0x102 and one 172-byte .mcs251.attributes carrier
+# instead of the v1 note.  The standalone checker check-crt-v2.py asserts
+# that split byte-exactly; this test then exercises the lld half:
+#
+#   * a v2 demo object links against the v2 self-start CRT (BOOT/CSEG at
+#     the frozen non-IRQ recipe) and the map keeps the frozen area bases;
+#   * a v2 ISR demo object (user handler carrying a trailing-pointer static
+#     slot, the exact A4 capability) links against the v2 IRQ CRT with the
+#     IRQ recipe BOOT=0xff0210/CSEG=0xff0400; lld synthesizes the 52-slot
+#     vector table from the .mcs251.isr inputs and places the OSEG slot;
+#   * v1/v2 mixing is rejected in BOTH directions against BOTH CRT flavors
+#     (design 4.2: "v1 and v2 objects never mix" - the CRT is an object
+#     like any other, so a v2 firmware cannot be assembled from a v1 CRT
+#     and vice versa);
+#   * the frozen v1 chain still links unchanged (v1 fixtures untouched).
+#
+# yaml2obj registers only EF_MCS251_ABI_V1 for EM_MCS251, so every v2
+# fixture is emitted with the v1 word and rewritten to 0x102 by setflags.py
+# below, exactly as v2-object-identity.test does.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-selfstart-v2.yaml -o ss-raw.o
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml -o irq-raw.o
+# RUN: yaml2obj demo-v2.yaml -o demo-v2.o
+# RUN: yaml2obj demo-isr-v2.yaml -o demo-isr-v2.o
+# RUN: %python setflags.py ss-raw.o irq-raw.o demo-v2.o demo-isr-v2.o
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o crt-irq-v1.o
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-selfstart.yaml -o crt-ss-v1.o
+# RUN: yaml2obj demo-v1-note.yaml -o demo-v1.o
+#
+# --- the standalone checker accepts both v2 CRT objects (identity split:
+# --- v2 carrier, template bytes identical to the frozen v1 fixtures) -----
+# RUN: %python %S/../../../validation/mcs251-elf/runtime/check-crt-v2.py ss-raw.o irq-raw.o
+#
+# --- v2 demo + v2 self-start CRT: link succeeds at the frozen non-IRQ
+# --- recipe; the map keeps the area bases and resolves the CRT requests --
+# RUN: mcs251-lld demo-v2.o ss-raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --map=ss.map -o ss.elf
+# RUN: test -f ss.elf
+# RUN: grep 's_BOOT = 0xff0100' ss.map
+# RUN: grep 's_CSEG = 0xff0200' ss.map
+# RUN: grep 's_VECS = 0xff0003' ss.map
+# RUN: grep '__mcs251_stack_base = ' ss.map
+#
+# --- v2 ISR demo + v2 IRQ CRT (the A4 case: a user handler whose second
+# --- parameter is a pointer, carried as the 4-byte OSEG.1 static slot):
+# --- identity and IRQ mode are orthogonal, the link synthesizes the vector
+# --- table and places the slot ------------------------------------------
+# RUN: mcs251-lld demo-isr-v2.o irq-raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --map=isr.map -o isr.elf
+# RUN: test -f isr.elf
+# RUN: grep 's_BOOT = 0xff0210' isr.map
+# RUN: grep 's_CSEG = 0xff0400' isr.map
+# RUN: grep 'l_VECS = 0x01a0' isr.map
+# RUN: grep 's_OSEG = 0x0008' isr.map
+#
+# --- identity exclusivity against the CRT, both directions, both flavors:
+# --- a v2 firmware cannot take a v1 CRT, and a v1 firmware cannot take a
+# --- v2 CRT --------------------------------------------------------------
+# RUN: not mcs251-lld demo-v2.o crt-ss-v1.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o m1.elf 2>&1 | FileCheck %s --check-prefix=MIX
+# RUN: test ! -e m1.elf
+# RUN: not mcs251-lld demo-isr-v2.o crt-irq-v1.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o m2.elf 2>&1 | FileCheck %s --check-prefix=MIX
+# RUN: test ! -e m2.elf
+# RUN: not mcs251-lld demo-v1.o irq-raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o m3.elf 2>&1 | FileCheck %s --check-prefix=MIX
+# RUN: test ! -e m3.elf
+# RUN: not mcs251-lld demo-v1.o ss-raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o m4.elf 2>&1 | FileCheck %s --check-prefix=MIX
+# RUN: test ! -e m4.elf
+# MIX: cannot link a v2 identity object (.mcs251.attributes) with a v1 identity object
+#
+# --- the frozen v1 chain still links (v1 fixtures byte-untouched) --------
+# RUN: mcs251-lld demo-v1.o crt-irq-v1.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0210 --area-start=CSEG=0xff0400 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --map=v1.map -o v1.elf
+# RUN: test -f v1.elf
+# RUN: grep 's_BOOT = 0xff0210' v1.map
+
+
+#--- setflags.py
+#!/usr/bin/env python3
+"""Patch the ELF header e_flags word of each object to the v2 identity word.
+
+yaml2obj only accepts enum bit names for FileHeader.Flags, and EM_MCS251
+registers just EF_MCS251_ABI_V1.  Same technique as v2-object-identity.test.
+"""
+import pathlib, sys
+
+EF_V2 = bytes.fromhex('00000102')
+OFF = 36
+
+for name in sys.argv[1:]:
+    p = pathlib.Path(name)
+    b = bytearray(p.read_bytes())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = EF_V2
+    p.write_bytes(bytes(b))
+
+#--- demo-v2.yaml
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D0'
+  - Name: .mcs251.REG_BANK_0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.OSEG.0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _main
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+
+
+#--- demo-isr-v2.yaml
+# A v2 ISR demo object: one user handler (ENTRY kind 1 + REGISTER kind 2,
+# slot 1) whose function carries a trailing pointer parameter - the exact
+# A4 capability - materialized as the 4-byte .mcs251.OSEG.1 static slot and
+# the _irq_PARM_2 STT_OBJECT symbol, mirroring the llc emission shape.
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D0CA0BCA1BCA2BCA3BCA4BCA5BCA6BCA7BCAEBDAEBDA7BDA6BDA5BDA4BDA3BDA2BDA1BDA0BD0D032AA80FE'
+  - Name: .mcs251.REG_BANK_0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    AddressAlign: 4
+    Content: '000100180101010100010001000000000000000000000000000100180201010100010001000000000000000000000000'
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .mcs251.isr
+    AddressAlign: 4
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000AB4D43533235310001000000A0048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B810400000000
+Symbols:
+  - Name: _main
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x2A
+    Size: 2
+    Type: STT_FUNC
+  - Name: _irq
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+    Size: 41
+    Type: STT_FUNC
+  - Name: _irq_PARM_2
+    Binding: STB_GLOBAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 4
+    Type: STT_OBJECT
+
+
+#--- demo-v1-note.yaml
+# The mirror image of demo-v2.yaml: identical code sections carrying the v1
+# identity instead (frozen 52-byte note), for the reverse mixing direction.
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D0'
+  - Name: .mcs251.REG_BANK_0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.OSEG.0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Content: '0000000700000020000000014D43533235310000000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
