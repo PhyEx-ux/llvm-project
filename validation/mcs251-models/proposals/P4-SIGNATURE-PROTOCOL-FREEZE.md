@@ -90,10 +90,16 @@ blob  ::= 全部记录之后；count 个以 NUL 结尾的名字串顺序串接
   - bit1 declared-not-defined：本 TU 仅声明/引用（含未用声明、被优化删除的
     引用——这类记录允许在符号表中无对应条目；**若存在符号条目，必须为外部
     未定义函数**，不得借 bit1 记录绕过定义关联检查）；
-  - bit2 no-prototype：K&R 无原型（bit 参数已被 Sema N14 拒绝）。**bit2=1 时
-    param_count=0、bitmap 为空、bit3=0，均由 decoder 验证**。比较语义：两侧
-    bit2 不同即冲突；两侧均为 1 只比较 (ret, call_abi)；两侧均为 0 比较
-    (param_count, bitmap, ret, call_abi, bit3)。
+  - bit2 no-prototype：K&R 无原型（bit 参数已被 Sema N14 拒绝）。本条原冻结
+    文本（"bit2=1 时 param_count=0、bitmap 为空、bit3=0，均由 decoder 验证；
+    比较语义：两侧 bit2 不同即冲突"）**已被下方"零参数协议修订
+    （2026-09-15）"节替代**，被替代的是三项规则：① "bit2=1 ⟹ param_count=0"
+    （废除：bit2=1 允许携带真实 param_count>0）；② "bitmap 为空"（改述：bitmap
+    按 param_count 照常编码，位必须全 0）；③ "两侧 bit2 不同即冲突"（收窄：
+    双方 param_count 均为 0 时豁免）。未被替代、继续有效的部分：bit3=0 由
+    decoder 验证；两侧均为 1 只比较 (ret, call_abi)；两侧均为 0 比较
+    (param_count, bitmap, ret, call_abi, bit3)。跨对象同名记录集合按修订节的
+    **全对比较**核对（兼容关系不传递）。
   - bit3 variadic：变参（bit 参数已被 Sema N13 拒绝）；**param_count 仅计固定
     形参，不含省略号**；两侧 bit3 一致方可比。
 - ret ∈ {0,1}；call_abi_major/minor 必须与本对象身份的 CallABI 代一致。
@@ -149,6 +155,42 @@ NOTYPE，栈/区间边界等 NOTYPE 数据符号不得当函数；判定边界�
   **仅引用对象缺条目**、**名字前缀错误（裸源名/二次前缀）与 asm-label**、
   **NOTYPE 数据符号误判排除**、NOTYPE 函数入口正例）；v1 对象照常链；opt 全
   管线（clang|opt|llc）签名存续；手写 IR 无 metadata 硬错。
+
+## 零参数协议修订（2026-09-15，复审后修订，替代上文 bit2 冻结条款中的三项规则）
+
+上文"内部值格式"bit2 条款中被本节替代的是**三项**规则（方案 B 首版把 writer 的
+ParamCount 在无原型时强制写 0，置位条件 `NoProto && ParamCount != 0` 因此恒假
+——bit2 门整体失效：K&R `int f(x) int x;` 被写为 prototyped 零参，与另一 TU 的
+`int f(void)` 链接成功；复审后修订）：
+
+1. "bit2=1 ⟹ param_count=0"——废除（bit2=1 允许携带真实 param_count>0）；
+2. "bitmap 为空"——改述（bitmap 按 param_count 照常编码，位必须全 0，见下）；
+3. "两侧 bit2 不同即冲突"——收窄（双方 param_count 均为 0 时豁免，否则冲突）。
+
+修订后：
+
+- **writer（clang）**：`ParamCount = FD->getNumParams()` 恒取精确计数（K&R 定义的
+  形参表即源真值）；bit2 恒按 `NoProto` 置位，不再做参数个数分支。
+- **wire**：bit2=1 的记录**允许携带 param_count>0**；仍要求 bitmap 全 0（K&R 形参
+  不得为 `__bit`，Sema N14）与 bit3=0。decoder（BinaryFormat）与 llc 的
+  `!mcs251.signatures` 校验同步放宽/补检。
+- **reader 比较语义（修订，非原冻结语义）**：兼容关系按**记录对**判定，且**不
+  传递**——零参豁免使 A（`int f();`）与 B（K&R 带参定义）、A 与 C
+  （`int f(void);`）分别兼容，而 B-C 仍冲突；A 的在场不豁免 B-C。因此同名记录
+  的跨对象核对必须**全对比较**（lld `validateSignatureSet` 按符号名分组后对组内
+  全部记录两两 compareRecords，不得以"首条记录"为比较基准），任何一对冲突即
+  拒绝，与命令行对象顺序无关。逐对判定：bit2 差异且双方 param_count=0 → 豁免
+  prototype-ness 冲突，仍比较 ret、call_abi、bit3（demo 76 的 `void main()` 定义
+  × CRT `void main(void)` 声明照常链接）；bit2 差异且任一方带参 → 冲突；
+  双 bit2=1 → 只比 (ret, call_abi)。
+- **诊断文案统一**：decoder（BinaryFormat）与 llc AsmPrinter 的 bit2 违规文案
+  逐字一致："a no-prototype record cannot also be variadic" 与
+  "a no-prototype record cannot set a __bit bit-ness for source parameter N
+  (K&R parameters cannot be __bit)"。
+- 回归：`validation/mcs251-elf/signature-zeroparam-e2e.sh`（六链路判定 +
+  三对象六排列全拒 + 两组全对兼容对照 + 零参记录计数变异负例 + 13 条完整节点
+  IR 钉死）；lld/test/MCS251/signature-protocol.test 同名三记录六排列全拒 +
+  两组全对兼容对照同步。
 
 ## 夹具影响面（Alice 复核清单，实施批次执行）
 

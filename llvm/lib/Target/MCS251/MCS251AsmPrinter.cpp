@@ -1723,14 +1723,14 @@ public:
     const bool NoProto = MCS251Signatures::hasNoPrototype(RoleByte);
     const bool Variadic = MCS251Signatures::isVariadic(RoleByte);
     if (NoProto && Variadic)
-      return "a K&R no-prototype record cannot also be variadic";
+      // Kept verbatim identical to the BinaryFormat decoder's wording so
+      // both validation paths report the same diagnostic.
+      return "a no-prototype record cannot also be variadic";
 
     const unsigned ParamCount =
         N.getNumOperands() - MCS251Signatures::MetadataOperandFirstParam;
     if (ParamCount > 255)
       return "more than 255 source parameters is not representable";
-    if (NoProto && ParamCount != 0)
-      return "a K&R no-prototype record must carry no source parameters";
 
     std::vector<uint8_t> Bitmap(MCS251Signatures::bitmapBytes(
                                     uint8_t(ParamCount)),
@@ -1741,6 +1741,15 @@ public:
       if (!Bit || *Bit > 1)
         return ("source parameter " + Twine(I) +
                 " must carry an i32 bit-ness (0 or 1)")
+                   .str();
+      // A K&R record keeps its real parameter list (zero-parameter protocol
+      // revision, PM 2026-09-15), but its parameters can never be `__bit`
+      // (Sema N14), so a set bit-ness next to bit2 is a producer bug.  The
+      // sentence is verbatim identical to the BinaryFormat decoder's.
+      if (NoProto && *Bit != 0)
+        return ("a no-prototype record cannot set a __bit bit-ness for "
+                "source parameter " +
+                Twine(I) + " (K&R parameters cannot be __bit)")
                    .str();
       MCS251Signatures::bitmapSet(Bitmap, I, *Bit != 0);
     }

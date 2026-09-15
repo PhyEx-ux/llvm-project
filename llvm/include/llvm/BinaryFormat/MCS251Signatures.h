@@ -40,7 +40,10 @@ namespace MCS251Signatures {
 /// The only value-format version registered for this revision.
 inline constexpr uint8_t ValueVersion = 1;
 
-/// role bits (P4 freeze "内部值格式").  Bits 4..7 are reserved and must be 0.
+/// role bits (P4 freeze "内部值格式", as revised by the zero-parameter
+/// protocol revision of PM 2026-09-15: a bit2=1 record keeps its real
+/// param_count; only its bitmap must stay all zero).  Bits 4..7 are reserved
+/// and must be 0.
 enum RoleBit : uint8_t {
   Role_HasDefinition       = 0x01, ///< this TU defines the function
   Role_DeclaredNotDefined  = 0x02, ///< this TU only declares/references it
@@ -175,13 +178,17 @@ inline void bitmapSet(std::vector<uint8_t> &Bitmap, unsigned I, bool Value) {
     Bitmap[I / 8] = uint8_t(Bitmap[I / 8] & uint8_t(~(1u << (I % 8))));
 }
 
-/// Compare two same-name records under the frozen "比较语义" and report the
-/// first disagreement as a diagnostic.  Returns success when the two records
-/// are compatible:
-///   - bit2 (no-prototype) differs on the two sides          -> conflict;
+/// Compare two same-name records under the frozen "比较语义" (with the
+/// zero-parameter compatibility exception) and report the first disagreement
+/// as a diagnostic.  Returns success when the two records are compatible:
+///   - bit2 (no-prototype) differs on the two sides          -> conflict,
+///     UNLESS both sides have param_count 0 (a `()` and a `(void)`
+///     zero-parameter function have the identical runtime ABI; this keeps
+///     objects written before the zero-parameter rule -- which always set
+///     bit2 for K&R -- linkable against new ones, in both directions);
 ///   - both sides bit2=1                                     -> compare
 ///     (ret, call_abi) only;
-///   - both sides bit2=0                                     -> compare
+///   - otherwise (including the zero-parameter bit2 difference) -> compare
 ///     (param_count, bitmap, ret, call_abi, bit3).
 /// \p Context names the record for the diagnostic (for example the two input
 /// paths); it may be empty.

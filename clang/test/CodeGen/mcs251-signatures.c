@@ -29,10 +29,24 @@ extern int unused_plain(int a, int b);
 // CHECK-DAG: !{!"_defined", i32 1, i32 0, i32 1, i32 0}
 int defined(BOOL a, int b) { return a + b; }
 
-// A K&R no-prototype declaration: role bit2 set, param_count 0 (the decoder
-// enforces that a no-prototype record carries no source parameters).
+// A K&R no-prototype declaration: bit2 records the source prototype-ness
+// verbatim (review revision of the zero-parameter rule, PM 2026-09-15): a
+// zero-parameter K&R record stays bit2=1 with param_count 0, and the READER
+// ignores a bit2 difference when both sides have param_count 0 (a `()` and a
+// `(void)` function have the identical runtime ABI).
 // CHECK-DAG: !{!"_knr_decl", i32 6, i32 0}
 void knr_decl();
+
+// A K&R zero-parameter DEFINITION: same rule -- bit2 set, param_count 0.
+// CHECK-DAG: !{!"_knr_zero_def", i32 5, i32 0}
+void knr_zero_def() {}
+
+// A K&R definition with a real parameter list: the definition's parameter
+// list is the source truth, so this is (bit2=1, param_count 1) -- NOT a
+// prototyped zero-parameter shape.  Against another TU's `int f(void)` the
+// reader sees a bit2 difference with nonzero count and rejects the link.
+// CHECK-DAG: !{!"_knr_one_def", i32 5, i32 0, i32 0}
+int knr_one_def(x) int x; { return x; }
 
 // Re-declaration merge: `int merged();` then `int merged(int);` must record
 // the PROTOTYPED, one-parameter shape, not the earliest zero-parameter one.
@@ -73,5 +87,8 @@ int nested_caller(void) {
 // CHECK-DAG: !{!"_inline_unused", i32 2, i32 0, i32 0}
 inline int inline_unused(int x) { return x + 1; }
 
-// Keep at least one definition so the module is well-formed.
-int main(void) { return defined(1, 2); }
+// Keep at least one definition so the module is well-formed: `main` itself
+// pins the prototyped zero-parameter definition shape (bit2 clear, count 0),
+// the counterpart of `_knr_zero_def` above.
+// CHECK-DAG: !{!"_main", i32 1, i32 0}
+int main(void) { return defined(1, 2) + knr_one_def(3); }

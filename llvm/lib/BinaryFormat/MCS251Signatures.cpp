@@ -122,18 +122,30 @@ llvm::Error MCS251Signatures::decode(StringRef Value, Table &Out) {
            << " (role&3 must be 1 = definition or 2 = declaration)";
       });
 
-    // bit2 no-prototype: param_count=0, empty bitmap, bit3 clear.
+    // bit2 no-prototype: bit3 clear, and the bitmap all zero.  The revision
+    // of the zero-parameter protocol (PM 2026-09-15, after review) lets a K&R
+    // record carry its real parameter list -- a K&R definition like
+    // `int f(x) int x;` is written (bit2=1, param_count=1) so a prototyped
+    // counterpart `int f(void)` is refused instead of silently matching.
+    // `__bit` parameters remain impossible on a K&R definition (Sema N14), so
+    // every bitmap bit of a bit2=1 record must still be zero.
     if (R.Role & Role_NoPrototype) {
       if (R.Role & Role_Variadic)
         return makeError([&](raw_ostream &OS) {
+          // The diagnostic sentence is kept verbatim identical to the llc
+          // side (MCS251AsmPrinter metadata check) so both validation paths
+          // report the same wording.
           OS << "record " << I
-             << " sets no-prototype and variadic together";
+             << ": a no-prototype record cannot also be variadic";
         });
-      if (R.ParamCount != 0)
-        return makeError([&](raw_ostream &OS) {
-          OS << "record " << I << " is no-prototype but has param_count "
-             << unsigned(R.ParamCount) << " (must be 0)";
-        });
+      for (unsigned Bit = 0; Bit != R.ParamCount; ++Bit)
+        if (R.Bitmap[Bit / 8] & (1u << (Bit % 8)))
+          return makeError([&](raw_ostream &OS) {
+            // Verbatim identical to the llc side (MCS251AsmPrinter).
+            OS << "record " << I << ": a no-prototype record cannot set a "
+               << "__bit bit-ness for source parameter " << Bit
+               << " (K&R parameters cannot be __bit)";
+          });
     }
 
     // Bitmap tail bits beyond param_count must be zero.
@@ -207,7 +219,8 @@ llvm::Error MCS251Signatures::decode(StringRef Value, Table &Out) {
 
 llvm::Error MCS251Signatures::compareRecords(const Record &A, const Record &B,
                                              StringRef Context) {
-  // Frozen "比较语义": a differing no-prototype bit is itself a conflict, and
+  // Frozen "比较语义", with the zero-parameter compatibility exception
+  // documented below: a differing no-prototype bit is itself a conflict, and
   // it changes which fields are compared when both sides agree.
   const bool ANoProto = hasNoPrototype(A.Role);
   const bool BNoProto = hasNoPrototype(B.Role);
@@ -220,7 +233,20 @@ llvm::Error MCS251Signatures::compareRecords(const Record &A, const Record &B,
     });
   };
 
-  if (ANoProto != BNoProto) {
+  // Zero-parameter compatibility (PM ruling 2026-09-15, 方案 B): when BOTH
+  // sides have param_count 0, a differing bit2 carries no information -- a
+  // `()` and a `(void)` zero-parameter function have the identical runtime
+  // ABI (nothing to marshal), and writers older than the zero-parameter rule
+  // (which always wrote bit2 for K&R) must stay linkable against new ones and
+  // vice versa.  Such a pair falls through to the bit2=0 branch, which for
+  // param_count 0 compares exactly (ret, variadic, call_abi) -- a strict
+  // subset of the shared ABI, so nothing is silently accepted that the old
+  // bit2=1 branch would have caught.  A bit2 difference with ANY parameter
+  // count above zero remains a conflict: the writer records bit2 verbatim
+  // (a K&R definition keeps its real parameter list), so the sides really
+  // disagree on how arguments are marshalled.
+  const bool ZeroParamsBothSides = A.ParamCount == 0 && B.ParamCount == 0;
+  if (ANoProto != BNoProto && !ZeroParamsBothSides) {
     return makeError([&](raw_ostream &OS) {
       OS << "records '" << A.Name
          << "' disagree on prototype-ness (one side is K&R no-prototype, the "
@@ -230,7 +256,7 @@ llvm::Error MCS251Signatures::compareRecords(const Record &A, const Record &B,
     });
   }
 
-  if (ANoProto) {
+  if (ANoProto && BNoProto) {
     // Both sides bit2=1: compare (ret, call_abi) only.
     if (A.Ret != B.Ret)
       return conflict("return type", Twine(unsigned(A.Ret)),

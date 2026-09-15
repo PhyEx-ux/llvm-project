@@ -383,13 +383,27 @@ public:
       const bool IsDefinition = C.HasBody && EmittedDefinitions.contains(Symbol);
       const bool NoProto = !FD->hasPrototype();
       const bool Variadic = FD->isVariadic();
-      const unsigned ParamCount = NoProto ? 0 : FD->getNumParams();
+      const unsigned ParamCount = FD->getNumParams();
 
       llvm::SmallVector<llvm::Metadata *, 8> Ops;
       Ops.push_back(llvm::MDString::get(Ctx, Symbol));
       uint8_t Role = IsDefinition
                          ? llvm::MCS251Signatures::Role_HasDefinition
                          : llvm::MCS251Signatures::Role_DeclaredNotDefined;
+      // Zero-parameter protocol rule (PM ruling 2026-09-15, revised after
+      // review): bit2 records the SOURCE prototype-ness of the recorded
+      // declaration, for every no-prototype function -- including the
+      // zero-parameter ones.  A K&R definition's parameter list is real
+      // (getNumParams covers it), so ParamCount is always the exact source
+      // count and a K&R `int f(x) int x;` is written (bit2=1, count=1),
+      // which the reader rejects against a prototyped `int f(void)`
+      // (bit2 differs and the counts are not both 0).  The reader-side
+      // exception carries the compatibility instead: a bit2 difference
+      // between two records that BOTH have param_count 0 is ignored, so a
+      // `void main()` definition (bit2=1, count=0) still links against the
+      // CRT's `void main(void)` declaration (bit2=0, count=0) -- the
+      // runtime ABI is identical and old objects written either way remain
+      // linkable in both directions.
       if (NoProto)
         Role |= llvm::MCS251Signatures::Role_NoPrototype;
       if (Variadic)

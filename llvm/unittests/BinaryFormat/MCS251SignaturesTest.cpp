@@ -12,9 +12,9 @@
 // The tests pin the grammar end to end: the empty-set spelling, the implicit
 // record length, the bitmap bit order, the name_blob rules (first byte,
 // empty name, duplicate name, trailing bytes), the role legal combinations
-// (role&3 in {1,2}, bit2 forcing param_count=0, bit3), the ret domain and
-// the encoder's self-check.  The frozen mutation matrix names exactly these
-// cases, so a change to the wire format breaks one test here by design.
+// (role&3 in {1,2}, bit2 vs bit3, the bit2 bitmap-zero rule), the ret domain
+// and the encoder's self-check.  The frozen mutation matrix names exactly
+// these cases, so a change to the wire format breaks one test here by design.
 //
 //===----------------------------------------------------------------------===//
 
@@ -204,29 +204,41 @@ TEST_F(MCS251SignaturesTest, IllegalRoleCombinationsAreRejected) {
   }
 }
 
-TEST_F(MCS251SignaturesTest, NoPrototypeForcesZeroParamsAndClearsVariadic) {
-  // bit2=1 requires param_count=0, empty bitmap and bit3=0.
+TEST_F(MCS251SignaturesTest, NoPrototypeKeepsParamsButForbidsBitBitmap) {
+  // Zero-parameter protocol revision (PM 2026-09-15, after review): bit2=1
+  // keeps its real param_count -- a K&R definition records the parameter list
+  // so a prototyped counterpart cannot silently match.  `__bit` stays
+  // impossible on K&R (Sema N14), so the bitmap must remain all zero and
+  // bit3 must stay clear.
   {
+    // A K&R one-parameter definition record round-trips.
     Table T;
-    Record R = simpleRecord("_f", Role_HasDefinition | Role_NoPrototype, 0);
+    Record R = simpleRecord("_f", Role_HasDefinition | Role_NoPrototype, 1);
     T.Records.push_back(R);
     Table D;
     ASSERT_FALSE(bool(decode(encode(T), D)));
-    EXPECT_EQ(D.Records[0].ParamCount, 0u);
+    EXPECT_EQ(D.Records[0].ParamCount, 1u);
+    EXPECT_TRUE(hasNoPrototype(D.Records[0].Role));
   }
   {
+    // A hand-built bit2=1 record with a set bitmap bit is rejected.
     std::string Bytes = rawValue(Role_HasDefinition | Role_NoPrototype, 1,
-                                 std::string(1, char(0x00)), 0, 2, 1,
+                                 std::string(1, char(0x01)), 0, 2, 1,
                                  nulBlob("_f"), 0);
     Table D;
-    ASSERT_TRUE(bool(decode(Bytes, D)));
+    Error E = decode(Bytes, D);
+    ASSERT_TRUE(bool(E));
+    EXPECT_NE(toString(std::move(E)).find("no-prototype"), std::string::npos);
   }
   {
+    // bit2 and bit3 together are still rejected.
     std::string Bytes = rawValue(
         Role_HasDefinition | Role_NoPrototype | Role_Variadic, 0, "", 0, 2,
         1, nulBlob("_f"), 0);
     Table D;
-    ASSERT_TRUE(bool(decode(Bytes, D)));
+    Error E = decode(Bytes, D);
+    ASSERT_TRUE(bool(E));
+    EXPECT_NE(toString(std::move(E)).find("variadic"), std::string::npos);
   }
 }
 
@@ -346,10 +358,38 @@ TEST_F(MCS251SignaturesTest, CompareRecordsFrozenSemantics) {
   EXPECT_NE(toString(std::move(E)).find("source parameter 1"),
             std::string::npos);
 
-  // Prototype-ness difference: bit2 on one side only.
+  // Prototype-ness difference with both sides at param_count 0: compatible
+  // (zero-parameter compatibility, PM ruling 2026-09-15).  A `()` and a
+  // `(void)` zero-parameter function have the identical runtime ABI, so a
+  // K&R-written record (bit2 set) and a prototyped-written record (bit2
+  // clear) must link in BOTH directions.
   Record Dp = simpleRecord("_f", Role_HasDefinition | Role_NoPrototype, 0);
   Record P = simpleRecord("_f", Role_HasDefinition, 0);
-  E = compareRecords(P, Dp, "");
+  ASSERT_FALSE(bool(compareRecords(P, Dp, "")));
+  ASSERT_FALSE(bool(compareRecords(Dp, P, "")));
+
+  // The zero-parameter exception changes nothing else: a differing return
+  // type or variadic-ness between such a pair is still a conflict.
+  Record Pv = P;
+  Pv.Ret = 1;
+  E = compareRecords(Dp, Pv, "");
+  ASSERT_TRUE(bool(E));
+  EXPECT_NE(toString(std::move(E)).find("return type"), std::string::npos);
+  Record Var = P;
+  Var.Role |= Role_Variadic;
+  E = compareRecords(Dp, Var, "");
+  ASSERT_TRUE(bool(E));
+  EXPECT_NE(toString(std::move(E)).find("variadic"), std::string::npos);
+
+  // A no-prototype bit difference on a function WITH parameters is still a
+  // conflict: the tolerance is exactly zero parameters, nothing wider.
+  Record K1 = makeRecord("_g", /*IsDefinition=*/true, 1,
+                         std::vector<uint8_t>{0x01}, false,
+                         /*NoPrototype=*/true, /*Variadic=*/false, 2, 1);
+  Record K2 = makeRecord("_g", /*IsDefinition=*/true, 1,
+                         std::vector<uint8_t>{0x01}, false,
+                         /*NoPrototype=*/false, /*Variadic=*/false, 2, 1);
+  E = compareRecords(K1, K2, "");
   ASSERT_TRUE(bool(E));
   EXPECT_NE(toString(std::move(E)).find("prototype"), std::string::npos);
 

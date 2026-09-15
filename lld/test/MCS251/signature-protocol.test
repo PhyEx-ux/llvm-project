@@ -20,7 +20,13 @@
 # RUN: yaml2obj producer-byte.yaml -o producer-byte.o
 # RUN: yaml2obj obj-decl.yaml -o obj-decl.o
 # RUN: yaml2obj func-def.yaml -o func-def.o
-# RUN: %python setflags.py defrec.o noproto.o noun.o producer.o consumer.o user.o dotl.o notype-data.o def-compatible.o caller-compatible.o producer-bit.o producer-byte.o obj-decl.o func-def.o
+# RUN: yaml2obj kr-old-def.yaml -o kr-old-def.o
+# RUN: yaml2obj kr-new-def.yaml -o kr-new-def.o
+# RUN: yaml2obj kr-old-decl.yaml -o kr-old-decl.o
+# RUN: yaml2obj crt-decl.yaml -o crt-decl.o
+# RUN: yaml2obj neg-old-def.yaml -o neg-old-def.o
+# RUN: yaml2obj neg-1param-decl.yaml -o neg-1param-decl.o
+# RUN: %python setflags.py defrec.o noproto.o noun.o producer.o consumer.o user.o dotl.o notype-data.o def-compatible.o caller-compatible.o producer-bit.o producer-byte.o obj-decl.o func-def.o kr-old-def.o kr-new-def.o kr-old-decl.o crt-decl.o neg-old-def.o neg-1param-decl.o
 #
 # --- a definition record must name a function definition in its own object
 # --- (a non-function NOTYPE symbol cannot carry a definition signature) ---
@@ -63,6 +69,86 @@
 # --- K&R no-prototype vs prototyped: definition and caller agree on ret ---
 # RUN: mcs251-lld def-compatible.o caller-compatible.o --area-start=CSEG=0xff0200 -o %t/kr.elf
 # RUN: test -f %t/kr.elf
+#
+# --- zero-parameter prototype-ness compatibility (demo-76 shape, PM ruling
+# --- 2026-09-15, revised after review): the writer records bit2 verbatim, so
+# --- a K&R `void main()` definition carries (bit2=1, param_count=0) and the
+# --- CRT's `void main(void)` declaration (bit2=0, param_count=0) differs on
+# --- bit2 -- but the two have the identical runtime ABI, so a bit2
+# --- difference with BOTH sides at param_count 0 links -- old objects
+# --- (bit2 set) against prototyped-written ones and vice versa ---
+# RUN: yaml2obj kr-old-def.yaml -o kr-old-def.o
+# RUN: yaml2obj kr-new-def.yaml -o kr-new-def.o
+# RUN: yaml2obj kr-old-decl.yaml -o kr-old-decl.o
+# RUN: yaml2obj crt-decl.yaml -o crt-decl.o
+# RUN: %python setflags.py kr-old-def.o kr-new-def.o kr-old-decl.o crt-decl.o
+# the demo-76 link: K&R `void main()` definition (role 0x05, any writer
+# vintage) vs the CRT's prototyped `_main` declaration (role 0x02)
+# RUN: mcs251-lld kr-old-def.o crt-decl.o --area-start=CSEG=0xff0200 -o %t/z1.elf
+# RUN: test -f %t/z1.elf
+# a prototyped-written zero-param definition (role 0x01: `void main(void)`
+# defined, or a 方案B-era object) vs the CRT: bit2 equal, plain compare
+# RUN: mcs251-lld kr-new-def.o crt-decl.o --area-start=CSEG=0xff0200 -o %t/z2.elf
+# RUN: test -f %t/z2.elf
+# prototyped-written definition vs an OLD K&R declaration still carrying bit2
+# RUN: mcs251-lld kr-new-def.o kr-old-decl.o --area-start=CSEG=0xff0200 -o %t/z3.elf
+# RUN: test -f %t/z3.elf
+#
+# --- the zero-parameter tolerance is exactly zero parameters: a bit2
+# --- difference next to a real parameter list is still a conflict -------
+# RUN: yaml2obj neg-old-def.yaml -o neg-old-def.o
+# RUN: yaml2obj neg-1param-decl.yaml -o neg-1param-decl.o
+# RUN: %python setflags.py neg-old-def.o neg-1param-decl.o
+# RUN: not mcs251-lld neg-old-def.o neg-1param-decl.o --area-start=CSEG=0xff0200 -o %t/z4.elf 2>&1 | FileCheck %s --check-prefix=ZEROPARAM-WIDE
+# ZEROPARAM-WIDE: records '_f' disagree on prototype-ness
+# RUN: test ! -e %t/z4.elf
+#
+# --- P1 closure (review round 3): compareRecords is deliberately NOT
+# --- transitive, so the same-name record set is checked pairwise over ALL
+# --- records.  Three legal records for _f --
+# ---   A  `int f();`                       role 6, param_count 0
+# ---   B  K&R definition, real parameters role 5, param_count 1
+# ---   C  `int f(void);`                   role 2, param_count 0
+# --- satisfy A-B (both bit2=1) and A-C (zero-parameter exemption) while
+# --- B-C is a genuine conflict (bit2 differs, B has parameters).  A's
+# --- presence does not exempt the B-C pair: B and C are simultaneously in
+# --- the link in every order, so ALL six command-line permutations must be
+# --- rejected.
+# RUN: yaml2obj tri-kr-decl.yaml -o tri-kr-decl.o
+# RUN: yaml2obj tri-kr-def.yaml -o tri-kr-def.o
+# RUN: yaml2obj tri-proto-decl.yaml -o tri-proto-decl.o
+# RUN: %python setflags.py tri-kr-decl.o tri-kr-def.o tri-proto-decl.o
+# RUN: not mcs251-lld tri-kr-decl.o tri-kr-def.o tri-proto-decl.o --area-start=CSEG=0xff0200 -o %t/perm1.elf 2>&1 | FileCheck %s --check-prefix=TRIPLE-CONFLICT
+# RUN: test ! -e %t/perm1.elf
+# RUN: not mcs251-lld tri-kr-decl.o tri-proto-decl.o tri-kr-def.o --area-start=CSEG=0xff0200 -o %t/perm2.elf 2>&1 | FileCheck %s --check-prefix=TRIPLE-CONFLICT
+# RUN: test ! -e %t/perm2.elf
+# RUN: not mcs251-lld tri-kr-def.o tri-kr-decl.o tri-proto-decl.o --area-start=CSEG=0xff0200 -o %t/perm3.elf 2>&1 | FileCheck %s --check-prefix=TRIPLE-CONFLICT
+# RUN: test ! -e %t/perm3.elf
+# RUN: not mcs251-lld tri-kr-def.o tri-proto-decl.o tri-kr-decl.o --area-start=CSEG=0xff0200 -o %t/perm4.elf 2>&1 | FileCheck %s --check-prefix=TRIPLE-CONFLICT
+# RUN: test ! -e %t/perm4.elf
+# RUN: not mcs251-lld tri-proto-decl.o tri-kr-decl.o tri-kr-def.o --area-start=CSEG=0xff0200 -o %t/perm5.elf 2>&1 | FileCheck %s --check-prefix=TRIPLE-CONFLICT
+# RUN: test ! -e %t/perm5.elf
+# RUN: not mcs251-lld tri-proto-decl.o tri-kr-def.o tri-kr-decl.o --area-start=CSEG=0xff0200 -o %t/perm6.elf 2>&1 | FileCheck %s --check-prefix=TRIPLE-CONFLICT
+# RUN: test ! -e %t/perm6.elf
+# TRIPLE-CONFLICT: records '_f' disagree on prototype-ness
+#
+# --- pairwise all-compatible control 1: A + C + a prototyped zero-parameter
+# --- definition (role 1, count 0).  Every pair is compatible (the two
+# --- bit2-differing pairs fall under the zero-parameter exemption), so the
+# --- pairwise sweep must not reject this triple.
+# RUN: yaml2obj tri-proto-def.yaml -o tri-proto-def.o
+# RUN: %python setflags.py tri-proto-def.o
+# RUN: mcs251-lld tri-kr-decl.o tri-proto-decl.o tri-proto-def.o --area-start=CSEG=0xff0200 -o %t/pc1.elf
+# RUN: test -f %t/pc1.elf
+#
+# --- pairwise all-compatible control 2: the demo-76 trio extended with the
+# --- old-style declaration -- K&R definition (role 5, count 0), K&R
+# --- declaration (role 6, count 0) and the prototyped CRT declaration
+# --- (role 2, count 0).  bit2=1 pairs compare (ret, call_abi) only and the
+# --- bit2-differing pairs fall under the zero-parameter exemption, so all
+# --- three pairs are compatible and the triple links.
+# RUN: mcs251-lld kr-old-def.o kr-old-decl.o crt-decl.o --area-start=CSEG=0xff0200 -o %t/pc2.elf
+# RUN: test -f %t/pc2.elf
 #
 # --- a declaration record must name a FUNCTION symbol: an undefined
 # --- STT_OBJECT symbol is valid object input but is DATA, so a signature
@@ -464,6 +550,324 @@ Sections:
     Content: 41000000C04D43533235310001000000B5048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8412010001000000000001000002015F666F6F00
 Symbols:
   - Name: _foo
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_FUNC
+#--- kr-old-def.yaml
+
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C14D43533235310001000000B6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8413010001000000000005000002015F6D61696E00
+Symbols:
+  - Name: _main
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_FUNC
+
+
+#--- kr-new-def.yaml
+
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C14D43533235310001000000B6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8413010001000000000001000002015F6D61696E00
+Symbols:
+  - Name: _main
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_FUNC
+
+
+#--- kr-old-decl.yaml
+
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _main
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C14D43533235310001000000B6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8413010001000000000006000002015F6D61696E00
+Symbols:
+  - Name: _main
+    Binding: STB_GLOBAL
+
+
+#--- crt-decl.yaml
+
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _main
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C14D43533235310001000000B6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8413010001000000000002000002015F6D61696E00
+Symbols:
+  - Name: _main
+    Binding: STB_GLOBAL
+
+
+#--- neg-old-def.yaml
+
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BE4D43533235310001000000B3048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8410010001000000000005000002015F6600
+Symbols:
+  - Name: _f
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_FUNC
+
+
+#--- neg-1param-decl.yaml
+
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _f
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BF4D43533235310001000000B4048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841101000100000000000201000002015F6600
+Symbols:
+  - Name: _f
+    Binding: STB_GLOBAL
+
+
+
+#--- tri-kr-decl.yaml
+# A: `int f();` -- declaration that still carries bit2 (role 6), count 0.
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _f
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BE4D43533235310001000000B3048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8410010001000000000006000002015F6600
+Symbols:
+  - Name: _f
+    Binding: STB_GLOBAL
+
+#--- tri-kr-def.yaml
+# B: K&R definition with a real parameter list -- role 5, param_count 1,
+# bitmap all zero (the revision keeps the parameter list on the record).
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BF4D43533235310001000000B4048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841101000100000000000501000002015F6600
+Symbols:
+  - Name: _f
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Type: STT_FUNC
+
+#--- tri-proto-decl.yaml
+# C: `int f(void);` -- prototyped declaration (role 2), count 0.
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ SHF_INFO_LINK ]
+    Link: .symtab
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _f
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BE4D43533235310001000000B3048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8410010001000000000002000002015F6600
+Symbols:
+  - Name: _f
+    Binding: STB_GLOBAL
+
+#--- tri-proto-def.yaml
+# D: prototyped zero-parameter definition (role 1), count 0 -- the
+# all-compatible control's third record.
+
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BE4D43533235310001000000B3048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8410010001000000000001000002015F6600
+Symbols:
+  - Name: _f
     Binding: STB_GLOBAL
     Section: .text
     Value: 0

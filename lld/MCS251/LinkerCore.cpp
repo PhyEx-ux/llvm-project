@@ -1961,26 +1961,42 @@ bool Linker::validateSignatureSet() {
     return true; // no v2 object: nothing to check.
 
   // Cross-object: for one name, every record found in the link must agree
-  // under compareRecords().  The first v2 object in command-line order is the
-  // reference, exactly like validateIdentitySet, so diagnostics name a stable
-  // pair.
-  std::map<std::string, const InputFile *> Owner;
-  std::map<std::string, const MCS251Signatures::Record *> First;
+  // under compareRecords().  compareRecords is deliberately NOT transitive:
+  // the zero-parameter exemption (PM ruling 2026-09-15) accepts a differing
+  // bit2 when BOTH sides have param_count 0, so the same name can carry
+  // records A (`int f();`, bit2=1/count=0), B (a K&R definition with a real
+  // parameter list, bit2=1/count=1) and C (`int f(void);`, bit2=0/count=0)
+  // where A-B and A-C are compatible while B-C is a genuine conflict --
+  // compatibility is a property of a PAIR, not of the name.  Keeping only
+  // the first record as the comparison reference would never compare B
+  // against C whenever an A-compatible record comes first, making the link
+  // verdict depend on command-line order.  Group every record per name and
+  // compare ALL pairs; same-name groups hold at most one record per v2
+  // object (the decoder rejects duplicate names within a Tag 28), so the
+  // O(k^2) sweep over each group is bounded by the object count.  Entries
+  // are pushed in command-line order, so the first conflicting pair in that
+  // order is the one diagnosed -- a stable pair, exactly like
+  // validateIdentitySet.
+  struct SigEntry {
+    const MCS251Signatures::Record *Rec;
+    const InputFile *File;
+  };
+  std::map<std::string, std::vector<SigEntry>> ByName;
   for (const auto &F : Files) {
     if (!F->IsV2)
       continue;
-    for (const MCS251Signatures::Record &Rec : F->Signatures.Records) {
-      auto It = First.find(Rec.Name);
-      if (It == First.end()) {
-        First[Rec.Name] = &Rec;
-        Owner[Rec.Name] = F.get();
-        continue;
-      }
-      if (llvm::Error E = MCS251Signatures::compareRecords(
-              *It->second, Rec,
-              Owner[Rec.Name]->Path + " vs " + F->Path))
-        return fail(Err, F->Path + ": " + toString(std::move(E)));
-    }
+    for (const MCS251Signatures::Record &Rec : F->Signatures.Records)
+      ByName[Rec.Name].push_back({&Rec, F.get()});
+  }
+  for (const auto &KV : ByName) {
+    const std::vector<SigEntry> &Group = KV.second;
+    for (size_t I = 0; I != Group.size(); ++I)
+      for (size_t J = I + 1; J != Group.size(); ++J)
+        if (llvm::Error E = MCS251Signatures::compareRecords(
+                *Group[I].Rec, *Group[J].Rec,
+                Group[I].File->Path + " vs " + Group[J].File->Path))
+          return fail(Err, Group[J].File->Path + ": " +
+                               toString(std::move(E)));
   }
 
   // Per-object coverage.  The record-count zero case is legal only when the
