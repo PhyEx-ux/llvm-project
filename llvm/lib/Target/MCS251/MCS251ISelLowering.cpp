@@ -192,13 +192,25 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   // SIGN_EXTEND_INREG (DAGCombiner's sext(trunc x) form) consults the
   // action table by INNER type, not by result type (LegalizeDAG), so the
   // two modeled inner widths need explicit entries. All other inner types
-  // (i1, wider scalars, vectors) are deliberately NOT registered this
-  // round: they keep whatever action the generic defaults give them (Legal
-  // for most scalars, Expand for vector INREG and the odd narrow types,
+  // (wider scalars, vectors) are deliberately NOT registered this round:
+  // they keep whatever action the generic defaults give them (Legal for
+  // most scalars, Expand for vector INREG and the odd narrow types,
   // TargetLoweringBase::initActions) -- no support is claimed for them,
   // and a Legal-but-unselectable node fails loudly at selection.
+  //
+  // Inner i1 is the exception that must NOT be left to the default: it is
+  // Legal-by-default yet unselectable, so `sext i1 %x to iN` (DAGCombiner
+  // folds it into SIGN_EXTEND_INREG) died at ISel with "Cannot select:
+  // sign_extend_inreg ... i1". That shape is reachable from clang for a
+  // signed 1-bit source, and sitofp consumes it (the signed pair must lower
+  // `sitofp i1` as sext-to-iN first: LLVM/IR semantics are `sitofp i1 true
+  // == -1.0`, matching LegalizeDAG.cpp's boolean expansion, versus `uitofp
+  // i1 true == +1.0`). Register Expand so the generic expander turns the
+  // boolean negation into AND 1 / SUB 0 that the i8/i16/i32 cores already
+  // select, instead of leaking an unselectable node.
   setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i8, Custom);
   setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i16, Custom);
+  setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i1, Expand);
   // Stack allocations (Phase 9): static allocas surface as FrameIndexSDNode
   // pointers handled by parseAddress (direct @dr60 access) and the FIADDR
   // Select hook (escaping pointer values); variable-length allocas lower

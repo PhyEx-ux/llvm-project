@@ -241,11 +241,6 @@ static bool hasMCS251ConnectedF32Compare(CmpInst::Predicate Pred) {
   }
 }
 
-// Arithmetic half of the contract. LI is the per-function local interpreter
-// (shared oracle with MCS251LoweringPrep); it decides, without touching the
-// IR, whether every operand of I evaluates to a compile-time constant and
-// whether I is effectively dead -- the two shapes MCS251LoweringPrep erases
-// for non-optnone functions and that ISel handles locally for optnone ones.
 static Error checkUnsupportedArithmetic(const Instruction &I,
                                         const LocalInterp &LI) {
   auto IsWideOrFloat = [](Type *Ty) {
@@ -407,18 +402,42 @@ static Error checkUnsupportedArithmetic(const Instruction &I,
                     "wide-integer runtime is not connected");
   }
 
-  // The only conversion helpers are signed i32 <-> f32. Narrow and unsigned
-  // forms deliberately remain absent: no __floatunsisf/__fixunssfsi exists.
+  // The conversion helpers are the signed and unsigned i32 <-> f32 pairs.
+  // Every narrower integer form is accepted because it needs no helper of its
+  // own: the generic soft-float legalizer zero/sign-extends the source to i32
+  // before the call and truncates the i32 result back (LegalizeFloatTypes.cpp
+  // SoftenFloatRes_XINT_TO_FP / findFPToIntLibcall).
+  //
+  // i1 is inside this whitelist and is NOT a leak: the signed direction needs
+  // a sign-extension of the boolean, which reaches the backend as
+  // SIGN_EXTEND_INREG with inner i1 -- Legal-by-default but unselectable on
+  // this target -- so MCS251ISelLowering registers it Expand and the generic
+  // expander lowers it to AND 1 / SUB 0 (LLVM/IR semantics: `sitofp i1 true
+  // == -1.0`, `uitofp i1 true == +1.0`). The full 1..32 width sweep is
+  // verified at O0 and O2. f64 and any integer wider than 32 bits stay
+  // rejected by the float test below -- only `float` is ever the float side
+  // of an accepted conversion.
   if (auto *CI = dyn_cast<CastInst>(&I)) {
     Type *SrcTy = CI->getSrcTy();
     Type *DstTy = CI->getDestTy();
-    if (CI->getOpcode() == Instruction::SIToFP && SrcTy->isIntegerTy(32) &&
+    auto IsNarrowOrI32 = [](Type *Ty) {
+      return Ty->isIntegerTy() && Ty->getIntegerBitWidth() <= 32;
+    };
+    if (CI->getOpcode() == Instruction::SIToFP && IsNarrowOrI32(SrcTy) &&
         DstTy->isFloatTy() &&
         isMCS251ConnectedF32Libcall(RTLIB::SINTTOFP_I32_F32))
       return Error::success();
     if (CI->getOpcode() == Instruction::FPToSI && SrcTy->isFloatTy() &&
-        DstTy->isIntegerTy(32) &&
+        IsNarrowOrI32(DstTy) &&
         isMCS251ConnectedF32Libcall(RTLIB::FPTOSINT_F32_I32))
+      return Error::success();
+    if (CI->getOpcode() == Instruction::UIToFP && IsNarrowOrI32(SrcTy) &&
+        DstTy->isFloatTy() &&
+        isMCS251ConnectedF32Libcall(RTLIB::UINTTOFP_I32_F32))
+      return Error::success();
+    if (CI->getOpcode() == Instruction::FPToUI && SrcTy->isFloatTy() &&
+        IsNarrowOrI32(DstTy) &&
+        isMCS251ConnectedF32Libcall(RTLIB::FPTOUINT_F32_I32))
       return Error::success();
     bool SrcFloat = SrcTy->isFloatTy() || SrcTy->isDoubleTy();
     bool DstFloat = DstTy->isFloatTy() || DstTy->isDoubleTy();
