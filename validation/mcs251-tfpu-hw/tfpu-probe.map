@@ -1,0 +1,98 @@
+ASxxxx Linker V05.50.4-SDLD,  page 1.
+Hexadecimal  [32-Bits]
+
+Area                                    Addr        Size        Decimal Bytes (Attributes)
+--------------------------------        ----        ----        ------- ----- ------------
+.  .ABS.                            00000000    00000000 =           0. bytes (ABS,CON)
+
+         Value  Global                             Global Defined In Module
+         -----  --------------------------------   ------------------------
+     00000000  .__.ABS.                           main
+     00000000  l_BIT_BANK                      
+     00000000  l_BSEG                          
+     00000000  l_BSEG_BYTES                    
+     00000000  l_DSEG                          
+     00000000  l_ISEG                          
+     00000000  l_OSEG                          
+     00000000  l_REG_BANK_0                    
+     00000000  l_REG_BANK_1                    
+     00000000  l_REG_BANK_2                    
+     00000000  l_REG_BANK_3                    
+     00000000  l_SSEG                          
+     00000000  l__CODE                         
+     00000000  s_BSEG                          
+     00000000  s_DSEG                          
+     00000000  s_ISEG                          
+     00000000  s_REG_BANK_0                    
+     00000000  s_SSEG                          
+     00000003  l_HOME                          
+     00000008  l_VECS                          
+     00000008  s_REG_BANK_1                    
+     00000010  s_REG_BANK_2                    
+     00000018  s_BIT_BANK                      
+     00000018  s_OSEG                          
+     00000018  s_REG_BANK_3                    
+     00000020  s_BSEG_BYTES                    
+     00000020  s__CODE                         
+     00000100  l_IRAM                          
+     000037E5  l_CSEG                          
+     00FF0000  s_HOME                          
+     00FF0003  s_VECS                          
+     00FF0200  s_CSEG                          
+
+ASxxxx Linker V05.50.4-SDLD,  page 2.
+Hexadecimal  [32-Bits]
+
+Area                                    Addr        Size        Decimal Bytes (Attributes)
+--------------------------------        ----        ----        ------- ----- ------------
+HOME                                00FF0000    00000003 =           3. bytes (REL,CON,CODE)
+
+         Value  Global                             Global Defined In Module
+         -----  --------------------------------   ------------------------
+ASxxxx Linker V05.50.4-SDLD,  page 3.
+Hexadecimal  [32-Bits]
+
+Area                                    Addr        Size        Decimal Bytes (Attributes)
+--------------------------------        ----        ----        ------- ----- ------------
+VECS                                00FF0003    00000008 =           8. bytes (REL,CON,CODE)
+
+         Value  Global                             Global Defined In Module
+         -----  --------------------------------   ------------------------
+ASxxxx Linker V05.50.4-SDLD,  page 4.
+Hexadecimal  [32-Bits]
+
+Area                                    Addr        Size        Decimal Bytes (Attributes)
+--------------------------------        ----        ----        ------- ----- ------------
+CSEG                                00FF0200    000037E5 =       14309. bytes (REL,CON,CODE)
+
+         Value  Global                             Global Defined In Module
+         -----  --------------------------------   ------------------------
+C:   00FF055D  _start                             mcs251_tfpu_probe
+C:   00FF0573  _tpu_clk_sys                       mcs251_tfpu_probe
+C:   00FF0577  _tpu_init                          mcs251_tfpu_probe
+C:   00FF057B  _tpu_clr_exc                       mcs251_tfpu_probe
+C:   00FF057F  _tpu_raw                           mcs251_tfpu_probe
+C:   00FF05AB  _tpu_read_state                    mcs251_tfpu_probe
+C:   00FF05E1  _tpu_mul_once                      mcs251_tfpu_probe
+C:   00FF0676  _tpu_mul_at_n                      mcs251_tfpu_probe
+C:   00FF0696  _tpu_add_at_n                      mcs251_tfpu_probe
+C:   00FF06B6  _tpu_sin_at_n                      mcs251_tfpu_probe
+C:   00FF073A  _main                              main
+
+ASxxxx Linker V05.50.4-SDLD,  page 5.
+
+Files Linked                              [ module(s) ]
+
+/tmp/tpu-deliver/tfpu-probe.rel           [  ]
+/tmp/tpu-deliver/main.rel                 [  ]
+
+ASxxxx Linker V05.50.4-SDLD,  page 6.
+
+User Base Address Definitions
+
+HOME = 0xff0000
+CSEG = 0xff0200
+ISEG = 0x0000
+BSEG = 0x0000
+
+

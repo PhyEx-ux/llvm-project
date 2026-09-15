@@ -1,0 +1,17 @@
+; STC32G12K128: Flash 128K at FE:0000-FF:FFFF, code linked at FF:0000/FF:0200.
+; All code and constants live in program Flash; the probe keeps every mutable
+; byte at fixed EDATA addresses (0x0030..0x0039) and never defines a C global,
+; so there is no XINIT / CRT data copy and ISEG/BSEG stay unused.
+;
+; EDATA on this part is 4K (00:0000-00:0FFF); the C stack starts at 0x0800 and
+; grows up into 0x0FFF.  0x0000..0x001F is the register bank and 0x0020..0x002F
+; is the bit-addressable area, so the observation slots sit at 0x0030 upward.
+-mwx
+-i @OUTPUT_IHX@
+-b HOME = 0xff0000
+-b CSEG = 0xff0200
+-b ISEG = 0x0000
+-b BSEG = 0x0000
+@PROBE_REL@
+@MAIN_REL@
+-e

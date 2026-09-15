@@ -1,0 +1,1421 @@
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))       Page 1
+Hexadecimal [24-Bits]
+
+
+
+                                      1 ; ---------------------------------------------------------------------------
+                                      2 ; TFPU status / completion probe for STC32G12K128.
+                                      3 ;
+                                      4 ; WHY THIS EXISTS
+                                      5 ; The manual documents command 0x33 as "read status register, result saved to
+                                      6 ; R7" but never defines the status bit layout, and the official
+                                      7 ; AI8051U_32_TFPU.LIB disassembles to "MOV DMAIR,#cmd ; RET" (zero wait).
+                                      8 ; This module collects the raw evidence on real silicon:
+                                      9 ;
+                                     10 ;   * raw R7 / SFR 0xEF / SFR 0xFF before any TFPU command
+                                     11 ;   * R7 after 0x33 at four moments: clean, after 0x31, after 0x32, after a
+                                     12 ;     multiply (and again once the product has been read out)
+                                     13 ;   * SFR 0xEF and 0xFF at the same moments
+                                     14 ;   * the first NOP count n at which R4..R7 hold the correct IEEE-754 result
+                                     15 ;     for mul (0x1E), add (0x1C) and sin (0x2D)
+                                     16 ;
+                                     17 ; IMPORTANT CORRECTION TO THE BRIEF
+                                     18 ; The bytes following "MOV DMAIR,#0x33" in the official library are
+                                     19 ;     A5 EF  ->  MOV A,R7    (Source-mode MOV A,Rn = [A5][E8+rn]; rn=7 -> EF)
+                                     20 ;     A5 FF  ->  MOV R7,A    (Source-mode MOV Rn,A = [A5][F8+rn]; rn=7 -> FF)
+                                     21 ; They are NOT reads of SFR 0xEF / 0xFF.  On this part 0xEF is AUXINTIF and
+                                     22 ; 0xFF is RSTCFG; the official library touches neither.  The probe still samples
+                                     23 ; both, purely as a control that they do not move.
+                                     24 ;
+                                     25 ; ORDERING CONTRACT (user requirement)
+                                     26 ; Every TFPU action -- the 0x3E clock select and 0x31/0x32 included -- happens
+                                     27 ; strictly after the first UART output.  main.c owns UART and prints a heartbeat
+                                     28 ; before and after each stage; this module only issues a TFPU command when
+                                     29 ; called from C.
+                                     30 ;
+                                     31 ; REGISTER BANKS
+                                     32 ; Bank 0 is the reset default and is what the C compiler uses, so R0..R7 map to
+                                     33 ; DATA 0x00..0x07 (BR = R0..R3 with MSB in R0, AR = R4..R7 with MSB in R4).  No
+                                     34 ; bank switch is performed: the compiler is not running inside the timed window
+                                     35 ; and every entry point saves/restores R0..R15, PSW, PSW1 and DPX.
+                                     36 ;
+                                     37 ; LATENCY MEASUREMENT
+                                     38 ; Each command owns one shared run of TPU_SLED NOPs (see gen-sled.py).  The
+                                     39 ; dispatcher jumps into that run so that exactly n NOPs execute before the
+                                     40 ; snapshot: PC = sled + (TPU_SLED - n).  Since A is only 8 bits wide, two DPTR
+                                     41 ; bases are used (lo: n <= 255, hi: n > 255); main.c pre-computes A and the
+                                     42 ; selector.  Only "JMP @A+DPTR" sits between the DMAIR trigger and the sled, so
+                                     43 ; the residual fixed overhead is a single instruction (documented, constant,
+                                     44 ; and small relative to the 26..270-clock commands under test).
+                                     45 ; ---------------------------------------------------------------------------
+                                     46         .module mcs251_tfpu_probe
+                                     47         .source
+                                     48         .optsdcc stc32-mcs251 abi-major=1 abi-minor=0 target=mcs251 model=small stack-auto=0 xstack=0 intlong-reent=0 float-reent=0 reg-params=1 all-callee-saves=0 sdcccall=2 regset=r0-r9,r12-r15 compiler-build=mcs251-abi1.0-r1
+                                     49         .globl _main, _start
+                                     50         .globl _tpu_clk_sys, _tpu_init, _tpu_clr_exc
+                                     51         .globl _tpu_raw, _tpu_read_state, _tpu_mul_once
+                                     52         .globl _tpu_mul_at_n, _tpu_add_at_n, _tpu_sin_at_n
+                                     53 
+                                     54 ; SFRs
+                           0000A8    55 IE      = 0xa8
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))       Page 2
+Hexadecimal [24-Bits]
+
+
+
+                           000088    56 TCON    = 0x88
+                           0000D0    57 PSW     = 0xd0
+                           0000D1    58 PSW1    = 0xd1
+                           0000ED    59 DMAIR   = 0xed
+                                     60 
+                                     61 ; EDATA scratch / observation slots shared with main.c.  Fixed addresses only,
+                                     62 ; so there are no C globals and therefore no XINIT / CRT data copy.
+                                     63 ; 0x00..0x1F is the register bank and 0x20..0x2F is the bit-addressable area,
+                                     64 ; hence the slots start at 0x0030.
+                           000030    65 S_R7RAW = 0x0030        ; R7 read directly, no 0x33 issued
+                           000031    66 S_R7    = 0x0031        ; R7 after 0x33
+                           000032    67 S_EF    = 0x0032        ; SFR 0xEF (AUXINTIF)
+                           000033    68 S_FF    = 0x0033        ; SFR 0xFF (RSTCFG)
+                           000034    69 S_A     = 0x0034        ; dispatch byte for JMP @A+DPTR
+                           000035    70 S_SEL   = 0x0035        ; 0 = lo sled base, 1 = hi sled base
+                           000036    71 S_L4    = 0x0036        ; snapshot of R4..R7 (MSB first)
+                           000037    72 S_L5    = 0x0037
+                           000038    73 S_L6    = 0x0038
+                           000039    74 S_L7    = 0x0039
+                           00003A    75 S_MARK  = 0x003a        ; written last by each entry: completion witness
+                                     76 
+                                     77 ; Known operands and expected IEEE-754 single results (big-endian per window):
+                                     78 ;   3.9f = 0x4079999A   5.1f = 0x40A33333   1.0f = 0x3F800000
+                                     79 ;   mul  = 0x419F1EB8   add  = 0x41100000   sin(1.0f) = 0x3F576AA4
+                                     80 
+                                     81         .area HOME (CODE)
+      000000 02 03 5D         [24]   82         ljmp _start
+                                     83 
+                                     84         .area VECS (CODE)
+      000000                         85         .ds 8
+                                     86 
+                                     87         .area CSEG (CODE)
+                                     88 
+                                     89 ; Sled geometry and bodies.  Included here, before the dispatchers, because
+                                     90 ; sdas251 resolves #(...) expressions where they appear: both the TPU_SLED*
+                                     91 ; constants and the sled labels must already be known at the dispatch sites.
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))       Page 3
+Hexadecimal [24-Bits]
+
+
+
+                                     92         .include "sled.inc"
+                                      1 ; AUTO-GENERATED by gen-sled.py -- do not edit by hand.
+                                      2 ; TPU_SLED = NOP count; TPU_SLED_LO = lo-range DPTR offset.
+                           000110     3 TPU_SLED = 272
+                           000011     4 TPU_SLED_LO = 17
+                                      5 ; ---- mul: 272 NOPs, entry offset = 272 - n ----
+      000000                          6 _tpu_mul_sled:
+                                      7         .rept 272
+                                      8         nop
+                                      9         .endm
+      000000 00               [12]    1         nop
+      000001 00               [12]    1         nop
+      000002 00               [12]    1         nop
+      000003 00               [12]    1         nop
+      000004 00               [12]    1         nop
+      000005 00               [12]    1         nop
+      000006 00               [12]    1         nop
+      000007 00               [12]    1         nop
+      000008 00               [12]    1         nop
+      000009 00               [12]    1         nop
+      00000A 00               [12]    1         nop
+      00000B 00               [12]    1         nop
+      00000C 00               [12]    1         nop
+      00000D 00               [12]    1         nop
+      00000E 00               [12]    1         nop
+      00000F 00               [12]    1         nop
+      000010 00               [12]    1         nop
+      000011 00               [12]    1         nop
+      000012 00               [12]    1         nop
+      000013 00               [12]    1         nop
+      000014 00               [12]    1         nop
+      000015 00               [12]    1         nop
+      000016 00               [12]    1         nop
+      000017 00               [12]    1         nop
+      000018 00               [12]    1         nop
+      000019 00               [12]    1         nop
+      00001A 00               [12]    1         nop
+      00001B 00               [12]    1         nop
+      00001C 00               [12]    1         nop
+      00001D 00               [12]    1         nop
+      00001E 00               [12]    1         nop
+      00001F 00               [12]    1         nop
+      000020 00               [12]    1         nop
+      000021 00               [12]    1         nop
+      000022 00               [12]    1         nop
+      000023 00               [12]    1         nop
+      000024 00               [12]    1         nop
+      000025 00               [12]    1         nop
+      000026 00               [12]    1         nop
+      000027 00               [12]    1         nop
+      000028 00               [12]    1         nop
+      000029 00               [12]    1         nop
+      00002A 00               [12]    1         nop
+      00002B 00               [12]    1         nop
+      00002C 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))       Page 4
+Hexadecimal [24-Bits]
+
+
+
+      00002D 00               [12]    1         nop
+      00002E 00               [12]    1         nop
+      00002F 00               [12]    1         nop
+      000030 00               [12]    1         nop
+      000031 00               [12]    1         nop
+      000032 00               [12]    1         nop
+      000033 00               [12]    1         nop
+      000034 00               [12]    1         nop
+      000035 00               [12]    1         nop
+      000036 00               [12]    1         nop
+      000037 00               [12]    1         nop
+      000038 00               [12]    1         nop
+      000039 00               [12]    1         nop
+      00003A 00               [12]    1         nop
+      00003B 00               [12]    1         nop
+      00003C 00               [12]    1         nop
+      00003D 00               [12]    1         nop
+      00003E 00               [12]    1         nop
+      00003F 00               [12]    1         nop
+      000040 00               [12]    1         nop
+      000041 00               [12]    1         nop
+      000042 00               [12]    1         nop
+      000043 00               [12]    1         nop
+      000044 00               [12]    1         nop
+      000045 00               [12]    1         nop
+      000046 00               [12]    1         nop
+      000047 00               [12]    1         nop
+      000048 00               [12]    1         nop
+      000049 00               [12]    1         nop
+      00004A 00               [12]    1         nop
+      00004B 00               [12]    1         nop
+      00004C 00               [12]    1         nop
+      00004D 00               [12]    1         nop
+      00004E 00               [12]    1         nop
+      00004F 00               [12]    1         nop
+      000050 00               [12]    1         nop
+      000051 00               [12]    1         nop
+      000052 00               [12]    1         nop
+      000053 00               [12]    1         nop
+      000054 00               [12]    1         nop
+      000055 00               [12]    1         nop
+      000056 00               [12]    1         nop
+      000057 00               [12]    1         nop
+      000058 00               [12]    1         nop
+      000059 00               [12]    1         nop
+      00005A 00               [12]    1         nop
+      00005B 00               [12]    1         nop
+      00005C 00               [12]    1         nop
+      00005D 00               [12]    1         nop
+      00005E 00               [12]    1         nop
+      00005F 00               [12]    1         nop
+      000060 00               [12]    1         nop
+      000061 00               [12]    1         nop
+      000062 00               [12]    1         nop
+      000063 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))       Page 5
+Hexadecimal [24-Bits]
+
+
+
+      000064 00               [12]    1         nop
+      000065 00               [12]    1         nop
+      000066 00               [12]    1         nop
+      000067 00               [12]    1         nop
+      000068 00               [12]    1         nop
+      000069 00               [12]    1         nop
+      00006A 00               [12]    1         nop
+      00006B 00               [12]    1         nop
+      00006C 00               [12]    1         nop
+      00006D 00               [12]    1         nop
+      00006E 00               [12]    1         nop
+      00006F 00               [12]    1         nop
+      000070 00               [12]    1         nop
+      000071 00               [12]    1         nop
+      000072 00               [12]    1         nop
+      000073 00               [12]    1         nop
+      000074 00               [12]    1         nop
+      000075 00               [12]    1         nop
+      000076 00               [12]    1         nop
+      000077 00               [12]    1         nop
+      000078 00               [12]    1         nop
+      000079 00               [12]    1         nop
+      00007A 00               [12]    1         nop
+      00007B 00               [12]    1         nop
+      00007C 00               [12]    1         nop
+      00007D 00               [12]    1         nop
+      00007E 00               [12]    1         nop
+      00007F 00               [12]    1         nop
+      000080 00               [12]    1         nop
+      000081 00               [12]    1         nop
+      000082 00               [12]    1         nop
+      000083 00               [12]    1         nop
+      000084 00               [12]    1         nop
+      000085 00               [12]    1         nop
+      000086 00               [12]    1         nop
+      000087 00               [12]    1         nop
+      000088 00               [12]    1         nop
+      000089 00               [12]    1         nop
+      00008A 00               [12]    1         nop
+      00008B 00               [12]    1         nop
+      00008C 00               [12]    1         nop
+      00008D 00               [12]    1         nop
+      00008E 00               [12]    1         nop
+      00008F 00               [12]    1         nop
+      000090 00               [12]    1         nop
+      000091 00               [12]    1         nop
+      000092 00               [12]    1         nop
+      000093 00               [12]    1         nop
+      000094 00               [12]    1         nop
+      000095 00               [12]    1         nop
+      000096 00               [12]    1         nop
+      000097 00               [12]    1         nop
+      000098 00               [12]    1         nop
+      000099 00               [12]    1         nop
+      00009A 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))       Page 6
+Hexadecimal [24-Bits]
+
+
+
+      00009B 00               [12]    1         nop
+      00009C 00               [12]    1         nop
+      00009D 00               [12]    1         nop
+      00009E 00               [12]    1         nop
+      00009F 00               [12]    1         nop
+      0000A0 00               [12]    1         nop
+      0000A1 00               [12]    1         nop
+      0000A2 00               [12]    1         nop
+      0000A3 00               [12]    1         nop
+      0000A4 00               [12]    1         nop
+      0000A5 00               [12]    1         nop
+      0000A6 00               [12]    1         nop
+      0000A7 00               [12]    1         nop
+      0000A8 00               [12]    1         nop
+      0000A9 00               [12]    1         nop
+      0000AA 00               [12]    1         nop
+      0000AB 00               [12]    1         nop
+      0000AC 00               [12]    1         nop
+      0000AD 00               [12]    1         nop
+      0000AE 00               [12]    1         nop
+      0000AF 00               [12]    1         nop
+      0000B0 00               [12]    1         nop
+      0000B1 00               [12]    1         nop
+      0000B2 00               [12]    1         nop
+      0000B3 00               [12]    1         nop
+      0000B4 00               [12]    1         nop
+      0000B5 00               [12]    1         nop
+      0000B6 00               [12]    1         nop
+      0000B7 00               [12]    1         nop
+      0000B8 00               [12]    1         nop
+      0000B9 00               [12]    1         nop
+      0000BA 00               [12]    1         nop
+      0000BB 00               [12]    1         nop
+      0000BC 00               [12]    1         nop
+      0000BD 00               [12]    1         nop
+      0000BE 00               [12]    1         nop
+      0000BF 00               [12]    1         nop
+      0000C0 00               [12]    1         nop
+      0000C1 00               [12]    1         nop
+      0000C2 00               [12]    1         nop
+      0000C3 00               [12]    1         nop
+      0000C4 00               [12]    1         nop
+      0000C5 00               [12]    1         nop
+      0000C6 00               [12]    1         nop
+      0000C7 00               [12]    1         nop
+      0000C8 00               [12]    1         nop
+      0000C9 00               [12]    1         nop
+      0000CA 00               [12]    1         nop
+      0000CB 00               [12]    1         nop
+      0000CC 00               [12]    1         nop
+      0000CD 00               [12]    1         nop
+      0000CE 00               [12]    1         nop
+      0000CF 00               [12]    1         nop
+      0000D0 00               [12]    1         nop
+      0000D1 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))       Page 7
+Hexadecimal [24-Bits]
+
+
+
+      0000D2 00               [12]    1         nop
+      0000D3 00               [12]    1         nop
+      0000D4 00               [12]    1         nop
+      0000D5 00               [12]    1         nop
+      0000D6 00               [12]    1         nop
+      0000D7 00               [12]    1         nop
+      0000D8 00               [12]    1         nop
+      0000D9 00               [12]    1         nop
+      0000DA 00               [12]    1         nop
+      0000DB 00               [12]    1         nop
+      0000DC 00               [12]    1         nop
+      0000DD 00               [12]    1         nop
+      0000DE 00               [12]    1         nop
+      0000DF 00               [12]    1         nop
+      0000E0 00               [12]    1         nop
+      0000E1 00               [12]    1         nop
+      0000E2 00               [12]    1         nop
+      0000E3 00               [12]    1         nop
+      0000E4 00               [12]    1         nop
+      0000E5 00               [12]    1         nop
+      0000E6 00               [12]    1         nop
+      0000E7 00               [12]    1         nop
+      0000E8 00               [12]    1         nop
+      0000E9 00               [12]    1         nop
+      0000EA 00               [12]    1         nop
+      0000EB 00               [12]    1         nop
+      0000EC 00               [12]    1         nop
+      0000ED 00               [12]    1         nop
+      0000EE 00               [12]    1         nop
+      0000EF 00               [12]    1         nop
+      0000F0 00               [12]    1         nop
+      0000F1 00               [12]    1         nop
+      0000F2 00               [12]    1         nop
+      0000F3 00               [12]    1         nop
+      0000F4 00               [12]    1         nop
+      0000F5 00               [12]    1         nop
+      0000F6 00               [12]    1         nop
+      0000F7 00               [12]    1         nop
+      0000F8 00               [12]    1         nop
+      0000F9 00               [12]    1         nop
+      0000FA 00               [12]    1         nop
+      0000FB 00               [12]    1         nop
+      0000FC 00               [12]    1         nop
+      0000FD 00               [12]    1         nop
+      0000FE 00               [12]    1         nop
+      0000FF 00               [12]    1         nop
+      000100 00               [12]    1         nop
+      000101 00               [12]    1         nop
+      000102 00               [12]    1         nop
+      000103 00               [12]    1         nop
+      000104 00               [12]    1         nop
+      000105 00               [12]    1         nop
+      000106 00               [12]    1         nop
+      000107 00               [12]    1         nop
+      000108 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))       Page 8
+Hexadecimal [24-Bits]
+
+
+
+      000109 00               [12]    1         nop
+      00010A 00               [12]    1         nop
+      00010B 00               [12]    1         nop
+      00010C 00               [12]    1         nop
+      00010D 00               [12]    1         nop
+      00010E 00               [12]    1         nop
+      00010F 00               [12]    1         nop
+      000110                         10 _tpu_mul_snap:
+      000110 7A 41 36         [12]   11         mov S_L4,r4
+      000113 7A 51 37         [12]   12         mov S_L5,r5
+      000116 7A 61 38         [12]   13         mov S_L6,r6
+      000119 7A 71 39         [12]   14         mov S_L7,r7
+      00011C 02 04 E0         [24]   15         ljmp _tpu_mul_done
+                                     16 ; ---- add: 272 NOPs, entry offset = 272 - n ----
+      00011F                         17 _tpu_add_sled:
+                                     18         .rept 272
+                                     19         nop
+                                     20         .endm
+      00011F 00               [12]    1         nop
+      000120 00               [12]    1         nop
+      000121 00               [12]    1         nop
+      000122 00               [12]    1         nop
+      000123 00               [12]    1         nop
+      000124 00               [12]    1         nop
+      000125 00               [12]    1         nop
+      000126 00               [12]    1         nop
+      000127 00               [12]    1         nop
+      000128 00               [12]    1         nop
+      000129 00               [12]    1         nop
+      00012A 00               [12]    1         nop
+      00012B 00               [12]    1         nop
+      00012C 00               [12]    1         nop
+      00012D 00               [12]    1         nop
+      00012E 00               [12]    1         nop
+      00012F 00               [12]    1         nop
+      000130 00               [12]    1         nop
+      000131 00               [12]    1         nop
+      000132 00               [12]    1         nop
+      000133 00               [12]    1         nop
+      000134 00               [12]    1         nop
+      000135 00               [12]    1         nop
+      000136 00               [12]    1         nop
+      000137 00               [12]    1         nop
+      000138 00               [12]    1         nop
+      000139 00               [12]    1         nop
+      00013A 00               [12]    1         nop
+      00013B 00               [12]    1         nop
+      00013C 00               [12]    1         nop
+      00013D 00               [12]    1         nop
+      00013E 00               [12]    1         nop
+      00013F 00               [12]    1         nop
+      000140 00               [12]    1         nop
+      000141 00               [12]    1         nop
+      000142 00               [12]    1         nop
+      000143 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))       Page 9
+Hexadecimal [24-Bits]
+
+
+
+      000144 00               [12]    1         nop
+      000145 00               [12]    1         nop
+      000146 00               [12]    1         nop
+      000147 00               [12]    1         nop
+      000148 00               [12]    1         nop
+      000149 00               [12]    1         nop
+      00014A 00               [12]    1         nop
+      00014B 00               [12]    1         nop
+      00014C 00               [12]    1         nop
+      00014D 00               [12]    1         nop
+      00014E 00               [12]    1         nop
+      00014F 00               [12]    1         nop
+      000150 00               [12]    1         nop
+      000151 00               [12]    1         nop
+      000152 00               [12]    1         nop
+      000153 00               [12]    1         nop
+      000154 00               [12]    1         nop
+      000155 00               [12]    1         nop
+      000156 00               [12]    1         nop
+      000157 00               [12]    1         nop
+      000158 00               [12]    1         nop
+      000159 00               [12]    1         nop
+      00015A 00               [12]    1         nop
+      00015B 00               [12]    1         nop
+      00015C 00               [12]    1         nop
+      00015D 00               [12]    1         nop
+      00015E 00               [12]    1         nop
+      00015F 00               [12]    1         nop
+      000160 00               [12]    1         nop
+      000161 00               [12]    1         nop
+      000162 00               [12]    1         nop
+      000163 00               [12]    1         nop
+      000164 00               [12]    1         nop
+      000165 00               [12]    1         nop
+      000166 00               [12]    1         nop
+      000167 00               [12]    1         nop
+      000168 00               [12]    1         nop
+      000169 00               [12]    1         nop
+      00016A 00               [12]    1         nop
+      00016B 00               [12]    1         nop
+      00016C 00               [12]    1         nop
+      00016D 00               [12]    1         nop
+      00016E 00               [12]    1         nop
+      00016F 00               [12]    1         nop
+      000170 00               [12]    1         nop
+      000171 00               [12]    1         nop
+      000172 00               [12]    1         nop
+      000173 00               [12]    1         nop
+      000174 00               [12]    1         nop
+      000175 00               [12]    1         nop
+      000176 00               [12]    1         nop
+      000177 00               [12]    1         nop
+      000178 00               [12]    1         nop
+      000179 00               [12]    1         nop
+      00017A 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 10
+Hexadecimal [24-Bits]
+
+
+
+      00017B 00               [12]    1         nop
+      00017C 00               [12]    1         nop
+      00017D 00               [12]    1         nop
+      00017E 00               [12]    1         nop
+      00017F 00               [12]    1         nop
+      000180 00               [12]    1         nop
+      000181 00               [12]    1         nop
+      000182 00               [12]    1         nop
+      000183 00               [12]    1         nop
+      000184 00               [12]    1         nop
+      000185 00               [12]    1         nop
+      000186 00               [12]    1         nop
+      000187 00               [12]    1         nop
+      000188 00               [12]    1         nop
+      000189 00               [12]    1         nop
+      00018A 00               [12]    1         nop
+      00018B 00               [12]    1         nop
+      00018C 00               [12]    1         nop
+      00018D 00               [12]    1         nop
+      00018E 00               [12]    1         nop
+      00018F 00               [12]    1         nop
+      000190 00               [12]    1         nop
+      000191 00               [12]    1         nop
+      000192 00               [12]    1         nop
+      000193 00               [12]    1         nop
+      000194 00               [12]    1         nop
+      000195 00               [12]    1         nop
+      000196 00               [12]    1         nop
+      000197 00               [12]    1         nop
+      000198 00               [12]    1         nop
+      000199 00               [12]    1         nop
+      00019A 00               [12]    1         nop
+      00019B 00               [12]    1         nop
+      00019C 00               [12]    1         nop
+      00019D 00               [12]    1         nop
+      00019E 00               [12]    1         nop
+      00019F 00               [12]    1         nop
+      0001A0 00               [12]    1         nop
+      0001A1 00               [12]    1         nop
+      0001A2 00               [12]    1         nop
+      0001A3 00               [12]    1         nop
+      0001A4 00               [12]    1         nop
+      0001A5 00               [12]    1         nop
+      0001A6 00               [12]    1         nop
+      0001A7 00               [12]    1         nop
+      0001A8 00               [12]    1         nop
+      0001A9 00               [12]    1         nop
+      0001AA 00               [12]    1         nop
+      0001AB 00               [12]    1         nop
+      0001AC 00               [12]    1         nop
+      0001AD 00               [12]    1         nop
+      0001AE 00               [12]    1         nop
+      0001AF 00               [12]    1         nop
+      0001B0 00               [12]    1         nop
+      0001B1 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 11
+Hexadecimal [24-Bits]
+
+
+
+      0001B2 00               [12]    1         nop
+      0001B3 00               [12]    1         nop
+      0001B4 00               [12]    1         nop
+      0001B5 00               [12]    1         nop
+      0001B6 00               [12]    1         nop
+      0001B7 00               [12]    1         nop
+      0001B8 00               [12]    1         nop
+      0001B9 00               [12]    1         nop
+      0001BA 00               [12]    1         nop
+      0001BB 00               [12]    1         nop
+      0001BC 00               [12]    1         nop
+      0001BD 00               [12]    1         nop
+      0001BE 00               [12]    1         nop
+      0001BF 00               [12]    1         nop
+      0001C0 00               [12]    1         nop
+      0001C1 00               [12]    1         nop
+      0001C2 00               [12]    1         nop
+      0001C3 00               [12]    1         nop
+      0001C4 00               [12]    1         nop
+      0001C5 00               [12]    1         nop
+      0001C6 00               [12]    1         nop
+      0001C7 00               [12]    1         nop
+      0001C8 00               [12]    1         nop
+      0001C9 00               [12]    1         nop
+      0001CA 00               [12]    1         nop
+      0001CB 00               [12]    1         nop
+      0001CC 00               [12]    1         nop
+      0001CD 00               [12]    1         nop
+      0001CE 00               [12]    1         nop
+      0001CF 00               [12]    1         nop
+      0001D0 00               [12]    1         nop
+      0001D1 00               [12]    1         nop
+      0001D2 00               [12]    1         nop
+      0001D3 00               [12]    1         nop
+      0001D4 00               [12]    1         nop
+      0001D5 00               [12]    1         nop
+      0001D6 00               [12]    1         nop
+      0001D7 00               [12]    1         nop
+      0001D8 00               [12]    1         nop
+      0001D9 00               [12]    1         nop
+      0001DA 00               [12]    1         nop
+      0001DB 00               [12]    1         nop
+      0001DC 00               [12]    1         nop
+      0001DD 00               [12]    1         nop
+      0001DE 00               [12]    1         nop
+      0001DF 00               [12]    1         nop
+      0001E0 00               [12]    1         nop
+      0001E1 00               [12]    1         nop
+      0001E2 00               [12]    1         nop
+      0001E3 00               [12]    1         nop
+      0001E4 00               [12]    1         nop
+      0001E5 00               [12]    1         nop
+      0001E6 00               [12]    1         nop
+      0001E7 00               [12]    1         nop
+      0001E8 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 12
+Hexadecimal [24-Bits]
+
+
+
+      0001E9 00               [12]    1         nop
+      0001EA 00               [12]    1         nop
+      0001EB 00               [12]    1         nop
+      0001EC 00               [12]    1         nop
+      0001ED 00               [12]    1         nop
+      0001EE 00               [12]    1         nop
+      0001EF 00               [12]    1         nop
+      0001F0 00               [12]    1         nop
+      0001F1 00               [12]    1         nop
+      0001F2 00               [12]    1         nop
+      0001F3 00               [12]    1         nop
+      0001F4 00               [12]    1         nop
+      0001F5 00               [12]    1         nop
+      0001F6 00               [12]    1         nop
+      0001F7 00               [12]    1         nop
+      0001F8 00               [12]    1         nop
+      0001F9 00               [12]    1         nop
+      0001FA 00               [12]    1         nop
+      0001FB 00               [12]    1         nop
+      0001FC 00               [12]    1         nop
+      0001FD 00               [12]    1         nop
+      0001FE 00               [12]    1         nop
+      0001FF 00               [12]    1         nop
+      000200 00               [12]    1         nop
+      000201 00               [12]    1         nop
+      000202 00               [12]    1         nop
+      000203 00               [12]    1         nop
+      000204 00               [12]    1         nop
+      000205 00               [12]    1         nop
+      000206 00               [12]    1         nop
+      000207 00               [12]    1         nop
+      000208 00               [12]    1         nop
+      000209 00               [12]    1         nop
+      00020A 00               [12]    1         nop
+      00020B 00               [12]    1         nop
+      00020C 00               [12]    1         nop
+      00020D 00               [12]    1         nop
+      00020E 00               [12]    1         nop
+      00020F 00               [12]    1         nop
+      000210 00               [12]    1         nop
+      000211 00               [12]    1         nop
+      000212 00               [12]    1         nop
+      000213 00               [12]    1         nop
+      000214 00               [12]    1         nop
+      000215 00               [12]    1         nop
+      000216 00               [12]    1         nop
+      000217 00               [12]    1         nop
+      000218 00               [12]    1         nop
+      000219 00               [12]    1         nop
+      00021A 00               [12]    1         nop
+      00021B 00               [12]    1         nop
+      00021C 00               [12]    1         nop
+      00021D 00               [12]    1         nop
+      00021E 00               [12]    1         nop
+      00021F 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 13
+Hexadecimal [24-Bits]
+
+
+
+      000220 00               [12]    1         nop
+      000221 00               [12]    1         nop
+      000222 00               [12]    1         nop
+      000223 00               [12]    1         nop
+      000224 00               [12]    1         nop
+      000225 00               [12]    1         nop
+      000226 00               [12]    1         nop
+      000227 00               [12]    1         nop
+      000228 00               [12]    1         nop
+      000229 00               [12]    1         nop
+      00022A 00               [12]    1         nop
+      00022B 00               [12]    1         nop
+      00022C 00               [12]    1         nop
+      00022D 00               [12]    1         nop
+      00022E 00               [12]    1         nop
+      00022F                         21 _tpu_add_snap:
+      00022F 7A 41 36         [12]   22         mov S_L4,r4
+      000232 7A 51 37         [12]   23         mov S_L5,r5
+      000235 7A 61 38         [12]   24         mov S_L6,r6
+      000238 7A 71 39         [12]   25         mov S_L7,r7
+      00023B 02 05 04         [24]   26         ljmp _tpu_add_done
+                                     27 ; ---- sin: 272 NOPs, entry offset = 272 - n ----
+      00023E                         28 _tpu_sin_sled:
+                                     29         .rept 272
+                                     30         nop
+                                     31         .endm
+      00023E 00               [12]    1         nop
+      00023F 00               [12]    1         nop
+      000240 00               [12]    1         nop
+      000241 00               [12]    1         nop
+      000242 00               [12]    1         nop
+      000243 00               [12]    1         nop
+      000244 00               [12]    1         nop
+      000245 00               [12]    1         nop
+      000246 00               [12]    1         nop
+      000247 00               [12]    1         nop
+      000248 00               [12]    1         nop
+      000249 00               [12]    1         nop
+      00024A 00               [12]    1         nop
+      00024B 00               [12]    1         nop
+      00024C 00               [12]    1         nop
+      00024D 00               [12]    1         nop
+      00024E 00               [12]    1         nop
+      00024F 00               [12]    1         nop
+      000250 00               [12]    1         nop
+      000251 00               [12]    1         nop
+      000252 00               [12]    1         nop
+      000253 00               [12]    1         nop
+      000254 00               [12]    1         nop
+      000255 00               [12]    1         nop
+      000256 00               [12]    1         nop
+      000257 00               [12]    1         nop
+      000258 00               [12]    1         nop
+      000259 00               [12]    1         nop
+      00025A 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 14
+Hexadecimal [24-Bits]
+
+
+
+      00025B 00               [12]    1         nop
+      00025C 00               [12]    1         nop
+      00025D 00               [12]    1         nop
+      00025E 00               [12]    1         nop
+      00025F 00               [12]    1         nop
+      000260 00               [12]    1         nop
+      000261 00               [12]    1         nop
+      000262 00               [12]    1         nop
+      000263 00               [12]    1         nop
+      000264 00               [12]    1         nop
+      000265 00               [12]    1         nop
+      000266 00               [12]    1         nop
+      000267 00               [12]    1         nop
+      000268 00               [12]    1         nop
+      000269 00               [12]    1         nop
+      00026A 00               [12]    1         nop
+      00026B 00               [12]    1         nop
+      00026C 00               [12]    1         nop
+      00026D 00               [12]    1         nop
+      00026E 00               [12]    1         nop
+      00026F 00               [12]    1         nop
+      000270 00               [12]    1         nop
+      000271 00               [12]    1         nop
+      000272 00               [12]    1         nop
+      000273 00               [12]    1         nop
+      000274 00               [12]    1         nop
+      000275 00               [12]    1         nop
+      000276 00               [12]    1         nop
+      000277 00               [12]    1         nop
+      000278 00               [12]    1         nop
+      000279 00               [12]    1         nop
+      00027A 00               [12]    1         nop
+      00027B 00               [12]    1         nop
+      00027C 00               [12]    1         nop
+      00027D 00               [12]    1         nop
+      00027E 00               [12]    1         nop
+      00027F 00               [12]    1         nop
+      000280 00               [12]    1         nop
+      000281 00               [12]    1         nop
+      000282 00               [12]    1         nop
+      000283 00               [12]    1         nop
+      000284 00               [12]    1         nop
+      000285 00               [12]    1         nop
+      000286 00               [12]    1         nop
+      000287 00               [12]    1         nop
+      000288 00               [12]    1         nop
+      000289 00               [12]    1         nop
+      00028A 00               [12]    1         nop
+      00028B 00               [12]    1         nop
+      00028C 00               [12]    1         nop
+      00028D 00               [12]    1         nop
+      00028E 00               [12]    1         nop
+      00028F 00               [12]    1         nop
+      000290 00               [12]    1         nop
+      000291 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 15
+Hexadecimal [24-Bits]
+
+
+
+      000292 00               [12]    1         nop
+      000293 00               [12]    1         nop
+      000294 00               [12]    1         nop
+      000295 00               [12]    1         nop
+      000296 00               [12]    1         nop
+      000297 00               [12]    1         nop
+      000298 00               [12]    1         nop
+      000299 00               [12]    1         nop
+      00029A 00               [12]    1         nop
+      00029B 00               [12]    1         nop
+      00029C 00               [12]    1         nop
+      00029D 00               [12]    1         nop
+      00029E 00               [12]    1         nop
+      00029F 00               [12]    1         nop
+      0002A0 00               [12]    1         nop
+      0002A1 00               [12]    1         nop
+      0002A2 00               [12]    1         nop
+      0002A3 00               [12]    1         nop
+      0002A4 00               [12]    1         nop
+      0002A5 00               [12]    1         nop
+      0002A6 00               [12]    1         nop
+      0002A7 00               [12]    1         nop
+      0002A8 00               [12]    1         nop
+      0002A9 00               [12]    1         nop
+      0002AA 00               [12]    1         nop
+      0002AB 00               [12]    1         nop
+      0002AC 00               [12]    1         nop
+      0002AD 00               [12]    1         nop
+      0002AE 00               [12]    1         nop
+      0002AF 00               [12]    1         nop
+      0002B0 00               [12]    1         nop
+      0002B1 00               [12]    1         nop
+      0002B2 00               [12]    1         nop
+      0002B3 00               [12]    1         nop
+      0002B4 00               [12]    1         nop
+      0002B5 00               [12]    1         nop
+      0002B6 00               [12]    1         nop
+      0002B7 00               [12]    1         nop
+      0002B8 00               [12]    1         nop
+      0002B9 00               [12]    1         nop
+      0002BA 00               [12]    1         nop
+      0002BB 00               [12]    1         nop
+      0002BC 00               [12]    1         nop
+      0002BD 00               [12]    1         nop
+      0002BE 00               [12]    1         nop
+      0002BF 00               [12]    1         nop
+      0002C0 00               [12]    1         nop
+      0002C1 00               [12]    1         nop
+      0002C2 00               [12]    1         nop
+      0002C3 00               [12]    1         nop
+      0002C4 00               [12]    1         nop
+      0002C5 00               [12]    1         nop
+      0002C6 00               [12]    1         nop
+      0002C7 00               [12]    1         nop
+      0002C8 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 16
+Hexadecimal [24-Bits]
+
+
+
+      0002C9 00               [12]    1         nop
+      0002CA 00               [12]    1         nop
+      0002CB 00               [12]    1         nop
+      0002CC 00               [12]    1         nop
+      0002CD 00               [12]    1         nop
+      0002CE 00               [12]    1         nop
+      0002CF 00               [12]    1         nop
+      0002D0 00               [12]    1         nop
+      0002D1 00               [12]    1         nop
+      0002D2 00               [12]    1         nop
+      0002D3 00               [12]    1         nop
+      0002D4 00               [12]    1         nop
+      0002D5 00               [12]    1         nop
+      0002D6 00               [12]    1         nop
+      0002D7 00               [12]    1         nop
+      0002D8 00               [12]    1         nop
+      0002D9 00               [12]    1         nop
+      0002DA 00               [12]    1         nop
+      0002DB 00               [12]    1         nop
+      0002DC 00               [12]    1         nop
+      0002DD 00               [12]    1         nop
+      0002DE 00               [12]    1         nop
+      0002DF 00               [12]    1         nop
+      0002E0 00               [12]    1         nop
+      0002E1 00               [12]    1         nop
+      0002E2 00               [12]    1         nop
+      0002E3 00               [12]    1         nop
+      0002E4 00               [12]    1         nop
+      0002E5 00               [12]    1         nop
+      0002E6 00               [12]    1         nop
+      0002E7 00               [12]    1         nop
+      0002E8 00               [12]    1         nop
+      0002E9 00               [12]    1         nop
+      0002EA 00               [12]    1         nop
+      0002EB 00               [12]    1         nop
+      0002EC 00               [12]    1         nop
+      0002ED 00               [12]    1         nop
+      0002EE 00               [12]    1         nop
+      0002EF 00               [12]    1         nop
+      0002F0 00               [12]    1         nop
+      0002F1 00               [12]    1         nop
+      0002F2 00               [12]    1         nop
+      0002F3 00               [12]    1         nop
+      0002F4 00               [12]    1         nop
+      0002F5 00               [12]    1         nop
+      0002F6 00               [12]    1         nop
+      0002F7 00               [12]    1         nop
+      0002F8 00               [12]    1         nop
+      0002F9 00               [12]    1         nop
+      0002FA 00               [12]    1         nop
+      0002FB 00               [12]    1         nop
+      0002FC 00               [12]    1         nop
+      0002FD 00               [12]    1         nop
+      0002FE 00               [12]    1         nop
+      0002FF 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 17
+Hexadecimal [24-Bits]
+
+
+
+      000300 00               [12]    1         nop
+      000301 00               [12]    1         nop
+      000302 00               [12]    1         nop
+      000303 00               [12]    1         nop
+      000304 00               [12]    1         nop
+      000305 00               [12]    1         nop
+      000306 00               [12]    1         nop
+      000307 00               [12]    1         nop
+      000308 00               [12]    1         nop
+      000309 00               [12]    1         nop
+      00030A 00               [12]    1         nop
+      00030B 00               [12]    1         nop
+      00030C 00               [12]    1         nop
+      00030D 00               [12]    1         nop
+      00030E 00               [12]    1         nop
+      00030F 00               [12]    1         nop
+      000310 00               [12]    1         nop
+      000311 00               [12]    1         nop
+      000312 00               [12]    1         nop
+      000313 00               [12]    1         nop
+      000314 00               [12]    1         nop
+      000315 00               [12]    1         nop
+      000316 00               [12]    1         nop
+      000317 00               [12]    1         nop
+      000318 00               [12]    1         nop
+      000319 00               [12]    1         nop
+      00031A 00               [12]    1         nop
+      00031B 00               [12]    1         nop
+      00031C 00               [12]    1         nop
+      00031D 00               [12]    1         nop
+      00031E 00               [12]    1         nop
+      00031F 00               [12]    1         nop
+      000320 00               [12]    1         nop
+      000321 00               [12]    1         nop
+      000322 00               [12]    1         nop
+      000323 00               [12]    1         nop
+      000324 00               [12]    1         nop
+      000325 00               [12]    1         nop
+      000326 00               [12]    1         nop
+      000327 00               [12]    1         nop
+      000328 00               [12]    1         nop
+      000329 00               [12]    1         nop
+      00032A 00               [12]    1         nop
+      00032B 00               [12]    1         nop
+      00032C 00               [12]    1         nop
+      00032D 00               [12]    1         nop
+      00032E 00               [12]    1         nop
+      00032F 00               [12]    1         nop
+      000330 00               [12]    1         nop
+      000331 00               [12]    1         nop
+      000332 00               [12]    1         nop
+      000333 00               [12]    1         nop
+      000334 00               [12]    1         nop
+      000335 00               [12]    1         nop
+      000336 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 18
+Hexadecimal [24-Bits]
+
+
+
+      000337 00               [12]    1         nop
+      000338 00               [12]    1         nop
+      000339 00               [12]    1         nop
+      00033A 00               [12]    1         nop
+      00033B 00               [12]    1         nop
+      00033C 00               [12]    1         nop
+      00033D 00               [12]    1         nop
+      00033E 00               [12]    1         nop
+      00033F 00               [12]    1         nop
+      000340 00               [12]    1         nop
+      000341 00               [12]    1         nop
+      000342 00               [12]    1         nop
+      000343 00               [12]    1         nop
+      000344 00               [12]    1         nop
+      000345 00               [12]    1         nop
+      000346 00               [12]    1         nop
+      000347 00               [12]    1         nop
+      000348 00               [12]    1         nop
+      000349 00               [12]    1         nop
+      00034A 00               [12]    1         nop
+      00034B 00               [12]    1         nop
+      00034C 00               [12]    1         nop
+      00034D 00               [12]    1         nop
+      00034E                         32 _tpu_sin_snap:
+      00034E 7A 41 36         [12]   33         mov S_L4,r4
+      000351 7A 51 37         [12]   34         mov S_L5,r5
+      000354 7A 61 38         [12]   35         mov S_L6,r6
+      000357 7A 71 39         [12]   36         mov S_L7,r7
+      00035A 02 05 28         [24]   37         ljmp _tpu_sin_done
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 19
+Hexadecimal [24-Bits]
+
+
+
+                                     93 
+                                     94 .macro SAVEREGS
+                                     95         push PSW
+                                     96         push PSW1
+                                     97         push dr0
+                                     98         push dr4
+                                     99         push dr8
+                                    100         push dr12
+                                    101         push dpx
+                                    102 .endm
+                                    103 .macro RESTREG
+                                    104         pop dpx
+                                    105         pop dr12
+                                    106         pop dr8
+                                    107         pop dr4
+                                    108         pop dr0
+                                    109         pop PSW1
+                                    110         pop PSW
+                                    111 .endm
+                                    112 
+      00035D                        113 _start:
+      00035D 75 A8 00         [24]  114         mov IE,#0
+      000360 75 88 00         [24]  115         mov TCON,#0
+      000363 75 E9 00         [24]  116         mov 0xe9,#0             ; WTST  = 0 (fastest XRAM/SFR access)
+      000366 75 EA 00         [24]  117         mov 0xea,#0             ; CKCON = 0
+      000369 7E F8 08 00      [12]  118         mov spx,#0x0800         ; C stack grows up from 0x0800 into 0x0FFF
+      00036D 9A 00 00 00      [12]  119         ecall _main
+      000371                        120 _stop:
+      000371 80 FE            [24]  121         sjmp _stop
+                                    122 
+                                    123 ; --- 0x3E: select the system clock as the TFPU clock source ---------------
+      000373                        124 _tpu_clk_sys:
+      000373 75 ED 3E         [24]  125         mov DMAIR,#0x3e
+      000376 AA               [24]  126         eret
+                                    127 
+                                    128 ; --- 0x31: initialise the co-processor (raises an exception state) --------
+      000377                        129 _tpu_init:
+      000377 75 ED 31         [24]  130         mov DMAIR,#0x31
+      00037A AA               [24]  131         eret
+                                    132 
+                                    133 ; --- 0x32: clear all exception states -------------------------------------
+      00037B                        134 _tpu_clr_exc:
+      00037B 75 ED 32         [24]  135         mov DMAIR,#0x32
+      00037E AA               [24]  136         eret
+                                    137 
+                                    138 ; --- raw sample: read R7 / 0xEF / 0xFF WITHOUT issuing any TFPU command ---
+      00037F                        139 _tpu_raw:
+      00037F                        140         SAVEREGS
+      00037F C0 D0            [24]    1         push PSW
+      000381 C0 D1            [24]    2         push PSW1
+      000383 CA 0B            [12]    3         push dr0
+      000385 CA 1B            [12]    4         push dr4
+      000387 CA 2B            [12]    5         push dr8
+      000389 CA 3B            [12]    6         push dr12
+      00038B CA EB            [12]    7         push dpx
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 20
+Hexadecimal [24-Bits]
+
+
+
+      00038D A5 EF                  141         mov a,r7
+      00038F F5 30            [12]  142         mov S_R7RAW,a
+      000391 E5 EF            [12]  143         mov r11,0xef            ; MOV A,0xEF : AUXINTIF
+      000393 F5 32            [12]  144         mov S_EF,r11
+      000395 E5 FF            [12]  145         mov r11,0xff            ; MOV A,0xFF : RSTCFG
+      000397 F5 33            [12]  146         mov S_FF,r11
+      000399 75 3A 01         [24]  147         mov S_MARK,#0x01
+      00039C                        148         RESTREG
+      00039C DA EB            [24]    1         pop dpx
+      00039E DA 3B            [24]    2         pop dr12
+      0003A0 DA 2B            [24]    3         pop dr8
+      0003A2 DA 1B            [24]    4         pop dr4
+      0003A4 DA 0B            [24]    5         pop dr0
+      0003A6 D0 D1            [24]    6         pop PSW1
+      0003A8 D0 D0            [24]    7         pop PSW
+      0003AA AA               [24]  149         eret
+                                    150 
+                                    151 ; --- 0x33: read the TFPU status register (documented result in R7) --------
+      0003AB                        152 _tpu_read_state:
+      0003AB                        153         SAVEREGS
+      0003AB C0 D0            [24]    1         push PSW
+      0003AD C0 D1            [24]    2         push PSW1
+      0003AF CA 0B            [12]    3         push dr0
+      0003B1 CA 1B            [12]    4         push dr4
+      0003B3 CA 2B            [12]    5         push dr8
+      0003B5 CA 3B            [12]    6         push dr12
+      0003B7 CA EB            [12]    7         push dpx
+      0003B9 75 ED 33         [24]  154         mov DMAIR,#0x33
+                                    155         .rept 8                 ; 0x33 is documented as 4 clocks
+                                    156         nop
+                                    157         .endm
+      0003BC 00               [12]    1         nop
+      0003BD 00               [12]    1         nop
+      0003BE 00               [12]    1         nop
+      0003BF 00               [12]    1         nop
+      0003C0 00               [12]    1         nop
+      0003C1 00               [12]    1         nop
+      0003C2 00               [12]    1         nop
+      0003C3 00               [12]    1         nop
+      0003C4 7A 71 31         [12]  158         mov S_R7,r7
+      0003C7 E5 EF            [12]  159         mov r11,0xef
+      0003C9 F5 32            [12]  160         mov S_EF,r11
+      0003CB E5 FF            [12]  161         mov r11,0xff
+      0003CD F5 33            [12]  162         mov S_FF,r11
+      0003CF 75 3A 02         [24]  163         mov S_MARK,#0x02
+      0003D2                        164         RESTREG
+      0003D2 DA EB            [24]    1         pop dpx
+      0003D4 DA 3B            [24]    2         pop dr12
+      0003D6 DA 2B            [24]    3         pop dr8
+      0003D8 DA 1B            [24]    4         pop dr4
+      0003DA DA 0B            [24]    5         pop dr0
+      0003DC D0 D1            [24]    6         pop PSW1
+      0003DE D0 D0            [24]    7         pop PSW
+      0003E0 AA               [24]  165         eret
+                                    166 
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 21
+Hexadecimal [24-Bits]
+
+
+
+                                    167 ; --- one multiply with a generous wait, then read the status --------------
+                                    168 ; Also acts as the TFPU-presence discriminator: if the part does not implement
+                                    169 ; TFPU, R4..R7 stay exactly as loaded (0x4079999A) instead of becoming
+                                    170 ; 0x419F1EB8.  The second 0x33 is issued *after* the product was read out, so
+                                    171 ; it shows the status at the "result consumed" moment.
+      0003E1                        172 _tpu_mul_once:
+      0003E1                        173         SAVEREGS
+      0003E1 C0 D0            [24]    1         push PSW
+      0003E3 C0 D1            [24]    2         push PSW1
+      0003E5 CA 0B            [12]    3         push dr0
+      0003E7 CA 1B            [12]    4         push dr4
+      0003E9 CA 2B            [12]    5         push dr8
+      0003EB CA 3B            [12]    6         push dr12
+      0003ED CA EB            [12]    7         push dpx
+      0003EF 7E 04 40 A3      [12]  174         mov wr0,#0x40A3         ; BR = 5.1f
+      0003F3 7E 14 33 33      [12]  175         mov wr2,#0x3333
+      0003F7 7E 24 40 79      [12]  176         mov wr4,#0x4079         ; AR = 3.9f
+      0003FB 7E 34 99 9A      [12]  177         mov wr6,#0x999A
+      0003FF 75 ED 1E         [24]  178         mov DMAIR,#0x1e
+                                    179         .rept 64
+                                    180         nop
+                                    181         .endm
+      000402 00               [12]    1         nop
+      000403 00               [12]    1         nop
+      000404 00               [12]    1         nop
+      000405 00               [12]    1         nop
+      000406 00               [12]    1         nop
+      000407 00               [12]    1         nop
+      000408 00               [12]    1         nop
+      000409 00               [12]    1         nop
+      00040A 00               [12]    1         nop
+      00040B 00               [12]    1         nop
+      00040C 00               [12]    1         nop
+      00040D 00               [12]    1         nop
+      00040E 00               [12]    1         nop
+      00040F 00               [12]    1         nop
+      000410 00               [12]    1         nop
+      000411 00               [12]    1         nop
+      000412 00               [12]    1         nop
+      000413 00               [12]    1         nop
+      000414 00               [12]    1         nop
+      000415 00               [12]    1         nop
+      000416 00               [12]    1         nop
+      000417 00               [12]    1         nop
+      000418 00               [12]    1         nop
+      000419 00               [12]    1         nop
+      00041A 00               [12]    1         nop
+      00041B 00               [12]    1         nop
+      00041C 00               [12]    1         nop
+      00041D 00               [12]    1         nop
+      00041E 00               [12]    1         nop
+      00041F 00               [12]    1         nop
+      000420 00               [12]    1         nop
+      000421 00               [12]    1         nop
+      000422 00               [12]    1         nop
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 22
+Hexadecimal [24-Bits]
+
+
+
+      000423 00               [12]    1         nop
+      000424 00               [12]    1         nop
+      000425 00               [12]    1         nop
+      000426 00               [12]    1         nop
+      000427 00               [12]    1         nop
+      000428 00               [12]    1         nop
+      000429 00               [12]    1         nop
+      00042A 00               [12]    1         nop
+      00042B 00               [12]    1         nop
+      00042C 00               [12]    1         nop
+      00042D 00               [12]    1         nop
+      00042E 00               [12]    1         nop
+      00042F 00               [12]    1         nop
+      000430 00               [12]    1         nop
+      000431 00               [12]    1         nop
+      000432 00               [12]    1         nop
+      000433 00               [12]    1         nop
+      000434 00               [12]    1         nop
+      000435 00               [12]    1         nop
+      000436 00               [12]    1         nop
+      000437 00               [12]    1         nop
+      000438 00               [12]    1         nop
+      000439 00               [12]    1         nop
+      00043A 00               [12]    1         nop
+      00043B 00               [12]    1         nop
+      00043C 00               [12]    1         nop
+      00043D 00               [12]    1         nop
+      00043E 00               [12]    1         nop
+      00043F 00               [12]    1         nop
+      000440 00               [12]    1         nop
+      000441 00               [12]    1         nop
+      000442 7A 41 36         [12]  182         mov S_L4,r4
+      000445 7A 51 37         [12]  183         mov S_L5,r5
+      000448 7A 61 38         [12]  184         mov S_L6,r6
+      00044B 7A 71 39         [12]  185         mov S_L7,r7
+      00044E 75 ED 33         [24]  186         mov DMAIR,#0x33
+                                    187         .rept 8
+                                    188         nop
+                                    189         .endm
+      000451 00               [12]    1         nop
+      000452 00               [12]    1         nop
+      000453 00               [12]    1         nop
+      000454 00               [12]    1         nop
+      000455 00               [12]    1         nop
+      000456 00               [12]    1         nop
+      000457 00               [12]    1         nop
+      000458 00               [12]    1         nop
+      000459 7A 71 31         [12]  190         mov S_R7,r7
+      00045C E5 EF            [12]  191         mov r11,0xef
+      00045E F5 32            [12]  192         mov S_EF,r11
+      000460 E5 FF            [12]  193         mov r11,0xff
+      000462 F5 33            [12]  194         mov S_FF,r11
+      000464 75 3A 03         [24]  195         mov S_MARK,#0x03
+      000467                        196         RESTREG
+      000467 DA EB            [24]    1         pop dpx
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 23
+Hexadecimal [24-Bits]
+
+
+
+      000469 DA 3B            [24]    2         pop dr12
+      00046B DA 2B            [24]    3         pop dr8
+      00046D DA 1B            [24]    4         pop dr4
+      00046F DA 0B            [24]    5         pop dr0
+      000471 D0 D1            [24]    6         pop PSW1
+      000473 D0 D0            [24]    7         pop PSW
+      000475 AA               [24]  197         eret
+                                    198 
+                                    199 ; --- latency scans --------------------------------------------------------
+                                    200 ; Operand windows: BR = R0..R3 (5.1f), AR = R4..R7 (3.9f or 1.0f).
+                                    201 ; The dispatch byte/selector are computed in C *before* the call; the trigger
+                                    202 ; is issued immediately before JMP @A+DPTR so nothing but the jump separates
+                                    203 ; the command from the sled.
+      000476                        204 _tpu_mul_at_n:
+      000476                        205         SAVEREGS
+      000476 C0 D0            [24]    1         push PSW
+      000478 C0 D1            [24]    2         push PSW1
+      00047A CA 0B            [12]    3         push dr0
+      00047C CA 1B            [12]    4         push dr4
+      00047E CA 2B            [12]    5         push dr8
+      000480 CA 3B            [12]    6         push dr12
+      000482 CA EB            [12]    7         push dpx
+      000484 7E 04 40 A3      [12]  206         mov wr0,#0x40A3
+      000488 7E 14 33 33      [12]  207         mov wr2,#0x3333
+      00048C 7E 24 40 79      [12]  208         mov wr4,#0x4079
+      000490 7E 34 99 9A      [12]  209         mov wr6,#0x999A
+      000494 80 38            [24]  210         sjmp _tpu_dispatch_mul
+                                    211 
+      000496                        212 _tpu_add_at_n:
+      000496                        213         SAVEREGS
+      000496 C0 D0            [24]    1         push PSW
+      000498 C0 D1            [24]    2         push PSW1
+      00049A CA 0B            [12]    3         push dr0
+      00049C CA 1B            [12]    4         push dr4
+      00049E CA 2B            [12]    5         push dr8
+      0004A0 CA 3B            [12]    6         push dr12
+      0004A2 CA EB            [12]    7         push dpx
+      0004A4 7E 04 40 A3      [12]  214         mov wr0,#0x40A3
+      0004A8 7E 14 33 33      [12]  215         mov wr2,#0x3333
+      0004AC 7E 24 40 79      [12]  216         mov wr4,#0x4079
+      0004B0 7E 34 99 9A      [12]  217         mov wr6,#0x999A
+      0004B4 80 3C            [24]  218         sjmp _tpu_dispatch_add
+                                    219 
+      0004B6                        220 _tpu_sin_at_n:
+      0004B6                        221         SAVEREGS
+      0004B6 C0 D0            [24]    1         push PSW
+      0004B8 C0 D1            [24]    2         push PSW1
+      0004BA CA 0B            [12]    3         push dr0
+      0004BC CA 1B            [12]    4         push dr4
+      0004BE CA 2B            [12]    5         push dr8
+      0004C0 CA 3B            [12]    6         push dr12
+      0004C2 CA EB            [12]    7         push dpx
+      0004C4 7E 24 3F 80      [12]  222         mov wr4,#0x3F80         ; AR = 1.0f radians
+      0004C8 7E 34 00 00      [12]  223         mov wr6,#0x0000
+      0004CC 80 48            [24]  224         sjmp _tpu_dispatch_sin
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 24
+Hexadecimal [24-Bits]
+
+
+
+                                    225 
+                                    226 ; Dispatch: S_SEL picks the DPTR base (lo covers n <= 255, hi covers the rest),
+                                    227 ; S_A carries the entry offset.  The DMAIR trigger is issued immediately before
+                                    228 ; JMP @A+DPTR so only that single jump separates the command from the sled.
+                                    229 ; Written out per command rather than macro-generated: sdas251 concatenates
+                                    230 ; macro arguments with an apostrophe, which does not work inside #(...).
+      0004CE                        231 _tpu_dispatch_mul:
+      0004CE E5 35            [12]  232         mov a,S_SEL
+      0004D0 60 05            [24]  233         jz _tpu_mul_lo
+      0004D2 90 00 00         [24]  234         mov dptr,#(_tpu_mul_sled)
+      0004D5 80 03            [24]  235         sjmp _tpu_mul_go
+      0004D7                        236 _tpu_mul_lo:
+      0004D7 90 00 11         [24]  237         mov dptr,#(_tpu_mul_sled+TPU_SLED_LO)
+      0004DA                        238 _tpu_mul_go:
+      0004DA E5 34            [12]  239         mov a,S_A
+      0004DC 75 ED 1E         [24]  240         mov DMAIR,#0x1e
+      0004DF 73               [24]  241         jmp @a+dptr
+      0004E0                        242 _tpu_mul_done:
+      0004E0 75 3A 11         [24]  243         mov S_MARK,#0x11
+      0004E3                        244         RESTREG
+      0004E3 DA EB            [24]    1         pop dpx
+      0004E5 DA 3B            [24]    2         pop dr12
+      0004E7 DA 2B            [24]    3         pop dr8
+      0004E9 DA 1B            [24]    4         pop dr4
+      0004EB DA 0B            [24]    5         pop dr0
+      0004ED D0 D1            [24]    6         pop PSW1
+      0004EF D0 D0            [24]    7         pop PSW
+      0004F1 AA               [24]  245         eret
+                                    246 
+      0004F2                        247 _tpu_dispatch_add:
+      0004F2 E5 35            [12]  248         mov a,S_SEL
+      0004F4 60 05            [24]  249         jz _tpu_add_lo
+      0004F6 90 01 1F         [24]  250         mov dptr,#(_tpu_add_sled)
+      0004F9 80 03            [24]  251         sjmp _tpu_add_go
+      0004FB                        252 _tpu_add_lo:
+      0004FB 90 01 30         [24]  253         mov dptr,#(_tpu_add_sled+TPU_SLED_LO)
+      0004FE                        254 _tpu_add_go:
+      0004FE E5 34            [12]  255         mov a,S_A
+      000500 75 ED 1C         [24]  256         mov DMAIR,#0x1c
+      000503 73               [24]  257         jmp @a+dptr
+      000504                        258 _tpu_add_done:
+      000504 75 3A 12         [24]  259         mov S_MARK,#0x12
+      000507                        260         RESTREG
+      000507 DA EB            [24]    1         pop dpx
+      000509 DA 3B            [24]    2         pop dr12
+      00050B DA 2B            [24]    3         pop dr8
+      00050D DA 1B            [24]    4         pop dr4
+      00050F DA 0B            [24]    5         pop dr0
+      000511 D0 D1            [24]    6         pop PSW1
+      000513 D0 D0            [24]    7         pop PSW
+      000515 AA               [24]  261         eret
+                                    262 
+      000516                        263 _tpu_dispatch_sin:
+      000516 E5 35            [12]  264         mov a,S_SEL
+      000518 60 05            [24]  265         jz _tpu_sin_lo
+ASxxxx Assembler V05.50.4+NoICE+SDCCmods-WIP-R14  (Intel MCS-251 (Source mode))        Page 25
+Hexadecimal [24-Bits]
+
+
+
+      00051A 90 02 3E         [24]  266         mov dptr,#(_tpu_sin_sled)
+      00051D 80 03            [24]  267         sjmp _tpu_sin_go
+      00051F                        268 _tpu_sin_lo:
+      00051F 90 02 4F         [24]  269         mov dptr,#(_tpu_sin_sled+TPU_SLED_LO)
+      000522                        270 _tpu_sin_go:
+      000522 E5 34            [12]  271         mov a,S_A
+      000524 75 ED 2D         [24]  272         mov DMAIR,#0x2d
+      000527 73               [24]  273         jmp @a+dptr
+      000528                        274 _tpu_sin_done:
+      000528 75 3A 13         [24]  275         mov S_MARK,#0x13
+      00052B                        276         RESTREG
+      00052B DA EB            [24]    1         pop dpx
+      00052D DA 3B            [24]    2         pop dr12
+      00052F DA 2B            [24]    3         pop dr8
+      000531 DA 1B            [24]    4         pop dr4
+      000533 DA 0B            [24]    5         pop dr0
+      000535 D0 D1            [24]    6         pop PSW1
+      000537 D0 D0            [24]    7         pop PSW
+      000539 AA               [24]  277         eret
+                                    278 
+                                    279 
