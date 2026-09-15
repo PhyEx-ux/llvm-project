@@ -92,6 +92,13 @@ public:
   void ReplaceBitReadResults(SDNode *N, SmallVectorImpl<SDValue> &Results,
                              SelectionDAG &DAG) const;
 
+  // G7 S3 (G7-FLOAT-DESIGN-draft.md §2.4): the TFPU intrinsic family
+  // (llvm.mcs251.tfpu.*, i32 bit-pattern signature). Builds the glued
+  // CopyToReg(dr4[/dr0]) -> TFPU_<OP> pseudo -> CopyFromReg(dr4) window;
+  // the pseudo itself is expanded after register allocation by
+  // MCS251TFPUExpand (mov 0xED,#cmd + fixed worst-case NOP chain).
+  SDValue LowerTFPUIntrinsic(SDValue Op, SelectionDAG &DAG) const;
+
   MachineBasicBlock *
   EmitInstrWithCustomInserter(MachineInstr &MI,
                               MachineBasicBlock *MBB) const override;
