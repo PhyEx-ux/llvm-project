@@ -1319,6 +1319,15 @@ enum : unsigned {
   // MCS251 NOBITS input sections in one named group share their run address.
   SHF_MCS251_OVERLAY = 0x10000000,
 
+  // G8: the section is a candidate for the EDATA window.  A v2 ELF object
+  // marks an ordinary AS0 NOBITS data section (`.mcs251.dseg` or a non-leaf
+  // parameter-slot `.mcs251.DSEG.<n>`) with this bit; the linker keeps it in
+  // the low 128-byte DSEG window by preference and may migrate the whole
+  // section into [0x100, --edata-end] only when that window cannot hold it.
+  // Sections without the bit are never migrated.  v1 objects must not carry
+  // it (the automatic migration is a v2 placement policy).
+  SHF_MCS251_EDATA_MOVABLE = 0x20000000,
+
   /// All sections with the "d" flag are grouped together by the linker to form
   /// the data section and the dp register is set to the start of the section by
   /// the boot code.

@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MCS251TargetObjectFile.h"
+#include "MCS251TargetMachine.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/MC/MCContext.h"
@@ -17,8 +18,28 @@ using namespace llvm;
 void MCS251TargetObjectFile::Initialize(MCContext &Ctx,
                                         const TargetMachine &TM) {
   TargetLoweringObjectFileELF::Initialize(Ctx, TM);
-  DSEGSection = Ctx.getELFSection(".mcs251.dseg", ELF::SHT_NOBITS,
-                                  ELF::SHF_ALLOC | ELF::SHF_WRITE);
+  // G8 (design §3, option (i)): a v2 ELF object marks its ordinary AS0
+  // writable data slice as a migration candidate.  The mark is a placement
+  // capability, never a placement decision: the linker still tries the low
+  // 128-byte DSEG window first and migrates the whole slice only when that
+  // window cannot hold it, so a module that fits keeps the pre-G8 layout
+  // byte for byte.  v1 objects and the REL stream stay unmarked (their
+  // layout is a frozen historical asset), and the object remains AS0 with
+  // 32-bit pointers either way -- only the section's admissible window
+  // widens, on link-time failure.
+  //
+  // The decision is per module, not per section: `.mcs251.dseg` is one
+  // MCContext-uniqued section per module, so the flag must be chosen here
+  // (before the section is first requested) rather than at each switch.
+  const auto &Contract =
+      static_cast<const MCS251TargetMachine &>(TM).getMemoryContract();
+  const bool V2ELFObject =
+      static_cast<const MCS251TargetMachine &>(TM).usesELFObjects() &&
+      Contract && Contract->isSpecified() && Contract->ASLayoutVersion == 2;
+  const uint64_t DSEGFlags =
+      ELF::SHF_ALLOC | ELF::SHF_WRITE |
+      (V2ELFObject ? ELF::SHF_MCS251_EDATA_MOVABLE : 0);
+  DSEGSection = Ctx.getELFSection(".mcs251.dseg", ELF::SHT_NOBITS, DSEGFlags);
   XINITSection = Ctx.getELFSection(".mcs251.xinit", ELF::SHT_PROGBITS,
                                    ELF::SHF_ALLOC);
   // X3 placement classes. AS3 (__xdata) objects are XDATA NOBITS whose ROM

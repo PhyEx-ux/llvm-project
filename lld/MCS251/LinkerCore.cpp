@@ -39,6 +39,11 @@ namespace lld::mcs251 {
 
 static constexpr uint16_t EM_MCS251 = 0x9999;
 static constexpr uint32_t SHF_MCS251_OVERLAY = 0x10000000;
+// G8 (design §3, option (i)): the producer's "may be placed in EDATA when the
+// low window cannot hold this AS0 section" capability bit.  It lives in the
+// MCS251 processor flag range next to SHF_MCS251_OVERLAY and is mirrored in
+// llvm/BinaryFormat/ELF.h for the producer and the object tools.
+static constexpr uint32_t SHF_MCS251_EDATA_MOVABLE = 0x20000000;
 static constexpr uint32_t ABI_FLAGS = 0x00000001;
 // W4 (design §4.2): the v2 object-protocol e_flags value.  The low byte is
 // the object protocol version (2, agreeing with Tag 4); bit 8 is the
@@ -150,6 +155,11 @@ struct InputSection {
   bool IsNobits = false;
   bool IsOverlay = false;
   bool IsLoadable = false;
+  // G8: the producer marked this section as a candidate for the EDATA window
+  // (SHF_MCS251_EDATA_MOVABLE, v2 objects only).  The linker prefers the low
+  // DSEG window and may migrate the whole section to [max(0x100,DsegStart),
+  // --edata-end] only when that window cannot hold it.
+  bool EDataMovable = false;
   // True only for sections lld itself created (vector slots, synthesized bit
   // XINIT): they are trusted owners and are exempt from input-side checks.
   bool Synthesized = false;
@@ -458,13 +468,20 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
   S.IsCode = (S.Flags & ELF::SHF_EXECINSTR) != 0;
   S.IsNobits = S.Type == ELF::SHT_NOBITS;
   S.IsOverlay = (S.Flags & SHF_MCS251_OVERLAY) != 0;
+  // G8: the producer's "this AS0 data section may be placed in EDATA" mark.
+  // The bit is a placement capability, never an instruction to migrate: the
+  // linker still tries the low window first and migrates only on failure.
+  S.EDataMovable = (S.Flags & SHF_MCS251_EDATA_MOVABLE) != 0;
   S.IsLoadable = S.IsAlloc && !S.IsNobits && S.Size != 0;
 
   if (!S.IsAlloc)
     return true; // validateMetaSection() checks the exact supported set.
 
+  // The mask names every flag a *placement* rule may see.  SHF_MCS251_EDATA_MOVABLE
+  // is a capability bit carried by the section's own Region rule below, so it
+  // must not be rejected here; every other processor/OS bit stays unsupported.
   const uint64_t Common = ELF::SHF_ALLOC | ELF::SHF_WRITE | ELF::SHF_EXECINSTR |
-                          SHF_MCS251_OVERLAY;
+                          SHF_MCS251_OVERLAY | SHF_MCS251_EDATA_MOVABLE;
   if (S.Flags & ~Common)
     return fail(Err, "unsupported ALLOC section flags for " + N);
   if (N == ".text" || N.starts_with(".text.")) {
@@ -527,10 +544,39 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
   if (N == ".mcs251.dseg" || N.starts_with(".mcs251.DSEG.") ||
       N == ".data" || N.starts_with(".data.") || N == ".bss" ||
       N.starts_with(".bss.")) {
+    // G8: an ordinary AS0 writable NOBITS slice may additionally carry the
+    // "may be placed in EDATA on low-window failure" capability bit.  The bit
+    // is a v2 placement policy on the MCS251-named slices, so a v1 object (or
+    // a generic `.data`/`.bss` name) carrying it is malformed rather than
+    // silently tolerated -- keeping every pre-G8 accepted input byte-identical.
+    const bool Markable = N.starts_with(".mcs251.");
+    if (S.EDataMovable && (!Markable || !S.File ||
+                           S.File->EFlags != ABI_FLAGS_V2))
+      return fail(Err,
+                  Markable
+                      ? "DSEG section carries the EDATA-movable flag outside "
+                        "its v2 contract: " + N
+                      : "generic DSEG name carries the EDATA-movable flag "
+                        "(only .mcs251.* slices may): " + N);
     if (S.Type != ELF::SHT_NOBITS ||
-        S.Flags != (ELF::SHF_ALLOC | ELF::SHF_WRITE))
+        S.Flags != (ELF::SHF_ALLOC | ELF::SHF_WRITE |
+                    (S.EDataMovable ? SHF_MCS251_EDATA_MOVABLE : 0)))
       return fail(Err, "DSEG sections must be writable NOBITS: " + N);
     S.Region = "DSEG";
+    return true;
+  }
+  // G8: the linker-assigned EDATA Region.  S1 does not emit this name (it
+  // marks `.mcs251.dseg` slices and lets the failure-fallback re-layout move
+  // them), but the Region exists in S0 so the window, the boundary symbols and
+  // the XINIT destination whitelist are complete independently of the
+  // producer.  A directly emitted slice is placed in EDATA unconditionally.
+  if (N == ".mcs251.edata" || N.starts_with(".mcs251.EDATA.")) {
+    if (S.Type != ELF::SHT_NOBITS ||
+        S.Flags != (ELF::SHF_ALLOC | ELF::SHF_WRITE) ||
+        !S.File || S.File->EFlags != ABI_FLAGS_V2)
+      return fail(Err, "EDATA sections must be writable NOBITS in a v2 object: " +
+                           N);
+    S.Region = "EDATA";
     return true;
   }
   if (N.starts_with(".mcs251.REG_BANK_")) {
@@ -1499,6 +1545,7 @@ private:
   bool layoutCode();
   bool layoutData();
   bool reserveCode(uint32_t Start, uint32_t Size, StringRef What);
+  bool tryAllocate(InputSection &S, uint32_t Lo, uint32_t Hi);
   bool allocate(InputSection &S, uint32_t Lo, uint32_t Hi);
   bool reserve(uint32_t Start, uint32_t Size, StringRef What);
   bool applyRelocations();
@@ -1558,11 +1605,11 @@ static bool isReservedBoundarySymbol(StringRef Name) {
   if (Name.starts_with("s_") || Name.starts_with("l_")) {
     StringRef Area = Name.substr(2);
     static const char *Areas[] = {
-        "DSEG",       "OSEG",       "ISEG",        "SSEG",
-        "HOME",       "VECS",       "BOOT",        "CSEG",
-        "XINIT",      "XDATA_INIT", "BSEG_BYTES",  "BIT_BANK",
-        "XSEG",       "REG_BANK_0", "REG_BANK_1",  "REG_BANK_2",
-        "REG_BANK_3"};
+        "DSEG",       "EDATA",      "OSEG",        "ISEG",
+        "SSEG",       "HOME",       "VECS",        "BOOT",
+        "CSEG",       "XINIT",      "XDATA_INIT",  "BSEG_BYTES",
+        "BIT_BANK",   "XSEG",       "REG_BANK_0",  "REG_BANK_1",
+        "REG_BANK_2", "REG_BANK_3"};
     for (const char *A : Areas)
       if (Area == A)
         return true;
@@ -2174,15 +2221,14 @@ bool Linker::reserve(uint32_t Start, uint32_t Size, StringRef What) {
   return true;
 }
 
-// E3: report why no first-fit slot exists, with every field a layout fix
-// needs: the failing object/section and its symbols, the request size and
-// alignment, the allocation window, the largest free hole, and every occupied
-// range inside the window with its conflict source.  The window itself is
-// policy (direct-addressing semantics) and is never changed here.
-bool Linker::allocate(InputSection &S, uint32_t Lo, uint32_t Hi) {
+// G8: the silent half of the first-fit placement.  Returns true and commits
+// the reservation when a slot exists; returns false without touching the
+// ledger or emitting a diagnostic otherwise.  `allocate()` below is this plus
+// the actionable failure report, and the EDATA failure-fallback re-layout uses
+// this form to probe candidate placements before committing to a re-run.
+bool Linker::tryAllocate(InputSection &S, uint32_t Lo, uint32_t Hi) {
   if (!S.Size)
     return true;
-  const uint32_t WinEnd = Hi + 1; // Exclusive; windows are <= 0x100 bytes.
   for (uint32_t A = Lo; A <= Hi && S.Size <= Hi - A + 1; ++A) {
     if (S.Align > 1)
       A = (A + S.Align - 1) & ~(S.Align - 1);
@@ -2200,6 +2246,20 @@ bool Linker::allocate(InputSection &S, uint32_t Lo, uint32_t Hi) {
       return reserve(A, S.Size, S.Name);
     }
   }
+  return false;
+}
+
+// E3: report why no first-fit slot exists, with every field a layout fix
+// needs: the failing object/section and its symbols, the request size and
+// alignment, the allocation window, the largest free hole, and every occupied
+// range inside the window with its conflict source.  The window itself is
+// policy (direct-addressing semantics) and is never changed here.
+bool Linker::allocate(InputSection &S, uint32_t Lo, uint32_t Hi) {
+  if (!S.Size)
+    return true;
+  const uint32_t WinEnd = Hi + 1; // Exclusive; windows are <= 0x100 bytes.
+  if (tryAllocate(S, Lo, Hi))
+    return true;
 
   // Allocation failed: build the actionable diagnostic.
   std::string Msg;
@@ -2650,11 +2710,144 @@ bool Linker::layoutData() {
     return fail(Err, "invalid DSEG allocation window: start 0x" +
                          Twine::utohexstr(DsegStart) + ", end 0x" +
                          Twine::utohexstr(DsegEnd));
-  for (InputSection *S : AllSections)
-    if (S->Region == "DSEG" && !allocate(*S, DsegStart, DsegEnd - 1))
+
+  // G8 (design §3 "migration mechanism"): the EDATA window is
+  // [max(0x100, DsegStart), --edata-end].  A board that narrows the window
+  // below its start (e.g. --edata-end=0xff) declares it empty; that is legal
+  // and simply makes every migration attempt fail closed.
+  const uint32_t EdataLo = std::max<uint32_t>(0x100, DsegStart);
+  const uint32_t EdataHi = Config.EdataEnd;
+
+  // The failure-fallback re-layout restarts the low-window sequence from the
+  // same ledger state on every attempt, so snapshot the state as it stands
+  // before any DSEG/OSEG placement.
+  const std::vector<DataUse> SeedUsed = DataUsed;
+  const uint32_t SeedH = StackH;
+
+  // Sections moved out of the low window, in migration order (deterministic).
+  // They become Region "EDATA" once the layout succeeds.
+  std::vector<InputSection *> Migrated;
+  auto AlreadyMigrated = [&](const InputSection *S) {
+    return llvm::is_contained(Migrated, S);
+  };
+  // A section is a migration candidate only when the producer marked it
+  // (SHF_MCS251_EDATA_MOVABLE on an ordinary AS0 DSEG slice).  Unmarked
+  // slices, `__data` (AS1) objects, v1 objects, XINIT/absolute/overlay
+  // slices never enter the candidate set.
+  auto IsCandidate = [](const InputSection *S) {
+    return S->Region == "DSEG" && S->EDataMovable && S->Size != 0;
+  };
+  auto EdataUnavailable = [&](const InputSection &S) {
+    return fail(Err, "cannot allocate " + S.Name +
+                         " in the EDATA window [0x" +
+                         Twine::utohexstr(EdataLo) + ",0x" +
+                         Twine::utohexstr(EdataHi) +
+                         "] (widen --edata-end to hold " +
+                         Twine::utohexstr(S.Size) + " more bytes)");
+  };
+  // Silenceable OSEG overlay placement, the counterpart of
+  // allocateOverlayGroup() for a provisional attempt.
+  auto tryOverlayGroup = [&](StringRef Group, uint32_t Lo, uint32_t Hi) {
+    uint32_t Size = 0;
+    InputSection *Representative = nullptr;
+    for (InputSection *S : AllSections)
+      if (S->Group == Group && S->Size >= Size) {
+        Size = S->Size;
+        Representative = S;
+      }
+    if (!Representative || !Size)
+      return true;
+    if (!tryAllocate(*Representative, Lo, Hi))
       return false;
-  if (!allocateOverlayGroup("OSEG", DsegStart, DsegEnd - 1))
-    return false;
+    for (InputSection *S : AllSections)
+      if (S->Group == Group)
+        S->Address = Representative->Address;
+    return true;
+  };
+
+  // Deterministic failure-fallback re-layout: place the migrated set in the
+  // EDATA window, then every remaining DSEG slice in input order and the OSEG
+  // overlay in the low window.  On failure migrate one candidate (the failing
+  // slice itself when it is a candidate, else the largest remaining candidate,
+  // ties by input order) and restart the whole sequence.  The candidate set
+  // exhausted means the low window cannot be freed for an unmovable slice:
+  // that stays a plain link failure, never a silent degradation.
+  bool Placed = false;
+  while (!Placed) {
+    DataUsed = SeedUsed;
+    StackH = SeedH;
+
+    for (InputSection *S : Migrated)
+      if (EdataHi < EdataLo || !tryAllocate(*S, EdataLo, EdataHi))
+        return EdataUnavailable(*S);
+    // A section the producer emitted directly into the EDATA Region (an
+    // explicit `.mcs251.edata` slice) is placed there unconditionally; it
+    // never competes for the low window.  No backend emitter uses this in G8
+    // (S1 marks DSEG slices instead), but the Region is part of the S0
+    // infrastructure and is exercised by the linker's own tests.
+    for (InputSection *S : AllSections)
+      if (S->Region == "EDATA" &&
+          (EdataHi < EdataLo || !tryAllocate(*S, EdataLo, EdataHi)))
+        return EdataUnavailable(*S);
+
+    InputSection *Failed = nullptr;
+    for (InputSection *S : AllSections)
+      if (S->Region == "DSEG" && !AlreadyMigrated(S) &&
+          !tryAllocate(*S, DsegStart, DsegEnd - 1)) {
+        Failed = S;
+        break;
+      }
+    bool OverlayFailed = false;
+    if (!Failed && !tryOverlayGroup("OSEG", DsegStart, DsegEnd - 1))
+      OverlayFailed = true;
+    if (!Failed && !OverlayFailed) {
+      Placed = true;
+      break;
+    }
+
+    // Pick the migration victim.
+    InputSection *Victim = nullptr;
+    if (Failed && IsCandidate(Failed)) {
+      Victim = Failed;
+    } else {
+      for (InputSection *S : AllSections)
+        if (IsCandidate(S) && !AlreadyMigrated(S) &&
+            (!Victim || S->Size > Victim->Size))
+          Victim = S;
+    }
+    if (!Victim) {
+      // No candidate can free the window: fail closed on the *live* ledger.
+      //
+      // The ledger at this point holds every reservation this attempt
+      // committed (the migrated set in EDATA plus the DSEG/OSEG slices already
+      // placed in the low window), and it is exactly the occupancy that made
+      // `Failed`/the OSEG overlay fail.  Re-running the diagnostic form here
+      // must therefore reuse that state unchanged.
+      //
+      // Resetting to SeedUsed (or replaying only `Migrated`) would erase the
+      // unmarked or already-migrated slices that hold the window and let the
+      // retried slice land on top of them: a hard allocation failure would be
+      // reported as success with two sections at the same address.
+      // `tryAllocate` is deterministic and the ledger is unchanged since the
+      // failing probe, so the re-probe below fails again and only emits the
+      // established actionable report.
+      if (Failed) {
+        if (allocate(*Failed, DsegStart, DsegEnd - 1))
+          return fail(Err, "internal: DSEG re-allocation of " + Failed->Name +
+                               " unexpectedly succeeded on the failure ledger");
+        return false;
+      }
+      if (allocateOverlayGroup("OSEG", DsegStart, DsegEnd - 1))
+        return fail(Err, "internal: OSEG re-allocation unexpectedly "
+                         "succeeded on the failure ledger");
+      return false;
+    }
+    Migrated.push_back(Victim);
+  }
+  // The migrated slices now belong to the EDATA Region: the boundary symbols,
+  // the map rows and the XINIT destination whitelist all key off it.
+  for (InputSection *S : Migrated)
+    S->Region = "EDATA";
 
   uint32_t IsegStart = areaStart("ISEG", 0);
   uint32_t IsegEnd = Config.IramSize > 0 && IsegStart < 0x100 &&
@@ -2963,6 +3156,25 @@ bool Linker::layoutData() {
     if (HasReg) {
       Synth[(Twine("s_") + Group).str()] = Bank * 8;
       Synth[(Twine("l_") + Group).str()] = RegMax;
+    }
+  }
+  // G8: EDATA boundary symbols.  s_EDATA is the address of the first
+  // non-empty EDATA slice in input order; l_EDATA is the sum of the slice
+  // sizes (the ISEG "sum of slice sizes, not physical span" convention), so a
+  // dispersed migration reports its real footprint.  When nothing migrated
+  // both stay absent, keeping the map byte-identical to a pre-G8 link.
+  {
+    InputSection *FirstEdata = nullptr;
+    uint32_t EdataTotal = 0;
+    for (InputSection *S : AllSections)
+      if (S->Region == "EDATA" && S->Size) {
+        if (!FirstEdata)
+          FirstEdata = S;
+        EdataTotal += static_cast<uint32_t>(S->Size);
+      }
+    if (FirstEdata) {
+      Synth["s_EDATA"] = FirstEdata->Address;
+      Synth["l_EDATA"] = EdataTotal;
     }
   }
   // XSEG: start and span.
@@ -3567,8 +3779,17 @@ bool Linker::validateXInit() {
         // window). No new bit allocator and no v2 capability is introduced:
         // only slices that were actually allocated by the existing BSEG_BYTES
         // rule (allocated slices carry a real Address) qualify.
-        if ((D->Region == "DSEG" || D->Region == "DATA_ABS" ||
-             D->Region == "BSEG_BYTES") &&
+        //
+        // G8: EDATA slices are owned DSEG-class initialization targets too.
+        // The record format is unchanged (u16 destination; the Driver already
+        // rejects --edata-end > 0xffff, so no legal EDATA address needs more
+        // than the u16 walker the CRT already runs), and the sparse record
+        // covers a dispersed EDATA layout exactly as it does a dispersed
+        // DSEG one.  Without this branch every migrated object's clear/copy
+        // record would be rejected here -- a link that succeeded in layout
+        // but could not start.
+        if ((D->Region == "DSEG" || D->Region == "EDATA" ||
+             D->Region == "DATA_ABS" || D->Region == "BSEG_BYTES") &&
             D->Size != 0 && Destination >= D->Address &&
             rangeFits(uint64_t(Destination) - D->Address, ObjectSize,
                       D->Size)) {
@@ -4064,7 +4285,8 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
     std::vector<InputSection *> Slots;
     for (const auto &SP : X->File->Sections) {
       InputSection *S = SP.get();
-      if (S->IsAlloc && (S->Region == "DSEG" || S->Region == "OSEG") &&
+      if (S->IsAlloc && (S->Region == "DSEG" || S->Region == "EDATA" ||
+                         S->Region == "OSEG") &&
           S->Size)
         Slots.push_back(S);
     }

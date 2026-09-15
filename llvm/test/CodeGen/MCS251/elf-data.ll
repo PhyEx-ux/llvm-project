@@ -57,11 +57,16 @@ define i16 @nonleaf(i16 %a, i16 %b) noinline {
 ; ELF: Size: 6
 ; ELF: Name: .mcs251.DSEG.2
 ; ELF: Type: SHT_NOBITS
-; ELF: Flags [ (0x3)
+; G8: a v2 object marks its ordinary AS0 writable slices as EDATA-migration
+; candidates (a capability bit, not a placement decision: the linker keeps
+; the low window by preference and only migrates on failure).
+; ELF: Flags [ (0x20000003)
+; ELF: SHF_MCS251_EDATA_MOVABLE
 ; ELF: Size: 2
 ; ELF: Name: .mcs251.dseg
 ; ELF: Type: SHT_NOBITS
-; ELF: Flags [ (0x3)
+; ELF: Flags [ (0x20000003)
+; ELF: SHF_MCS251_EDATA_MOVABLE
 ; ELF: Size: 71
 ; ELF: Name: .mcs251.xinit
 ; ELF: Type: SHT_PROGBITS

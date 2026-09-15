@@ -179,6 +179,17 @@ class MCS251AsmPrinter final : public AsmPrinter {
 
   bool usesELFObjects() const { return getMCS251TM().usesELFObjects(); }
 
+  // G8: the v2 ELF-object predicate that gates the EDATA-movable capability
+  // marks.  Same shape as the identity gate in classifyModule(): a specified
+  // layout-v2 contract on ELF object output.  v1 objects and the REL stream
+  // never carry the mark, so their layout stays a frozen historical asset.
+  bool marksEDataMovable() const {
+    const std::optional<MCS251::MemoryContract> &Contract =
+        getMCS251TM().getMemoryContract();
+    return usesELFObjects() && Contract && Contract->isSpecified() &&
+           Contract->ASLayoutVersion == 2;
+  }
+
   // The slot value is canonical decimal text ("0" and "1" are legal;
   // The canonical-decimal slot check is shared with the Verifier and the
   // target contract check through MCS251ISR::parseCanonicalSlot; the object
@@ -1457,6 +1468,16 @@ public:
     unsigned Flags = ELF::SHF_ALLOC | ELF::SHF_WRITE;
     if (Leaf && usesELFObjects())
       Flags |= ELF::SHF_MCS251_OVERLAY;
+    // G8 S2 (design §3(b1)): a non-leaf slot area is an AS0 writable slice
+    // whose accesses already go through 24-bit absolute addresses (the
+    // parameterSlot() ExternalSymbol path), so it may share the EDATA
+    // migration candidates under a v2 ELF object.  As with the global DSEG
+    // slice, this is a capability mark only: the linker keeps the low window
+    // by preference and migrates on failure, so a program that fits keeps
+    // its pre-G8 slot addresses byte for byte.  Leaf OSEG areas overlay and
+    // are never candidates.
+    if (!Leaf && marksEDataMovable())
+      Flags |= ELF::SHF_MCS251_EDATA_MOVABLE;
     MCSection *Sec = OutContext.getELFSection(
         ".mcs251." + Area + "." + Twine(MF.getFunctionNumber()),
         ELF::SHT_NOBITS, Flags);

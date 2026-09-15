@@ -27,6 +27,7 @@
 **文件 md5（冻结值）**：
 
 ```
+0d0e35f5fcc3e0e5c59dbf97b7d9e05c  AI8051U.h      (unchanged)
 9fd6cf5479bb3c4b44bf3a8fdac851f5  ASCII-10x24.h
 9804188ed3a335ca5f99490a06135a55  picture2.h
 f40a57a3ca94d5e3f996da4024b1d85e  ASCII6x8.h      (unchanged)

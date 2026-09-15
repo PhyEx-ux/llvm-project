@@ -1412,7 +1412,8 @@ constexpr auto ElfMipsSectionFlags =
     BUILD_ENUM_STRINGS(ElfMipsSectionFlagsDefs);
 
 constexpr EnumStringDef<unsigned, 2> ElfMCS251SectionFlagsDefs[] = {
-    ENUM_ENT(SHF_MCS251_OVERLAY, "p")};
+    ENUM_ENT(SHF_MCS251_OVERLAY, "p"),
+    ENUM_ENT(SHF_MCS251_EDATA_MOVABLE, "e")};
 constexpr auto ElfMCS251SectionFlags =
     BUILD_ENUM_STRINGS(ElfMCS251SectionFlagsDefs);
 

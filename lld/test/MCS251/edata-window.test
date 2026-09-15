@@ -1,0 +1,820 @@
+#
+# G8 S0: the EDATA Region, its window, the failure-fallback re-layout and the
+# XINIT destination whitelist.  S0 is pure lld infrastructure: no backend
+# emitter is connected in this slice, so every fixture here is a hand-built
+# v2 object that carries the capability bit itself.
+#
+#   * a marked AS0 slice that cannot fit the low window migrates whole into
+#     [max(0x100,DsegStart), --edata-end]; s_EDATA/l_EDATA report it
+#   * a marked slice that FITS the low window stays in DSEG and the map is
+#     byte-identical to a pre-G8 link (no boundary symbols appear)
+#   * an unmarked slice never migrates: the link keeps the established
+#     allocation failure (negative: no silent degradation)
+#   * the failing slice is migrated when it is itself a candidate; otherwise
+#     the largest remaining candidate is migrated and the whole low-window
+#     sequence restarts
+#   * the EDATA window is empty when --edata-end < 0x100: fail closed
+#   * EDATA counts toward the stack high-water mark H
+#   * XINIT destinations inside a migrated slice are accepted for BOTH the
+#     clear-only (payload 0) and the nonzero-copy (payload == size) records;
+#     a destination past the slice end is still rejected
+#   * the capability bit is a v2-only mark: a v1 object carrying it, or an
+#     explicit `.mcs251.edata` section in a v1 object, is malformed
+#   * s_EDATA/l_EDATA are reserved boundary symbols
+#   * fail-closed negatives (Alice G8-DSEG review): with no migration candidate
+#     the fallback keeps the LIVE ledger, so a cumulative overflow, an OSEG
+#     leaf-overlay failure and a post-migration exhaustion all stay non-zero
+#     exit with no ELF, instead of resetting the ledger and reporting success
+#     with two sections at the same address
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj big.yaml -o big-v1.o
+# RUN: yaml2obj small.yaml -o small-v1.o
+# RUN: yaml2obj unmarked.yaml -o unmarked-v1.o
+# RUN: yaml2obj mixbig.yaml -o mixbig-v1.o
+# RUN: yaml2obj mixsmall.yaml -o mixsmall-v1.o
+# RUN: yaml2obj edata-v1.yaml -o edata-v1.o
+# RUN: yaml2obj edata-v2.yaml -o edata-v2.o
+# RUN: yaml2obj dsegmark-v1.yaml -o dsegmark-v1.o
+# RUN: yaml2obj resv-edata.yaml -o resv-edata.o
+# RUN: yaml2obj xinit-clear.yaml -o xinit-clear.o
+# RUN: yaml2obj xinit-copy.yaml -o xinit-copy.o
+# RUN: yaml2obj xinit-past.yaml -o xinit-past.o
+# RUN: yaml2obj slot.yaml -o slot-v1.o
+# RUN: yaml2obj unmarked100.yaml -o unmarked100.o
+# RUN: yaml2obj cumul.yaml -o cumul.o
+# RUN: yaml2obj osegfail.yaml -o osegfail.o
+# RUN: yaml2obj migratex.yaml -o migratex.o
+# RUN: %python setflags.py big-v1.o small-v1.o unmarked-v1.o mixbig-v1.o
+# RUN: %python setflags.py mixsmall-v1.o edata-v2.o resv-edata.o
+# RUN: %python setflags.py xinit-clear.o xinit-copy.o xinit-past.o slot-v1.o
+# RUN: %python setflags.py unmarked100.o cumul.o osegfail.o migratex.o
+
+# --- S2: a NON-LEAF parameter-slot slice (`.mcs251.DSEG.<n>`) is a migration
+# --- candidate like the global slice; the marked 150-byte slot cannot fit the
+# --- low window and moves whole, while the 4-byte global stays put
+# RUN: mcs251-lld slot-v1.o --area-start=CSEG=0xff0200 --edata-end=0x3fff \
+# RUN:   --map=%t/slot.map -o %t/slot.elf && test -f %t/slot.elf
+# RUN: grep 's_EDATA = 0x0100' %t/slot.map
+# RUN: grep 'l_EDATA = 0x0096' %t/slot.map
+# RUN: grep 'slot-v1.o:.mcs251.DSEG.1 0x0100' %t/slot.map
+# RUN: grep 'slot-v1.o:.mcs251.dseg 0x0000 +0x4' %t/slot.map
+
+# --- a 200-byte marked slice overflows the 128-byte window: the whole slice
+# --- moves to EDATA; l_EDATA is the sum of migrated sizes and s_EDATA the
+# --- first migrated address; nothing is left in the low window
+# RUN: mcs251-lld big-v1.o --area-start=CSEG=0xff0200 --edata-end=0x3fff \
+# RUN:   --map=%t/big.map -o %t/big.elf && test -f %t/big.elf
+# RUN: grep 's_EDATA = 0x0100' %t/big.map
+# RUN: grep 'l_EDATA = 0x00c8' %t/big.map
+# RUN: grep 'l_DSEG = 0x0000' %t/big.map
+
+# --- a marked slice that fits: no migration, no EDATA boundary symbols, the
+# --- low window keeps the pre-G8 layout exactly
+# RUN: mcs251-lld small-v1.o --area-start=CSEG=0xff0200 --edata-end=0x3fff \
+# RUN:   --map=%t/small.map -o %t/small.elf && test -f %t/small.elf
+# RUN: grep 'l_DSEG = 0x0014' %t/small.map
+# RUN: not grep 's_EDATA' %t/small.map
+
+# --- unmarked overflow: never migrates, keeps the allocation diagnostic
+# RUN: not mcs251-lld unmarked-v1.o --area-start=CSEG=0xff0200 \
+# RUN:   --edata-end=0x3fff --map=%t/un.map -o %t/un.elf 2>&1 | FileCheck %s --check-prefix=UNMARKED
+# RUN: test ! -e %t/un.elf
+# UNMARKED: cannot allocate .mcs251.dseg (from unmarked-v1.o): size 200 bytes
+# UNMARKED-SAME: window [0x0000,0x0080)
+
+# --- REGRESSION (Alice G8-DSEG review): two UNMARKED slices, 100B + 60B, sum
+# --- 160B > the 128B window although neither overflows alone.  The fallback
+# --- finds no migration candidate; it must fail closed on the *live* ledger
+# --- (the 100B occupancy that blocked the 60B), NOT reset the ledger and retry
+# --- only the failing slice -- which reported success with both at 0x0000.
+# RUN: not mcs251-lld unmarked100.o mixsmall-v1.o --area-start=CSEG=0xff0200 \
+# RUN:   --edata-end=0x3fff --map=%t/alice.map -o %t/alice.elf 2>&1 | FileCheck %s --check-prefix=ALICEMIN
+# RUN: test ! -e %t/alice.elf
+# ALICEMIN: cannot allocate .mcs251.dseg (from mixsmall-v1.o): size 60 bytes
+# ALICEMIN-SAME: window [0x0000,0x0080): no free range of 60 bytes
+# ALICEMIN-SAME: occupied: [0x0000,0x0064) from .mcs251.dseg
+
+# --- cumulative overflow: two 80-byte slices in one object; each fits the
+# --- window on its own, their sum (160B) does not.  The second slice must keep
+# --- the established allocation failure with the first slice named as owner.
+# RUN: not mcs251-lld cumul.o --area-start=CSEG=0xff0200 --edata-end=0x3fff \
+# RUN:   --map=%t/cumul.map -o %t/cumul.elf 2>&1 | FileCheck %s --check-prefix=CUMUL
+# RUN: test ! -e %t/cumul.elf
+# CUMUL: cannot allocate .mcs251.DSEG.1 (from cumul.o): size 80 bytes
+# CUMUL-SAME: window [0x0000,0x0080): no free range of 80 bytes
+# CUMUL-SAME: occupied: [0x0000,0x0050) from .mcs251.dseg
+
+# --- OSEG leaf-slot failure: an unmarked 100-byte global leaves only 28 bytes
+# --- in the low window, so the 40-byte leaf overlay group cannot be placed.
+# --- No migration candidate exists; the OSEG allocation must fail closed
+# --- rather than overwrite the global it could not fit beside.
+# RUN: not mcs251-lld osegfail.o --area-start=CSEG=0xff0200 --edata-end=0x3fff \
+# RUN:   --map=%t/osegf.map -o %t/osegf.elf 2>&1 | FileCheck %s --check-prefix=OSEGFAIL
+# RUN: test ! -e %t/osegf.elf
+# OSEGFAIL: cannot allocate .mcs251.OSEG.0 (from osegfail.o): size 40 bytes
+# OSEGFAIL-SAME: window [0x0000,0x0080): no free range of 40 bytes
+# OSEGFAIL-SAME: occupied: [0x0000,0x0064) from .mcs251.dseg
+
+# --- candidate exhaustion after a migration: the marked 80-byte slice is
+# --- migrated to EDATA (freeing the low window), but the remaining unmarked
+# --- 100-byte + 30-byte slices still do not fit together.  With the candidate
+# --- set exhausted the link must fail closed on the ledger that now holds the
+# --- migrated 80B in EDATA and the 100B in the low window.
+# RUN: not mcs251-lld migratex.o --area-start=CSEG=0xff0200 --edata-end=0x3fff \
+# RUN:   --map=%t/migx.map -o %t/migx.elf 2>&1 | FileCheck %s --check-prefix=MIGREX
+# RUN: test ! -e %t/migx.elf
+# MIGREX: cannot allocate .mcs251.DSEG.2 (from migratex.o): size 30 bytes
+# MIGREX-SAME: window [0x0000,0x0080): no free range of 30 bytes
+# MIGREX-SAME: occupied: [0x0000,0x0064) from .mcs251.dseg
+
+# --- failure-fallback re-layout: the marked 100-byte slice is migrated even
+# --- though it placed fine on its own, because the later unmarked 60-byte
+# --- slice cannot fit beside it.  The unmovable slice keeps the low window.
+# RUN: mcs251-lld mixbig-v1.o mixsmall-v1.o --area-start=CSEG=0xff0200 \
+# RUN:   --edata-end=0x3fff --map=%t/mix.map -o %t/mix.elf && test -f %t/mix.elf
+# RUN: grep 'l_EDATA = 0x0064' %t/mix.map
+# RUN: grep 'l_DSEG = 0x003c' %t/mix.map
+# RUN: grep 'mixbig-v1.o:.mcs251.dseg 0x0100' %t/mix.map
+
+# --- deterministic: the same input links to the same map twice
+# RUN: mcs251-lld mixbig-v1.o mixsmall-v1.o --area-start=CSEG=0xff0200 \
+# RUN:   --edata-end=0x3fff --map=%t/mix2.map -o %t/mix2.elf
+# RUN: cmp %t/mix.map %t/mix2.map
+
+# --- empty EDATA window (--edata-end below the window start) fails closed
+# RUN: not mcs251-lld big-v1.o --area-start=CSEG=0xff0200 --edata-end=0xff \
+# RUN:   -o %t/narrow.elf 2>&1 | FileCheck %s --check-prefix=NARROW
+# RUN: test ! -e %t/narrow.elf
+# NARROW: cannot allocate .mcs251.dseg in the EDATA window [0x100,0xff]
+# NARROW-SAME: widen --edata-end
+
+# --- EDATA is counted in the stack high-water mark H: the migration target
+# --- object asks for the stack base, so H (and the SPX) must clear the
+# --- 0x100+0xc8 EDATA end
+# RUN: mcs251-lld big-v1.o --area-start=CSEG=0xff0200 --edata-end=0x3fff \
+# RUN:   --map=%t/h.map -o %t/h.elf
+# RUN: grep 'stack H=0x1c8' %t/h.map
+
+# --- XINIT: a clear-only record (payload 0) and a nonzero-copy record whose
+# --- destinations lie in a migrated slice are both accepted
+# RUN: mcs251-lld xinit-clear.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --edata-end=0x3fff \
+# RUN:   --map=%t/xc.map -o %t/xc.elf && test -f %t/xc.elf
+# RUN: grep 'l_EDATA = 0x00c8' %t/xc.map
+# RUN: mcs251-lld xinit-copy.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --edata-end=0x3fff \
+# RUN:   --map=%t/xn.map -o %t/xn.elf && test -f %t/xn.elf
+# RUN: grep 'l_EDATA = 0x00c8' %t/xn.map
+
+# --- XINIT negative: a destination past the migrated slice end is still
+# --- rejected by the destination whitelist
+# RUN: not mcs251-lld xinit-past.o --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --edata-end=0x3fff \
+# RUN:   -o %t/xp.elf 2>&1 | FileCheck %s --check-prefix=PAST
+# RUN: test ! -e %t/xp.elf
+# PAST: XINIT destination is not within one DSEG slice
+
+# --- the capability bit is a v2 mark: a v1 object carrying it is malformed
+# RUN: not mcs251-lld dsegmark-v1.o --area-start=CSEG=0xff0200 -o %t/dm.elf 2>&1 | FileCheck %s --check-prefix=V1MARK
+# RUN: test ! -e %t/dm.elf
+# V1MARK: DSEG section carries the EDATA-movable flag outside its v2 contract: .mcs251.dseg
+
+# --- an explicit `.mcs251.edata` slice is placed in the EDATA window
+# RUN: mcs251-lld edata-v2.o --area-start=CSEG=0xff0200 --edata-end=0x3fff \
+# RUN:   --map=%t/ed.map -o %t/ed.elf && test -f %t/ed.elf
+# RUN: grep 's_EDATA = 0x0100' %t/ed.map
+# RUN: grep 'l_EDATA = 0x0020' %t/ed.map
+
+# --- ... but it belongs to the v2 identity, so a v1 object may not carry it
+# RUN: not mcs251-lld edata-v1.o --area-start=CSEG=0xff0200 -o %t/ed1.elf 2>&1 | FileCheck %s --check-prefix=V1EDATA
+# RUN: test ! -e %t/ed1.elf
+# V1EDATA: EDATA sections must be writable NOBITS in a v2 object: .mcs251.edata
+
+# --- s_EDATA is a reserved boundary symbol
+# RUN: not mcs251-lld resv-edata.o --area-start=CSEG=0xff0200 -o %t/re.elf 2>&1 | FileCheck %s --check-prefix=RSE
+# RUN: test ! -e %t/re.elf
+# RSE: user definition of reserved symbol s_EDATA
+
+#--- setflags.py
+#!/usr/bin/env python3
+"""Rewrite e_flags to the v2 word (yaml2obj only registers the v1 enum)."""
+import pathlib, sys
+OFF = 36
+for name in sys.argv[1:]:
+    p = pathlib.Path(name)
+    b = bytearray(p.read_bytes())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = bytes.fromhex("00000102")
+    p.write_bytes(bytes(b))
+
+#--- attr.hex
+# The registered minimal v2 identity (same 179-byte payload every v2 test
+# fixture uses: XSmall placement 8, object protocol 2, no signatures).
+41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+
+#--- big.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 200
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: __big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+  - Name: __mcs251_stack_base
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- small.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 20
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: __small
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+
+#--- unmarked.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 200
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: __unmarked
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+
+#--- mixbig.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 100
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: __mixbig
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+
+#--- mixsmall.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 60
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: __mixsmall
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+
+#--- dsegmark-v1.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 20
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: __marked
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+
+#--- edata-v1.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.edata
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 32
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: __ed
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.edata
+
+#--- edata-v2.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.edata
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 32
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: __ed
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.edata
+
+#--- resv-edata.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: s_EDATA
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+    Value: 0
+    Index: SHN_ABS
+
+#--- xinit-clear.yaml
+# The clear-only record (payload 0, object size 200) targets a marked slice
+# that must migrate.  The object also DEFINES __mcs251_globals_init so the
+# linker actually runs the destination whitelist this record exercises.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 200
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '000000C80000'
+  - Name: .rela.mcs251.xinit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.xinit
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: _xclear
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010001000000000001000002015F5F6D63733235315F676C6F62616C735F696E697400
+Symbols:
+  - Name: _xclear
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+  - Name: __mcs251_globals_init
+    Binding: STB_GLOBAL
+    Type: STT_FUNC
+    Section: .text
+
+#--- xinit-copy.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 200
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '00000004000411223344'
+  - Name: .rela.mcs251.xinit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.xinit
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: _xcopy
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010001000000000001000002015F5F6D63733235315F676C6F62616C735F696E697400
+Symbols:
+  - Name: _xcopy
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+  - Name: __mcs251_globals_init
+    Binding: STB_GLOBAL
+    Type: STT_FUNC
+    Section: .text
+
+#--- xinit-past.yaml
+# Object size 0x00FA (250) at destination 0x0100 runs past the migrated
+# 200-byte slice (end 0x01c8): the destination whitelist must still reject it.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 200
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '010000FA0000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010001000000000001000002015F5F6D63733235315F676C6F62616C735F696E697400
+Symbols:
+  - Name: __mcs251_globals_init
+    Binding: STB_GLOBAL
+    Type: STT_FUNC
+    Section: .text
+
+#--- slot.yaml
+# S2: one marked non-leaf slot slice (150 bytes, overflows the 128-byte low
+# window on its own) plus one marked 4-byte global slice that fits.  The slot
+# is the failing section AND a candidate, so the fallback migrates it directly.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.DSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 150
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _g
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+  - Name: _wide_PARM_2
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.DSEG.1
+
+#--- unmarked100.yaml
+# REGRESSION (Alice G8-DSEG review): the 100-byte half of her 100B+60B minimal
+# shape.  UNMARKED, so it is never a migration candidate; paired with the
+# unmarked 60-byte mixsmall.yaml slice it overflows the window cumulatively.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 100
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: __u100
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+
+#--- cumul.yaml
+# Cumulative overflow in ONE object: two 80-byte UNMARKED slices, neither of
+# which overflows the 128-byte window alone but whose sum (160B) does.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 80
+  - Name: .mcs251.DSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 80
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _a
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+  - Name: _b
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.DSEG.1
+
+#--- osegfail.yaml
+# OSEG (leaf parameter-slot overlay group) placement failure: the UNMARKED
+# 100-byte global leaves 28 bytes in the low window, less than the 40-byte
+# leaf overlay.  No candidate can free the window, so the overlay must fail
+# closed instead of being laid over the global it does not fit beside.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 100
+  - Name: .mcs251.OSEG.0
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 40
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: __u100
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+  - Name: _leaf_PARM_1
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.OSEG.0
+
+#--- migratex.yaml
+# Candidate exhaustion AFTER a successful migration: the marked 80-byte slice
+# is migrated to EDATA (freeing the low window), but the remaining UNMARKED
+# 100-byte + 30-byte slices still do not fit together.  With no candidate left
+# the link must fail closed on the ledger that holds the migrated 80B in EDATA
+# and the 100B in the low window.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 100
+  - Name: .mcs251.DSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 80
+  - Name: .mcs251.DSEG.2
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 30
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: __u100
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+  - Name: __m80
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.DSEG.1
+  - Name: __u30
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.DSEG.2
