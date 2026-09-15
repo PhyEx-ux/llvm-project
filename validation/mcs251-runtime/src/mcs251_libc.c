@@ -32,18 +32,11 @@ void* memset(void* dst, int c, uint32_t n)
     return dst;
 }
 
-/* ---- memcpy（第二指针经全局槽，私有 ABI） ---- */
-static uint32_t g_memcpy_src;
-
-void memcpy_set_src(const void* src)
-{
-    g_memcpy_src = (uint32_t)(uintptr_t)src;
-}
-
-void* memcpy(void* dst, uint32_t n)
+/* ---- memcpy：标准 3 参（PM 裁定 2026-09-15，见 mcs251_libc.h） ---- */
+void* memcpy(void* dst, const void* src, uint32_t n)
 {
     uint8_t* dp = (uint8_t*)dst;
-    const uint8_t* sp = (const uint8_t*)(uintptr_t)g_memcpy_src;
+    const uint8_t* sp = (const uint8_t*)src;
     while (n != 0u) {
         *dp = *sp;
         dp++;
@@ -53,18 +46,11 @@ void* memcpy(void* dst, uint32_t n)
     return dst;
 }
 
-/* ---- strcpy（第二指针经全局槽，私有 ABI） ---- */
-static uint32_t g_strcpy_src;
-
-void strcpy_set_src(const char* src)
-{
-    g_strcpy_src = (uint32_t)(uintptr_t)src;
-}
-
-char* strcpy(char* dst)
+/* ---- strcpy：标准 2 参（PM 裁定 2026-09-15，见 mcs251_libc.h） ---- */
+char* strcpy(char* dst, const char* src)
 {
     char* r = dst;
-    const char* sp = (const char*)(uintptr_t)g_strcpy_src;
+    const char* sp = (const char*)src;
     while (*sp != 0) {
         *dst = *sp;
         dst++;
@@ -85,18 +71,11 @@ uint32_t strlen(const char* s)
     return n;
 }
 
-/* ---- memcmp（第二指针经全局槽，私有 ABI） ---- */
-static uint32_t g_memcmp_src;
-
-void memcmp_set_src(const void* src)
+/* ---- memcmp：标准 3 参（PM 裁定 2026-09-15，见 mcs251_libc.h） ---- */
+int memcmp(const void* s1, const void* s2, uint32_t n)
 {
-    g_memcmp_src = (uint32_t)(uintptr_t)src;
-}
-
-int memcmp(const void* dst, uint32_t n)
-{
-    const uint8_t* pa = (const uint8_t*)dst;
-    const uint8_t* pb = (const uint8_t*)(uintptr_t)g_memcmp_src;
+    const uint8_t* pa = (const uint8_t*)s1;
+    const uint8_t* pb = (const uint8_t*)s2;
     while (n != 0u) {
         if (*pa != *pb) {
             return (int)*pa - (int)*pb;

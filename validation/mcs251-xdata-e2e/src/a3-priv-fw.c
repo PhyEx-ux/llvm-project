@@ -28,12 +28,9 @@
 typedef unsigned int size_t;
 
 /* Private ABI declarations (validation/mcs251-runtime/src/mcs251_libc.h). */
-void memcpy_set_src(const void *src);
-void *memcpy(void *dst, unsigned n);
-void strcpy_set_src(const char *src);
-char *strcpy(char *dst);
-void memcmp_set_src(const void *src);
-int memcmp(const void *a, unsigned n);
+void *memcpy(void *dst, const void *src, unsigned n);
+char *strcpy(char *dst, const char *src);
+int memcmp(const void *a, const void *b, unsigned n);
 size_t strlen(const char *s);
 
 /* CODE-resident source objects (AS4). */
@@ -73,8 +70,7 @@ int main(void)
      *    AS4 to AS0; the setter stores that pointer's integer value and the
      *    callee reconstructs an AS0 pointer. Bytes must arrive intact. */
     {
-        memcpy_set_src(priv_pat);
-        memcpy(dst1, 8);
+        memcpy(dst1, priv_pat, 8);
         int ok = 1;
         for (unsigned i = 0; i < 8; ++i)
             ok &= (dst1[i] == priv_pat[i]);
@@ -84,8 +80,7 @@ int main(void)
 
     /* 2: strcpy_set_src + strcpy with a __code NUL-terminated string. */
     {
-        strcpy_set_src(priv_msg);
-        strcpy(dst2);
+        strcpy(dst2, priv_msg);
         int ok = 1;
         const char *p = priv_msg;
         for (unsigned i = 0; ; ++i) {
@@ -102,8 +97,7 @@ int main(void)
     {
         for (unsigned i = 0; i < 8; ++i)
             cmp1[i] = priv_pat[i];
-        memcmp_set_src(priv_pat);
-        int same = memcmp(cmp1, 8);
+        int same = memcmp(cmp1, priv_pat, 8);
         cmp1[3] ^= 0xFF;
         int diff = memcmp(cmp1, 8);
         int ok = (same == 0) && (diff != 0);

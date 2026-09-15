@@ -29,8 +29,10 @@
  *   1. 后端只支持单首参进寄存器（DPL/DPTR/DPL:DPH:B:A），第二及以后
  *      参数走 __<fn>_PARM_n 静态槽；但指针类型的静态槽参数被拒绝
  *      ("static pointer parameters are not supported")。
- *      因此需要两个指针的函数（memcpy/strcpy/memcmp）用全局 uint32_t
- *      槽存储第二指针（见上方私有 ABI 警告）。
+ *      因此需要两个指针的函数（memcpy/strcpy）用全局 uint32_t
+ *      槽存储第二指针（见上方私有 ABI 警告）。memcpy/strcpy/memcmp
+ *      已于 2026-09-15 按 PM 裁定统一迁移为标准原型（v2 静态指针槽），
+ *      不再使用 setter/全局槽；上方警告自此仅作为历史记录保留。
  *   2. 全局指针变量也被拒绝，但全局 uint32_t 可以。故第二指针以
  *      uint32_t 存储，函数内部 cast 回指针使用。
  *   3. memset 第三参数（size）走 PARM_3 静态槽（uint32_t）。
@@ -50,21 +52,22 @@
 /* ---- memset：单指针 + int + size ---- */
 void* memset(void* dst, int c, uint32_t n);
 
-/* ---- memcpy：第二指针经全局槽（私有 ABI，见顶部警告） ---- */
-/* 调用序列：memcpy_set_src(src); memcpy(dst, n); */
-void memcpy_set_src(const void* src);
-void* memcpy(void* dst, uint32_t n);
-
-/* ---- strcpy：第二指针经全局槽（私有 ABI，见顶部警告） ---- */
-void strcpy_set_src(const char* src);
-char* strcpy(char* dst);
+/* ---- memcpy / strcpy：标准原型（同 memcmp 的 PM 裁定 2026-09-15，
+ * 同一根因——demo TU 经宿主 string.h 声明的标准原型与私有 setter
+ * ABI 的 P-4 记录冲突；v2 静态指针槽下第二指针直接走 PARM_2，
+ * setter/全局槽 ABI 一并退役） ---- */
+void* memcpy(void* dst, const void* src, uint32_t n);
+char* strcpy(char* dst, const char* src);
 
 /* ---- strlen：单指针 ---- */
 uint32_t strlen(const char* s);
 
-/* ---- memcmp：第二指针经全局槽（私有 ABI，见顶部警告） ---- */
-void memcmp_set_src(const void* src);
-int memcmp(const void* dst, uint32_t n);
+/* ---- memcmp：标准 3 参原型（PM 裁定 2026-09-15，统一与宿主 string.h
+ * 的口径，消除 demo TU 经标准原型声明与 runtime 私有 2 参记录的 P-4
+ * 签名冲突）。s1 走首参寄存器通道，s2 走 _memcmp_PARM_2 静态指针槽
+ * （v2 合同 1,2,32,8,1 下合法——A4 静态指针槽通路），n 走 PARM_3。
+ * 旧的 memcmp_set_src/setter 全局槽 ABI 随本裁定退役删除。 ---- */
+int memcmp(const void* s1, const void* s2, uint32_t n);
 
 /* 注：strncmp/strncmp_set_src 已按范围裁剪移除（不入库，不再提供）。 */
 
