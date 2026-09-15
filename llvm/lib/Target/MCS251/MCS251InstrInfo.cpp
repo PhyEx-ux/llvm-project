@@ -348,6 +348,9 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case MCS251::JSLE:
   case MCS251::SJMP:
     return 2; // opcode + rel8
+  // G2 B-S2: `sjmp .` = opcode + rel8(-2), the frozen 80 FE dead loop.
+  case MCS251::VARARG_HALT:
+    return 2;
   case MCS251::EJMP:
   case MCS251::ECALL:
     return 4; // opcode + addr24

@@ -10422,6 +10422,97 @@ CreateXtensaABIBuiltinVaListDecl(const ASTContext *Context) {
   return VaListTagTypedefDecl;
 }
 
+static TypedefDecl *
+CreateMCS251BuiltinVaListDecl(const ASTContext *Context) {
+  // G2 B1 static-slot variadic ABI (G2-VARIADIC-DESIGN-draft.md R3
+  // §4.3.3(a)).  The single-element-array form (SystemZ precedent, :10281)
+  // makes `va_list ap` decay to a pointer to the 8-byte pair and forbids
+  // by-value struct copies (va_copy stays the only duplication path).
+  //
+  //   typedef struct __va_list_tag {
+  //     void *__base;          /* owner's first continuation slot address */
+  //     unsigned long __off;   /* next slot byte offset (0, 4, ..., 20)    */
+  //   } __va_list_tag[1];
+  //
+  // The target data layout is fully 1-byte aligned, so the pair is exactly
+  // 8 bytes with no padding: __base@0, __off@4.  The __base *value* carries
+  // the owner function's slot-area identity, which is what lets a va_list
+  // be consumed by any ordinary helper function.
+  //
+  // Offset width pin (G2 B-S2 review fix, Alice blocker 1): the frozen
+  // consumers of this pair address __off with a hardwired 4-byte access at
+  // byte 4 -- va_start stores 4 zero bytes there (LowerVASTART) and every
+  // va_arg loads/stores a 4-byte offset and advances by exactly one 4-byte
+  // slot (MCS251ABIInfo::EmitVAArg).  The R3 draft spelled the field
+  // `unsigned int`, which silently degenerates to a 2-byte field under the
+  // +int16 C model: the pair shrinks to 6 bytes and those fixed accesses
+  // run past the object end (caller advances 4, consumer reads 4 at +4).
+  // The offset field is therefore PINNED to whichever built-in unsigned
+  // type is exactly 32 bits: `unsigned long` in every C model (long is
+  // architecturally 32 bits on MCS251, feature validation rejects any
+  // other long model), falling back to `unsigned int` where a language
+  // layer widens long (OpenCL forces long to 64 bits; it has no variadics
+  // but Sema::Initialize still builds this declaration eagerly).  With
+  // neither candidate at 32 bits the freeze check fails loudly instead of
+  // building an object the fixed 4-byte offset access would step over.
+  QualType OffTy;
+  if (Context->getTypeSize(Context->UnsignedLongTy) == 32)
+    OffTy = Context->UnsignedLongTy;
+  else if (Context->getTypeSize(Context->UnsignedIntTy) == 32)
+    OffTy = Context->UnsignedIntTy;
+  else
+    llvm::report_fatal_error(
+        "MCS251: the frozen va_list pair needs a 32-bit offset field, but "
+        "no built-in unsigned type is 32 bits in this target model "
+        "(unsigned long is " +
+        Twine(Context->getTypeSize(Context->UnsignedLongTy)) +
+        " bits, unsigned int is " +
+        Twine(Context->getTypeSize(Context->UnsignedIntTy)) + " bits)");
+
+  RecordDecl *VaListTagDecl;
+  VaListTagDecl = Context->buildImplicitRecord("__va_list_tag");
+  VaListTagDecl->startDefinition();
+
+  const size_t NumFields = 2;
+  QualType FieldTypes[NumFields];
+  const char *FieldNames[NumFields];
+
+  //   void *__base;
+  FieldTypes[0] = Context->getPointerType(Context->VoidTy);
+  FieldNames[0] = "__base";
+
+  //   unsigned long __off;
+  FieldTypes[1] = OffTy;
+  FieldNames[1] = "__off";
+
+  // Create fields
+  for (unsigned i = 0; i < NumFields; ++i) {
+    FieldDecl *Field = FieldDecl::Create(const_cast<ASTContext &>(*Context),
+                                         VaListTagDecl,
+                                         SourceLocation(),
+                                         SourceLocation(),
+                                         &Context->Idents.get(FieldNames[i]),
+                                         FieldTypes[i], /*TInfo=*/nullptr,
+                                         /*BitWidth=*/nullptr,
+                                         /*Mutable=*/false,
+                                         ICIS_NoInit);
+    Field->setAccess(AS_public);
+    VaListTagDecl->addDecl(Field);
+  }
+  VaListTagDecl->completeDefinition();
+  Context->VaListTagDecl = VaListTagDecl;
+  CanQualType VaListTagType = Context->getCanonicalTagType(VaListTagDecl);
+
+  // };
+
+  // typedef __va_list_tag __builtin_va_list[1];
+  llvm::APInt Size(Context->getTypeSize(Context->getSizeType()), 1);
+  QualType VaListTagArrayType = Context->getConstantArrayType(
+      VaListTagType, Size, nullptr, ArraySizeModifier::Normal, 0);
+
+  return Context->buildImplicitTypedef(VaListTagArrayType, "__builtin_va_list");
+}
+
 static TypedefDecl *CreateVaListDecl(const ASTContext *Context,
                                      TargetInfo::BuiltinVaListKind Kind) {
   switch (Kind) {
@@ -10443,6 +10534,8 @@ static TypedefDecl *CreateVaListDecl(const ASTContext *Context,
     return CreateHexagonBuiltinVaListDecl(Context);
   case TargetInfo::XtensaABIBuiltinVaList:
     return CreateXtensaABIBuiltinVaListDecl(Context);
+  case TargetInfo::MCS251BuiltinVaList:
+    return CreateMCS251BuiltinVaListDecl(Context);
   }
 
   llvm_unreachable("Unhandled __builtin_va_list type kind");

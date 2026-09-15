@@ -17,6 +17,7 @@
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
@@ -25,6 +26,7 @@
 #include "llvm/IR/RuntimeLibcalls.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Utils/SizeOpts.h"
 
@@ -208,6 +210,20 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::GlobalAddress, MVT::i32, Custom);
   setOperationAction(ISD::ADDRSPACECAST, MVT::i16, Custom);
   setOperationAction(ISD::ADDRSPACECAST, MVT::i32, Custom);
+  // G2 B-S2 static-slot variadic ABI (G2-VARIADIC-DESIGN-draft.md R3
+  // §4.3.4/§4.3.5).  VASTART/VAEND/VACOPY lower onto the va_list
+  // {owner-slot-area base, byte offset} pair; VAARG is a fail-closed reject
+  // for any residual llvm.va_arg (clang lowers va_arg itself via
+  // MCS251ABIInfo::EmitVAArg).  NOTE: the legalizer queries VAARG's action
+  // on MVT::Other unless the value-type action is Promote (LegalizeDAG.cpp
+  // case ISD::VAARG), so the reject MUST be registered on MVT::Other; the
+  // per-value-type table is never consulted here.  An illegal-result VAARG
+  // (f32/f64/i64) type-legalizes first and is rejected in
+  // ReplaceNodeResults instead.
+  setOperationAction(ISD::VASTART, MVT::Other, Custom);
+  setOperationAction(ISD::VAEND, MVT::Other, Custom);
+  setOperationAction(ISD::VACOPY, MVT::Other, Custom);
+  setOperationAction(ISD::VAARG, MVT::Other, Custom);
   // Scaled GEPs use constant shifts, lowered with native DR additions.
   // Phase 14: full constant-count shift support.  i8/i16 unroll the native
   // 1-bit sll/srl/sra; i32 SHL keeps the ADD32rr doubling while i32 SRL/SRA
@@ -542,6 +558,23 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
   switch (Op.getOpcode()) {
   default:
     llvm_unreachable("custom operation has no registered lowering");
+  case ISD::VAARG:
+    // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md R3 §4.3.5/§4.3.6, frozen message
+    // E): clang lowers va_arg itself -- the guard/load/advance chain of
+    // §4.3.3(c) emitted by MCS251ABIInfo::EmitVAArg -- so no llvm.va_arg
+    // needs to reach the backend.  A node that does is a hand-written-IR or
+    // stale-compiler leak and fails closed here instead of the generic
+    // "Cannot select".
+    report_fatal_error("MCS251: llvm.va_arg is not supported; va_arg is "
+                       "lowered by clang CodeGen (MCS251ABIInfo::EmitVAArg)");
+  case ISD::VASTART:
+    return LowerVASTART(Op, DAG);
+  case ISD::VAEND:
+    // va_end touches nothing: the {base,off} pair lives in the owner's frame
+    // and the slot area is static storage.  Keep the chain.
+    return Op.getOperand(0);
+  case ISD::VACOPY:
+    return LowerVACOPY(Op, DAG);
   case ISD::MUL:
     return LowerMul32(Op, DAG);
   case ISD::BR_CC:
@@ -655,6 +688,13 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     case Intrinsic::mcs251_bit_obj_clear:
     case Intrinsic::mcs251_bit_obj_toggle:
       return LowerBitIntrinsic(Op, DAG);
+    case Intrinsic::mcs251_vararg_halt:
+      // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md §4.3.6): deterministic
+      // dead-loop stop, encoded as `sjmp .` (80 FE).  Terminator + barrier,
+      // so the halt arm's block can never fall through.
+      return SDValue(DAG.getMachineNode(MCS251::VARARG_HALT, SDLoc(Op),
+                                        MVT::Other, Op.getOperand(0)),
+                     0);
     default:
       report_fatal_error("MCS251: unsupported target intrinsic");
     }
@@ -1002,6 +1042,13 @@ void MCS251TargetLowering::ReplaceNodeResults(
   // legalizer routes it here. Handle it before the f32/f64/i64 cases.
   if (N->getOpcode() == ISD::INTRINSIC_W_CHAIN && VT == MVT::i1)
     return ReplaceBitReadResults(N, Results, DAG);
+  // G2 B-S2: a residual llvm.va_arg whose result type is illegal on this
+  // target (f32/f64/i64) reaches the type legalizer instead of
+  // LowerOperation; reject it with the same frozen message E so every
+  // llvm.va_arg shape fails closed identically.
+  if (N->getOpcode() == ISD::VAARG)
+    report_fatal_error("MCS251: llvm.va_arg is not supported; va_arg is "
+                       "lowered by clang CodeGen (MCS251ABIInfo::EmitVAArg)");
   if (VT == MVT::f32 || VT == MVT::f64 || VT == MVT::i64) {
     // Attempt to constant-fold this node. FoldConstantArithmetic handles
     // binary integer ops (add, sub, mul, udiv, etc.), unary and binary FP
@@ -3451,6 +3498,204 @@ static void checkParameter(const ArgT &Arg, unsigned Index,
                        "by the compatibility ABI");
 }
 
+//===----------------------------------------------------------------------===//
+// Variadic lowering (G2 B-S2, G2-VARIADIC-DESIGN-draft.md R3 §4.3.4)
+//===----------------------------------------------------------------------===//
+//
+// va_start anchors the 8-byte va_list pair on THIS function's first
+// continuation slot:
+//
+//   __base = &slot _<this>_PARM_(F+1)   F = arg_size() (>= 1)
+//   __off  = 0
+//
+// F=1 (printf) anchors on _PARM_2, F=2 (sprintf) on _PARM_3 -- the same
+// slots the static-slot runtime already consumes.  F=0 was fail-closed in
+// LowerFormalArguments: the register-channel argument has no slot to
+// anchor on.
+//
+// The base is a slot-symbol ADDRESS AS A VALUE.  A bare ExternalSymbol
+// node is only selectable as a load/store base; as a value it must be
+// materialised through the same MOVADDR32/target-symbol path the
+// GlobalAddress custom lowering and getAddressingUse use for symbol
+// addresses (LowerOperation ISD::GlobalAddress case).
+//
+// Backend shape gate (G2 B-S2 review fix, Alice blocker 1, backend half):
+// LowerVASTART/VACOPY write the pair unconditionally -- a PtrVT-wide base
+// at +0 and a 4-byte i32 offset at +4 -- so a va_start/va_copy aimed at a
+// narrower object (e.g. the 6-byte {ptr, i16} an unpinned +int16 offset
+// field builds) would write up to 2 bytes past the object end and llc
+// would still exit 0.  clang pins the pair shape at ASTContext
+// construction (32-bit offset field, ASTContext ::buildVAList); this is
+// the fail-closed second gate on the IR that actually reaches codegen.
+// The VASTART/VACOPY nodes carry their IR pointer operand as an SrcValue
+// operand, so whenever the object is countable (an alloca or a global)
+// its exact shape is verified against the frozen two-field {ptr, i32}
+// 8-byte pair (field 0 may be a pointer of any address space).  An
+// opaque pointer -- a va_list forwarded into a helper -- names no
+// countable object and stays under the producer-side pin.  va_end needs
+// no gate: it is a pure no-op here (the pair lives in the owner's frame).
+static void reportVAListPairShape(Type *ValTy, const DataLayout &DL,
+                                  const char *What, uint64_t Bytes) {
+  // Unwrap clang's single-element __va_list_tag[1] array wrapper; any other
+  // array (e.g. [2 x pair]) keeps its array shape and fails.
+  Type *PairTy = ValTy;
+  while (const auto *AT = dyn_cast<ArrayType>(PairTy)) {
+    if (AT->getNumElements() != 1)
+      break;
+    PairTy = AT->getElementType();
+  }
+  const auto *ST = dyn_cast<StructType>(PairTy);
+  const bool IsFrozenPair =
+      ST && ST->getNumElements() == 2 &&
+      ST->getElementType(0)->isPointerTy() &&
+      ST->getElementType(1)->isIntegerTy(32) && Bytes == 8;
+  if (!IsFrozenPair) {
+    std::string TyStr;
+    raw_string_ostream OS(TyStr);
+    ValTy->print(OS);
+    report_fatal_error(Twine("MCS251: ") + What +
+                       " requires the frozen 8-byte va_list pair {ptr, i32}; "
+                       "got a " +
+                       Twine(Bytes) + "-byte object (" + TyStr + ")");
+  }
+}
+
+static void checkVAListPairShape(const SDValue &SrcValueOp,
+                                 const DataLayout &DL, const char *What) {
+  auto *SVN = dyn_cast<SrcValueSDNode>(SrcValueOp.getNode());
+  if (!SVN)
+    return;
+  const Value *Ptr = SVN->getValue()->stripPointerCasts();
+  // Follow the pointer through all-zero (decay-like) GEPs; a GEP that
+  // actually selects a field or element redirects the check to the
+  // sub-object it addresses (e.g. `alloca {i8,{ptr,i16}}` + field-1 GEP is
+  // judged as the 6-byte inner pair, not waved through as uncountable).
+  const GetElementPtrInst *SelGEP = nullptr;
+  while (const auto *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
+    bool AllZero = all_of(GEP->indices(), [](const Value *Idx) {
+      const auto *C = dyn_cast<ConstantInt>(Idx);
+      return C && C->isZero();
+    });
+    Ptr = GEP->getPointerOperand()->stripPointerCasts();
+    if (!AllZero) {
+      SelGEP = GEP;
+      break;
+    }
+  }
+  if (SelGEP) {
+    Type *ResTy = SelGEP->getResultElementType();
+    reportVAListPairShape(ResTy, DL, What, DL.getTypeAllocSize(ResTy));
+    return;
+  }
+  Type *ValTy = nullptr;
+  uint64_t Bytes = 0;
+  if (auto *AI = dyn_cast<AllocaInst>(const_cast<Value *>(Ptr))) {
+    ValTy = AI->getAllocatedType();
+    // Honor the array-size operand: `alloca {ptr,i32}, i32 0` allocates
+    // nothing and must not pass as an 8-byte pair.
+    auto Bits = AI->getAllocationSizeInBits(DL);
+    Bytes = Bits ? *Bits / 8 : 0;
+  } else if (auto *GV = dyn_cast<GlobalVariable>(const_cast<Value *>(Ptr))) {
+    ValTy = GV->getValueType();
+    Bytes = DL.getTypeAllocSize(ValTy);
+  } else {
+    return; // no countable object behind the pointer
+  }
+  reportVAListPairShape(ValTy, DL, What, Bytes);
+}
+
+static void reportVAListShape(Type *ValTy, const DataLayout &DL,
+                              const char *What) {
+
+  const uint64_t Size = DL.getTypeAllocSize(ValTy);
+  // Unwrap clang's single-element __va_list_tag[1] array wrapper; any
+  // other array (e.g. [2 x pair]) keeps its array shape and fails.
+  const Type *PairTy = ValTy;
+  while (const auto *AT = dyn_cast<ArrayType>(PairTy)) {
+    if (AT->getNumElements() != 1)
+      break;
+    PairTy = AT->getElementType();
+  }
+  const auto *ST = dyn_cast<StructType>(PairTy);
+  const bool IsFrozenPair =
+      ST && ST->getNumElements() == 2 &&
+      ST->getElementType(0)->isPointerTy() &&
+      ST->getElementType(1)->isIntegerTy(32) && Size == 8;
+  if (!IsFrozenPair) {
+    std::string TyStr;
+    raw_string_ostream OS(TyStr);
+    ValTy->print(OS);
+    report_fatal_error(Twine("MCS251: ") + What +
+                       " requires the frozen 8-byte va_list pair {ptr, i32}; "
+                       "got a " +
+                       Twine(Size) + "-byte object (" + OS.str() + ")");
+  }
+}
+
+SDValue MCS251TargetLowering::LowerVASTART(SDValue Op,
+                                           SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue Chain = Op.getOperand(0);
+  SDValue AP = Op.getOperand(1); // address of the 8-byte va_list pair
+
+  checkVAListPairShape(Op.getOperand(2), DAG.getDataLayout(), "va_start");
+
+  MachineFunction &MF = DAG.getMachineFunction();
+  const Function &F = MF.getFunction();
+  EVT PtrVT = AP.getValueType();
+
+  std::string SlotName =
+      (Twine("\1") + DAG.getTarget().getSymbol(&F)->getName() + "_PARM_" +
+       Twine(F.arg_size() + 1))
+          .str();
+  unsigned Opc = PtrVT == MVT::i16 ? MCS251::MOV16ri : MCS251::MOVADDR32;
+  SDValue Base = SDValue(DAG.getMachineNode(
+                             Opc, DL, PtrVT,
+                             DAG.getTargetExternalSymbol(
+                                 MF.createExternalSymbolName(SlotName), PtrVT)),
+                         0);
+  Chain = DAG.getStore(Chain, DL, Base, AP, MachinePointerInfo(), Align(1));
+
+  SDValue OffPtr =
+      DAG.getNode(ISD::ADD, DL, PtrVT, AP, DAG.getConstant(4, DL, PtrVT));
+  return DAG.getStore(Chain, DL, DAG.getConstant(0, DL, MVT::i32), OffPtr,
+                      MachinePointerInfo(), Align(1));
+}
+
+// va_copy duplicates the whole pair -- including the "partially consumed"
+// offset state -- through two aligned-1 field copies (G2 §4.3.5; the two
+// store/load shapes are probe-V selectable).
+SDValue MCS251TargetLowering::LowerVACOPY(SDValue Op,
+                                          SelectionDAG &DAG) const {
+  SDLoc DL(Op);
+  SDValue Chain = Op.getOperand(0);
+  SDValue Dst = Op.getOperand(1);
+  SDValue Src = Op.getOperand(2);
+  EVT PtrVT = Dst.getValueType();
+
+  // Same shape gate as va_start: the copy reads and writes the full
+  // 8-byte pair, so a narrow destination would take the same 2-byte
+  // out-of-bounds write.  Operands 3/4 are the SrcValues of dst/src.
+  checkVAListPairShape(Op.getOperand(3), DAG.getDataLayout(),
+                       "va_copy destination");
+  checkVAListPairShape(Op.getOperand(4), DAG.getDataLayout(), "va_copy source");
+
+  SDValue Base =
+      DAG.getLoad(PtrVT, DL, Chain, Src, MachinePointerInfo(), Align(1));
+  Chain = Base.getValue(1);
+  SDValue SrcOff =
+      DAG.getNode(ISD::ADD, DL, PtrVT, Src, DAG.getConstant(4, DL, PtrVT));
+  SDValue Off =
+      DAG.getLoad(MVT::i32, DL, Chain, SrcOff, MachinePointerInfo(), Align(1));
+  Chain = Off.getValue(1);
+
+  Chain = DAG.getStore(Chain, DL, Base, Dst, MachinePointerInfo(), Align(1));
+  SDValue DstOff =
+      DAG.getNode(ISD::ADD, DL, PtrVT, Dst, DAG.getConstant(4, DL, PtrVT));
+  return DAG.getStore(Chain, DL, Off, DstOff, MachinePointerInfo(),
+                      Align(1));
+}
+
 SDValue MCS251TargetLowering::LowerFormalArguments(
     SDValue Chain, CallingConv::ID CallConv, bool IsVarArg,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &DL,
@@ -3473,9 +3718,20 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
     break;
   }
 
-  if (IsVarArg)
-    report_fatal_error("minimal MCS251 backend does not support variadic "
-                       "functions");
+  // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md R3 §4.3.4): variadic definitions
+  // are supported -- the static continuation slots `_PARM_(F+1)..` exist in
+  // addition to the fixed ones and va_start anchors the va_list pair on the
+  // first of them.  One shape stays fail-closed: with zero fixed parameters
+  // the first source argument occupies the DPL register channel and the
+  // caller starts writing slots at `_PARM_2`, so the base formula
+  // (`_PARM_(F+1)` = `_PARM_1` for F=0) would anchor one slot BEFORE the
+  // first written one and va_arg would silently skip the register argument
+  // and read an unwritten slot.  The shape is compiler-countable, so it is
+  // a hard error, not a silent-corruption path (§4.3.6 design stance).
+  if (IsVarArg && Ins.empty())
+    report_fatal_error("MCS251: a variadic definition must have at least one "
+                       "fixed parameter (the first source argument uses the "
+                       "register channel, which va_arg cannot read)");
 
   MachineFunction &MF = DAG.getMachineFunction();
   // DF0 P0-B: function placement must match the program address space (AS4 in
@@ -3616,9 +3872,9 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                        /*gen_crash_diag=*/false);
   }
 
-  if (IsVarArg)
-    report_fatal_error("minimal MCS251 backend does not support variadic "
-                       "functions");
+  // G2 B-S2: the blanket variadic rejection that stood here was REMOVED.
+  // The two remaining call-side fail-closed points sit right below, once
+  // IsDirect has been computed (G2-VARIADIC-DESIGN-draft.md §4.5 row 3).
 
   if (CLI.CB && CLI.CB->isMustTailCall())
     report_fatal_error("MCS251: musttail calls are not supported",
@@ -3655,6 +3911,27 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   }
   const bool IsDirect = isa<GlobalAddressSDNode>(Callee) ||
                         isa<ExternalSymbolSDNode>(Callee);
+  // G2 B-S2 call-side fail-closed gates (G2-VARIADIC-DESIGN-draft.md R3
+  // §4.3.6 / §4.4.3).  Sema (B-S1) hard-errors both shapes at the source
+  // level; these are the IR-level backstops.
+  if (IsVarArg && !IsDirect)
+    // C2, frozen: a function-pointer call has no named callee to derive the
+    // `_PARM_n` continuation-slot symbols from.
+    report_fatal_error("MCS251 variadic call form 'indirect' is not supported "
+                       "(static slots require a named callee)");
+  if (IsVarArg) {
+    // Message F, frozen: the six continuation slots are all the ABI has.
+    // NumFixedArgs is the callee's fixed-parameter count (set from the call
+    // site's FunctionType), so this is exactly the Sema A-formula
+    // (actuals - fixed > 6) re-checked on the lowered IR.
+    unsigned NumFixed = CLI.NumFixedArgs;
+    if (NumFixed == static_cast<unsigned>(-1))
+      NumFixed = 0; // no call-site type survived: fail towards the gate
+    if (Outs.size() > NumFixed && Outs.size() - NumFixed > 6)
+      report_fatal_error("MCS251: variadic call passes more than 6 variadic "
+                         "arguments (Sema cap gate missed this call; "
+                         "recompile the caller with a current compiler)");
+  }
   if (!IsDirect) {
     if (CLI.CB) {
       auto *CalleeTy = cast<PointerType>(CLI.CB->getCalledOperand()->getType());
@@ -3835,6 +4112,9 @@ bool MCS251TargetLowering::CanLowerReturn(
   if (CallConv == CallingConv::MCS251_INTR) {
     // ISR campaign T05: an interrupt entry returns nothing and returns via
     // RETI, never through the ordinary RetCC_MCS251 assignment machinery.
+    // G2 B-S2: the ISR x variadic rejection is FROZEN (T05 zero-argument
+    // ISR; G2 §4.5/§4.6 keep this branch loud while the ordinary variadic
+    // rejection below it was removed).
     if (IsVarArg)
       report_fatal_error("minimal MCS251 backend does not support variadic "
                          "functions");
@@ -3842,12 +4122,12 @@ bool MCS251TargetLowering::CanLowerReturn(
       report_fatal_error("MCS251 ISR: interrupt entry must return void");
     return true;
   }
-  if (IsVarArg)
-    // The first rejection point for variadic functions: CanLowerReturn runs
-    // (from FunctionLoweringInfo) before LowerFormalArguments, so name the
-    // actual limitation here rather than talking about return values.
-    report_fatal_error("minimal MCS251 backend does not support variadic "
-                       "functions");
+  // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md §4.5): the ordinary-definition
+  // IsVarArg rejection that stood here was REMOVED.  Variadic definitions
+  // now lower through the static continuation-slot ABI; the remaining
+  // fail-closed points for variadic shapes are the ISR branch above, the
+  // LowerCall indirect/count gates (C2 / message F) and the residual
+  // llvm.va_arg reject (message E).
   if (Outs.size() > 1)
     report_fatal_error("minimal MCS251 backend only supports zero or one "
                        "i8/i16/i32 return value; multi-value returns are not "

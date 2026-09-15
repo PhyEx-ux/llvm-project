@@ -74,6 +74,14 @@ public:
   SDValue LowerSTACKRESTORE(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerAddrSpaceCast(SDValue Op, SelectionDAG &DAG) const;
 
+  // G2 B-S2 static-slot variadic ABI (G2-VARIADIC-DESIGN-draft.md R3
+  // §4.3.4/§4.3.5).  va_start stores the {first continuation slot address,
+  // 0} pair through the va_list pointer; va_end is a chain-keeping no-op;
+  // va_copy duplicates the whole pair; a residual llvm.va_arg (clang now
+  // lowers va_arg itself via MCS251ABIInfo::EmitVAArg) fails closed.
+  SDValue LowerVASTART(SDValue Op, SelectionDAG &DAG) const;
+  SDValue LowerVACOPY(SDValue Op, SelectionDAG &DAG) const;
+
   // MCS251 bit-access intrinsics (BIT task BT03):
   //   llvm.mcs251.bit.read/set/clear/toggle
   // set/clear/toggle are chain-only INTRINSIC_VOID nodes; read is an

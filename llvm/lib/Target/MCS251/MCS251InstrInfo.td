@@ -963,6 +963,24 @@ let isReturn = 1, isTerminator = 1, isBarrier = 1, hasSideEffects = 1,
 def RETI : MCS251Inst<(outs), (ins), "reti", [(MCS251reti)]>;
 
 //===----------------------------------------------------------------------===//
+// Variadic out-of-range halt (G2 B-S2, G2-VARIADIC-DESIGN-draft.md R3
+// §4.3.6)
+//===----------------------------------------------------------------------===//
+//
+// Deterministic dead-loop stop for a va_arg running past the sixth
+// continuation slot (compile-time uncountable: loops of va_args).  Encoding
+// is frozen as the two bytes 80 FE -- `sjmp .`, a rel8 branch to itself:
+// no call frame, no runtime symbol (unlike llvm.trap, whose generic
+// expansion here is an `_abort` libcall with no provider; R3 probe V3).
+// Terminator + barrier because the halt arm of the clang EmitVAArg
+// if-chain ends in `unreachable`: this instruction is that block's only
+// terminator and must never fall through into the load arm.  Built by
+// lowering int_mcs251_vararg_halt (INTRINSIC_VOID), never selected from a
+// pattern.
+let isTerminator = 1, isBarrier = 1, hasSideEffects = 1, Size = 2 in
+def VARARG_HALT : MCS251Inst<(outs), (ins), "sjmp .", []>;
+
+//===----------------------------------------------------------------------===//
 // Stack frame instructions (Phase 9)
 //===----------------------------------------------------------------------===//
 //

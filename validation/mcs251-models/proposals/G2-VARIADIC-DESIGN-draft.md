@@ -394,10 +394,14 @@ switch 新增 case，构造：
 
 ```c
 typedef struct __va_list_tag {
-    void *__base;        /* 4B：来源函数变参槽区基址（来源槽区身份） */
-    unsigned int __off;  /* 4B：下一待取字节偏移（0,4,8,...,20） */
+    void *__base;         /* 4B：来源函数变参槽区基址（来源槽区身份） */
+    unsigned long __off;  /* 4B：下一待取字节偏移（0,4,8,...,20）      */
 } __va_list_tag[1];
 ```
+
+（`__off` 的源级拼写按模型取"恰 32 位"的内置无符号类型：C 模型取
+`unsigned long`；语言层强制 long=64 的模型（OpenCL）退回
+`unsigned int`——OpenCL 无变参，但 va_list 声明仍被急切构造。）
 
 - 单元素数组（`[1]`）形态使 `va_list ap` 在表达式中衰减为"指向 8B
   对象的指针"，且禁止按值结构体拷贝（强制走 va_copy，SystemZ 同型
@@ -406,6 +410,24 @@ typedef struct __va_list_tag {
   `target datalayout = "E-...-p:32:8:8:32-...-i32:8-..."`）→ 结构体
   恰 8B、无填充：`__base`@0，`__off`@4；
 - `va_list` 局部对象 8B，DSEG 帧内；作参数传递时按指针传（衰减）。
+- **偏移字段宽度钉死（B-S2 Alice 复审阻断 1 裁定，2026-09-15）**：
+  R3 原稿写作 `unsigned int`；`+int16` C 模型下它退化为 2B，二元组
+  缩成 6B，而 LowerVASTART/EmitVAArg 对 `__off` 的硬编码字节 4 偏移
+  4B 读写越过对象末尾（调用方按窄字段写、消费方按 i32 读并推进 4B，
+  静默破坏 ABI）。裁定：**offset 字段恒 i32**——构造点
+  （`CreateMCS251BuiltinVaListDecl`）钉"恰 32 位"的内置无符号类型
+  （C 模型即 `unsigned long`，本目标 long 架构性固定 32 位，feature
+  校验拒绝任何其它 long 模型；OpenCL 强制 long=64 时退回
+  `unsigned int`），{ptr,i16} 形态从此不可构造；无任何 32 位候选时
+  构造点冻结硬错（`report_fatal_error`，防未来模型漂移）。使用点
+  （`MCS251ABIInfo::EmitVAArg`）另设布局背止：任何非
+  {4B base@0, 4B i32 off@4} 形态（如 16 位数据指针存储协定下
+  `__base` 退化）以冻结文案硬错停止，不再静默越界。负例与字节测试：
+  clang/test/CodeGen/mcs251-vararg-ir.c 的 INT16（sizeof==8、
+  `{ptr,i32}`）与 TINY（背止硬错）RUN。选择方向 (a)（构造点拒绝）
+  而非 (b)（统一实参槽规范化）：Sema::Initialize 对每个 TU 急切构
+  造 va_list，构造点用户级报错会击穿非变参的 +int16/Tiny 基线，
+  故"拒绝"落位为构造点冻结检查 + 使用点背止的组合。
 
 **(b) 消费语义：基址值即身份（R3 探针 V 实证可发射）**
 
@@ -423,9 +445,16 @@ typedef struct __va_list_tag {
   `_helper_PARM_n` 完全无关。逐级转发（helper→helper2）同理，只移
   指针。R3 探针 V 的 `@consume(ptr %ap)` + `@own_setup` 组合即此
   语义，今日 llc 全部 select 成功（v2e.o，146B）。
-- **owner 侧基址物化**：符号地址作值 store（`store ptr @_own_PARM_2`
-  形态）R3 探针 V `@own_setup` 实证今日可选（52B）；后端实现时
-  LowerVASTART 直接以 `parameterSlot(MF 符号, F, DAG)` 为 store 值。
+- **owner 侧基址物化（B-S2 实施修订，Alice 复审回报 3）**：~~符号
+  地址作值 store（`store ptr @_own_PARM_2` 形态）R3 探针 V
+  `@own_setup` 实证今日可选~~——R3 的"裸 ExternalSymbol 可直接作
+  值"论断作废：裸 ExternalSymbol 节点仅在 SelectionDAG 中可作
+  load/store 的**基址**选中，作**值**必须经 MOVADDR32（16 位指针
+  模型走 MOV16ri）+ TargetExternalSymbol 物化，与 GlobalAddress
+  自定义降低/getAddressingUse 的符号地址路径同源。实施：
+  `LowerVASTART` 以 `MOVADDR32(TargetExternalSymbol(_PARM_(F+1)))`
+  物化 32 位槽地址后再 store 进 `__base`（vararg-slots.ll 的
+  `.db 0x7e, 0x08, (_sum_PARM_2)...` 序列即该物化的字节形态）。
 
 **(c) IR 形态样例（R3 探针 V 全文实测，/tmp/g2var-probe3/v2e.ll →
 v2e.o 编译通过）**
@@ -478,10 +507,22 @@ load:
   :3360 `BI__va_start`；探针 B 实测形态不变，%apaddr = 8B va_list
   对象地址，`EmitVAListRef` `CodeGenFunction.cpp:2711`）。
 - 新增 `LowerVASTART`：经 %apaddr 向对象 store 二元组——
-  `__base = parameterSlot(本 MF 符号, F, DAG)`（ExternalSymbol 作值，
-  探针 V `@own_setup` 实证可选）、`__off = 0`。`F` =
-  `MachineFunction::getFunction().arg_size()` 编译期可得；F=0
-  （C23 `void f(...)` 形态）时基址 = `_PARM_1`，公式无特例。
+  `__base = parameterSlot(本 MF 符号, F, DAG)` 的地址**经 MOVADDR32
+  物化为值**后 store（§4.3.3(b) 修订，非裸 ExternalSymbol）、
+  `__off = 0`。`F` = `MachineFunction::getFunction().arg_size()`
+  编译期可得。
+- **F=0 触发冻结硬错（B-S2 实施修订，Alice 复审回报 3）**：
+  ~~F=0（C23 `void f(...)` 形态）时基址 = `_PARM_1`，公式无特例~~
+  ——R3 的"F=0 无特例"承诺作废。实施裁定：F=0（变参定义无固定
+  参数，即首源级参数落在寄存器通道边界）在 `LowerFormalArguments`
+  以冻结文案硬错拒绝（"a variadic definition must have at least one
+  fixed parameter (the first source argument uses the register
+  channel, which va_arg cannot read)"，args-error-varargs.ll 的 F0
+  负例）。理由：本 ABI 中 `Outs[0]`（首个源级参数）恒走寄存器通道
+  （DPL/DPTR），调用方从 `_PARM_2` 起才写槽，**`_PARM_1` 永不落
+  盘**；若 F=0 时按公式把基址锚到 `_PARM_1`，va_arg 将静默跳过
+  寄存器通道里的首参并读一个从未写入的槽——属编译期可计数的
+  静默破坏形态，按 §4.3.6 立场必须硬错而非无特例放行。
 - `F=1` 时基址 = `_PARM_2`——与 runtime printf 现状"首变参 =
   `_printf_PARM_2`"一致（探针 R）；`F=2` 时 = `_PARM_3`——与迁移后
   sprintf 一致（§4.7）。

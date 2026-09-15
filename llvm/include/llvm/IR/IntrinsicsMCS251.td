@@ -81,4 +81,15 @@ let TargetPrefix = "mcs251" in { // All intrinsics start with "llvm.mcs251.".
                                            [IntrHasSideEffects]>;
   def int_mcs251_bit_obj_toggle : Intrinsic<[], [llvm_ptr_ty],
                                             [IntrHasSideEffects]>;
+
+  // G2 B1 (G2-VARIADIC-DESIGN-draft.md R3 §4.3.6): the deterministic va_arg
+  // out-of-range halt.  Lowers to the VARARG_HALT machine instruction, which
+  // encodes as the two bytes 80 FE -- `sjmp .`, a branch to itself: two
+  // bytes, no call frame, no runtime symbol dependency.  Deliberately NOT
+  // llvm.trap, whose generic expansion on this target is an `_abort` libcall
+  // the runtime has no provider for (R3 probe V3).  Emitted only by clang
+  // CodeGen's MCS251ABIInfo::EmitVAArg out-of-range arm; control never
+  // returns.  Worst-case effect model like the bit family above, so nothing
+  // may reorder or dead-store it.
+  def int_mcs251_vararg_halt : Intrinsic<[], [], [IntrHasSideEffects]>;
 }

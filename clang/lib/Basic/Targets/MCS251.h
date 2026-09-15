@@ -167,12 +167,17 @@ public:
   //       - A bit value passed through varargs (`g(0, (__bit)1)`) or to an
   //         unprototyped function (`g((__bit)1)`) is accepted today and is a
   //         real gap: no bit ABI is emitted for it.
-  //       - `va_arg(ap, __bit)` used directly as a value (e.g. `return
-  //         __builtin_va_arg(ap, __bit);`) compiles as an i8 slot and is a real
-  //         gap; binding it to a local `__bit` object instead hits the ordinary
-  //         bit-object fail-closed gate above. Note: `va_arg` is fully usable on
-  //         this target for ordinary types; the only `va_arg` failure is passing
-  //         the *address* of a `va_list` (`va_arg(&ap, T)`), which is a general
+  //       - `va_arg(ap, __bit)` stays on the frozen M2 boundary (G2
+  //         G2-VARIADIC-DESIGN-draft.md §4.6): the B1 continuation-slot ABI
+  //         defines no `bit` encoding, and the N13 family (bit in a variadic
+  //         signature) is unchanged by the G2 campaign.  Ordinary-type va_arg
+  //         is implemented by the G2 B1 static-slot ABI: `__builtin_va_list`
+  //         is the 8-byte {__base, __off} pair (MCS251BuiltinVaList), va_start
+  //         stores the owner's first continuation-slot address, and va_arg is
+  //         lowered by MCS251ABIInfo::EmitVAArg onto the six static
+  //         continuation slots (cap 6, deterministic halt beyond them).
+  //         Note: the only other historical va_arg failure -- passing the
+  //         *address* of a `va_list` (`va_arg(&ap, T)`) -- remains a general
   //         va_list lvalue requirement unrelated to bit.
   //   * CodeGen fail-closed: every bit object that would need storage (global,
   //     local, static, extern read, compound literal including in a constant
@@ -216,9 +221,12 @@ public:
   }
   std::string_view getClobbers() const override { return ""; }
   BuiltinVaListKind getBuiltinVaListKind() const override {
-    // This supplies the language type; variadic calls remain unsupported by
-    // the backend and are not part of the initial single-argument C ABI.
-    return CharPtrBuiltinVaList;
+    // G2 B1 (G2-VARIADIC-DESIGN-draft.md R3 §4.3.3(a)): the 8-byte
+    // {owner-slot-area base, byte offset} pair in its single-element-array
+    // wrapper.  va_start/va_arg/va_copy lower through the target's
+    // MCS251ABIInfo::EmitVAArg (clang CodeGen) and the backend's
+    // VASTART/VAEND/VACOPY hooks onto the six static continuation slots.
+    return MCS251BuiltinVaList;
   }
 };
 

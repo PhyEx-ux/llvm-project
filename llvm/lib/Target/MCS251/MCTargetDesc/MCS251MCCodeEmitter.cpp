@@ -535,6 +535,12 @@ void MCS251MCCodeEmitter::encodeInstruction(
   case MCS251::JSG: B(0x118); putBranch(MI.getOperand(0), CB.size(), CB, Fixups); break;
   case MCS251::JSLE: B(0x108); putBranch(MI.getOperand(0), CB.size(), CB, Fixups); break;
   case MCS251::SJMP: B(0x080); putBranch(MI.getOperand(0), CB.size(), CB, Fixups); break;
+  // Variadic out-of-range halt (G2 B-S2): `sjmp .` with the rel8 displacement
+  // -2, i.e. the frozen byte pair 80 FE -- a branch to its own address.  No
+  // operands, no fixups, never relaxed (BranchRelaxation only touches SJMP).
+  // The displacement byte goes out via put8, NOT the opcode helper: 0xFE has
+  // low nibble >= 6 and putOpcode would wrongly A5-escape it.
+  case MCS251::VARARG_HALT: B(0x080); put8(0xfe, CB); break;
   case MCS251::EJMP: B(0x18a); E24(0); break;
   case MCS251::ECALL: B(0x19a); E24(0); break;
   case MCS251::ECALLr:

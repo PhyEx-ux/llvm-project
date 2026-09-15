@@ -1437,7 +1437,11 @@ public:
 
   void emitParameterSlots(const MachineFunction &MF) {
     const Function &F = MF.getFunction();
-    if (F.arg_size() < 2)
+    // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md §4.5): a variadic definition
+    // also needs its slot area even when it has fewer than two IR fixed
+    // parameters -- the printf shape is exactly one fixed parameter plus
+    // the six 4-byte continuation slots emitted below.
+    if (F.arg_size() < 2 && !F.isVarArg())
       return;
     if (!F.hasLocalLinkage() && !F.hasExternalLinkage())
       report_fatal_error("MCS251: static parameter slots require local or "
@@ -1488,6 +1492,26 @@ public:
             Slot, MCConstantExpr::create(SlotSize, OutContext));
       }
       OutStreamer->emitZeros(SlotSize);
+    }
+    // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md R3 §4.3.1/§4.3.2): a variadic
+    // definition continues the same serial slot stream with exactly six
+    // 4-byte continuation slots `_PARM_(F+1).._PARM_(F+6)`.  Every actual
+    // promoted to the slot width is 4B (i8/i16 promote to i32; f32 and
+    // pointers are 4B), so there is no narrower continuation slot to emit.
+    if (F.isVarArg()) {
+      for (unsigned N = F.arg_size() + 1; N <= F.arg_size() + 6; ++N) {
+        MCSymbol *Slot = OutContext.getOrCreateSymbol(
+            getSymbol(&F)->getName() + "_PARM_" + Twine(N));
+        if (!F.hasLocalLinkage())
+          OutStreamer->emitSymbolAttribute(Slot, MCSA_Global);
+        OutStreamer->emitLabel(Slot);
+        if (usesELFObjects()) {
+          OutStreamer->emitSymbolAttribute(Slot, MCSA_ELF_TypeObject);
+          OutStreamer->emitELFSize(
+              Slot, MCConstantExpr::create(4, OutContext));
+        }
+        OutStreamer->emitZeros(4);
+      }
     }
     OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
     emitASxxxxText("\t.area CSEG (CODE)");
@@ -1913,7 +1937,12 @@ public:
     ISRRecordCount = 0;
     BitRecordCount = 0;
     if (llvm::any_of(M, [](const Function &F) {
-          return !F.isDeclaration() && F.arg_size() > 1;
+          return !F.isDeclaration() &&
+                 // G2 B-S2: a variadic definition owns a slot area even with
+                 // fewer than two fixed parameters (printf shape: 1 + six
+                 // continuation slots), so it reserves the bank like any
+                 // other slotted definition.
+                 (F.arg_size() > 1 || F.isVarArg());
         }) ||
         llvm::any_of(M.globals(), [this](const GlobalVariable &GV) {
           // T06 rework R1: precisely verified ISR keepalive metadata is
@@ -1950,6 +1979,13 @@ public:
       for (unsigned I = 1; I < F.arg_size(); ++I)
         LocalParameterSlots.insert(
             (getSymbol(&F)->getName() + "_PARM_" + Twine(I + 1)).str());
+      // G2 B-S2: a local variadic definition owns the six continuation
+      // slots too; references to them must not turn into external
+      // declarations.
+      if (F.isVarArg())
+        for (unsigned N = F.arg_size() + 1; N <= F.arg_size() + 6; ++N)
+          LocalParameterSlots.insert(
+              (getSymbol(&F)->getName() + "_PARM_" + Twine(N)).str());
     }
 
     // BT12: the single `.mcs251.bit` section (if any bit-object placeholder is

@@ -382,7 +382,18 @@ public:
     //    int* __va_reg;
     //    int __va_ndx;
     //} va_list;
-    XtensaABIBuiltinVaList
+    XtensaABIBuiltinVaList,
+
+    // __builtin_va_list as defined by the MCS251 static-slot variadic ABI
+    // (G2-VARIADIC-DESIGN-draft.md R3 §4.3.3(a)):
+    // typedef struct __va_list_tag {
+    //    void *__base;    // owner's variadic continuation-slot area identity
+    //    unsigned __off;  // next slot byte offset (0, 4, ..., 20)
+    // } __va_list_tag[1];
+    // The single-element array form decays `va_list ap` to a pointer to the
+    // 8-byte pair, so a va_list can be forwarded to any ordinary helper
+    // function; the base *value* carries the owner's slot-area identity.
+    MCS251BuiltinVaList
   };
 
 protected:
