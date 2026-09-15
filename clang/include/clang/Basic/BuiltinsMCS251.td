@@ -33,3 +33,79 @@ def __builtin_mcs251_bit_lvalue :
   let Attributes = [CustomTypeChecking];
   let Prototype = "__bit(...)";
 }
+
+//===----------------------------------------------------------------------===//
+// G7 S3 (G7-FLOAT-DESIGN-draft.md §2.3 plan A / §2.4): the TFPU DMA
+// coprocessor math builtins. Nine commands in one batch (PM ruling D3):
+// the five unary transcendentals and the four binary arithmetic ops.
+//
+// The prototype is a variadic placeholder with CustomTypeChecking: no
+// implicit argument conversion is applied before Sema sees the operands,
+// so SemaMCS251::CheckMCS251BuiltinFunctionCall enforces the EXACT f32
+// scalar type on every argument (f64, integers, pointers and anything
+// else are rejected with a frozen diagnostic; on this target `double` is
+// 32 bits wide but is still a distinct type from `float` and is refused
+// -- routing it through would silently claim an f64 path that does not
+// exist).
+//
+// CodeGen (CodeGenFunction::EmitMCS251BuiltinExpr) bitcasts each float
+// argument to its IEEE-754 i32 bit pattern, calls the corresponding
+// llvm.mcs251.tfpu.* intrinsic, and bitcasts the result back to float.
+// The intrinsic is [IntrHasSideEffects], so nothing reorders the hardware
+// sequence out of the demo 38 TPIN measurement window.
+//===----------------------------------------------------------------------===//
+
+def __builtin_mcs251_tfpu_sin :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_tfpu_sin"];
+  let Attributes = [CustomTypeChecking];
+  let Prototype = "float(...)";
+}
+def __builtin_mcs251_tfpu_cos :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_tfpu_cos"];
+  let Attributes = [CustomTypeChecking];
+  let Prototype = "float(...)";
+}
+def __builtin_mcs251_tfpu_tan :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_tfpu_tan"];
+  let Attributes = [CustomTypeChecking];
+  let Prototype = "float(...)";
+}
+def __builtin_mcs251_tfpu_atan :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_tfpu_atan"];
+  let Attributes = [CustomTypeChecking];
+  let Prototype = "float(...)";
+}
+def __builtin_mcs251_tfpu_sqrt :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_tfpu_sqrt"];
+  let Attributes = [CustomTypeChecking];
+  let Prototype = "float(...)";
+}
+def __builtin_mcs251_tfpu_add :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_tfpu_add"];
+  let Attributes = [CustomTypeChecking];
+  let Prototype = "float(...)";
+}
+def __builtin_mcs251_tfpu_sub :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_tfpu_sub"];
+  let Attributes = [CustomTypeChecking];
+  let Prototype = "float(...)";
+}
+def __builtin_mcs251_tfpu_mul :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_tfpu_mul"];
+  let Attributes = [CustomTypeChecking];
+  let Prototype = "float(...)";
+}
+def __builtin_mcs251_tfpu_div :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_tfpu_div"];
+  let Attributes = [CustomTypeChecking];
+  let Prototype = "float(...)";
+}

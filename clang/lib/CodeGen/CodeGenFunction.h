@@ -5072,6 +5072,9 @@ public:
   llvm::Value *EmitAVRBuiltinExpr(unsigned BuiltinID, const CallExpr *E);
   llvm::Value *EmitRISCVBuiltinExpr(unsigned BuiltinID, const CallExpr *E,
                                     ReturnValueSlot ReturnValue);
+  // G7 S3: the TFPU math builtins (__builtin_mcs251_tfpu_*); bitcasts the
+  // f32 operands to their i32 bit patterns and calls llvm.mcs251.tfpu.*.
+  llvm::Value *EmitMCS251BuiltinExpr(unsigned BuiltinID, const CallExpr *E);
 
   llvm::Value *EmitRISCVCpuSupports(const CallExpr *E);
   llvm::Value *EmitRISCVCpuSupports(ArrayRef<StringRef> FeaturesStrs);

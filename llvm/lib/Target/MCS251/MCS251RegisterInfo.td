@@ -227,6 +227,50 @@ def GPR16 : RegisterClass<"MCS251", [i16], 8, (add WR0, WR2, WR4, WR6, WR8,
 // DR16 (private frame anchor), DR56 (DPX) and DR60 (SPX) remain reserved.
 def GPR32 : RegisterClass<"MCS251", [i32], 8, (add DR0, DR4, DR12)>;
 
+// TFPU operand parking (G7 S3, G7-FLOAT-DESIGN-draft.md §2.4). The AR (DR4)
+// and BR (DR0) operands must be materialised OUTSIDE the PSW[4:3] selected
+// R0-R7 bank window, so that every write into the coprocessor's
+// operand/result bytes happens INSIDE the TPIN measurement window: the
+// window loads are emitted by the post-RA MCS251TFPUExpand pass as the first
+// step of the TFPU_<OP> pseudo (mov dr4,<ar> / mov dr0,<br>), never as a
+// separate copy at the operand's definition site.
+//
+// DR12 is the ONLY allocatable 32-bit register outside that window: GPR32 is
+// {DR0, DR4, DR12}, DR0/DR4 are the two window halves themselves, DR8
+// overlaps the fixed A/B ABI bytes and DR16+ have no encodable byte lanes
+// (see the GPR32 comment above). The class is therefore a singleton, which
+// is exactly the "park it outside the window" constraint the design states;
+// register pressure around a TFPU sequence is handled by the ordinary
+// spill/reload machinery, and a reload lands before the pseudo -- inside the
+// window, on the parked register, not in R0-R7.
+def GPR32Win : RegisterClass<"MCS251", [i32], 8, (add DR12)>;
+
+// TFPU readback destination (G7 S3, design §2.4 step 4). The readback
+// `mov <result>, DR4` MUST be a real instruction inside the TPIN window, so
+// its destination has to be a register OTHER than DR4: if the allocator
+// placed the result vreg in DR4 the expansion would be `mov dr4, dr4`, the
+// snapshot would vanish, and the dr4 lanes would again be read at the first
+// consumer (the blocker-1 readback bug).
+//
+// Unlike the operand parking class this one is NOT a singleton. The operand
+// side genuinely needs the one register outside the window (dr12), but a
+// readback value and a parked operand can be live simultaneously (a second
+// command whose operand was gathered before the first command ran), and a
+// second singleton live range would deadlock the allocator ("ran out of
+// registers" on chained/nested TFPU expressions). DR0 is the second
+// candidate: for a unary command r0-r3 are not used by the coprocessor at
+// all, and for the binary four the BR half is dead once the trigger has
+// fired. A live readback value in DR0 across a LATER window is protected by
+// the ordinary implicit-def machinery (TFPU_LD_BR defs DR0, TFPU_<OP> defs
+// r0-r7), so the allocator relocates or spills it -- correctness never rests
+// on the allocator's choice, only the shape does.
+//
+// DR4 is excluded by construction; DR8/DR16+ are unallocatable for the same
+// reasons as in GPR32 above. Order is allocation preference: dr12 first (it
+// is outside every window half, so a readback there writes no operand byte),
+// dr0 second for the nested case where dr12 still holds a parked operand.
+def GPR32Rd : RegisterClass<"MCS251", [i32], 8, (add DR12, DR0)>;
+
 // Non-allocatable class holding the two stack-addressing bases: dr60 (spx,
 // the default frame reference) and dr16 (the frame anchor used when the
 // function has variable-sized objects, see MCS251FrameLowering). The stack

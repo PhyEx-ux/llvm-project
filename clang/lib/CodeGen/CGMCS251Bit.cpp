@@ -276,3 +276,54 @@ void CodeGenFunction::EmitToggleMCS251BitLValue(LValue Dst) {
                          llvm::Intrinsic::mcs251_bit_toggle, Dst)),
                      Addr);
 }
+
+//===----------------------------------------------------------------------===//
+// G7 S3: TFPU math builtins (__builtin_mcs251_tfpu_*)
+//===----------------------------------------------------------------------===//
+//
+// The builtin is f32-typed at the source level; the IR intrinsic carries the
+// IEEE-754 bit pattern as i32 (see the SIGNATURE NOTE in
+// IntrinsicsMCS251.td -- this target softens every f32 and the generic
+// float legalizer has no softening for intrinsic nodes, so the bitcast
+// boundary lives HERE, in the frontend, where the value is still IR). The
+// pattern is never transformed: bitcast in, hardware sequence, bitcast out.
+//
+// P-4 (G7 design §2.3): the intrinsic has no linkage symbol, so nothing
+// leaks into !mcs251.signatures (emitTargetMetadata skips intrinsics in
+// both its loops); the type-safety chain is Sema's exact-f32 gate above,
+// CGM.getIntrinsic's declaration (never getOrInsertFunction), and llc's
+// ContractCheck ID whitelist + exact signature check.
+llvm::Value *CodeGenFunction::EmitMCS251BuiltinExpr(unsigned BuiltinID,
+                                                    const CallExpr *E) {
+  llvm::Intrinsic::ID IID;
+  switch (BuiltinID) {
+  default:
+    llvm_unreachable("not an MCS251 TFPU builtin");
+  case MCS251::BI__builtin_mcs251_tfpu_sin:
+    IID = llvm::Intrinsic::mcs251_tfpu_sin; break;
+  case MCS251::BI__builtin_mcs251_tfpu_cos:
+    IID = llvm::Intrinsic::mcs251_tfpu_cos; break;
+  case MCS251::BI__builtin_mcs251_tfpu_tan:
+    IID = llvm::Intrinsic::mcs251_tfpu_tan; break;
+  case MCS251::BI__builtin_mcs251_tfpu_atan:
+    IID = llvm::Intrinsic::mcs251_tfpu_atan; break;
+  case MCS251::BI__builtin_mcs251_tfpu_sqrt:
+    IID = llvm::Intrinsic::mcs251_tfpu_sqrt; break;
+  case MCS251::BI__builtin_mcs251_tfpu_add:
+    IID = llvm::Intrinsic::mcs251_tfpu_add; break;
+  case MCS251::BI__builtin_mcs251_tfpu_sub:
+    IID = llvm::Intrinsic::mcs251_tfpu_sub; break;
+  case MCS251::BI__builtin_mcs251_tfpu_mul:
+    IID = llvm::Intrinsic::mcs251_tfpu_mul; break;
+  case MCS251::BI__builtin_mcs251_tfpu_div:
+    IID = llvm::Intrinsic::mcs251_tfpu_div; break;
+  }
+  // Sema's exact-f32 gate guarantees each argument is an f32 scalar.
+  SmallVector<llvm::Value *, 2> Args;
+  for (const Expr *Arg : E->arguments())
+    Args.push_back(
+        Builder.CreateBitCast(EmitScalarExpr(Arg), Int32Ty, "tfpu.bits"));
+  llvm::Function *F = CGM.getIntrinsic(IID);
+  llvm::CallInst *Call = Builder.CreateCall(F, Args);
+  return Builder.CreateBitCast(Call, ConvertType(E->getType()), "tfpu.val");
+}

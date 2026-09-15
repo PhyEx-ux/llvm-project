@@ -12775,6 +12775,12 @@ def err_mcs251_bit_lvalue_result_used
 def err_mcs251_bit_rmw_unsupported
     : Error<"read-modify-write '%0' of a controlled MCS251 bit is not "
             "supported; sample the bit into an ordinary value first">;
+// G7 S3 (G7-FLOAT-DESIGN-draft.md §2.3): the TFPU builtins take exact f32
+// scalars only. On this target `double` is 32 bits wide but is a distinct
+// type; accepting it would silently claim an f64 path that does not exist.
+def err_mcs251_tfpu_arg_not_float
+    : Error<"argument %0 of '%1' must have type 'float'; the MCS251 TFPU "
+            "builtins accept only f32 operands">;
 def err_mcs251_sbit_ordinary_redecl
     : Error<"%0 was declared as a controlled MCS251 fixed bit reference; it "
             "cannot be redeclared as an ordinary object">;

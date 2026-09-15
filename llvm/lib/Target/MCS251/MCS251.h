@@ -19,10 +19,17 @@ FunctionPass *createMCS251ISelDag(MCS251TargetMachine &TM,
 // final block order pushed out of range into equivalent ejmp-based forms.
 MachineFunctionPass *createMCS251BranchRelaxationPass();
 
+// G7 S3 (G7-FLOAT-DESIGN-draft.md §2.4): post-RA expansion of the TFPU
+// window pseudos into the trigger write (mov 0xED,#cmd) plus the fixed
+// worst-case NOP-chain wait. Runs in addPreEmitPass BEFORE branch
+// relaxation so the delay-chain sizes are part of its size arithmetic.
+MachineFunctionPass *createMCS251TFPUExpandPass();
+
 void initializeMCS251AsmPrinterPass(PassRegistry &);
 void initializeMCS251BranchRelaxationPass(PassRegistry &);
 void initializeMCS251DAGToDAGISelLegacyPass(PassRegistry &);
 void initializeMCS251LoweringPrepLegacyPass(PassRegistry &);
+void initializeMCS251TFPUExpandPass(PassRegistry &);
 } // namespace llvm
 
 #endif

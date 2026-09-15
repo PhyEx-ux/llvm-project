@@ -372,6 +372,8 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   // CY bit forms: opcode+1 of the single-byte classic bit family.
   case MCS251::SETBC:
   case MCS251::CPLC:
+  // G7 S3: delay-chain NOP, the classic single byte 0x00.
+  case MCS251::NOP:
     return 1;
   case MCS251::MOVADDR32:
     return 8;
@@ -405,6 +407,9 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case MCS251::OR8ri:
   case MCS251::XOR8ri:
   case MCS251::CMP8ri:
+  // G7 S3: the TFPU trigger `mov 0xED,#cmd` = 75 ED <cmd>, opcode + direct
+  // address + imm8.
+  case MCS251::TFPU_TRG:
     return 3;
   case MCS251::MOVAI:
   case MCS251::OR8a:

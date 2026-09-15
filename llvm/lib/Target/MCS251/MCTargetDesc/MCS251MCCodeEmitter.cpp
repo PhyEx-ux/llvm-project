@@ -99,6 +99,11 @@ static unsigned regCode(MCRegister R) {
   llvm_unreachable("unexpected MCS251 register");
 }
 
+// TFPU trigger register (G7 S3, manual 35-TFPU-*.md:21): the coprocessor
+// command register, reachable ONLY through the immediate-addressed direct
+// write encoded by TFPU_TRG.
+static constexpr unsigned SFR_DMAIR = 0xED;
+
 static void put8(unsigned V, SmallVectorImpl<char> &CB) {
   CB.push_back(char(V & 0xff));
 }
@@ -276,6 +281,22 @@ static void rejectPseudo(const MCInst &MI) {
     MCS251_PSEUDO(VSHIFT32)
     MCS251_PSEUDO(SRL32one)
     MCS251_PSEUDO(SRA32one)
+    // TFPU window pseudos (G7 S3): the whole load-trigger-wait-readback
+    // sequence is expanded by the post-RA MCS251TFPUExpand pass, before
+    // branch relaxation measures any sizes.  One reaching the emitter is
+    // a pipeline-ordering bug, not an encodable instruction.
+    MCS251_PSEUDO(TFPU_LD_AR)
+    MCS251_PSEUDO(TFPU_LD_BR)
+    MCS251_PSEUDO(TFPU_RD_AR)
+    MCS251_PSEUDO(TFPU_ADD)
+    MCS251_PSEUDO(TFPU_SUB)
+    MCS251_PSEUDO(TFPU_MUL)
+    MCS251_PSEUDO(TFPU_DIV)
+    MCS251_PSEUDO(TFPU_SQRT)
+    MCS251_PSEUDO(TFPU_SIN)
+    MCS251_PSEUDO(TFPU_COS)
+    MCS251_PSEUDO(TFPU_TAN)
+    MCS251_PSEUDO(TFPU_ATAN)
     // ADD16fi keeps its frame index only until PEI, which retargets it to
     // ADD16ri (see MCS251RegisterInfo::eliminateFrameIndex).
     MCS251_PSEUDO(ADD16fi)
@@ -347,6 +368,17 @@ void MCS251MCCodeEmitter::encodeInstruction(
   // 7A 21 84), the direct-store encoding with the fixed address 0x84.
   case MCS251::MOV8dpxl:
     B(0x17a); put8((R(MI, 0) << 4) | 1, CB); put8(SFR_DPXL, CB); break;
+  // G7 S3: the TFPU trigger, `mov DMAIR,#cmd` -- the direct-address
+  // immediate write the manual's red note makes mandatory (35-TFPU-*.md:21;
+  // classic opcode 0x75 + direct 0xED + imm8; low nibble 5 < 6 so no A5
+  // escape).  The command byte goes out through putImm8: a symbolic 8-bit
+  // immediate is rejected loudly there, and DMAIR is a runtime SFR write
+  // that never carries a relocation.
+  case MCS251::TFPU_TRG:
+    B(0x075); put8(SFR_DMAIR, CB); putImm8(MI.getOperand(0), CB); break;
+  // G7 S3: delay-chain NOP, the classic single byte 0x00.
+  case MCS251::NOP:
+    B(0x000); break;
   case MCS251::MOV8rdpl:
     B(0x17e); put8((R(MI, 0) << 4) | 1, CB); put8(SFR_DPL, CB); break;
   case MCS251::MOV8rdph:

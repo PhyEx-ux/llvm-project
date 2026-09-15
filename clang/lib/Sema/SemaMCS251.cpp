@@ -712,6 +712,43 @@ bool SemaMCS251::CheckMCS251BuiltinFunctionCall(unsigned BuiltinID,
     TheCall->setValueKind(VK_LValue);
     return false;
   }
+  case MCS251::BI__builtin_mcs251_tfpu_sin:
+  case MCS251::BI__builtin_mcs251_tfpu_cos:
+  case MCS251::BI__builtin_mcs251_tfpu_tan:
+  case MCS251::BI__builtin_mcs251_tfpu_atan:
+  case MCS251::BI__builtin_mcs251_tfpu_sqrt:
+  case MCS251::BI__builtin_mcs251_tfpu_add:
+  case MCS251::BI__builtin_mcs251_tfpu_sub:
+  case MCS251::BI__builtin_mcs251_tfpu_mul:
+  case MCS251::BI__builtin_mcs251_tfpu_div: {
+    // G7 S3 (G7-FLOAT-DESIGN-draft.md §2.3/§2.4): the TFPU math builtins.
+    // CustomTypeChecking left every operand at its true source type, so the
+    // exact-f32 gate below sees the REAL type: no implicit double->float,
+    // integer or pointer conversion happened first. On this target `double`
+    // is 32 bits wide but is still a distinct type from `float` and is
+    // rejected -- routing it through would silently claim an f64 path that
+    // does not exist (the backend connects the f32 bit pattern only).
+    unsigned ExpectedArgs =
+        (BuiltinID == MCS251::BI__builtin_mcs251_tfpu_add ||
+         BuiltinID == MCS251::BI__builtin_mcs251_tfpu_sub ||
+         BuiltinID == MCS251::BI__builtin_mcs251_tfpu_mul ||
+         BuiltinID == MCS251::BI__builtin_mcs251_tfpu_div)
+            ? 2
+            : 1;
+    if (SemaRef.checkArgCount(TheCall, ExpectedArgs))
+      return true;
+    std::string Name = Context.BuiltinInfo.getName(BuiltinID);
+    for (unsigned I = 0; I < TheCall->getNumArgs(); ++I) {
+      const Expr *Arg = TheCall->getArg(I);
+      QualType T = Arg->getType();
+      if (!T->isSpecificBuiltinType(BuiltinType::Float)) {
+        Diag(Arg->getBeginLoc(), diag::err_mcs251_tfpu_arg_not_float)
+            << (I + 1) << Name << Arg->getSourceRange();
+        return true;
+      }
+    }
+    return false;
+  }
   default:
     return false;
   }

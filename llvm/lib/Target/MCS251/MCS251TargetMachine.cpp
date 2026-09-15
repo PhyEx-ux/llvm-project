@@ -281,9 +281,15 @@ public:
   }
 
   void addPreEmitPass() override {
+    // G7 S3: expand the TFPU window pseudos into the trigger write plus the
+    // fixed worst-case NOP-chain delay. This must run AFTER register
+    // allocation (the whole window is one instruction while the allocator
+    // relocates live values out of R0-R7) and BEFORE branch relaxation (the
+    // NOP chain changes instruction sizes).
+    addPass(createMCS251TFPUExpandPass());
     // E1 (branch relaxation): the jcc family and sjmp only reach +/-128
     // bytes, and MachineBlockPlacement is free to displace a branch's skip
-    // block or a fallthrough target, so after the layout is final every
+    // block or fallthrough target, so after the layout is final every
     // out-of-range rel8 branch is rewritten into an equivalent always-
     // reachable ejmp-based form.  Runs after all block-reordering passes;
     // nothing after it changes instruction or block sizes.
@@ -362,4 +368,5 @@ LLVMInitializeMCS251Target() {
   initializeMCS251BranchRelaxationPass(PR);
   initializeMCS251DAGToDAGISelLegacyPass(PR);
   initializeMCS251LoweringPrepLegacyPass(PR);
+  initializeMCS251TFPUExpandPass(PR);
 }

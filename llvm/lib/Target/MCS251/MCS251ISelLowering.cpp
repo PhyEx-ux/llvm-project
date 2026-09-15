@@ -707,6 +707,20 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
       return SDValue(DAG.getMachineNode(MCS251::VARARG_HALT, SDLoc(Op),
                                         MVT::Other, Op.getOperand(0)),
                      0);
+    case Intrinsic::mcs251_tfpu_sin:
+    case Intrinsic::mcs251_tfpu_cos:
+    case Intrinsic::mcs251_tfpu_tan:
+    case Intrinsic::mcs251_tfpu_atan:
+    case Intrinsic::mcs251_tfpu_sqrt:
+    case Intrinsic::mcs251_tfpu_add:
+    case Intrinsic::mcs251_tfpu_sub:
+    case Intrinsic::mcs251_tfpu_mul:
+    case Intrinsic::mcs251_tfpu_div:
+      // G7 S3 (G7-FLOAT-DESIGN-draft.md §2.4): the i32 bit-pattern
+      // operands ride CopyToReg into the fixed DR4/DR0 window, the single
+      // TFPU pseudo carries trigger+wait, and the result is read back from
+      // DR4. All welded with Glue into one scheduling unit.
+      return LowerTFPUIntrinsic(Op, DAG);
     default:
       report_fatal_error("MCS251: unsupported target intrinsic");
     }
@@ -1537,6 +1551,133 @@ void MCS251TargetLowering::ReplaceBitReadResults(
   // promoted value is Byte itself. The chain result is returned unchanged.
   Results.push_back(DAG.getNode(ISD::TRUNCATE, DL, MVT::i1, Byte));
   Results.push_back(Sample);
+}
+
+//===----------------------------------------------------------------------===//
+// TFPU coprocessor intrinsics (G7 S3, design §2.4)
+//===----------------------------------------------------------------------===//
+//
+// The whole hardware sequence is ONE MachineInstr (the TFPU_<OP> pseudo)
+// between two ordinary fixed-register copies:
+//
+//   copy  dr4, <AR vreg>          ; AR window load (mov dr4 is lane-exact
+//   copy  dr0, <BR vreg>          ;  for the TFPU MSB-first figures, binary
+//                                 ;  ops only)
+//   TFPU_<OP>                     ; expanded post-RA: mov 0xED,#cmd ; NOPs
+//   <dst vreg> = copy dr4         ; result readback
+//
+// Every step is welded with Glue into a single scheduling unit (the same
+// device the MOVX channel uses): the pseudo's implicit Uses/Defs carry the
+// physical window to the machine schedulers, and the glue additionally
+// keeps the load/trigger/readback inseparable under DAG-combiner
+// parallelisation. The implicit Defs cover the FULL R0-R7 bank window
+// (the coprocessor owns it for the whole busy period), so RA relocates or
+// spills anything live across the sequence out of those bytes; values that
+// merely pass through (the two loads before, the readback after) are
+// unaffected. The pseudo is expanded only after RA by MCS251TFPUExpand,
+// which is why it stays one instruction here.
+SDValue MCS251TargetLowering::LowerTFPUIntrinsic(SDValue Op,
+                                                SelectionDAG &DAG) const {
+  SDNode *N = Op.getNode();
+  SDLoc DL(Op);
+  unsigned IID = N->getConstantOperandVal(1);
+  unsigned Opc;
+  bool Binary;
+  switch (IID) {
+  default:
+    llvm_unreachable("not a TFPU intrinsic");
+  case Intrinsic::mcs251_tfpu_sin:
+    Opc = MCS251::TFPU_SIN; Binary = false; break;
+  case Intrinsic::mcs251_tfpu_cos:
+    Opc = MCS251::TFPU_COS; Binary = false; break;
+  case Intrinsic::mcs251_tfpu_tan:
+    Opc = MCS251::TFPU_TAN; Binary = false; break;
+  case Intrinsic::mcs251_tfpu_atan:
+    Opc = MCS251::TFPU_ATAN; Binary = false; break;
+  case Intrinsic::mcs251_tfpu_sqrt:
+    Opc = MCS251::TFPU_SQRT; Binary = false; break;
+  case Intrinsic::mcs251_tfpu_add:
+    Opc = MCS251::TFPU_ADD; Binary = true; break;
+  case Intrinsic::mcs251_tfpu_sub:
+    Opc = MCS251::TFPU_SUB; Binary = true; break;
+  case Intrinsic::mcs251_tfpu_mul:
+    Opc = MCS251::TFPU_MUL; Binary = true; break;
+  case Intrinsic::mcs251_tfpu_div:
+    Opc = MCS251::TFPU_DIV; Binary = true; break;
+  }
+
+  SDValue Chain = N->getOperand(0);
+  // Park the AR (first operand) in GPR32Win -- dr12, the only allocatable
+  // 32-bit register outside the PSW[4:3] selected R0-R7 window -- and load
+  // the AR window with the dedicated TFPU_LD_AR pseudo, expanded post-RA
+  // into `mov dr4, $ar`.
+  //
+  // This is deliberately NOT a CopyToReg to DR4. With CopyToReg the
+  // allocator coalesced the operand vreg straight into dr4, the copy folded
+  // away, and the byte gather that produces the value stayed pinned at its
+  // definition site (function entry) -- the AR window could then be written
+  // BEFORE the TPIN=0 bit write (G7 S3 blocker 1, measured at -O0 and -O2).
+  // With the operand parked in dr12 the allocator cannot place the value in
+  // the window at all, and the only write into r4-r7 is the pseudo's own
+  // expansion, which is emitted inside the window.
+  //
+  // Both window loads carry Chain+Glue. The chain serialises them against
+  // every other memory operation (the TPIN writes included, both
+  // IntrHasSideEffects); the glue is what makes them one scheduling unit
+  // with the command pseudo, and it is also what keeps the implicit DR4/DR0
+  // defs of the loads alive for the command's implicit uses (InstrEmitter's
+  // glue walk collects the implicit uses of glued users).
+  SDVTList ChainGlue = DAG.getVTList(MVT::Other, MVT::Glue);
+  SDValue AR =
+      SDValue(DAG.getMachineNode(TargetOpcode::COPY_TO_REGCLASS, DL, MVT::i32,
+                                 N->getOperand(2),
+                                 DAG.getTargetConstant(
+                                     MCS251::GPR32WinRegClassID, DL, MVT::i32)),
+              0);
+  SDNode *LDAR =
+      DAG.getMachineNode(MCS251::TFPU_LD_AR, DL, ChainGlue, {AR, Chain});
+  Chain = SDValue(LDAR, 0);
+  SDValue Glue = SDValue(LDAR, 1);
+  // BR (second operand) into dr0 for the binary four, through the same
+  // parking class. DR0 and DR4 are physically disjoint windows, so the two
+  // loads never conflict; the AR parking value is dead once its window load
+  // has run, so the singleton parking class can serve a binary command
+  // (the allocator spills/reloads the BR operand in dr12 if it must, and
+  // that reload is outside the window by construction).
+  if (Binary) {
+    SDValue BR =
+        SDValue(DAG.getMachineNode(TargetOpcode::COPY_TO_REGCLASS, DL,
+                                   MVT::i32, N->getOperand(3),
+                                   DAG.getTargetConstant(
+                                       MCS251::GPR32WinRegClassID, DL,
+                                       MVT::i32)),
+                0);
+    SDNode *LDBR =
+        DAG.getMachineNode(MCS251::TFPU_LD_BR, DL, ChainGlue, {BR, Chain, Glue});
+    Chain = SDValue(LDBR, 0);
+    Glue = SDValue(LDBR, 1);
+  }
+  // The trigger plus the fixed wait, i.e. the middle of the window. The
+  // chained loads above keep it strictly after both window loads.
+  SDNode *T = DAG.getMachineNode(Opc, DL, DAG.getVTList(MVT::Other, MVT::Glue),
+                                 {Chain, Glue});
+  // Result readback, still inside the glued unit -- and, like the operand
+  // side, an explicit post-RA pseudo (TFPU_RD_AR) instead of getCopyFromReg.
+  // The CopyFromReg form was blocker 1's readback half: the allocator
+  // coalesced the result vreg straight into dr4, the COPY folded away, and
+  // the first real read of the window lanes became the consumer (the
+  // epilogue `mov dpl, r7`), which sits AFTER the TPIN=1 `clr 0x90`.
+  // Measured on the reviewer's set->sin->clear->return shape at -O2:
+  //
+  //   270 x nop / clr 0x90 / mov dpl, r7 / ...
+  //
+  // TFPU_RD_AR defs an explicit GPR32Win vreg (dr12, outside the window)
+  // and expands post-RA into `mov $dst, dr4`, emitted here -- after the
+  // wait chain, before anything that could consume the result.
+  SDNode *RD = DAG.getMachineNode(MCS251::TFPU_RD_AR, DL,
+                                  DAG.getVTList(MVT::i32, MVT::Other, MVT::Glue),
+                                  {SDValue(T, 0), SDValue(T, 1)});
+  return DAG.getMergeValues({SDValue(RD, 0), SDValue(RD, 1)}, DL);
 }
 
 // P09 section 2.4: a DIRECT condition (`if (B)` / `if (!B)`) is exactly one

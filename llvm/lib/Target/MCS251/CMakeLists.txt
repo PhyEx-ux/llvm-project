@@ -27,6 +27,7 @@ add_llvm_target(MCS251CodeGen
   MCS251Subtarget.cpp
   MCS251TargetMachine.cpp
   MCS251TargetObjectFile.cpp
+  MCS251TFPUExpand.cpp
 
   LINK_COMPONENTS
   AsmPrinter

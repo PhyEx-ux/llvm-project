@@ -145,6 +145,37 @@ static Error checkValue(const Value &V, SmallPtrSetImpl<const Type *> &Seen) {
 // a default-AS0 declaration to reach LowerCall in a v2 module.  In particular,
 // a 32-bit AS0/AS3 function pointer must not be mistaken for the AS4 CODE
 // container merely because it has the same scalar width.
+// The frozen G7 S3 signatures: i32(i32) for the unary five, i32(i32, i32)
+// for the binary four -- never vararg, never overloaded float forms.
+static unsigned mcs251TFPUIntrinsicArity(Intrinsic::ID IID) {
+  switch (IID) {
+  case Intrinsic::mcs251_tfpu_add:
+  case Intrinsic::mcs251_tfpu_sub:
+  case Intrinsic::mcs251_tfpu_mul:
+  case Intrinsic::mcs251_tfpu_div:
+    return 2;
+  default:
+    return 1;
+  }
+}
+
+static bool isMCS251TFPUIntrinsic(Intrinsic::ID IID) {
+  switch (IID) {
+  case Intrinsic::mcs251_tfpu_sin:
+  case Intrinsic::mcs251_tfpu_cos:
+  case Intrinsic::mcs251_tfpu_tan:
+  case Intrinsic::mcs251_tfpu_atan:
+  case Intrinsic::mcs251_tfpu_sqrt:
+  case Intrinsic::mcs251_tfpu_add:
+  case Intrinsic::mcs251_tfpu_sub:
+  case Intrinsic::mcs251_tfpu_mul:
+  case Intrinsic::mcs251_tfpu_div:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static Error checkDirectCallTarget(const CallBase &CB, unsigned ProgramAS) {
   const Value *Callee = CB.getCalledOperand()->stripPointerCasts();
   const auto *GV = dyn_cast<GlobalValue>(Callee);
@@ -155,6 +186,47 @@ static Error checkDirectCallTarget(const CallBase &CB, unsigned ProgramAS) {
   if (GV->getAddressSpace() != ProgramAS)
     return reject("direct call target function is not in the configured CODE "
                   "address space");
+  return Error::success();
+}
+
+// G7 S3 (Alice review, blocker 3): the TFPU signature gate must not depend
+// on IntrinsicInst::classof. A declaration whose function type does not
+// match the registered intrinsic signature still RESOLVES to the intrinsic
+// ID, but LLVM refuses to call it an IntrinsicInst -- so an IntrinsicInst-
+// only check let `declare float @llvm.mcs251.tfpu.sin(float)` plus a
+// mis-typed call through to the backend once the IR verifier was disabled.
+// This gate keys on the CALLEE function's intrinsic ID and validates BOTH
+// the declaration signature and every call site's argument/result types.
+static Error checkMCS251TFPUCallSite(const CallBase &CB) {
+  const Value *Callee = CB.getCalledOperand()->stripPointerCasts();
+  const auto *F = dyn_cast<Function>(Callee);
+  if (!F)
+    return Error::success();
+  Intrinsic::ID IID = F->getIntrinsicID();
+  if (!isMCS251TFPUIntrinsic(IID))
+    return Error::success();
+  auto Bad = [&]() -> Error {
+    return reject("MCS251 TFPU intrinsic: invalid signature (the connected "
+                  "form is the i32 bit-pattern intrinsic; float-typed or "
+                  "wrong-arity spellings are rejected)");
+  };
+  // Declaration side: i32(i32) unary, i32(i32, i32) binary, never vararg.
+  unsigned Arity = mcs251TFPUIntrinsicArity(IID);
+  FunctionType *FT = F->getFunctionType();
+  if (FT->isVarArg() || FT->getNumParams() != Arity ||
+      !FT->getReturnType()->isIntegerTy(32))
+    return Bad();
+  for (Type *PT : FT->params())
+    if (!PT->isIntegerTy(32))
+      return Bad();
+  // Call side: result and every argument must be the i32 bit pattern.
+  if (CB.getType()->isVoidTy() ? false : !CB.getType()->isIntegerTy(32))
+    return Bad();
+  if (CB.arg_size() != Arity)
+    return Bad();
+  for (const Value *Arg : CB.args())
+    if (!Arg->getType()->isIntegerTy(32))
+      return Bad();
   return Error::success();
 }
 
@@ -345,6 +417,9 @@ static Error checkUnsupportedArithmetic(const Instruction &I,
   // separately so that e.g. llvm.uadd.sat.i64 reports the wide-integer
   // diagnostic instead of the misleading soft-float one.
   if (auto *II = dyn_cast<IntrinsicInst>(&I)) {
+    // G7 S3: the TFPU family is gated by the CallBase-based signature
+    // check (checkMCS251TFPUCallSite, wired in the instruction loop), which
+    // also covers mis-typed spellings the IntrinsicInst test never sees.
     auto BaseType = [](Type *Ty) -> Type * {
       if (auto *VecTy = dyn_cast<VectorType>(Ty))
         return VecTy->getElementType();
@@ -1069,6 +1144,9 @@ Error llvm::MCS251::verifyModuleContract(const Module &M,
         // has an opportunity to coerce its scalar representation.
         if (const auto *CB = dyn_cast<CallBase>(&I))
           if (Error Err = checkDirectCallTarget(*CB, ProgramAS))
+            return Err;
+        if (auto *CB = dyn_cast<CallBase>(&I))
+          if (Error Err = checkMCS251TFPUCallSite(*CB))
             return Err;
         // RC-6: arithmetic checks run post-optimization only, so that
         // foldable or dead i64/f32/f64 operations are not falsely rejected.

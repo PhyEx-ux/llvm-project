@@ -963,6 +963,174 @@ let isReturn = 1, isTerminator = 1, isBarrier = 1, hasSideEffects = 1,
 def RETI : MCS251Inst<(outs), (ins), "reti", [(MCS251reti)]>;
 
 //===----------------------------------------------------------------------===//
+// TFPU DMA coprocessor (G7 S3, G7-FLOAT-DESIGN-draft.md §2.4)
+//===----------------------------------------------------------------------===//
+//
+// The TFPU is not a CPU instruction set: it is a DMA-controlled coprocessor
+// (manual 35-TFPU-*.md:13). An operation is started by writing its DMA
+// command code to the DMAIR control register (SFR 0xED), and the manual's
+// red note (:21) is a hard code-generation constraint: DMAIR can only be
+// written with the immediate-addressed form `MOV DMAIR,#N` (encoding
+// 75 ED <cmd>, classic opcode 0x75 + direct 0xED + imm8; low nibble 5 < 6,
+// so putOpcode adds no A5 escape). Any other addressing mode (register
+// source, indirect) does not trigger the unit. The command byte is therefore
+// an immediate operand by construction, never a register.
+//
+// Register mapping (manual :63-65 figures + the RegisterInfo.td byte-order
+// ruling): AR (first operand) = DR4 (R4=MSB..R7=LSB), BR (second operand) =
+// DR0 (R0=MSB..R3=LSB), result written back to DR4. `wr{k}=[r{k+1} low,
+// r{k} high]` makes the existing 32-bit DR moves byte-identical to the TFPU
+// figures, so no byte reordering is needed anywhere.
+//
+// TFPU_TRG is the pinned trigger write, shaped after the MOV8dpxl direct
+// SFR precedent: the address literal 0xED is part of the instruction, the
+// only operand is the command immediate, and hasSideEffects keeps every
+// machine pass from merging or reordering two triggers (the write hits
+// architectural state no SSA value tracks; the DMAIR write also starts the
+// coprocessor, whose completion nothing in the CPU can observe). No DMAIR
+// register is modelled in RegisterInfo.td: exactly one instruction writes
+// it, nothing else names it, and the pin that matters is the side-effect
+// bit, not a lane mask.
+let hasSideEffects = 1, Size = 3 in
+def TFPU_TRG : MCS251Inst<(outs), (ins mcs251_imm8:$cmd),
+                          "mov 0xed, $cmd", []>;
+
+// NOP for the fixed worst-case delay chain (see the pseudos below).
+// Classic single byte 0x00, no A5 escape, no flag effects.
+let Size = 1 in
+def NOP : MCS251Inst<(outs), (ins), "nop", []>;
+
+// The two window loads, each carrying ONE operand parked in a register
+// outside the R0-R7 window (GPR32Win = dr12, the only allocatable 32-bit
+// register that is neither window half nor an A/B-SFR alias). Expanded
+// post-RA into the plain move design §2.4 step 1 asks for:
+//
+//   TFPU_LD_AR $ar  ==>  mov dr4, $ar      ; AR (first operand) window load
+//   TFPU_LD_BR $br  ==>  mov dr0, $br      ; BR (second operand), binary only
+//
+// These are the whole reason the operand is an explicit operand and not a
+// CopyToReg: with CopyToReg the allocator coalesced the operand vreg into
+// dr4/dr0, the copy vanished, and the byte gather that produces the value
+// stayed at its definition site (function entry) -- outside the TPIN
+// window. With an explicit GPR32Win operand the allocator cannot put the
+// operand value in the window at all, and this pseudo's expansion is a real
+// instruction inside the window.
+//
+// Why the load is its own pseudo instead of an operand of TFPU_<OP> (which
+// is what design §2.4's single-pseudo sketch says): the parking class is a
+// singleton, so a binary command's two operands cannot both be live in it at
+// the same instruction. Split into one load per operand the ranges do not
+// overlap -- the AR operand is dead once its window load has run, so the
+// allocator may reload the BR operand into dr12 afterwards -- and a binary
+// command needs no second parking register. Both loads are glued to the
+// command pseudo, so the three form one scheduling unit and the implicit
+// DR4/DR0 def-use edges keep them in order.
+//
+// hasSideEffects is load-bearing, not cosmetic: the write into the
+// coprocessor's operand window is part of the measured hardware sequence, so
+// an ordinary (side-effect-free) register move would be free to hoist above
+// the TPIN=0 write -- exactly the escape this fixes.
+//
+// The implicit Def is the window half the load writes (DR4 = r4-r7 for AR,
+// DR0 = r0-r3 for BR). That names the real hardware effect and gives the
+// following TFPU_<OP> -- whose Uses are exactly [DR4] / [DR4,DR0] -- a
+// defined physical register to read, which is what keeps the trigger after
+// both loads.
+let isPseudo = 1, hasSideEffects = 1 in {
+  let Defs = [DR4] in
+    def TFPU_LD_AR : MCS251Inst<(outs), (ins GPR32Win:$ar), "", []>;
+  let Defs = [DR0] in
+    def TFPU_LD_BR : MCS251Inst<(outs), (ins GPR32Win:$br), "", []>;
+
+  // The window readback (blocker-1 fix, readback half). This is the mirror
+  // image of the two window loads above and exists for the same reason:
+  // `getCopyFromReg(chain, DR4)` lowered to an ordinary COPY, the allocator
+  // coalesced the result vreg straight into DR4, the COPY folded away, and
+  // the real read -- the first *use* of the result -- sank to the consumer
+  // (the epilogue `mov dpl, r7`), which sits AFTER the TPIN=1 `clr 0x90`.
+  // Measured on the reviewer's set->sin->clear->return shape at -O2:
+  //
+  //   ... 270 x nop / clr 0x90 / mov dpl, r7 / mov dph, r6 / ...
+  //
+  // so the dr4 lanes were read outside the measurement window.
+  //
+  // TFPU_RD_AR defs an EXPLICIT vreg and the post-RA MCS251TFPUExpand pass
+  // expands it into `mov $dst, dr4` INSIDE the window:
+  //
+  //   TFPU_RD_AR $dst  ==>  mov $dst, dr4    ; still before any consumer
+  //
+  // Because the destination is an explicit vreg the allocator cannot fold
+  // the read into the consumer; and because the pseudo carries Chain+Glue
+  // it stays glued to the command pseudo, so the expansion lands
+  // immediately after the wait chain and before anything else -- in
+  // particular before the TPIN=1 write that closes the window.
+  //
+  // The destination class GPR32Rd is {dr0, dr12}: it excludes dr4 by
+  // construction (a result allocated to dr4 would expand to the no-op
+  // `mov dr4, dr4` and silently restore the bug), but it is NOT the
+  // singleton parking class -- an AR/BR operand and a readback value can be
+  // live at once (chained commands: the second command's operand was
+  // gathered before the first command ran), and two live ranges in a
+  // singleton class deadlock the allocator.
+  //
+  // The implicit Use is DR4 (the result window half); the explicit def is
+  // the only value the pseudo produces. hasSideEffects keeps the read from
+  // being hoisted/sunk across the window boundaries.
+  let Uses = [DR4] in
+    def TFPU_RD_AR : MCS251Inst<(outs GPR32Rd:$dst), (ins), "", []>;
+}
+
+// One pseudo per connected TFPU command: the trigger plus the fixed
+// worst-case wait, i.e. the middle of the window. The whole window is
+//
+//   TFPU_LD_AR $ar                 ; mov dr4, $ar     (AR window load)
+//   [TFPU_LD_BR $br]               ; mov dr0, $br     (BR window load)
+//   TFPU_<OP>                      ; TFPU_TRG #<cmd> ; <N x NOP>
+//   $dst = TFPU_RD_AR              ; mov $dst, dr4    (readback, in window)
+//
+// The pseudo itself only names the physical window:
+//   * Uses  [DR4] (AR) and, for the binary ops, [DR0] (BR) -- the data
+//     dependency that keeps the trigger after both window loads;
+//   * Defs  R0-R7 -- the PSW[4:3] selected current bank window the
+//     coprocessor owns for the whole trigger duration. Any value live
+//     across the sequence in those bytes is relocated or spilled by RA
+//     because of this implicit def list; a value that only passes through
+//     (parked in dr12 before, read back after) is untouched.
+//   * hasSideEffects: the SFR 0xED write plus the unmodellable coprocessor
+//     busy period. Nothing may merge, hoist or delete the sequence.
+//
+// The delay is the design's fixed worst-case model (manual 35.3 clock
+// table, no completion flag/interrupt exists -- G7 design §1.4): one NOP
+// per worst-case clock, expanded after RA by the MCS251TFPUExpand pass
+// (BranchRelaxation layer, BEFORE it so the NOP chain sizes are visible to
+// relaxation). The wait step is deliberately its own sequence step so the
+// model can be revised in one place if hardware measurement ever finds a
+// pollable status bit.
+//
+// Command codes / worst-case clocks (manual 35.3):
+//   add 0x1C/40  sub 0x1D/40  mul 0x1E/34  div 0x1F/67  sqrt 0x20/54
+//   sin 0x2D/270 cos 0x2E/270 tan 0x2F/258 atan 0x30/175
+//
+// Conversion (0x23-0x29), compare/check (0x21/0x22) and the init/clock
+// commands are deliberately NOT connected here (G7 D6 / §3 S3 scope): the
+// soft-float conversions and comparisons stay the only paths for those.
+let isPseudo = 1, hasSideEffects = 1, Defs = [R0, R1, R2, R3, R4, R5, R6, R7] in {
+  let Uses = [DR4] in {
+    def TFPU_SQRT : MCS251Inst<(outs), (ins), "", []>;
+    def TFPU_SIN  : MCS251Inst<(outs), (ins), "", []>;
+    def TFPU_COS  : MCS251Inst<(outs), (ins), "", []>;
+    def TFPU_TAN  : MCS251Inst<(outs), (ins), "", []>;
+    def TFPU_ATAN : MCS251Inst<(outs), (ins), "", []>;
+  }
+  let Uses = [DR4, DR0] in {
+    def TFPU_ADD : MCS251Inst<(outs), (ins), "", []>;
+    def TFPU_SUB : MCS251Inst<(outs), (ins), "", []>;
+    def TFPU_MUL : MCS251Inst<(outs), (ins), "", []>;
+    def TFPU_DIV : MCS251Inst<(outs), (ins), "", []>;
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // Variadic out-of-range halt (G2 B-S2, G2-VARIADIC-DESIGN-draft.md R3
 // §4.3.6)
 //===----------------------------------------------------------------------===//
