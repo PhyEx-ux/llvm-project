@@ -48,9 +48,15 @@ project(mcs251-runtime NONE)
 #   审计失败（cmake -P 非零退出）立即中断对象生成。
 #===-----------------------------------------------------------------------===#
 
-# 软浮点源文件（-O2 编译）
+# 软浮点源文件（-O2 编译）。
+# G7 S1''：加减/乘法/除法例程从 mcs251_float_arith.c 拆到独立 TU，使链接器
+# 可按程序未解析符号单独拉取（MCS251 lld 无 --gc-sections，故用多 TU 而非
+# -ffunction-sections 达成按例程链接）。
 set(MCS251RT_FLOAT_SOURCES
   mcs251_float_arith.c
+  mcs251_float_addsub.c
+  mcs251_float_mul.c
+  mcs251_float_div.c
   mcs251_float_cmp.c
   )
 
@@ -142,12 +148,18 @@ endforeach()
 #    a) 本模块 define 定义（define 行提取，全名相等比较）；
 #    b) 白名单精确符号 mcs251_msb32（bitutil.o 链接期提供，全名相等）；
 #    c) 已验证当前 llc 可下译的 clang -O2 常规 intrinsic（lifetim/umax/
-#       abs/ucmp 模式），按"前缀 + 点分重载后缀"严格正则匹配——
+#       abs/ucmp/fshl/fshr 模式），按"前缀 + 点分重载后缀"严格正则匹配——
 #       @mcs251_msb32_evil / @llvm.umax_evil / @llvm.umaxx 均拒绝。
-set(_allow_desc "mcs251_msb32(精确), llvm.{lifetime.start,lifetime.end,umax,abs,ucmp}(前缀+重载后缀)")
+#    fshl/fshr（G7 S1'' 追加）：clang -O2 会把 16 位 `(a<<n)|(b>>(16-n))`
+#       识别成 funnel-shift。后端**有意**支持它：MCS251ISelLowering.cpp:240-241
+#       对 FSHL/FSHR 设 Expand 走通用合法化，llvm/test/CodeGen/MCS251/
+#       rotate-expand.ll 是专门回归，且实测下译后对象无任何未解析符号
+#       （llvm-readelf -sW 的 UND 集为空）——故它与 umax/abs 同类，属
+#       "已下译、不产生链接期外部依赖"的常规 intrinsic，纳入白名单。
+set(_allow_desc "mcs251_msb32(精确), llvm.{lifetime.start,lifetime.end,umax,abs,ucmp,fshl,fshr}(前缀+重载后缀)")
 # b/c 白名单：全名相等或 intrinsic 正则
 set(_sym_allow_exact "mcs251_msb32")
-set(_intr_re "^llvm\\.(lifetime\\.start|lifetime\\.end|umax|abs|ucmp)(\\.[A-Za-z0-9]+)*$")
+set(_intr_re "^llvm\\.(lifetime\\.start|lifetime\\.end|umax|abs|ucmp|fshl|fshr)(\\.[A-Za-z0-9]+)*$")
 # 模块内定义的符号：define 行（函数）+ 行首 @name = 行（全局定义）
 set(_defined "")
 string(REGEX MATCHALL "define[^${NL}]*" _deflines "${CODE}")
@@ -229,9 +241,16 @@ function(mcs251rt_add_module SRC OPT_LEVEL EXTRA_DEPS)
   set(MCS251RT_OBJECTS "${MCS251RT_OBJECTS}" PARENT_SCOPE)
 endfunction()
 
-# 软浮点模块：-O2 管道（依赖两个头）
+# 软浮点模块：-O2 管道（依赖浮点头；算术单元另依赖 limb 头）
+# G7 S1''：按例程拆分，各自独立对象，便于链接期按符号拉取。
 mcs251rt_add_module(mcs251_float_arith.c O2
   "${MCS251RT_SRC_DIR}/mcs251_float.h;${MCS251RT_SRC_DIR}/mcs251_bitutil.h")
+mcs251rt_add_module(mcs251_float_addsub.c O2
+  "${MCS251RT_SRC_DIR}/mcs251_float.h;${MCS251RT_SRC_DIR}/mcs251_float_limb.h")
+mcs251rt_add_module(mcs251_float_mul.c O2
+  "${MCS251RT_SRC_DIR}/mcs251_float.h;${MCS251RT_SRC_DIR}/mcs251_float_limb.h")
+mcs251rt_add_module(mcs251_float_div.c O2
+  "${MCS251RT_SRC_DIR}/mcs251_float.h;${MCS251RT_SRC_DIR}/mcs251_float_limb.h;${MCS251RT_SRC_DIR}/mcs251_bitutil.h")
 mcs251rt_add_module(mcs251_float_cmp.c O2
   "${MCS251RT_SRC_DIR}/mcs251_float.h")
 

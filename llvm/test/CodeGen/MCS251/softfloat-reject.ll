@@ -7,19 +7,25 @@
 ; RUN: not --crash llc -mtriple=mcs251 -O2 %t/f64-cmp.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
 ; RUN: not --crash llc -mtriple=mcs251 -O0 %t/math.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=MATH
 ; RUN: not --crash llc -mtriple=mcs251 -O2 %t/math.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=MATH
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/unsigned-to-float.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNSIGNED
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/unsigned-to-float.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNSIGNED
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/float-to-unsigned.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNSIGNED
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/float-to-unsigned.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNSIGNED
+; RUN: not --crash llc -mtriple=mcs251 -O0 %t/wide-int-to-float.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
+; RUN: not --crash llc -mtriple=mcs251 -O2 %t/wide-int-to-float.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
+; RUN: not --crash llc -mtriple=mcs251 -O0 %t/float-to-wide-int.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
+; RUN: not --crash llc -mtriple=mcs251 -O2 %t/float-to-wide-int.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
+; RUN: not --crash llc -mtriple=mcs251 -O0 %t/f64-to-f32.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
+; RUN: not --crash llc -mtriple=mcs251 -O2 %t/f64-to-f32.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
 ; RUN: not --crash llc -mtriple=mcs251 -O0 %t/vector-add.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=VECTOR
 ; RUN: not --crash llc -mtriple=mcs251 -O2 %t/vector-add.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=VECTOR
 ;
-; F64 must never be aliased to the f32 ABI subset.  The unsupported math and
-; unsigned conversion families also stay outside the connected set.
+; F64 must never be aliased to the f32 ABI subset.  The unsupported math
+; family also stays outside the connected set.  G7 S1' (PM ruling 2026-09-15,
+; D1) connected the unsigned i32 <-> f32 pair AND the narrow i8/i16 forms
+; (promoted to i32 by the generic soft-float legalizer), so those are no
+; longer rejections -- what stays rejected is any integer WIDER than 32 bits
+; (no DI helper exists) and any f64 conversion.
 ;
 ; F64: LLVM ERROR: MCS251 contract violation: f64 IR is not supported; MCS251 only connects an explicit f32 libcall subset
 ; MATH: LLVM ERROR: MCS251 contract violation: f32/f64 intrinsic operation is not yet implemented; soft-float runtime is not connected
-; UNSIGNED: LLVM ERROR: MCS251 contract violation: f32 conversion is not in the connected libcall subset
+; WIDE: LLVM ERROR: MCS251 contract violation: f32 conversion is not in the connected libcall subset
 ; VECTOR: LLVM ERROR: MCS251 contract violation: f32/f64 arithmetic is not yet implemented; soft-float runtime is not connected
 
 ;--- vector-add.ll
@@ -59,14 +65,22 @@ define float @math(float %a) {
   ret float %r
 }
 
-;--- unsigned-to-float.ll
-define float @unsigned_to_float(i32 %a) {
-  %r = uitofp i32 %a to float
+;--- wide-int-to-float.ll
+; i64 sources need a DI helper, which the connected set deliberately omits.
+define float @wide_int_to_float(i64 %a) {
+  %r = uitofp i64 %a to float
   ret float %r
 }
 
-;--- float-to-unsigned.ll
-define i32 @float_to_unsigned(float %a) {
-  %r = fptoui float %a to i32
-  ret i32 %r
+;--- float-to-wide-int.ll
+define i64 @float_to_wide_int(float %a) {
+  %r = fptoui float %a to i64
+  ret i64 %r
+}
+
+;--- f64-to-f32.ll
+; f64 is never an alias for the f32 subset, not even narrowing into it.
+define float @f64_to_f32(double %a) {
+  %r = fptrunc double %a to float
+  ret float %r
 }
