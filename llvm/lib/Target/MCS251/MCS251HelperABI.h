@@ -75,6 +75,12 @@ inline constexpr HelperABI RegisteredHelperABIs[] = {
     {"__unordsf2", 2},
     {"__floatsisf", 1},
     {"__fixsfsi", 1},
+    // G7 S1' (PM ruling 2026-09-15, D1): unsigned i32 <-> f32 pair. Same
+    // single-argument DPL:DPH:B:A helper ABI as the signed pair above; the
+    // narrow (i8/i16) IR forms promote to these through the generic soft-float
+    // legalizer and are not separate symbols.
+    {"__floatunsisf", 1},
+    {"__fixunssfsi", 1},
 };
 
 /// \return the registered helper ABI for the final ELF symbol \p Symbol, or

@@ -2957,8 +2957,17 @@ def __mips16_unordsf2 : RuntimeLibcallImpl<UO_F32>;
 // linker symbols with a leading '__'. MCS251ConnectedF32Libcalls is the sole
 // supported-f32 contract: RuntimeLibcalls.td exposes exactly these helpers,
 // while the generated isMCS251ConnectedF32Libcall classifier is consumed by
-// MCS251 ISel and the contract verifier. Do not add unsigned, DI, f64 or libm
-// helpers here without an implemented runtime and a corresponding ABI review.
+// MCS251 ISel and the contract verifier. Do not add DI, f64 or libm helpers
+// here without an implemented runtime and a corresponding ABI review.
+//
+// G7 S1' (PM ruling 2026-09-15, G7-FLOAT-DESIGN-draft.md §6 D1 "坚决解决浮点
+// 问题，不绕过"): the unsigned i32 <-> f32 pair is connected, lifting the
+// mcs251_float.h "no unsigned conversion helper" freeze for exactly these two
+// helpers. Narrow (i8/i16) forms need no helper of their own: the generic
+// soft-float legalizer zero/sign-extends the source to i32 before the call and
+// truncates the i32 result back (LegalizeFloatTypes.cpp SoftenFloatRes_XINT_
+// TO_FP / findFPToIntLibcall). f64 and >32-bit integer conversions stay
+// rejected by the contract verifier.
 //
 // Integer division/remainder helpers are provided by
 // llvm/lib/Target/MCS251/Runtime. No i8 or i64 helper exists: i8 promotes to
@@ -2989,6 +2998,8 @@ defset list<RuntimeLibcallImpl> MCS251ConnectedF32Libcalls = {
   def mcs251_unordsf2 : RuntimeLibcallImpl<UO_F32, "_unordsf2">;
   def mcs251_floatsisf : RuntimeLibcallImpl<SINTTOFP_I32_F32, "_floatsisf">;
   def mcs251_fixsfsi : RuntimeLibcallImpl<FPTOSINT_F32_I32, "_fixsfsi">;
+  def mcs251_floatunsisf : RuntimeLibcallImpl<UINTTOFP_I32_F32, "_floatunsisf">;
+  def mcs251_fixunssfsi : RuntimeLibcallImpl<FPTOUINT_F32_I32, "_fixunssfsi">;
 }
 def IsMCS251 : LibcallPredicate<[{TT.getArch() == Triple::mcs251}]>;
 def isMCS251 : RuntimeLibcallAvailability<(all_of IsMCS251)>;
