@@ -4,17 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  */
 /*
- * MCS251 libc 子集 —— printf/sprintf 定参实现。
+ * MCS251 libc 子集 —— printf/sprintf 变参实现（G2 B1，B-S4 迁移，
+ * G2-VARIADIC-DESIGN-draft.md §4.7）。
  *
- * ABI 约束（见 mcs251_libc.h）：固定 6 参槽，无 variadic。
+ * 变参定义（frozen va_list ABI，cap 6）：
+ *   void  printf(const char *fmt, ...);
+ *   void  sprintf(char *buf, const char *fmt, ...);
+ * 槽位（对象级，B-S2 延续槽补发）：
+ *   printf  槽 = _printf_PARM_2..7   （fmt 首参走 DPL 寄存器通道，6×4B）
+ *   sprintf 槽 = _sprintf_PARM_2..8  （buf 首参走寄存器，_PARM_2 = fmt
+ *             指针槽，_PARM_3..8 = 6 个变参延续槽，7×4B = 28B）
+ * buf 语义：sprintf 输出写入调用方提供的缓冲（g_out_buf），不再用
+ * 全局缓冲区；内部 24B 截断 + 强制 NUL 上限维持（非标准行为，如实
+ * 记录：调用方缓冲小于 24B 时仍按 24B 预算截断）。
+ * P-4 Tag 28 记录变化：_printf bit3 0→1、param_count 7→1；
+ * _sprintf bit3 0→1、param_count 7→2。
+ * 契约：v2（1,2,32,8,1）——compat(1,1) 身份拒绝静态槽指针参数
+ * （sprintf 的 fmt 槽所迫）。
+ *
  * 格式符按语料频率实现：d/i u x X s c f g %%
  * 支持基本宽度（%5d）和精度（%.2f）。
  *
  * 设计：printf 和 sprintf 共享同一格式化引擎，区别只在输出目标
- * （printf 调 putchar，sprintf 写全局缓冲区）。
+ * （printf 调 putchar，sprintf 写调用方缓冲）。
  *
  * 红线：纯 C；无 64 位；无浮点运算符；无内联汇编；无 pragma。
- * 全局缓冲区用 uint8_t 数组（后端允许全局整数数组）。
  */
 
 #include "mcs251_libc.h"
@@ -26,47 +40,20 @@
  * 声明在 -Werror 下拒绝）。 */
 extern void putchar(char c);
 
-/* ---- sprintf 全局缓冲区 ----
- * 2026-09-09 Kazimi：256 -> 64。sdld 经典 DATA 页共 256B（与 REG_BANK/
- * BIT_BANK/OSEG/DSEG 共享），256B 缓冲区必然放不下（链接直接失败）；
- * 64B 足够验收用例的行长（最长样例 < 40B）。溢出防护逻辑不变：
- * 超长截断 + 强制 NUL。
- * 2026-09-09 Kazimi 二次收紧：64 -> 24。sdld 源码（lkarea.c lnksect2）
- * 对 DSEG 硬上限 0x80=128B（经典 8051 直接寻址页，无旗标可放宽）；
- * 扣除 REG_BANK_0(8) 与除法运行时 OSEG(8) 后预算 112B。原布局
- * 175B 超限。本文件整体去 g_args/g_nargs（-28）+ out_* 参数打包
- * （-11）+ 缓冲区 64->24（-40）后 DSEG=96B。验收语料最长 sprintf
- * 行 17 字符 + NUL = 18B，24B 仍留 6B 余量。 */
+/* ---- sprintf 输出缓冲（B-S4：buf 由调用方提供）----
+ * 2026-09-09 历史：全局 g_sprintf_buf 曾 256→64→24 收紧（sdld 经典
+ * DATA 页 / DSEG 0x80 硬上限预算）。
+ * 2026-09-15 B-S4 迁移（G2-VARIADIC-DESIGN §4.7）：定义改
+ * sprintf(buf, fmt, ...)，buf 是首源参数（DPL 寄存器通道）；全局
+ * g_sprintf_buf[24] 退役（-24B），新增 g_out_buf 指针（+4B），
+ * out_char mode-1 臂改写 g_out_buf[g_sprintf_pos++]。
+ * 保留内部 SPRINTF_BUFSZ=24 截断 + 强制 NUL 上限：单次调用最多
+ * 写 24B（非标准行为，见文件头），g_sprintf_pos 每次调用入口清零，
+ * 截断 + 末尾强制 NUL 语义与迁移前一致。sprintf_reset/len/getc/str
+ * 随全局缓冲退役（repo 内无外部使用者，全树 sweep 实证）。 */
 #define SPRINTF_BUFSZ 24
-static uint8_t g_sprintf_buf[SPRINTF_BUFSZ];
+static char *g_out_buf;          /* 调用方提供的输出缓冲（v2 允许全局指针） */
 static uint32_t g_sprintf_pos;
-
-void sprintf_reset(void)
-{
-    g_sprintf_pos = 0u;
-}
-
-uint32_t sprintf_len(void)
-{
-    return g_sprintf_pos;
-}
-
-char sprintf_getc(uint32_t idx)
-{
-    if (idx >= SPRINTF_BUFSZ) return 0;
-    return (char)g_sprintf_buf[idx];
-}
-
-const char* sprintf_str(void)
-{
-    /* 确保以 NUL 结尾 */
-    if (g_sprintf_pos < SPRINTF_BUFSZ) {
-        g_sprintf_buf[g_sprintf_pos] = 0;
-    } else {
-        g_sprintf_buf[SPRINTF_BUFSZ - 1u] = 0;
-    }
-    return (const char*)(uintptr_t)g_sprintf_buf;
-}
 
 /* ---- 输出目标抽象 ----
  * 用函数指针模式不现实（后端限制），改用全局模式标志。
@@ -85,7 +72,7 @@ static void out_char(char c)
         putchar(c);
     } else {
         if (g_sprintf_pos < SPRINTF_BUFSZ) {
-            g_sprintf_buf[g_sprintf_pos] = (uint8_t)c;
+            g_out_buf[g_sprintf_pos] = c;
             g_sprintf_pos++;
         }
     }
@@ -452,32 +439,58 @@ static void out_float(uint32_t bits, uint32_t fs)
  * output_mode 已由调用方设置。
  *
  * 2026-09-09 Kazimi：去 g_args[6]/g_nargs（DSEG 预算，见文件头）。
- * 实参直接读 printf/sprintf 的 _PARM_2..7 静态槽——引擎本就运行在
- * 参数槽已写好之后，语义等价（本就非重入）。printf/sprintf 体内保留
- * 镜像回存：目标侧后端本就把参数放同一批槽（回存幂等冗余），宿主
- * oracle 侧则靠回存把实参物化进槽，两端同源。
+ * 实参直接读 printf/sprintf 的静态参数槽——引擎本就运行在参数槽已
+ * 写好之后，语义等价（本就非重入）。
+ * 2026-09-15 B-S4 迁移（G2-VARIADIC-DESIGN §4.7）：printf/sprintf 定义
+ * 改变参，具名 a0..a5 与镜像回存退役。目标侧槽由调用方后端在调用前
+ * 写入（LowerCall 既有机制）+ 本对象 B1 延续槽补发（_printf_PARM_2..7 /
+ * _sprintf_PARM_3..8）提供；宿主 oracle 侧由 printf/sprintf 体内的
+ * va_start/va_arg shim 把变参物化进同名全局（两端同源的新机制）。
  * 取参用 if 链 + volatile 序号（k），防止 clang 把多值比较综合成
  * switch IR（switch -> br_jt 后端不支持，同文件既有手法）。 */
 /* C 标识符不带前导下划线：目标 '_' 前缀后恰为后端参数槽符号
  * _printf_PARM_2（多一层下划线会变成另一个符号 __printf_PARM_2，
- * 链接期未定义）。 */
-extern volatile uint32_t printf_PARM_2, printf_PARM_3, printf_PARM_4,
+ * 链接期未定义）。printf 槽 = _PARM_2..7（6 变参延续槽）；
+ * sprintf 槽 = _PARM_3..8（_PARM_2 是 fmt 指针槽、由被调方
+ * LowerFormalArguments 既有路径读，引擎不经手）。
+ * 槽位宽度：目标 32 位（指针与提升标量同 4B，get_arg 原 u32 读法
+ * 逐字节不变）；宿主 64 位（uintptr_t——%s 的指针实参必须完整过槽，
+ * 截成低 32 位会在 out_str 解引用时崩溃，2026-09-15 B-S4 实测）。
+ * 目标侧 typedef 恒 uint32_t，对象级布局零变化。 */
+#ifdef MCS251_RT_TARGET
+typedef uint32_t printf_arg_t;
+#else
+typedef uintptr_t printf_arg_t;
+#endif
+extern volatile printf_arg_t printf_PARM_2, printf_PARM_3, printf_PARM_4,
     printf_PARM_5, printf_PARM_6, printf_PARM_7;
-extern volatile uint32_t sprintf_PARM_2, sprintf_PARM_3, sprintf_PARM_4,
-    sprintf_PARM_5, sprintf_PARM_6, sprintf_PARM_7;
+extern volatile printf_arg_t sprintf_PARM_3, sprintf_PARM_4, sprintf_PARM_5,
+    sprintf_PARM_6, sprintf_PARM_7, sprintf_PARM_8;
+#ifdef MCS251_RT_TARGET
+/* 目标侧：槽对象由本 TU 的 B-S2 延续槽补发定义（emitParameterSlots），
+ * 上面 extern 即绑定到它们。 */
+#else
+/* 宿主侧：无后端槽补发，这里定义同名全局供 oracle 编译本文件使用；
+ * printf/sprintf 体内的 va_start/va_arg shim 在调用引擎前写入。 */
+volatile printf_arg_t printf_PARM_2, printf_PARM_3, printf_PARM_4,
+    printf_PARM_5, printf_PARM_6, printf_PARM_7;
+volatile printf_arg_t sprintf_PARM_3, sprintf_PARM_4, sprintf_PARM_5,
+    sprintf_PARM_6, sprintf_PARM_7, sprintf_PARM_8;
+#include <stdarg.h>   /* 宿主桥 shim 专用（目标侧不用 va_*） */
+#endif
 
 __attribute__((noinline))
-static uint32_t get_arg(uint32_t idx)
+static printf_arg_t get_arg(uint32_t idx)
 {
     volatile uint32_t k = idx;
     uint32_t m = g_output_mode;
 
-    if (k == 0u) return (m == 0u) ? printf_PARM_2 : sprintf_PARM_2;
-    if (k == 1u) return (m == 0u) ? printf_PARM_3 : sprintf_PARM_3;
-    if (k == 2u) return (m == 0u) ? printf_PARM_4 : sprintf_PARM_4;
-    if (k == 3u) return (m == 0u) ? printf_PARM_5 : sprintf_PARM_5;
-    if (k == 4u) return (m == 0u) ? printf_PARM_6 : sprintf_PARM_6;
-    return (m == 0u) ? printf_PARM_7 : sprintf_PARM_7;
+    if (k == 0u) return (m == 0u) ? printf_PARM_2 : sprintf_PARM_3;
+    if (k == 1u) return (m == 0u) ? printf_PARM_3 : sprintf_PARM_4;
+    if (k == 2u) return (m == 0u) ? printf_PARM_4 : sprintf_PARM_5;
+    if (k == 3u) return (m == 0u) ? printf_PARM_5 : sprintf_PARM_6;
+    if (k == 4u) return (m == 0u) ? printf_PARM_6 : sprintf_PARM_7;
+    return (m == 0u) ? printf_PARM_7 : sprintf_PARM_8;
 }
 
 __attribute__((noinline))
@@ -622,31 +635,66 @@ static void format_engine(const char* fmt)
     }
 }
 
-/* ---- printf ---- */
-void printf(const char* fmt, uint32_t a0, uint32_t a1, uint32_t a2,
-            uint32_t a3, uint32_t a4, uint32_t a5)
+/* ---- printf ----
+ * B-S4 迁移（G2-VARIADIC-DESIGN §4.7）：固定 7 参 → 变参
+ * （固定形参 7→1，P-4 记录 bit3 0→1、param_count 7→1）。
+ * fmt 走 DPL 首参通道；6 个变参延续槽 _printf_PARM_2..7 由调用方
+ * 后端在调用前写入 + 本对象 B1 延续槽补发（对象级布局与迁移前
+ * 逐字节相同，探针 R：6×4B 连续 @0x0..0x14）。目标侧无物化代码；
+ * 宿主（Oracle-A）侧由 va_start/va_arg shim 物化槽值。 */
+void printf(const char* fmt, ...)
 {
-    /* 镜像回存：目标侧后端已把 a0..a5 放进 _printf_PARM_2..7（回存
-     * 幂等冗余）；宿主 oracle 侧靠这组回存物化槽值，两端同源。 */
-    printf_PARM_2 = a0; printf_PARM_3 = a1; printf_PARM_4 = a2;
-    printf_PARM_5 = a3; printf_PARM_6 = a4; printf_PARM_7 = a5;
+#ifndef MCS251_RT_TARGET
+    /* 宿主桥 shim：宿主没有后端槽写机制，把变参物化进同名全局。
+     * 契约：宿主 oracle 调用方必须恰好传满 6 个 printf_arg_t
+     * (uintptr_t) 实参——少于 6 个或类型不匹配时 va_arg 是未定义
+     * 行为（会读入栈参数区，不是无害的寄存器保存区读）。oracle
+     * battery（/tmp/bs4-host/battery.c 先例）以补齐六参的方式
+     * 调用；本 shim 不对欠参调用提供任何保证。 */
+    va_list ap;
+    va_start(ap, fmt);
+    printf_PARM_2 = va_arg(ap, printf_arg_t);
+    printf_PARM_3 = va_arg(ap, printf_arg_t);
+    printf_PARM_4 = va_arg(ap, printf_arg_t);
+    printf_PARM_5 = va_arg(ap, printf_arg_t);
+    printf_PARM_6 = va_arg(ap, printf_arg_t);
+    printf_PARM_7 = va_arg(ap, printf_arg_t);
+    va_end(ap);
+#endif
     g_output_mode = 0u;
     format_engine(fmt);
 }
 
-/* ---- sprintf ---- */
-void sprintf(const char* fmt, uint32_t a0, uint32_t a1, uint32_t a2,
-             uint32_t a3, uint32_t a4, uint32_t a5)
+/* ---- sprintf ----
+ * B-S4 迁移：固定 7 参（fmt+6，无 buf）→ 变参
+ * sprintf(buf, fmt, ...)（固定形参 7→2，P-4 记录 bit3 0→1、
+ * param_count 7→2）。buf = 首源参数（DPL 寄存器通道、无槽），
+ * fmt = 第二源参数 → _sprintf_PARM_2（4B 指针槽），变参延续槽
+ * _sprintf_PARM_3..8（对象 7 槽 28B，较迁移前 +4B）。
+ * buf 语义：输出写调用方缓冲（g_out_buf），g_sprintf_pos 每次调用
+ * 清零，24B 截断 + 强制 NUL 维持。 */
+void sprintf(char* buf, const char* fmt, ...)
 {
-    sprintf_PARM_2 = a0; sprintf_PARM_3 = a1; sprintf_PARM_4 = a2;
-    sprintf_PARM_5 = a3; sprintf_PARM_6 = a4; sprintf_PARM_7 = a5;
+#ifndef MCS251_RT_TARGET
+    /* 宿主桥 shim：变参从 fmt 之后起取（buf 是固定首参）。 */
+    va_list ap;
+    va_start(ap, fmt);
+    sprintf_PARM_3 = va_arg(ap, printf_arg_t);
+    sprintf_PARM_4 = va_arg(ap, printf_arg_t);
+    sprintf_PARM_5 = va_arg(ap, printf_arg_t);
+    sprintf_PARM_6 = va_arg(ap, printf_arg_t);
+    sprintf_PARM_7 = va_arg(ap, printf_arg_t);
+    sprintf_PARM_8 = va_arg(ap, printf_arg_t);
+    va_end(ap);
+#endif
+    g_out_buf = buf;
+    g_sprintf_pos = 0u;
     g_output_mode = 1u;
-    /* g_sprintf_pos 由调用方通过 sprintf_reset() 设置 */
     format_engine(fmt);
-    /* 确保 NUL 结尾 */
+    /* 确保 NUL 结尾（超长截断：末字节强制 NUL，与迁移前语义一致） */
     if (g_sprintf_pos < SPRINTF_BUFSZ) {
-        g_sprintf_buf[g_sprintf_pos] = 0;
+        g_out_buf[g_sprintf_pos] = 0;
     } else {
-        g_sprintf_buf[SPRINTF_BUFSZ - 1u] = 0;
+        g_out_buf[SPRINTF_BUFSZ - 1u] = 0;
     }
 }

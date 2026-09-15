@@ -344,7 +344,7 @@ S2+S3**（demo 38 同时吃初始化器与 builtin 两面）。
 
 | # | 决策 | 推荐 |
 |---|---|---|
-| D1 | demo 36：(a) 改写 / (b) 连接窄无符号转换 / (c) 保留 gap | **(b)——PM 裁定 2026-09-15："坚决解决浮点问题，不绕过"**。连接无符号 i32↔f32 双向（`__floatunsisf`/`__fixunssfsi` 两个 helper；**mcs251_float.h 冻结令"不得添加 unsigned conversion helper"由本裁定解除并登记**）；窄类型 i8/i16 转换经类型提升（zext/sext + i32 版 / f32→i32 + trunc）放行、不加窄 helper；demo 36 语料零改动直编。§2.1 穷举等价性保留为改写可行性的历史记录 |
+| D1 | demo 36：(a) 改写 / (b) 连接窄无符号转换 / (c) 保留 gap | **(b)——PM 裁定 2026-09-15："坚决解决浮点问题，不绕过"**。连接无符号 i32↔f32 双向（`__floatunsisf`/`__fixunssfsi` 两个 helper；**mcs251_float.h 冻结令"不得添加 unsigned conversion helper"由本裁定解除并登记**）；窄类型 i8/i16 转换经类型提升（zext/sext + i32 版 / f32→i32 + trunc）放行、不加窄 helper；demo 36 语料零改动直编。§2.1 穷举等价性保留为改写可行性的历史记录。**补充裁定（同日，PM）："两个都搞"——软浮点库重写与 TFPU 双轨**：软浮点为通用能力（"不是所有 STC32 都有硬浮点器"，不依赖 TFPU 的芯片必须可用），当前 C 实现实测膨胀一个数量级（-O2 float_arith.o .text 19.5KB，__mulsf3 单例程 5627B，对标 SDCC 200-400B），根因是纯位移/分支实现未用硬件 MUL——**库重写（24×24 尾数经 8×8 MUL 拼装等）与例程级按需链接列为 S1' 的必配套质量门槛**（位精确 oracle 全值域对拍，NaN/Inf/舍入到偶逐位一致）；TFPU（S3）为显式硬件 API，两者互补。另实测发现：drive.py `_runtime_for` 按需闭包现仅含除法/printf，浮点对象不在内——S1' 必须同步扩展闭包，否则 unresolved |
 | D2 | 38 math 暴露：A TFPU intrinsic（builtin→IR intrinsic→DMA 触发序列）/ B 软库 / C asm | A |
 | D3 | TFPU 双目算术是否同批（TPIN 窗口语义） | 同批连接 add/sub/mul/div/sqrt + 四三角 = 9 个命令 |
 | D4 | QEMU 无 TFPU/DMAIR 模型时 38 的 T2 口径 | 记 "model-capability 未支持"（仅记未验证）；T1 完整触发序列编码为验收底线 |

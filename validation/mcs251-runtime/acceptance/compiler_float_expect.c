@@ -76,11 +76,37 @@ static void emit_conversions(uint32_t Index) {
   putchar('\n');
 }
 
+/* G7 S1' unsigned pair: identical inputs and record shape as the target
+ * firmware, so the host transcript must match byte for byte. */
+#define NUNS 5
+static const uint32_t UInputI[NUNS] = {
+    0U, 1U, 0x7FFFFFFFU, 0x80000000U, 0xFFFFFFFFU,
+};
+static const uint32_t UInputF[NUNS] = {
+    0x00000000U, 0x3FC00000U, 0x4F7FFFFFU, 0x4F000000U, 0x3F800000U,
+};
+
+static void emit_unsigned_conversions(uint32_t Index) {
+  volatile uint32_t U = UInputI[Index];
+  volatile float G = bits_to_float(UInputF[Index]);
+  float FromU = (float)U;
+  uint32_t ToU = (uint32_t)G;
+
+  printf("UCNV u="); hex32((uint32_t)U);
+  printf(" g="); hex32(UInputF[Index]);
+  printf(" u2f="); hex32(float_to_bits(FromU));
+  printf(" f2u="); hex32(ToU);
+  putchar('\n');
+}
+
 int main(void) {
   uint32_t I;
   for (I = 0; I != 4U; ++I) {
     emit_float_ops(I);
     emit_conversions(I);
+  }
+  for (I = 0; I != NUNS; ++I) {
+    emit_unsigned_conversions(I);
   }
   puts("COMPILER-FLOAT-PASS");
   return 0;

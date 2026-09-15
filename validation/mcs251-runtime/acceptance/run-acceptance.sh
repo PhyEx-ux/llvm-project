@@ -26,6 +26,8 @@ CLANG=/home/liu/build-mcs251-s1/bin/clang
 LLC=/home/liu/build-mcs251-s1/bin/llc
 LLD=/home/liu/build-mcs251-lld/bin/mcs251-lld
 OBJCOPY=/home/liu/build-mcs251-s1/bin/llvm-objcopy
+READELF=/home/liu/build-mcs251-s1/bin/llvm-readelf
+STRINGS=/home/liu/build-mcs251-s1/bin/llvm-strings
 QEMU=/home/liu/build-qemu/qemu-system-mcs251
 HOSTCC=/usr/bin/cc
 CRT=/home/liu/mcs251-rt-acceptance/crt-selfstart.o
@@ -109,8 +111,12 @@ if [ "$INJECT_WRONG" -eq 1 ] && [ "$FAIL" -eq 0 ]; then
 fi
 
 step "host runtime fuzz"
+# G7 S1'': the arithmetic helpers live in per-routine TUs now; the host fuzz
+# links all of them plus the comparison/bit-utility units.
 if "$HOSTCC" -std=c11 -O2 -Wall -Wextra -Werror -I"$RTSRC" \
     "$SRC/host_fuzz.c" "$RTSRC/mcs251_float_arith.c" \
+    "$RTSRC/mcs251_float_addsub.c" "$RTSRC/mcs251_float_mul.c" \
+    "$RTSRC/mcs251_float_div.c" \
     "$RTSRC/mcs251_float_cmp.c" "$RTSRC/mcs251_bitutil.c" -lm \
     -o "$LOG/host_fuzz" 2>"$LOG/host_fuzz.build.err"; then
   "$LOG/host_fuzz" >"$LOG/host_fuzz.out" 2>&1 || mark_failure
@@ -124,7 +130,11 @@ fi
 # firmware.  Arithmetic/cmp use O2; bit utilities remain O0 by runtime design.
 if [ "$FAIL" -eq 0 ]; then
   step "compile explicit f32 runtime objects"
-  for Name in mcs251_float_arith mcs251_float_cmp; do
+  # G7 S1'': the arithmetic routines are split into per-routine translation
+  # units (addsub/mul/div) so the linker can pull a single helper.  Each is
+  # still built with the -O2 pipeline.
+  for Name in mcs251_float_arith mcs251_float_addsub mcs251_float_mul \
+              mcs251_float_div mcs251_float_cmp; do
     if ! compile_ir "$RTSRC/$Name.c" O2 "$LOG/$Name.ll" \
         2>"$LOG/$Name.clang.err" || \
        ! compile_obj "$LOG/$Name.ll" O2 "$LOG/$Name.o" \
@@ -147,9 +157,46 @@ fi
 
 FLOAT_RUNTIME_OBJS=(
   "$LOG/mcs251_float_arith.o"
+  "$LOG/mcs251_float_addsub.o"
+  "$LOG/mcs251_float_mul.o"
+  "$LOG/mcs251_float_div.o"
   "$LOG/mcs251_float_cmp.o"
   "$LOG/mcs251_bitutil.o"
 )
+
+# G7 S1' object-level gate: the connected unsigned conversion pair must be a
+# real definition in the runtime object (not merely declared), and the object's
+# Tag 28 signature table must carry a record for each.  G7 S1'' split the
+# arithmetic helpers into their own TUs, so the gate checks each helper in the
+# object that now defines it (the arith TU keeps the conversion helpers).
+if [ "$FAIL" -eq 0 ]; then
+  step "f32 runtime object-level helper gate (G7 S1'/S1'')"
+  for Pair in "__floatunsisf:$LOG/mcs251_float_arith.o" \
+              "__fixunssfsi:$LOG/mcs251_float_arith.o" \
+              "__floatsisf:$LOG/mcs251_float_arith.o" \
+              "__fixsfsi:$LOG/mcs251_float_arith.o" \
+              "__mulsf3:$LOG/mcs251_float_mul.o" \
+              "__addsf3:$LOG/mcs251_float_addsub.o" \
+              "__divsf3:$LOG/mcs251_float_div.o"; do
+    Sym="${Pair%%:*}"; ARITH_OBJ="${Pair#*:}"
+    if ! "$READELF" -sW "$ARITH_OBJ" 2>/dev/null \
+         | grep -qE "FUNC +GLOBAL +DEFAULT +[0-9]+ +$Sym\$"; then
+      printf 'HELPER-GATE-FAIL: %s is not a defined global function in %s\n' \
+             "$Sym" "$(basename "$ARITH_OBJ")"
+      mark_failure
+      break
+    fi
+    if ! "$STRINGS" "$ARITH_OBJ" | grep -qF "$Sym"; then
+      printf 'HELPER-GATE-FAIL: %s missing from Tag 28 signature payload of %s\n' \
+             "$Sym" "$(basename "$ARITH_OBJ")"
+      mark_failure
+      break
+    fi
+  done
+  if [ "$FAIL" -eq 0 ]; then
+    printf 'HELPER-GATE-PASS: 7 helpers defined and recorded in Tag 28\n'
+  fi
+fi
 
 run_qemu() {
   local hex=$1 serial=$2 timeout_seconds=$3 sentinel=$4

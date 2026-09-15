@@ -13,7 +13,15 @@
  * （如 _addsf3 -> __addsf3）。
  *
  * 本运行时仅实现 binary32 的已连接子集。不得添加 f64/double helper、
- * unsigned conversion helper、DI helper 或 math helper。
+ * DI helper 或 math helper。
+ *
+ * 冻结令解除登记（G7 S1'，PM 裁定 2026-09-15，依据
+ * validation/mcs251-models/proposals/G7-FLOAT-DESIGN-draft.md §6 D1 行
+ * "坚决解决浮点问题，不绕过"）：原文"不得添加 unsigned conversion
+ * helper"的禁令**就且仅就** `_floatunsisf`（uint32->f32）与
+ * `_fixunssfsi`（f32->uint32）两个 i32 宽度 helper 解除；f64/double、
+ * DI（i64）与 math helper 的禁令维持不变。窄类型（i8/i16）不新增
+ * helper：IR 侧经 zext/sext 提升到 i32 调用本对 helper。
  *
  * 独立实现声明：依据 IEEE-754 标准与公开算法描述（移位-加法对齐、
  * 恢复余数尾数除法、标准舍入到偶数）独立写出；未逐行参照 SDCC、
@@ -90,8 +98,10 @@ _Static_assert(sizeof(void*) == 4, "MCS251 float runtime: target pointer must be
  * 签名约定：uint32_t _<name>(uint32_t a, uint32_t b)
  * 第二参数走 __<name>_PARM_2 静态槽（4 字节，大端）。
  *
- * __floatdisf / __fixsfdi、unsigned conversion 和 f64 conversion helpers
- * 刻意不提供：本链不把任何未实现 family 用 payload 位宽伪装成已支持 ABI。
+ * __floatdisf / __fixsfdi、f64 conversion helpers 刻意不提供：本链不把
+ * 任何未实现 family 用 payload 位宽伪装成已支持 ABI。
+ * unsigned conversion 对（_floatunsisf/_fixunssfsi）按 G7 S1' 裁定已连接
+ * （见上"冻结令解除登记"）。
  */
 uint32_t _addsf3(uint32_t a, uint32_t b);   /* a + b */
 uint32_t _subsf3(uint32_t a, uint32_t b);   /* a - b (= a + (-b)) */
@@ -100,6 +110,8 @@ uint32_t _divsf3(uint32_t a, uint32_t b);   /* a / b */
 uint32_t _negsf2(uint32_t a);               /* -a (single argument) */
 uint32_t _floatsisf(int32_t a);             /* signed i32 -> f32 */
 uint32_t _fixsfsi(uint32_t a);              /* f32 -> signed i32 */
+uint32_t _floatunsisf(uint32_t a);          /* unsigned i32 -> f32 (G7 S1') */
+uint32_t _fixunssfsi(uint32_t a);           /* f32 -> unsigned i32 (G7 S1') */
 
 /*
  * === 软浮点比较（7 个）===

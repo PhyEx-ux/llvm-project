@@ -263,6 +263,48 @@ int main(void)
             else exp = (uint32_t)(int32_t)f;
             note("f2i", u, 0, _fixsfsi(u), exp);
         }
+
+        /* ---- 5b. 无符号转换：uint32 <-> float（G7 S1' 连接）----
+         * 边界含 0/1/0x7FFFFFFF/0x80000000/0xFFFFFFFF（D1 明文要求），
+         * 再加全域抽样；宿主 C 的 uint32->float（最近偶数）与
+         * float->uint32（向零截断）转换即 IEEE-754 参照。 */
+        {
+            const uint32_t uv[] = { 0u, 1u, 2u, 0x7FFFFFFFu, 0x80000000u,
+                                    0x80000001u, 0xFFFFFFFFu, 0xFFFFFFu,
+                                    0x1000000u, 0x1000001u, 0x7FFFFF80u,
+                                    0x7FFFFF81u, 0xFFFFFE80u };
+            for (i = 0; i < (int)(sizeof(uv) / sizeof(uv[0])); i++) {
+                note("u2f", uv[i], 0, _floatunsisf(uv[i]),
+                     f2u((float)uv[i]));
+            }
+            srand(46);
+            for (i = 0; i < 50000; i++) {
+                uint32_t v = rnd32();
+                note("u2f", v, 0, _floatunsisf(v), f2u((float)v));
+            }
+            /* 无符号 f2u 口径（compiler-rt __fixunssfsi）：NaN -> 0、
+             * 负值（含 -0.0）-> 0、>= 2^32 饱和 0xFFFFFFFF（Inf 同）。 */
+            for (i = 0; i < NSPEC; i++) {
+                float f = u2f(specials[i]);
+                uint32_t exp;
+                if (f != f) exp = 0u;
+                else if (f < 0.0f) exp = 0u;
+                else if (f >= 4294967296.0f) exp = 0xFFFFFFFFu;
+                else exp = (uint32_t)f;
+                note("f2u", specials[i], 0, _fixunssfsi(specials[i]), exp);
+            }
+            srand(47);
+            for (i = 0; i < 50000; i++) {
+                uint32_t u = rnd32();
+                float f = u2f(u);
+                uint32_t exp;
+                if (f != f) exp = 0u;
+                else if (f < 0.0f) exp = 0u;
+                else if (f >= 4294967296.0f) exp = 0xFFFFFFFFu;
+                else exp = (uint32_t)f;
+                note("f2u", u, 0, _fixunssfsi(u), exp);
+            }
+        }
     }
 
     printf("host_fuzz: %ld checks, %ld mismatches\n", g_total, g_bad);

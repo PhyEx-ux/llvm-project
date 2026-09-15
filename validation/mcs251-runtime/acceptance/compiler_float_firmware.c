@@ -111,11 +111,45 @@ __attribute__((noinline)) static void emit_conversions(uint32_t Index) {
   uart_putc('\n');
 }
 
+/* G7 S1' (PM ruling 2026-09-15, D1): the unsigned i32 <-> f32 pair is
+ * connected, so real C unsigned casts must compile and run.  The unsigned
+ * domain spans the boundary values D1 names (0/1/0x7FFFFFFF/0x80000000/
+ * 0xFFFFFFFF); the float side stays strictly inside [0, 2^32) because a
+ * negative or >= 2^32 float -> unsigned cast is UB in C, which would make
+ * the host oracle meaningless. */
+#define NUNS 5
+static const uint32_t UInputI[NUNS] = {
+    0U, 1U, 0x7FFFFFFFU, 0x80000000U, 0xFFFFFFFFU,
+};
+static const uint32_t UInputF[NUNS] = {
+    0x00000000U,  /* 0.0 */
+    0x3FC00000U,  /* 1.5 */
+    0x4F7FFFFFU,  /* 4294967040.0 = largest float below 2^32 */
+    0x4F000000U,  /* 2147483648.0 */
+    0x3F800000U,  /* 1.0 */
+};
+
+__attribute__((noinline)) static void emit_unsigned_conversions(uint32_t Index) {
+  volatile uint32_t U = UInputI[Index];
+  volatile float G = bits_to_float(UInputF[Index]);
+  float FromU = (float)U;
+  uint32_t ToU = (uint32_t)G;
+
+  uart_puts("UCNV u="); uart_hex32((uint32_t)U);
+  uart_puts(" g="); uart_hex32(UInputF[Index]);
+  uart_puts(" u2f="); uart_hex32(float_to_bits(FromU));
+  uart_puts(" f2u="); uart_hex32(ToU);
+  uart_putc('\n');
+}
+
 int main(void) {
   uint32_t I;
   for (I = 0; I != 4U; ++I) {
     emit_float_ops(I);
     emit_conversions(I);
+  }
+  for (I = 0; I != NUNS; ++I) {
+    emit_unsigned_conversions(I);
   }
   uart_puts("COMPILER-FLOAT-PASS\n");
   for (;;) {
