@@ -1,0 +1,866 @@
+#
+# G2/B-S3 (design R3 4.7, "P-4 interaction positive/negative examples"): the
+# variadic interaction matrix of the P-4 function-signature cross-object
+# comparison.  Every object below is the yaml twin of a real clang -cc1 + llc
+# product (v2 contract 1,2,32,8,1, Tag 28 emitted by the B-S2 toolchain), so
+# the attribute bytes are the wire truth, not hand-crafted values.  The C
+# source of each twin is quoted above its yaml block together with the
+# `!mcs251.signatures` nodes clang actually produced.
+#
+# Matrix (record fields in play: role bit3 = variadic, param_count = fixed
+# parameters only, compareRecords order = no-proto bit, THEN param_count,
+# THEN bitmap, THEN ret, THEN bit3, THEN call_abi):
+#   P1 pass    variadic definition (role 9, count 1) x variadic caller
+#              declaration (role 10, count 1) - bit3=1 on both sides;
+#   P2 reject  variadic definition (count 1) x fixed 7-param declaration
+#              (role 2, count 7): the COUNT arm fires first (1 vs 7);
+#   P3 reject-a fixed 7-param definition ("forgot to rebuild the pre-P-4
+#              runtime", role 1/count 7) x variadic caller (count 1): count
+#              arm again, 7 vs 1;
+#   P3 reject-b a v2 object whose .mcs251.attributes carries no Tag 28 at all
+#              (strip28.py removes the record and fixes both envelope size
+#              fields): the strict attribute decoder's own "required
+#              function_signatures(28) is missing" - the pre-P-4 v2-object
+#              rejection path, which variadic does not change;
+#   P4 pass    fixed `long mix(long,char,long)` definition x same-proto
+#              caller (count 3, bitmap all-zero both sides);
+#   P5 reject  fixed definition count 3 x fixed declaration count 2;
+#   P6 reject  same fixed count (1), same bitmap, ONLY bit3 differs
+#              (variadic declaration TU x fixed declaration TU): the bit3 arm
+#              alone - proof the P2/P3 count rejections are not the only
+#              variadic-ness defense.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj vdef.yaml -o vdef.o
+# RUN: yaml2obj vuse.yaml -o vuse.o
+# RUN: yaml2obj fixed7call.yaml -o fixed7call.o
+# RUN: yaml2obj fixed7def.yaml -o fixed7def.o
+# RUN: yaml2obj mixdef.yaml -o mixdef.o
+# RUN: yaml2obj mix3call.yaml -o mix3call.o
+# RUN: yaml2obj mix2call.yaml -o mix2call.o
+# RUN: yaml2obj vdecl.yaml -o vdecl.o
+# RUN: yaml2obj fdecl.yaml -o fdecl.o
+# RUN: %python setflags.py vdef.o vuse.o fixed7call.o fixed7def.o mixdef.o mix3call.o mix2call.o vdecl.o fdecl.o
+# RUN: cp vuse.yaml vuse-nosig.yaml
+# RUN: %python strip28.py vuse-nosig.yaml
+# RUN: yaml2obj vuse-nosig.yaml -o vuse-nosig.o
+# RUN: %python setflags.py vuse-nosig.o
+#
+# --- P1 (pass) variadic x variadic links, and the output exists ----------
+# RUN: mcs251-lld vdef.o vuse.o --area-start=CSEG=0xff0200 -o %t/p1.elf
+# RUN: test -f %t/p1.elf
+#
+# --- P2 (reject) variadic definition x fixed 7-param declaration --------
+# RUN: not mcs251-lld vdef.o fixed7call.o --area-start=CSEG=0xff0200 -o %t/p2.elf 2>&1 | FileCheck %s --check-prefix=P2
+# P2: error: fixed7call.o: MCS251 signatures: records '_vsum' have a parameter count conflict (vdef.o vs fixed7call.o): 1 vs 7
+# RUN: test ! -e %t/p2.elf
+#
+# --- P3a (reject) pre-P-4 fixed 7-param definition x variadic caller ----
+# RUN: not mcs251-lld fixed7def.o vuse.o --area-start=CSEG=0xff0200 -o %t/p3a.elf 2>&1 | FileCheck %s --check-prefix=P3A
+# P3A: error: vuse.o: MCS251 signatures: records '_vsum' have a parameter count conflict (fixed7def.o vs vuse.o): 7 vs 1
+# RUN: test ! -e %t/p3a.elf
+#
+# --- P3b (reject) v2 object with no Tag 28 at all; the strict decoder ----
+# --- before any signature comparison could even run ----------------------
+# RUN: not mcs251-lld vdef.o vuse-nosig.o --area-start=CSEG=0xff0200 -o %t/p3b.elf 2>&1 | FileCheck %s --check-prefix=P3B
+# P3B: error: vuse-nosig.o: MCS251 attributes: required function_signatures(28) is missing
+# RUN: test ! -e %t/p3b.elf
+#
+# --- P4 (pass) fixed signatures agree on count and bitmap, links ---------
+# RUN: mcs251-lld mixdef.o mix3call.o --area-start=CSEG=0xff0200 -o %t/p4.elf
+# RUN: test -f %t/p4.elf
+#
+# --- P5 (reject) fixed count disagreement 3 vs 2 -------------------------
+# RUN: not mcs251-lld mixdef.o mix2call.o --area-start=CSEG=0xff0200 -o %t/p5.elf 2>&1 | FileCheck %s --check-prefix=P5
+# P5: error: mix2call.o: MCS251 signatures: records '_mix' have a parameter count conflict (mixdef.o vs mix2call.o): 3 vs 2
+# RUN: test ! -e %t/p5.elf
+#
+# --- P6 (reject) identical count and bitmap, ONLY role bit3 differs ------
+# RUN: not mcs251-lld vdecl.o fdecl.o --area-start=CSEG=0xff0200 -o %t/p6.elf 2>&1 | FileCheck %s --check-prefix=P6
+# P6: error: fdecl.o: MCS251 signatures: records '_f' disagree on variadic-ness (bit3 differs) (vdecl.o vs fdecl.o)
+# RUN: test ! -e %t/p6.elf
+#
+
+#--- setflags.py
+#!/usr/bin/env python3
+"""Rewrite e_flags to the v2 word (yaml2obj only registers the v1 enum)."""
+import pathlib, sys
+OFF = 36
+for name in sys.argv[1:]:
+    p = pathlib.Path(name)
+    b = bytearray(p.read_bytes())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = bytes.fromhex("00000102")
+    p.write_bytes(bytes(b))
+
+#--- strip28.py
+#!/usr/bin/env python3
+"""Remove the Tag 28 record from .mcs251.attributes in an obj2yaml dump.
+
+Rebuilds the N.3 envelope size fields (VendorSize = sh_size - 1,
+ScopeSize = VendorSize - 11) after dropping the record, producing the
+byte-exact attributes of a pre-P-4 v2 object.
+"""
+import pathlib, re, struct, sys
+p = pathlib.Path(sys.argv[1])
+t = p.read_text()
+m = re.search(r'(- Name:\s*\.mcs251\.attributes\n(?:.*\n)*?\s*Content:\s*)([0-9A-F]+)', t)
+b = bytes.fromhex(m.group(2))
+assert b[0] == 0x41 and b[5:12] == b'MCS251\0' and b[12] == 0x01
+
+def uleb(bb, i):
+    v = s = 0
+    while True:
+        x = bb[i]; i += 1; v |= (x & 0x7f) << s; s += 7
+        if not (x & 0x80):
+            return v, i
+
+i, out, seen = 17, bytearray(b[:17]), False
+while i < len(b):
+    tag, i = uleb(b, i); typ = b[i]; i += 1
+    ln, i = uleb(b, i); val = b[i:i + ln]; i += ln
+    if tag == 28:
+        seen = True
+        continue
+    assert tag < 128 and ln < 128, (tag, ln)
+    out += bytes([tag, typ, ln]) + val
+assert seen, "no Tag 28 record found"
+out[1:5] = struct.pack('>I', len(out) - 1)
+out[13:17] = struct.pack('>I', len(out) - 12)
+p.write_text(t[:m.start(2)] + out.hex().upper() + t[m.end(2):])
+
+#--- vdef.yaml
+
+# C source of the twin (clang -cc1 -triple mcs251-unknown-none -std=c11
+# -fmcs251-keil -mcs251-memory-contract=1,2,32,8,1) and its signature nodes:
+#   int vsum(int n, ...) { return n; }
+# !2 = !{!"_vsum", i32 9, i32 0, i32 0}    # role 9 = def(1)+variadic(8), 1 fixed param
+
+--- !ELF
+FileHeader:
+  Class:           ELFCLASS32
+  Data:            ELFDATA2MSB
+  Type:            ET_REL
+  Machine:         EM_MCS251
+  Flags:           [  ]
+  SectionHeaderStringTable: .strtab
+Sections:
+  - Name:            .text
+    Type:            SHT_PROGBITS
+    Flags:           [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign:    0x1
+    Content:         0BFEA5F87E11F07E21837E3182390FFFFD391FFFFE392FFFFF7AFB30290FFFFD291FFFFE292FFFFF7EFB307A31827A21837A11F0A5E81BFEAA
+  - Name:            .mcs251.REG_BANK_0
+    Type:            SHT_NOBITS
+    Flags:           [ SHF_WRITE, SHF_ALLOC, SHF_MCS251_OVERLAY ]
+    AddressAlign:    0x1
+    Size:            0x8
+  - Name:            .mcs251.OSEG.0
+    Type:            SHT_NOBITS
+    Flags:           [ SHF_WRITE, SHF_ALLOC, SHF_MCS251_OVERLAY ]
+    AddressAlign:    0x1
+    Size:            0x18
+  - Name:            .mcs251.attributes
+    Type:            0x70000003
+    AddressAlign:    0x1
+    Content:         41000000C24D43533235310001000000B7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841401000100000000000901000002015F7673756D00
+  - Type:            SectionHeaderTable
+    Sections:
+      - Name:            .strtab
+      - Name:            .text
+      - Name:            .mcs251.REG_BANK_0
+      - Name:            .mcs251.OSEG.0
+      - Name:            .mcs251.attributes
+      - Name:            .symtab
+Symbols:
+  - Name:            _vsum_PARM_2
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Size:            0x4
+  - Name:            _vsum_PARM_3
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0x4
+    Size:            0x4
+  - Name:            _vsum_PARM_4
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0x8
+    Size:            0x4
+  - Name:            _vsum_PARM_5
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0xC
+    Size:            0x4
+  - Name:            _vsum_PARM_6
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0x10
+    Size:            0x4
+  - Name:            _vsum_PARM_7
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0x14
+    Size:            0x4
+  - Name:            _vsum
+    Type:            STT_FUNC
+    Section:         .text
+    Binding:         STB_GLOBAL
+    Size:            0x39
+...
+
+#--- vuse.yaml
+
+# C source of the twin (clang -cc1 -triple mcs251-unknown-none -std=c11
+# -fmcs251-keil -mcs251-memory-contract=1,2,32,8,1) and its signature nodes:
+#   int vsum(int n, ...);
+#   int main(void) { return vsum(3, 1, 2, 3); }
+# !2 = !{!"_main", i32 1, i32 0}
+# # !3 = !{!"_vsum", i32 10, i32 0, i32 0}   # role 10 = decl(2)+variadic(8)
+
+--- !ELF
+FileHeader:
+  Class:           ELFCLASS32
+  Data:            ELFDATA2MSB
+  Type:            ET_REL
+  Machine:         EM_MCS251
+  Flags:           [  ]
+  SectionHeaderStringTable: .strtab
+Sections:
+  - Name:            .text
+    Type:            SHT_PROGBITS
+    Flags:           [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign:    0x1
+    Content:         0BFE7E0000390FFFFD390FFFFE390FFFFF7AFB007E1800007A1C00007A1B0039010001390100027E1001391100037E1800007A1C00007A1B0039010001390100027E1002391100037E1800007A1C00007A1B0039010001390100027E0003390100037E0400037E1400007A11827A01837A31F0A5EA9A0000007E31827E21837E11F0A5F87A31827A21837A11F0A5E81BFEAA
+  - Name:            .mcs251.attributes
+    Type:            0x70000003
+    AddressAlign:    0x1
+    Content:         41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C842301000200000000000100000201060000000A01000002015F6D61696E005F7673756D00
+  - Name:            .rela.text
+    Type:            SHT_RELA
+    Flags:           [ SHF_INFO_LINK ]
+    Link:            .symtab
+    AddressAlign:    0x4
+    Info:            .text
+    Relocations:
+      - Offset:          0x16
+        Symbol:          _vsum_PARM_2
+        Type:            R_MCS251_MID8
+      - Offset:          0x17
+        Symbol:          _vsum_PARM_2
+        Type:            R_MCS251_LO8
+      - Offset:          0x1B
+        Symbol:          _vsum_PARM_2
+        Type:            R_MCS251_HI8
+      - Offset:          0x30
+        Symbol:          _vsum_PARM_3
+        Type:            R_MCS251_MID8
+      - Offset:          0x31
+        Symbol:          _vsum_PARM_3
+        Type:            R_MCS251_LO8
+      - Offset:          0x35
+        Symbol:          _vsum_PARM_3
+        Type:            R_MCS251_HI8
+      - Offset:          0x4A
+        Symbol:          _vsum_PARM_4
+        Type:            R_MCS251_MID8
+      - Offset:          0x4B
+        Symbol:          _vsum_PARM_4
+        Type:            R_MCS251_LO8
+      - Offset:          0x4F
+        Symbol:          _vsum_PARM_4
+        Type:            R_MCS251_HI8
+      - Offset:          0x76
+        Symbol:          _vsum
+        Type:            R_MCS251_24
+  - Type:            SectionHeaderTable
+    Sections:
+      - Name:            .strtab
+      - Name:            .text
+      - Name:            .rela.text
+      - Name:            .mcs251.attributes
+      - Name:            .symtab
+Symbols:
+  - Name:            _main
+    Type:            STT_FUNC
+    Section:         .text
+    Binding:         STB_GLOBAL
+    Size:            0x92
+  - Name:            _vsum_PARM_2
+    Binding:         STB_GLOBAL
+  - Name:            _vsum_PARM_3
+    Binding:         STB_GLOBAL
+  - Name:            _vsum_PARM_4
+    Binding:         STB_GLOBAL
+  - Name:            _vsum
+    Binding:         STB_GLOBAL
+...
+
+#--- fixed7call.yaml
+
+# C source of the twin (clang -cc1 -triple mcs251-unknown-none -std=c11
+# -fmcs251-keil -mcs251-memory-contract=1,2,32,8,1) and its signature nodes:
+#   int vsum(int, int, int, int, int, int, int);
+#   int main(void) { return vsum(1,2,3,4,5,6,7); }
+# !2 = !{!"_main", i32 1, i32 0}
+# # !3 = !{!"_vsum", i32 2, i32 0, 0,0,0,0,0,0,0}   # 7 fixed params
+
+--- !ELF
+FileHeader:
+  Class:           ELFCLASS32
+  Data:            ELFDATA2MSB
+  Type:            ET_REL
+  Machine:         EM_MCS251
+  Flags:           [  ]
+  SectionHeaderStringTable: .strtab
+Sections:
+  - Name:            .text
+    Type:            SHT_PROGBITS
+    Flags:           [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign:    0x1
+    Content:         0BFE7E0000390FFFFD390FFFFE390FFFFF7AFB007E1800007A1C00007A1B0039010001390100027E1002391100037E1800007A1C00007A1B0039010001390100027E1003391100037E1800007A1C00007A1B0039010001390100027E1004391100037E1800007A1C00007A1B0039010001390100027E1005391100037E1800007A1C00007A1B0039010001390100027E1006391100037E1800007A1C00007A1B0039010001390100027E0007390100037E0400017E1400007A11827A01837A31F0A5EA9A0000007E31827E21837E11F0A5F87A31827A21837A11F0A5E81BFEAA
+  - Name:            .mcs251.attributes
+    Type:            0x70000003
+    AddressAlign:    0x1
+    Content:         41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C842301000200000000000100000201060000000207000002015F6D61696E005F7673756D00
+  - Name:            .rela.text
+    Type:            SHT_RELA
+    Flags:           [ SHF_INFO_LINK ]
+    Link:            .symtab
+    AddressAlign:    0x4
+    Info:            .text
+    Relocations:
+      - Offset:          0x16
+        Symbol:          _vsum_PARM_2
+        Type:            R_MCS251_MID8
+      - Offset:          0x17
+        Symbol:          _vsum_PARM_2
+        Type:            R_MCS251_LO8
+      - Offset:          0x1B
+        Symbol:          _vsum_PARM_2
+        Type:            R_MCS251_HI8
+      - Offset:          0x30
+        Symbol:          _vsum_PARM_3
+        Type:            R_MCS251_MID8
+      - Offset:          0x31
+        Symbol:          _vsum_PARM_3
+        Type:            R_MCS251_LO8
+      - Offset:          0x35
+        Symbol:          _vsum_PARM_3
+        Type:            R_MCS251_HI8
+      - Offset:          0x4A
+        Symbol:          _vsum_PARM_4
+        Type:            R_MCS251_MID8
+      - Offset:          0x4B
+        Symbol:          _vsum_PARM_4
+        Type:            R_MCS251_LO8
+      - Offset:          0x4F
+        Symbol:          _vsum_PARM_4
+        Type:            R_MCS251_HI8
+      - Offset:          0x64
+        Symbol:          _vsum_PARM_5
+        Type:            R_MCS251_MID8
+      - Offset:          0x65
+        Symbol:          _vsum_PARM_5
+        Type:            R_MCS251_LO8
+      - Offset:          0x69
+        Symbol:          _vsum_PARM_5
+        Type:            R_MCS251_HI8
+      - Offset:          0x7E
+        Symbol:          _vsum_PARM_6
+        Type:            R_MCS251_MID8
+      - Offset:          0x7F
+        Symbol:          _vsum_PARM_6
+        Type:            R_MCS251_LO8
+      - Offset:          0x83
+        Symbol:          _vsum_PARM_6
+        Type:            R_MCS251_HI8
+      - Offset:          0x98
+        Symbol:          _vsum_PARM_7
+        Type:            R_MCS251_MID8
+      - Offset:          0x99
+        Symbol:          _vsum_PARM_7
+        Type:            R_MCS251_LO8
+      - Offset:          0x9D
+        Symbol:          _vsum_PARM_7
+        Type:            R_MCS251_HI8
+      - Offset:          0xC4
+        Symbol:          _vsum
+        Type:            R_MCS251_24
+  - Type:            SectionHeaderTable
+    Sections:
+      - Name:            .strtab
+      - Name:            .text
+      - Name:            .rela.text
+      - Name:            .mcs251.attributes
+      - Name:            .symtab
+Symbols:
+  - Name:            _main
+    Type:            STT_FUNC
+    Section:         .text
+    Binding:         STB_GLOBAL
+    Size:            0xE0
+  - Name:            _vsum_PARM_2
+    Binding:         STB_GLOBAL
+  - Name:            _vsum_PARM_3
+    Binding:         STB_GLOBAL
+  - Name:            _vsum_PARM_4
+    Binding:         STB_GLOBAL
+  - Name:            _vsum_PARM_5
+    Binding:         STB_GLOBAL
+  - Name:            _vsum_PARM_6
+    Binding:         STB_GLOBAL
+  - Name:            _vsum_PARM_7
+    Binding:         STB_GLOBAL
+  - Name:            _vsum
+    Binding:         STB_GLOBAL
+...
+
+#--- fixed7def.yaml
+
+# C source of the twin (clang -cc1 -triple mcs251-unknown-none -std=c11
+# -fmcs251-keil -mcs251-memory-contract=1,2,32,8,1) and its signature nodes:
+#   int vsum(int a, int b, int c, int d, int e, int f, int g) { return a + g; }
+# !2 = !{!"_vsum", i32 1, i32 0, 0,0,0,0,0,0,0}    # role 1 = fixed def, count 7
+
+--- !ELF
+FileHeader:
+  Class:           ELFCLASS32
+  Data:            ELFDATA2MSB
+  Type:            ET_REL
+  Machine:         EM_MCS251
+  Flags:           [  ]
+  SectionHeaderStringTable: .strtab
+Sections:
+  - Name:            .text
+    Type:            SHT_PROGBITS
+    Flags:           [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign:    0x1
+    Content:         0BFE0BFE0BFE0BFE0BFE0BFE0BFE0BFE0BFE0BFE0BFE0BFEA5F87E11F07E21837E31827E3800007A3C00007E3B40295300012963000229730003792FFFFD793FFFFF7E1800007A1C00007E1BC029D1000129E1000229F10003796FFFF9797FFFFB7E1800007A1C00007E1BC029D1000129E1000229F10003796FFFF5797FFFF77E1800007A1C00007E1BC029D1000129E1000229F10003796FFFF1797FFFF37E1800007A1C00007E1BC029D1000129E1000229F10003796FFFED797FFFEF7E1800007A1C00007E1BC029D1000129E1000229F10003390FFFD1391FFFD2392FFFD3393FFFD4690FFFFD691FFFFF390FFFD5391FFFD6392FFFD7393FFFD8690FFFF9691FFFFB390FFFD9391FFFDA392FFFDB393FFFDC690FFFF5691FFFF7390FFFDD391FFFDE392FFFDF393FFFE0690FFFF1691FFFF3390FFFE1391FFFE2392FFFE3393FFFE4690FFFED691FFFEF390FFFE5391FFFE6392FFFE7393FFFE839CFFFE939DFFFEA39EFFFEB39FFFFEC290FFFD1291FFFD2292FFFD3293FFFD4294FFFE9295FFFEA296FFFEB297FFFEC2F017A31827A21837A11F0A5E81BFE1BFE1BFE1BFE1BFE1BFE1BFE1BFE1BFE1BFE1BFE1BFEAA
+  - Name:            .mcs251.REG_BANK_0
+    Type:            SHT_NOBITS
+    Flags:           [ SHF_WRITE, SHF_ALLOC, SHF_MCS251_OVERLAY ]
+    AddressAlign:    0x1
+    Size:            0x8
+  - Name:            .mcs251.OSEG.0
+    Type:            SHT_NOBITS
+    Flags:           [ SHF_WRITE, SHF_ALLOC, SHF_MCS251_OVERLAY ]
+    AddressAlign:    0x1
+    Size:            0x18
+  - Name:            .mcs251.attributes
+    Type:            0x70000003
+    AddressAlign:    0x1
+    Content:         41000000C24D43533235310001000000B7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841401000100000000000107000002015F7673756D00
+  - Name:            .rela.text
+    Type:            SHT_RELA
+    Flags:           [ SHF_INFO_LINK ]
+    Link:            .symtab
+    AddressAlign:    0x4
+    Info:            .text
+    Relocations:
+      - Offset:          0x25
+        Symbol:          _vsum_PARM_2
+        Type:            R_MCS251_MID8
+      - Offset:          0x26
+        Symbol:          _vsum_PARM_2
+        Type:            R_MCS251_LO8
+      - Offset:          0x2A
+        Symbol:          _vsum_PARM_2
+        Type:            R_MCS251_HI8
+      - Offset:          0x44
+        Symbol:          _vsum_PARM_3
+        Type:            R_MCS251_MID8
+      - Offset:          0x45
+        Symbol:          _vsum_PARM_3
+        Type:            R_MCS251_LO8
+      - Offset:          0x49
+        Symbol:          _vsum_PARM_3
+        Type:            R_MCS251_HI8
+      - Offset:          0x63
+        Symbol:          _vsum_PARM_4
+        Type:            R_MCS251_MID8
+      - Offset:          0x64
+        Symbol:          _vsum_PARM_4
+        Type:            R_MCS251_LO8
+      - Offset:          0x68
+        Symbol:          _vsum_PARM_4
+        Type:            R_MCS251_HI8
+      - Offset:          0x82
+        Symbol:          _vsum_PARM_5
+        Type:            R_MCS251_MID8
+      - Offset:          0x83
+        Symbol:          _vsum_PARM_5
+        Type:            R_MCS251_LO8
+      - Offset:          0x87
+        Symbol:          _vsum_PARM_5
+        Type:            R_MCS251_HI8
+      - Offset:          0xA1
+        Symbol:          _vsum_PARM_6
+        Type:            R_MCS251_MID8
+      - Offset:          0xA2
+        Symbol:          _vsum_PARM_6
+        Type:            R_MCS251_LO8
+      - Offset:          0xA6
+        Symbol:          _vsum_PARM_6
+        Type:            R_MCS251_HI8
+      - Offset:          0xC0
+        Symbol:          _vsum_PARM_7
+        Type:            R_MCS251_MID8
+      - Offset:          0xC1
+        Symbol:          _vsum_PARM_7
+        Type:            R_MCS251_LO8
+      - Offset:          0xC5
+        Symbol:          _vsum_PARM_7
+        Type:            R_MCS251_HI8
+  - Type:            SectionHeaderTable
+    Sections:
+      - Name:            .strtab
+      - Name:            .text
+      - Name:            .rela.text
+      - Name:            .mcs251.REG_BANK_0
+      - Name:            .mcs251.OSEG.0
+      - Name:            .mcs251.attributes
+      - Name:            .symtab
+Symbols:
+  - Name:            _vsum_PARM_2
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Size:            0x4
+  - Name:            _vsum_PARM_3
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0x4
+    Size:            0x4
+  - Name:            _vsum_PARM_4
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0x8
+    Size:            0x4
+  - Name:            _vsum_PARM_5
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0xC
+    Size:            0x4
+  - Name:            _vsum_PARM_6
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0x10
+    Size:            0x4
+  - Name:            _vsum_PARM_7
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0x14
+    Size:            0x4
+  - Name:            _vsum
+    Type:            STT_FUNC
+    Section:         .text
+    Binding:         STB_GLOBAL
+    Size:            0x1B3
+...
+
+#--- mixdef.yaml
+
+# C source of the twin (clang -cc1 -triple mcs251-unknown-none -std=c11
+# -fmcs251-keil -mcs251-memory-contract=1,2,32,8,1) and its signature nodes:
+#   long mix(long a, char b, long c) { return a + b + c; }
+# !2 = !{!"_mix", i32 1, i32 0, i32 0, i32 0, i32 0}   # role 1, 3 non-bit params
+
+--- !ELF
+FileHeader:
+  Class:           ELFCLASS32
+  Data:            ELFDATA2MSB
+  Type:            ET_REL
+  Machine:         EM_MCS251
+  Flags:           [  ]
+  SectionHeaderStringTable: .strtab
+Sections:
+  - Name:            .text
+    Type:            SHT_PROGBITS
+    Flags:           [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign:    0x1
+    Content:         0BFE0BFE0BFCA5FC7E51F07E61837E71827E0800007A0C00007E0B807E3800007A3C00007E3B00291300012923000229330003394FFFF8395FFFF9396FFFFA397FFFFB398FFFFC390FFFFD391FFFFE392FFFFF7AFB30290FFFF8291FFFF9292FFFFA293FFFFB297FFFFC6E70807E60007C467C567E38FF807A3CFFFF2F132F01294FFFFD295FFFFE296FFFFF7EFB702F017A31827A21837A11F0A5E81BFE1BFE1BFCAA
+  - Name:            .mcs251.REG_BANK_0
+    Type:            SHT_NOBITS
+    Flags:           [ SHF_WRITE, SHF_ALLOC, SHF_MCS251_OVERLAY ]
+    AddressAlign:    0x1
+    Size:            0x8
+  - Name:            .mcs251.OSEG.0
+    Type:            SHT_NOBITS
+    Flags:           [ SHF_WRITE, SHF_ALLOC, SHF_MCS251_OVERLAY ]
+    AddressAlign:    0x1
+    Size:            0x5
+  - Name:            .mcs251.attributes
+    Type:            0x70000003
+    AddressAlign:    0x1
+    Content:         41000000C14D43533235310001000000B6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841301000100000000000103000002015F6D697800
+  - Name:            .rela.text
+    Type:            SHT_RELA
+    Flags:           [ SHF_INFO_LINK ]
+    Link:            .symtab
+    AddressAlign:    0x4
+    Info:            .text
+    Relocations:
+      - Offset:          0x13
+        Symbol:          _mix_PARM_2
+        Type:            R_MCS251_MID8
+      - Offset:          0x14
+        Symbol:          _mix_PARM_2
+        Type:            R_MCS251_LO8
+      - Offset:          0x18
+        Symbol:          _mix_PARM_2
+        Type:            R_MCS251_HI8
+      - Offset:          0x1E
+        Symbol:          _mix_PARM_3
+        Type:            R_MCS251_MID8
+      - Offset:          0x1F
+        Symbol:          _mix_PARM_3
+        Type:            R_MCS251_LO8
+      - Offset:          0x23
+        Symbol:          _mix_PARM_3
+        Type:            R_MCS251_HI8
+  - Type:            SectionHeaderTable
+    Sections:
+      - Name:            .strtab
+      - Name:            .text
+      - Name:            .rela.text
+      - Name:            .mcs251.REG_BANK_0
+      - Name:            .mcs251.OSEG.0
+      - Name:            .mcs251.attributes
+      - Name:            .symtab
+Symbols:
+  - Name:            _mix_PARM_2
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Size:            0x1
+  - Name:            _mix_PARM_3
+    Type:            STT_OBJECT
+    Section:         .mcs251.OSEG.0
+    Binding:         STB_GLOBAL
+    Value:           0x1
+    Size:            0x4
+  - Name:            _mix
+    Type:            STT_FUNC
+    Section:         .text
+    Binding:         STB_GLOBAL
+    Size:            0xA3
+...
+
+#--- mix3call.yaml
+
+# C source of the twin (clang -cc1 -triple mcs251-unknown-none -std=c11
+# -fmcs251-keil -mcs251-memory-contract=1,2,32,8,1) and its signature nodes:
+#   long mix(long, char, long);
+#   int main(void) { return mix(1, 2, 3); }
+# !2 = !{!"_main", i32 1, i32 0}
+# # !3 = !{!"_mix", i32 2, i32 0, i32 0, i32 0, i32 0}
+
+--- !ELF
+FileHeader:
+  Class:           ELFCLASS32
+  Data:            ELFDATA2MSB
+  Type:            ET_REL
+  Machine:         EM_MCS251
+  Flags:           [  ]
+  SectionHeaderStringTable: .strtab
+Sections:
+  - Name:            .text
+    Type:            SHT_PROGBITS
+    Flags:           [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign:    0x1
+    Content:         0BFE7E0000390FFFFD390FFFFE390FFFFF7AFB007E10027E1800007A1C00007A1B107E1800007A1C00007A1B0039010001390100027E0003390100037E0400017E1400007A11827A01837A31F0A5EA9A0000007E31827E21837E11F0A5F87A31827A21837A11F0A5E81BFEAA
+  - Name:            .mcs251.attributes
+    Type:            0x70000003
+    AddressAlign:    0x1
+    Content:         41000000D04D43533235310001000000C5048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C842201000200000000000100000201060000000203000002015F6D61696E005F6D697800
+  - Name:            .rela.text
+    Type:            SHT_RELA
+    Flags:           [ SHF_INFO_LINK ]
+    Link:            .symtab
+    AddressAlign:    0x4
+    Info:            .text
+    Relocations:
+      - Offset:          0x19
+        Symbol:          _mix_PARM_2
+        Type:            R_MCS251_MID8
+      - Offset:          0x1A
+        Symbol:          _mix_PARM_2
+        Type:            R_MCS251_LO8
+      - Offset:          0x1E
+        Symbol:          _mix_PARM_2
+        Type:            R_MCS251_HI8
+      - Offset:          0x24
+        Symbol:          _mix_PARM_3
+        Type:            R_MCS251_MID8
+      - Offset:          0x25
+        Symbol:          _mix_PARM_3
+        Type:            R_MCS251_LO8
+      - Offset:          0x29
+        Symbol:          _mix_PARM_3
+        Type:            R_MCS251_HI8
+      - Offset:          0x50
+        Symbol:          _mix
+        Type:            R_MCS251_24
+  - Type:            SectionHeaderTable
+    Sections:
+      - Name:            .strtab
+      - Name:            .text
+      - Name:            .rela.text
+      - Name:            .mcs251.attributes
+      - Name:            .symtab
+Symbols:
+  - Name:            _main
+    Type:            STT_FUNC
+    Section:         .text
+    Binding:         STB_GLOBAL
+    Size:            0x6C
+  - Name:            _mix_PARM_2
+    Binding:         STB_GLOBAL
+  - Name:            _mix_PARM_3
+    Binding:         STB_GLOBAL
+  - Name:            _mix
+    Binding:         STB_GLOBAL
+...
+
+#--- mix2call.yaml
+
+# C source of the twin (clang -cc1 -triple mcs251-unknown-none -std=c11
+# -fmcs251-keil -mcs251-memory-contract=1,2,32,8,1) and its signature nodes:
+#   long mix(long, char);
+#   int main(void) { return mix(1, 2); }
+# !2 = !{!"_main", i32 1, i32 0}
+# # !3 = !{!"_mix", i32 2, i32 0, i32 0, i32 0}   # only 2 params
+
+--- !ELF
+FileHeader:
+  Class:           ELFCLASS32
+  Data:            ELFDATA2MSB
+  Type:            ET_REL
+  Machine:         EM_MCS251
+  Flags:           [  ]
+  SectionHeaderStringTable: .strtab
+Sections:
+  - Name:            .text
+    Type:            SHT_PROGBITS
+    Flags:           [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign:    0x1
+    Content:         0BFE7E0000390FFFFD390FFFFE390FFFFF7AFB007E00027E1800007A1C00007A1B007E0400017E1400007A11827A01837A31F0A5EA9A0000007E31827E21837E11F0A5F87A31827A21837A11F0A5E81BFEAA
+  - Name:            .mcs251.attributes
+    Type:            0x70000003
+    AddressAlign:    0x1
+    Content:         41000000D04D43533235310001000000C5048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C842201000200000000000100000201060000000202000002015F6D61696E005F6D697800
+  - Name:            .rela.text
+    Type:            SHT_RELA
+    Flags:           [ SHF_INFO_LINK ]
+    Link:            .symtab
+    AddressAlign:    0x4
+    Info:            .text
+    Relocations:
+      - Offset:          0x19
+        Symbol:          _mix_PARM_2
+        Type:            R_MCS251_MID8
+      - Offset:          0x1A
+        Symbol:          _mix_PARM_2
+        Type:            R_MCS251_LO8
+      - Offset:          0x1E
+        Symbol:          _mix_PARM_2
+        Type:            R_MCS251_HI8
+      - Offset:          0x36
+        Symbol:          _mix
+        Type:            R_MCS251_24
+  - Type:            SectionHeaderTable
+    Sections:
+      - Name:            .strtab
+      - Name:            .text
+      - Name:            .rela.text
+      - Name:            .mcs251.attributes
+      - Name:            .symtab
+Symbols:
+  - Name:            _main
+    Type:            STT_FUNC
+    Section:         .text
+    Binding:         STB_GLOBAL
+    Size:            0x52
+  - Name:            _mix_PARM_2
+    Binding:         STB_GLOBAL
+  - Name:            _mix
+    Binding:         STB_GLOBAL
+...
+
+#--- vdecl.yaml
+
+# C source of the twin (clang -cc1 -triple mcs251-unknown-none -std=c11
+# -fmcs251-keil -mcs251-memory-contract=1,2,32,8,1) and its signature nodes:
+#   void f(int, ...);
+# !2 = !{!"_f", i32 10, i32 0, i32 0}    # decl+variadic, 1 fixed param
+
+--- !ELF
+FileHeader:
+  Class:           ELFCLASS32
+  Data:            ELFDATA2MSB
+  Type:            ET_REL
+  Machine:         EM_MCS251
+  Flags:           [  ]
+  SectionHeaderStringTable: .strtab
+Sections:
+  - Name:            .text
+    Type:            SHT_PROGBITS
+    Flags:           [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign:    0x1
+  - Name:            .mcs251.attributes
+    Type:            0x70000003
+    AddressAlign:    0x1
+    Content:         41000000BF4D43533235310001000000B4048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841101000100000000000A01000002015F6600
+  - Type:            SectionHeaderTable
+    Sections:
+      - Name:            .strtab
+      - Name:            .text
+      - Name:            .mcs251.attributes
+      - Name:            .symtab
+Symbols:         []
+...
+
+#--- fdecl.yaml
+
+# C source of the twin (clang -cc1 -triple mcs251-unknown-none -std=c11
+# -fmcs251-keil -mcs251-memory-contract=1,2,32,8,1) and its signature nodes:
+#   void f(int);
+# !2 = !{!"_f", i32 2, i32 0, i32 0}     # fixed decl, 1 fixed param
+
+--- !ELF
+FileHeader:
+  Class:           ELFCLASS32
+  Data:            ELFDATA2MSB
+  Type:            ET_REL
+  Machine:         EM_MCS251
+  Flags:           [  ]
+  SectionHeaderStringTable: .strtab
+Sections:
+  - Name:            .text
+    Type:            SHT_PROGBITS
+    Flags:           [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign:    0x1
+  - Name:            .mcs251.attributes
+    Type:            0x70000003
+    AddressAlign:    0x1
+    Content:         41000000BF4D43533235310001000000B4048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841101000100000000000201000002015F6600
+  - Type:            SectionHeaderTable
+    Sections:
+      - Name:            .strtab
+      - Name:            .text
+      - Name:            .mcs251.attributes
+      - Name:            .symtab
+Symbols:         []
+...
