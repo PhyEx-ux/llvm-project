@@ -150,13 +150,15 @@
 # RUN:   | FileCheck %s --check-prefix=DEFOFF
 # DEFOFF: definition b st_value 0x8 does not name its record offset 0x0
 
-# --- the bit-aware CRT profile is fail-closed for this lld stream ---
-# A .mcs251.bitprofile section names the BT14 profile this protocol does not
-# consume; it must be a loud error, never silently ignored.
+# --- the bit-aware CRT profile is fail-closed outside the frozen shape ---
+# A .mcs251.bitprofile section is accepted only as the frozen 16-byte v1
+# record of the bit-aware CRT (BT14).  A wrong-length carrier (4 bytes here)
+# is a loud error, never silently ignored; see bit-profile.test for the full
+# accepted-shape and carrier-rule matrix.
 # RUN: yaml2obj profile.yaml -o bp.o
 # RUN: not mcs251-lld bp.o --area-start=CSEG=0xff0200 -o %t/bp.elf 2>&1 \
 # RUN:   | FileCheck %s --check-prefix=PROFILE
-# PROFILE: unsupported .mcs251.bitprofile: the bit-aware CRT profile is not accepted
+# PROFILE: malformed .mcs251.bitprofile: expected a non-ALLOC 16-byte PROGBITS record with align 4
 
 # --- a nonzero initial value requires the XINIT area ---
 # RUN: yaml2obj init1.yaml -o i1.o

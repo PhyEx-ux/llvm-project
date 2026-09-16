@@ -1,0 +1,365 @@
+# crt-bit.yaml - BT14 bit-aware CRT profile fixture (P09, BIT-TASK-BREAKDOWN
+# BT14; PM ruling 2026-09-13 design 8.1 item 2).
+#
+# Drop-in replacement for crt-irq.yaml in links whose bit objects must
+# PRESERVE external owners' neighbouring bits.  Everything is byte-for-byte
+# the frozen crt-irq.yaml shape (v1 object identity: EF_MCS251_ABI_V1 +
+# .note.mcs251.abi) except the initialization policy:
+#
+#   - the 16 x "mov 0xNN,#0" window clear is REPLACED by
+#     "ecall __mcs251_bit_init", a walker that applies the lld-synthesized
+#     .mcs251.bittable records (IRAM[addr] = (IRAM[addr] & and_mask) |
+#     or_value) so that ONLY allocator-owned bits are written; a byte with
+#     mask 0 is never accessed, and partial masks keep every neighbour bit's
+#     power-on value.  Zero-valued owned bits are cleared through the mask,
+#     never through a blanket clear.
+#   - the new .mcs251.bitprofile section (16 bytes) declares that policy to
+#     lld (protocol v1).  lld fail-closes on unknown profile versions, bad
+#     lengths, a profile carrier that is not this CRT (does not define
+#     __mcs251_bit_init in executable code / carries no BSEG_BYTES pool), and
+#     on two profile carriers in one link - which also rejects the
+#     old-CRT + new-profile mix (design L13).
+#
+# Kept identical to crt-irq.yaml: .mcs251.HOME ljmp trampoline, the
+# .mcs251.BSEG_BYTES 16-byte writable NOBITS physical pool reservation (the
+# single physical reservation of the window - lld sub-allocates bits into it
+# and never reserves those bytes twice), the two .mcs251.isr asset records
+# (protocol v2, asset_profile=1), the XINIT walker bytes (86B) and the
+# XDATA_INIT walker bytes (98B) moved verbatim (their internal branches are
+# position independent; only their four relocations each were recomputed),
+# the C2AF80FE default entry, and the note.
+#
+# Machine-byte evidence: identical encodings to crt-irq.yaml plus the
+# bit-init walker from crt-bit-walker.asm (sdas251 gold listing; assemble it
+# to reproduce: mov r12,@dr0 = 7E 0B C0, inc dr0 = 0B 0C, mov r7,r12 = 7C 7C,
+# mov a,@wr6 = 7E 39 B0, anl a,r13 = 5C BD, orl a,r14 = 4C BE,
+# mov @wr6,a = 7A 39 B0, eret = AA).
+#
+# Walker register plan (fixed 2026-09-16 after the first QEMU pollute-RAM e2e
+# caught the original staging): DR0 is the register-file bytes r0-r3 (RAM
+# mapped in the selected bank) and WR2 shares r2/r3 with it, and r10/r11 are
+# B/ACC - so staging the record address into r5 or r3 and the masks into
+# r10-r12 corrupts the loop counter, the table pointer, or loses the mask to
+# the accumulator.  The plan now keeps every pointer/staging register
+# disjoint from dr0: wr6={r6,r7} is the IDATA pointer (r6 pinned 0 once, r7
+# loaded per record; r6/r7 are bank bytes no other part of the walker uses),
+# wr4={r4,r5} stays the record counter, and the record fields stage into the
+# general registers r12/r13/r14 (the frozen XINIT walker precedent: its own
+# staging lives in r12/r14/r16 and never in r0-r7).
+#
+# BOOT layout (273 = 0x111 bytes, section-relative offsets):
+#   0x00 C2 AF        clr EA                       (__mcs251_selfstart_boot)
+#   0x02 75 D0 00     mov PSW,#0
+#   0x05 75 E3 00     mov DPS,#0
+#   0x08 7E F8 00 00  mov spx,#__mcs251_stack_base (R_MCS251_16 @0x0A)
+#   0x0C 9A 00 00 00  ecall __mcs251_bit_init      (R_MCS251_24 @0x0D)
+#   0x10 9A 00 00 00  ecall __mcs251_globals_init  (R_MCS251_24 @0x11)
+#   0x14 9A 00 00 00  ecall __mcs251_xdata_init    (R_MCS251_24 @0x15)
+#   0x18 9A 00 00 00  ecall _main                  (R_MCS251_24 @0x19)
+#   0x1C 80 FE        sjmp self                    (__mcs251_halt)
+#   0x1E [55B]        bit-init walker              (__mcs251_bit_init)
+#   0x55 [86B]        XINIT walker                 (__mcs251_globals_init)
+#   0xAB [98B]        XDATA_INIT walker            (__mcs251_xdata_init)
+#   0x10D C2 AF 80 FE IRQ default entry            (__mcs251_isr_unhandled)
+#
+# The .mcs251.bitprofile record v1 (big-endian, 16 bytes):
+#   u16 protocol_version = 1; u16 record_size = 0x0010; u8 kind = 1 (bit-aware
+#   CRT); u8 init_strategy = 1 (mask RMW, neighbour-preserving); u16 pool_base
+#   = 0x0020; u16 pool_size = 0x0010; u16 window_bits = 0x0080; u16 entry_kind
+#   = 1 (walker symbol __mcs251_bit_init); u16 reserved = 0.
+#
+# Undefined s_BITINIT/l_BITINIT are lld-synthesized boundary symbols of the
+# BITINIT CODE area (exactly the s_XINIT/l_XINIT mechanism; SPEC 6.1).  With
+# no bit objects the table is empty (l_BITINIT = 0) and the walker returns
+# immediately.  Build with yaml2obj from the frozen lld build tree.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  # HOME: reset trampoline. ljmp __mcs251_selfstart_boot (3 bytes; T07 requires
+  # HOME to be exactly a 3-byte J16 to the paired BOOT, never a 4-byte EJMP).
+  - Name: .mcs251.HOME
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '020000'
+  # BOOT: startup flow + bit-init walker + reusable XINIT walker + XDATA_INIT
+  # walker + IRQ default entry, 0x111 bytes.  NO window clear: the bit-init
+  # walker owns every allocator byte write in [0x20,0x30).
+  - Name: .mcs251.BOOT
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C2AF75D00075E3007EF800009A0000009A0000009A0000009A00000080FE7E0800007A0C00007E2400007E6000BE24000068217E0BC00B0C7E0BD00B0C7E0BE00B0C9E2400037C7C7E39B05CBD4CBE7A39B080D9AA7E0800007A0C00007E240000BE24000068430B0A400B0C0B0C7DA40B0A600B0C0B0C0B0A800B0C0B0C9E2400067EE000BE64000068097A49E00B441B6480F1BE84000068C77E0BE00B0C7AA9E00BA41B841B2480EAAA7E0800007A0C00007E240000BE240000684F7E0BE00B0C0B0A400B0C0B0C0B0A600B0C0B0C0B0A800B0C0B0C9E2400077AE1847A81837A9182BE84000068157E0BE00B0C7CBEF0A31B241B84BE84000068BA80EBBE64000068B2E4F0A31B6480F3AAC2AF80FE'
+  # T08 step 6 (frozen, unchanged from crt-irq.yaml): the CRT owns the 16-byte
+  # BSEG_BYTES reservation for the bit-addressable byte window at 0x20-0x2F.
+  # This stays the SINGLE physical reservation of the window; lld
+  # sub-allocates bit slots into it and never reserves these bytes twice.
+  # What changes under the bit profile is the INITIALIZATION policy (mask RMW
+  # via the walker above), not the ownership.
+  - Name: .mcs251.BSEG_BYTES
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 16
+  # ISR metadata: byte-identical to crt-irq.yaml (two 24-byte v2 records,
+  # asset_profile=1).
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0002001803020100FFFF00010000000000000001000000000002001804030000FFFF0001000000000000000100000000'
+  # BT14 bit-aware CRT profile v1 (big-endian, 16 bytes; see the header
+  # comment for the field table).
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010010010100200010008000010000'
+  - Name: .rela.mcs251.HOME
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.HOME
+    Relocations:
+      # ljmp __mcs251_selfstart_boot: 02 [J16]
+      - Offset: 0x1
+        Type: R_MCS251_J16
+        Symbol: __mcs251_selfstart_boot
+        Addend: 0
+  - Name: .rela.mcs251.BOOT
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.BOOT
+    Relocations:
+      # mov spx,#__mcs251_stack_base: 7E F8 [imm16]; lld synthesizes the ABS
+      # stack base (SPEC 6.3) because this object carries the UNDEF request.
+      - Offset: 0xA
+        Type: R_MCS251_16
+        Symbol: __mcs251_stack_base
+        Addend: 0
+      # ecall __mcs251_bit_init: 9A [addr24] (BT14: before globals_init)
+      - Offset: 0xD
+        Type: R_MCS251_24
+        Symbol: __mcs251_bit_init
+        Addend: 0
+      # ecall __mcs251_globals_init: 9A [addr24]
+      - Offset: 0x11
+        Type: R_MCS251_24
+        Symbol: __mcs251_globals_init
+        Addend: 0
+      # ecall __mcs251_xdata_init (X4): 9A [addr24]
+      - Offset: 0x15
+        Type: R_MCS251_24
+        Symbol: __mcs251_xdata_init
+        Addend: 0
+      # ecall _main: 9A [addr24]
+      - Offset: 0x19
+        Type: R_MCS251_24
+        Symbol: _main
+        Addend: 0
+      # bit-init walker prologue (walker at 0x1E):
+      # mov dr0[15:0],#<s_BITINIT window>: 7E 08 [MID8] [LO8]
+      - Offset: 0x20
+        Type: R_MCS251_MID8
+        Symbol: s_BITINIT
+        Addend: 0
+      - Offset: 0x21
+        Type: R_MCS251_LO8
+        Symbol: s_BITINIT
+        Addend: 0
+      # mov dr0[31:16],#0x00<bank>: 7A 0C 00 [HI8]
+      - Offset: 0x25
+        Type: R_MCS251_HI8
+        Symbol: s_BITINIT
+        Addend: 0
+      # mov wr4,#l_BITINIT: 7E 24 [imm16]
+      - Offset: 0x28
+        Type: R_MCS251_16
+        Symbol: l_BITINIT
+        Addend: 0
+      # walker hand-prologue: mov wr8,#<s_XINIT mid/lo>: 7E 08 [MID8] [LO8]
+      # (XINIT walker at 0x55)
+      - Offset: 0x57
+        Type: R_MCS251_MID8
+        Symbol: s_XINIT
+        Addend: 0
+      - Offset: 0x58
+        Type: R_MCS251_LO8
+        Symbol: s_XINIT
+        Addend: 0
+      # mov r12,#<s_XINIT hi>: 7A 0C 00 [HI8] (dr0 24-bit bank byte)
+      - Offset: 0x5C
+        Type: R_MCS251_HI8
+        Symbol: s_XINIT
+        Addend: 0
+      # mov wr4,#l_XINIT: 7E 24 [imm16]
+      - Offset: 0x5F
+        Type: R_MCS251_16
+        Symbol: l_XINIT
+        Addend: 0
+      # XDATA_INIT walker prologue (walker at 0xAB):
+      # mov dr0[15:0],#<s_XDATA_INIT window>: 7E 08 [MID8] [LO8]
+      - Offset: 0xAD
+        Type: R_MCS251_MID8
+        Symbol: s_XDATA_INIT
+        Addend: 0
+      - Offset: 0xAE
+        Type: R_MCS251_LO8
+        Symbol: s_XDATA_INIT
+        Addend: 0
+      # mov dr0[31:16],#0x00<bank>: 7A 0C 00 [HI8]
+      - Offset: 0xB2
+        Type: R_MCS251_HI8
+        Symbol: s_XDATA_INIT
+        Addend: 0
+      # mov wr4,#l_XDATA_INIT: 7E 24 [imm16]
+      - Offset: 0xB5
+        Type: R_MCS251_16
+        Symbol: l_XDATA_INIT
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      # IRQ_DEFAULT record @0: zero-width symbol association, r_offset=0+12.
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: __mcs251_isr_unhandled
+        Addend: 0
+      # IRQ_RESET record @24: r_offset=24+12. Precise named STT_FUNC symbols,
+      # never section+addend (A3.4).
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: __mcs251_reset
+        Addend: 0
+  # Exactly one ABI note per object (SPEC 3.2): namesz=7 descsz=32 type=1,
+  # owner "MCS251", eight BE u32 descriptor words.  Identical to crt-irq.yaml.
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  # Reset entry: named STT_FUNC in executable PROGBITS so the IRQ_RESET record
+  # association points at a precise in-object function of range 3 (A3.4).
+  - Name: __mcs251_reset
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .mcs251.HOME
+    Value: 0x0
+    Size: 3
+  # IRQ default fail-stop entry: STT_FUNC size 4 (A5); no relocation may fall
+  # inside [0x10D,0x111).
+  - Name: __mcs251_isr_unhandled
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x10D
+    Size: 4
+  # BOOT entry (HOME J16 target).
+  - Name: __mcs251_selfstart_boot
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x0
+  # BT14 bit-init walker entry, ECALLed before __mcs251_globals_init.  A
+  # profile carrier that does not define this symbol in executable code is
+  # rejected by lld (the profile would be unapplied).
+  - Name: __mcs251_bit_init
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x1E
+  # XINIT walker (keeps the SPEC 6.2 __mcs251_globals_init-defined validation
+  # trigger of the v1 chain).
+  - Name: __mcs251_globals_init
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0x55
+  # XDATA_INIT walker entry (X4), ECALLed between globals_init and _main.
+  - Name: __mcs251_xdata_init
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .mcs251.BOOT
+    Value: 0xAB
+  # Local labels: bit walker (crt-bit-walker.asm), frozen XINIT walker asset
+  # (crt-selfstart.lst) and the X4 walker asset (crt-xdata-init-walker.asm).
+  - Name: __mcs251_halt
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x1C
+  - Name: __mcs251_bit_record
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x2D
+  - Name: __mcs251_bit_done
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x54
+  - Name: __mcs251_xinit_record
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x61
+  - Name: __mcs251_xinit_clear
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x85
+  - Name: __mcs251_xinit_copy
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x94
+  - Name: __mcs251_xinit_done
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0xAA
+  - Name: __mcs251_xdata_record
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0xB7
+  - Name: __mcs251_xdata_copy
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0xEA
+  - Name: __mcs251_xdata_zero
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0xFF
+  - Name: __mcs251_xdata_done
+    Type: STT_NOTYPE
+    Section: .mcs251.BOOT
+    Value: 0x10C
+  # Undefined globals resolved by lld: module entry, synthesized stack base,
+  # synthesized XINIT/XDATA_INIT/BITINIT boundary symbols (SPEC 6.1/6.3; X4;
+  # BT14).
+  - Name: _main
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: __mcs251_stack_base
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: s_XINIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: l_XINIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: s_XDATA_INIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: l_XDATA_INIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: s_BITINIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+  - Name: l_BITINIT
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL

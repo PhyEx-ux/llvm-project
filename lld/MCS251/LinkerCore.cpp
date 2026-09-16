@@ -89,6 +89,34 @@ static constexpr uint8_t BitKindDefinition = 1;
 static constexpr uint8_t BitKindReference = 2;
 static constexpr uint8_t BitCapabilities = 1;
 
+// BT14: the bit-aware CRT profile section (crt-bit.yaml).  A non-ALLOC 16-byte
+// record declaring that this object is the bit CRT whose __mcs251_bit_init
+// walker applies the lld-synthesized .mcs251.bittable mask-RMW records, so
+// external owners' neighbouring bits are PRESERVED instead of being cleared
+// by the old 16-byte window clear (BIT-OBJECT-CONTRACT.md §7's S1 subset).
+// The profile is the BT14 asset wire format; every field is frozen here and
+// unknown values fail closed (design §6.4 L13).
+static constexpr uint32_t BitProfileRecordSize = 16;
+static constexpr uint16_t BitProfileVersion = 1;
+static constexpr uint16_t BitProfileSizeWord = 16;
+static constexpr uint8_t BitProfileKind = 1;          // bit-aware CRT
+static constexpr uint8_t BitProfileStrategyMaskRMW = 1; // preserve neighbours
+static constexpr uint16_t BitProfileEntryWalker = 1;  // __mcs251_bit_init
+// Field offsets in the big-endian 16-byte record.
+namespace BitProfileRec {
+static constexpr unsigned Version = 0;      // u16, must be 1
+static constexpr unsigned Size = 2;         // u16, must be 16
+static constexpr unsigned Kind = 4;         // u8, must be 1
+static constexpr unsigned Strategy = 5;     // u8, must be 1
+static constexpr unsigned PoolBase = 6;     // u16, must be 0x0020
+static constexpr unsigned PoolSize = 8;     // u16, must be 0x0010
+static constexpr unsigned WindowBits = 10;  // u16, must be 0x0080
+static constexpr unsigned EntryKind = 12;   // u16, must be 1 (walker)
+static constexpr unsigned Reserved = 14;    // u16, must be 0
+} // namespace BitProfileRec
+// The walker entry the profile carrier must define in executable code.
+static constexpr StringRef BitInitWalkerName = "__mcs251_bit_init";
+
 struct InputSection;
 struct InputFile;
 struct InputSymbol;
@@ -193,6 +221,9 @@ struct InputFile {
   // BT12: at most one `.mcs251.bit` per object.
   InputSection *BitSection = nullptr;
   std::vector<BitRecord> BitRecords;
+  // BT14: at most one `.mcs251.bitprofile` per object; presence means this
+  // object is the bit-aware CRT (see BitProfileRec above).
+  InputSection *BitProfileSection = nullptr;
   // P-4 (freeze 2026-09-14): the decoded Tag 28 signature table.  Present for
   // every v2 object (the codec rejects a v2 identity without it), so
   // HasSignatures distinguishes the pre-P4 object the freeze makes a hard
@@ -665,14 +696,18 @@ static bool validateMetaSection(const InputSection &S, raw_ostream &Err) {
   if (N == BitObjectSectionName)
     return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 && S.Align == 4 ||
            fail(Err, "malformed " + BitObjectSectionName);
-  // BT14: the bit-aware CRT profile is a reserved name that this lld stream
-  // does not consume yet.  Fail closed with the exact name rather than the
-  // generic unsupported-metadata message, so a new-profile asset mixed with
-  // the current bit protocol is a loud error and never silently ignored.
+  // BT14: the bit-aware CRT profile section is whitelisted by its exact name
+  // only, with the frozen 16-byte record shape (the field values are decoded
+  // after the section contents are loaded, next to the bit-record parser).
+  // Whether the carrier is allowed to *use* the profile (it must be the CRT)
+  // is decided later, after symbols resolve.  Unknown shapes stay loud
+  // errors, never silently ignored.
   if (N == BitProfileSectionName)
-    return fail(Err, "unsupported " + BitProfileSectionName +
-                         ": the bit-aware CRT profile is not accepted by this "
-                         "linker; use the legacy IRQ CRT bit protocol");
+    return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 &&
+               S.Align == 4 && S.Size == BitProfileRecordSize ||
+           fail(Err, "malformed " + BitProfileSectionName +
+                         ": expected a non-ALLOC 16-byte PROGBITS record "
+                         "with align 4");
   if (N == ".symtab")
     return S.Type == ELF::SHT_SYMTAB && S.Flags == 0 ||
            fail(Err, "malformed .symtab");
@@ -1005,6 +1040,22 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
         return fail(Err, Path + ": MCS251 bit: at most one .mcs251.bit per object");
       F.BitSection = S.get();
     }
+    if (S->Name == BitProfileSectionName) {
+      // BT14: one profile per object; the header shape (non-ALLOC 16-byte
+      // PROGBITS, align 4, entsize 0) is frozen here, and the field decode
+      // runs right after this loop, once the section contents are loaded.
+      // The record itself carries no relocation: the walker entry is
+      // discovered by symbol name (the __mcs251_globals_init discovery
+      // precedent), and the set-level "is this really the CRT" check runs
+      // after resolveSymbols.
+      if (H.sh_entsize != 0)
+        return fail(Err, Path + ": MCS251 bitprofile: .mcs251.bitprofile "
+                             "must have sh_entsize 0");
+      if (F.BitProfileSection)
+        return fail(Err, Path + ": MCS251 bitprofile: at most one "
+                             ".mcs251.bitprofile per object");
+      F.BitProfileSection = S.get();
+    }
     if (S->Name == MCS251Attributes::SectionName) {
       // A4W4-R1 fix: the claim path validates the *complete* frozen carrier
       // shape itself, unconditionally.  validateMetaSection() gives the
@@ -1200,6 +1251,37 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
                              "entry/hardware/save/asset profile");
       F.IsrRecords.push_back(R);
     }
+  }
+
+  // BT14: decode the bit-profile record fields now that the section contents
+  // are loaded (the claim path above only froze the header shape, so
+  // --print-input exercises this decode).  Every field is a frozen constant;
+  // unknown values fail closed and name the field.
+  if (F.BitProfileSection) {
+    const ArrayRef<uint8_t> P(F.BitProfileSection->Data);
+    if (P.size() != BitProfileRecordSize)
+      return fail(Err, Path + ": MCS251 bitprofile: section must be exactly "
+                           "16 bytes");
+    if (read16BE(P, BitProfileRec::Version) != BitProfileVersion)
+      return fail(Err, Path + ": MCS251 bitprofile: unsupported protocol "
+                           "version");
+    if (read16BE(P, BitProfileRec::Size) != BitProfileSizeWord)
+      return fail(Err, Path + ": MCS251 bitprofile: unsupported record size");
+    if (P[BitProfileRec::Kind] != BitProfileKind)
+      return fail(Err, Path + ": MCS251 bitprofile: unknown profile kind");
+    if (P[BitProfileRec::Strategy] != BitProfileStrategyMaskRMW)
+      return fail(Err, Path + ": MCS251 bitprofile: unsupported init "
+                           "strategy");
+    if (read16BE(P, BitProfileRec::PoolBase) != BitWindowBase ||
+        read16BE(P, BitProfileRec::PoolSize) != BitByteCount ||
+        read16BE(P, BitProfileRec::WindowBits) != BitCount)
+      return fail(Err, Path + ": MCS251 bitprofile: profile window does not "
+                           "match the 0x20..0x2f bit pool");
+    if (read16BE(P, BitProfileRec::EntryKind) != BitProfileEntryWalker)
+      return fail(Err, Path + ": MCS251 bitprofile: unsupported entry kind");
+    if (read16BE(P, BitProfileRec::Reserved) != 0)
+      return fail(Err, Path + ": MCS251 bitprofile: reserved fields must be "
+                           "zero");
   }
 
   // BT12: parse the fixed 8-byte bit-object records. Field-level structure is
@@ -1528,6 +1610,12 @@ private:
   bool rejectInputVecs();
   bool resolveSymbols();
   bool buildBitIdentities();
+  // BT14: set-level bit-profile rules.  At most one carrier in the link, and
+  // the carrier must be the CRT (defines the __mcs251_bit_init walker in
+  // executable code and owns the 16-byte BSEG_BYTES pool).  This is what
+  // rejects the old CRT + new-profile mix and the duplicate-owner cases
+  // (design §6.4 L13).
+  bool validateBitProfileSet();
 
   /// The link-wide set of names reached through a CODE-target relocation
   /// (R_MCS251_24 / R_MCS251_J16 / R_MCS251_J11) in ANY input object.  Built
@@ -1537,6 +1625,8 @@ private:
   /// object).
   std::set<StringRef> LinkFunctionReferenced;
   bool allocateBitSlots();
+  // BT14: the link's single bit-profile carrier (the bit-aware CRT), or null.
+  InputFile *BitProfileFile = nullptr;
   bool validateISRIdentitiesAndRegistrations();
   bool synthesizeIRQVectors();
   bool layout();
@@ -1596,8 +1686,11 @@ InputSymbol *Linker::findSymbol(InputFile &F, uint32_t Index) {
 static bool isReservedBoundarySymbol(StringRef Name) {
   // SPEC §6.1: s_<AREA>, l_<AREA>, l_IRAM are reserved synthesised boundary
   // symbols.  User definitions of these names are rejected.
-  // This set must match exactly the set of synthesised boundary symbols
-  // generated in layoutData().
+  // This set covers every boundary symbol layoutData() can synthesize.  Since
+  // BT14-R1 some members are conditional (s_/l_BITINIT exist only for a
+  // profile link or an explicit --area-start=BITINIT); the names stay
+  // reserved in every link so a user definition can never alias a boundary
+  // symbol that a profile link would inject.
   if (Name == "l_IRAM")
     return true;
   if (Name == "__mcs251_stack_base")
@@ -1609,7 +1702,7 @@ static bool isReservedBoundarySymbol(StringRef Name) {
         "SSEG",       "HOME",       "VECS",        "BOOT",
         "CSEG",       "XINIT",      "XDATA_INIT",  "BSEG_BYTES",
         "BIT_BANK",   "XSEG",       "REG_BANK_0",  "REG_BANK_1",
-        "REG_BANK_2", "REG_BANK_3"};
+        "REG_BANK_2", "REG_BANK_3", "BITINIT"};
     for (const char *A : Areas)
       if (Area == A)
         return true;
@@ -1698,6 +1791,53 @@ bool Linker::buildBitIdentities() {
                                Twine::utohexstr(Def->Value) + " exceeds 0xff");
       }
     }
+  return true;
+}
+
+// BT14: the set-level bit-profile rules.  Exactly one carrier; the carrier is
+// the bit CRT.  "Old CRT plus a new-profile object" is rejected here (the
+// profile carrier is not the CRT: no walker, no pool), as is any second
+// profile carrier.  Without a profile the link keeps the S1 semantics
+// (owned 16B all-zero clear + synthesized whole-byte XINIT), byte-identical
+// to the pre-BT14 links.
+bool Linker::validateBitProfileSet() {
+  BitProfileFile = nullptr;
+  for (auto &F : Files) {
+    if (!F->BitProfileSection)
+      continue;
+    if (BitProfileFile)
+      return fail(Err, "MCS251 bitprofile: duplicate profile carrier: " +
+                           BitProfileFile->Path + " and " + F->Path +
+                           "; only one bit-aware CRT may own the window "
+                           "initialization");
+    BitProfileFile = F.get();
+  }
+  if (!BitProfileFile)
+    return true;
+  InputFile &Crt = *BitProfileFile;
+  // The carrier must define the walker entry in executable code of its own:
+  // a profile whose values can never be applied must not link.
+  bool HasWalker = false;
+  for (const InputSymbol &S : Crt.Symbols)
+    if (S.Name == BitInitWalkerName && S.Defined && S.Sec &&
+        S.Sec->IsCode && S.Sec->File == &Crt)
+      HasWalker = true;
+  if (!HasWalker)
+    return fail(Err, "MCS251 bitprofile: the profile carrier " + Crt.Path +
+                         " does not define " + BitInitWalkerName +
+                         " in executable code; the bit table could never be "
+                         "applied (old CRT + new-profile mixes are rejected "
+                         "by this rule)");
+  // The carrier must own the 16-byte physical pool: the profile declares
+  // pool_base/pool_size for exactly this window, and a carrier that reserves
+  // nothing is not the CRT that clears or preserves it.
+  bool OwnsPool = false;
+  for (const auto &S : Crt.Sections)
+    if (S->Region == "BSEG_BYTES" && S->Size == BitByteCount)
+      OwnsPool = true;
+  if (!OwnsPool)
+    return fail(Err, "MCS251 bitprofile: the profile carrier " + Crt.Path +
+                         " does not own the 16-byte BSEG_BYTES pool");
   return true;
 }
 
@@ -2584,7 +2724,75 @@ bool Linker::allocateBitSlots() {
     }
   }
 
-  // 3. Aggregate one v1 XINIT record per byte with a nonzero initial value.
+  // 3. Initialize the owned bits.  Two strategies, mutually exclusive:
+  //
+  //  BT14 bit profile (crt-bit.yaml, BitProfileFile != null): synthesize a
+  //  `.mcs251.bittable` in the BITINIT CODE area with one 3-byte record per
+  //  automatic backing byte -- {addr, and_mask = ~mask, or_value = value &
+  //  mask} -- applied by the CRT's __mcs251_bit_init walker as
+  //  IRAM[addr] = (IRAM[addr] & and_mask) | or_value.  Neighbour bits (mask
+  //  0 in the owned mask) keep their power-on value, a byte with mask 0
+  //  (fixed-only or untouched) gets NO record and is never accessed, and
+  //  zero-valued owned bits are cleared through the mask explicitly -- never
+  //  through a blanket window clear and never through QEMU-default zero RAM.
+  //  A full mask (0xff) makes and_mask 0x00, i.e. the walker writes the
+  //  declared value outright.  No XINIT record is synthesized for a bit byte
+  //  on this path (a whole-byte XINIT payload would clobber the neighbours).
+  //
+  //  S1 (no profile, the pre-BT14 frozen behaviour): the old CRT clears the
+  //  whole [0x20,0x30) window and one v1 XINIT record per byte with a
+  //  nonzero value is synthesized after every input XINIT section.  This
+  //  branch is kept byte-identical for links without the profile.
+  if (BitProfileFile) {
+    if (!BitMask.empty()) {
+      if (!hasAreaStart("BITINIT"))
+        return fail(Err, "MCS251 bit: bit objects under the bit-aware CRT "
+                         "profile require --area-start=BITINIT");
+      uint32_t Start = areaStart("BITINIT", 0);
+      for (InputSection *S : AllSections)
+        if (S->Region == "BITINIT" && S->Size)
+          Start = std::max(Start, S->Address + uint32_t(S->Size));
+      std::vector<uint8_t> Data;
+      for (const auto &P : BitMask) {
+        const uint8_t Mask = P.second;
+        auto V = BitValue.find(P.first);
+        const uint8_t Value = V == BitValue.end() ? 0 : V->second;
+        Data.push_back(static_cast<uint8_t>(P.first));
+        Data.push_back(static_cast<uint8_t>(~Mask));
+        Data.push_back(Value & Mask);
+      }
+      auto S = std::make_unique<InputSection>();
+      S->Name = ".mcs251.bittable";
+      S->Type = ELF::SHT_PROGBITS;
+      S->Flags = ELF::SHF_ALLOC;
+      S->Size = Data.size();
+      S->Align = 1;
+      S->Address = Start;
+      S->Region = "BITINIT";
+      S->IsAlloc = true;
+      S->IsLoadable = true;
+      S->Synthesized = true;
+      S->Data = Data;
+      // The table is a CODE-class ROM object exactly like the synthesized
+      // XINIT records: the always-on 24-bit range bound and the overlap
+      // check apply; the optional board flash gate is not a substitute.
+      if (!reserveCode(S->Address, static_cast<uint32_t>(S->Size), S->Name))
+        return false;
+      for (size_t I = 0; I != Data.size(); ++I) {
+        const uint32_t A = S->Address + static_cast<uint32_t>(I);
+        if (Image.count(A))
+          return fail(Err, "MCS251 bit: synthesized BITINIT byte overlaps "
+                           "CODE at 0x" + Twine::utohexstr(A));
+        Image[A] = Data[I];
+      }
+      AllSections.push_back(S.get());
+      OwnedSynth.push_back(std::move(S));
+    }
+    return true;
+  }
+
+  // S1 path (frozen): aggregate one v1 XINIT record per byte with a nonzero
+  // initial value.
   //    Every such byte is either pool storage (the CRT owns the whole window)
   //    or a byte lld reserved exclusively for bits (this pass rejects any
   //    other kind of collision), so a whole-byte payload cannot clobber an
@@ -3087,13 +3295,34 @@ bool Linker::layoutData() {
   Synth["l_DSEG"] = LowUsed;
   Synth["l_IRAM"] = (Config.IramSize > 0 && Config.IramSize <= 0x100)
                         ? Config.IramSize : 0x100;
-  for (const char *R : {"HOME", "VECS", "BOOT", "CSEG", "XINIT", "XDATA_INIT"}) {
+  for (const char *R : {"HOME", "VECS", "BOOT", "CSEG", "XINIT",
+                        "XDATA_INIT"}) {
     uint32_t Start = areaStart(R, 0), End = Start;
     for (InputSection *S : AllSections)
       if (S->Region == R)
         End = std::max(End, S->Address + static_cast<uint32_t>(S->Size));
     Synth[(Twine("s_") + R).str()] = Start;
     Synth[(Twine("l_") + R).str()] = End - Start;
+  }
+  // BT14 (R1): the BITINIT boundary symbols are synthesized only when the
+  // link actually carries the bit-init machinery: the bit profile is present
+  // (so the bit CRT's s_BITINIT/l_BITINIT references resolve, including the
+  // empty-table link where l_BITINIT = 0), or the build explicitly
+  // configures the area with --area-start=BITINIT.  An old S1 link (no
+  // .mcs251.bitprofile, no BITINIT configuration) has no BITINIT area and no
+  // consumer, so its map, image and --keep-symbols symbol table stay
+  // byte-identical to the pre-BT14 frozen artifacts: the symbols must not be
+  // injected there.  This is the set consulted by errorUndefined(),
+  // applyRelocations(), buildMap() and collectSymbols(); keeping it the
+  // single source of truth keeps all four in agreement.
+  const bool WantBitInit = BitProfileFile != nullptr || hasAreaStart("BITINIT");
+  if (WantBitInit) {
+    uint32_t Start = areaStart("BITINIT", 0), End = Start;
+    for (InputSection *S : AllSections)
+      if (S->Region == "BITINIT")
+        End = std::max(End, S->Address + static_cast<uint32_t>(S->Size));
+    Synth["s_BITINIT"] = Start;
+    Synth["l_BITINIT"] = End - Start;
   }
   for (InputSection *S : AllSections)
     if (S->Region == "OSEG") {
@@ -3343,7 +3572,7 @@ bool Linker::checkFlashGate() {
   auto Hex = [](uint64_t V) { return "0x" + Twine::utohexstr(V); };
   auto IsCodeArea = [](StringRef N) {
     return N == "HOME" || N == "VECS" || N == "BOOT" || N == "CSEG" ||
-           N == "XINIT" || N == "XDATA_INIT";
+           N == "XINIT" || N == "XDATA_INIT" || N == "BITINIT";
   };
   // A configured CODE-class area start must itself sit inside the window,
   // even when the area turns out to hold no bytes at all.
@@ -3756,7 +3985,14 @@ bool Linker::validateXInit() {
     // dropped (the section would sit in ROM unconsumed), and NOBITS must never
     // be trusted as power-on zero: fail closed instead of emitting a bit
     // object whose declared initial value is not realized.
-    if (!BitValue.empty())
+    //
+    // BT14: under the bit profile the values ride the synthesized
+    // .mcs251.bittable applied by the CRT's __mcs251_bit_init walker, whose
+    // presence validateBitProfileSet() already proved; the globals walker is
+    // then not the initializer for bit values (ordinary XINIT records have
+    // none here).  This branch keeps the S1 fail-closed behaviour untouched
+    // for profile-less links.
+    if (!BitValue.empty() && !BitProfileFile)
       return fail(Err, "MCS251 bit: a nonzero bit initial value requires a "
                        "__mcs251_globals_init initializer in the link; none "
                        "is present, so the value could not be applied");
@@ -4445,9 +4681,11 @@ void Linker::buildMap(raw_ostream &Out) const {
           << " value " << Hex2(Value) << " owner "
           << (O == BitByteOrigin.end() ? std::string("?") : O->second)
           << " init "
-          << (BitPoolByte.count(P.first)
-                  ? (Value ? "crt-clear+xinit" : "crt-clear")
-                  : (Value ? "xinit" : "none"))
+          << (BitProfileFile
+                  ? std::string("bit-rmw")
+                  : (BitPoolByte.count(P.first)
+                         ? (Value ? "crt-clear+xinit" : "crt-clear")
+                         : (Value ? "xinit" : "none")))
           << '\n';
     }
     // BT13 auditability: a byte owned ONLY by a fixed reference carries no
@@ -4460,10 +4698,15 @@ void Linker::buildMap(raw_ostream &Out) const {
         continue; // Covered by the automatic row above.
       const bool InPool = BitPoolByte.count(P.first) != 0;
       const bool UserXInit = BitInputXInitDest.count(P.first) != 0;
+      // BT14: under the bit profile a fixed-only byte is never touched by the
+      // CRT (no window clear exists and the byte carries no mask), so it
+      // reports the user's own policy; only the S1 CRT's clear would justify
+      // the crt-clear wording.
       Out << "BITBYTE " << Hex2(P.first) << " mask 0x00 value 0x00 owner "
           << "fixed " << P.second << " init "
-          << (InPool ? (UserXInit ? "crt-clear+user-xinit" : "crt-clear")
-                     : (UserXInit ? "user-xinit" : "none"))
+          << (InPool && !BitProfileFile
+                  ? (UserXInit ? "crt-clear+user-xinit" : "crt-clear")
+                  : (UserXInit ? "user-xinit" : "none"))
           << '\n';
     }
   }
@@ -4581,6 +4824,10 @@ bool Linker::run(LinkerResult &Result) {
   if (!validateSignatureSet())
     return false;
   if (!buildBitIdentities())
+    return false;
+  // BT14: bit-profile set rules run after the symbol table is final (the
+  // carrier check needs the walker definition) and before any layout work.
+  if (!validateBitProfileSet())
     return false;
   if (IrqMode && (!validateISRIdentitiesAndRegistrations() ||
                   !synthesizeIRQVectors()))

@@ -430,8 +430,10 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
         return fail(Err, "invalid --area-start");
       // SPEC §5.1: validate the area name and reject duplicate/conflicting
       // settings.  CODE/XDATA areas use 24-bit addresses, DATA areas 16-bit.
+      // BT14: BITINIT is the CODE area holding the lld-synthesized bit-init
+      // table consumed by the bit-aware CRT's __mcs251_bit_init walker.
       static const char *CodeAreas[] = {"HOME", "VECS", "BOOT", "CSEG",
-                                        "XINIT", "XDATA_INIT"};
+                                        "XINIT", "XDATA_INIT", "BITINIT"};
       static const char *DataAreas[] = {"DSEG", "ISEG"};
       bool IsCode = false, IsData = false, IsDataAbs = false;
       for (const char *A2 : CodeAreas)

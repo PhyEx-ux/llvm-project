@@ -1,0 +1,1014 @@
+#
+# BT14: the bit-aware CRT profile (crt-bit.yaml) - neighbour-preserving bit
+# initialization.
+#
+# Under the profile the CRT carries NO [0x20,0x30) window clear.  lld
+# synthesizes a .mcs251.bittable record {addr, and_mask=~mask,
+# or_value=value&mask} for EVERY backing byte with at least one automatic bit
+# (zero-valued bits included: they are cleared through the mask, never by a
+# blanket clear), and the CRT's __mcs251_bit_init walker applies
+# IRAM[addr] = (IRAM[addr] & and_mask) | or_value: a byte with mask 0 is
+# never accessed, partial masks preserve the neighbours' power-on values, and
+# a full mask writes the declared value outright.  No XINIT record is
+# synthesized for a bit byte on this path.
+#
+# The profile itself is fail-closed: unknown version/size/length/kind/
+# strategy/window/entry/reserved fields are rejected, a profile carrier that
+# is not the CRT (no __mcs251_bit_init in executable code, no 16-byte
+# BSEG_BYTES pool) is rejected - which also rejects the old CRT + new-profile
+# mix - and two carriers are a duplicate-owner error.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-bit.yaml -o crtbit.o
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq.yaml -o crtirq.o
+
+# --- mixed zero/nonzero values, mask boundary: 0xff and 0x01 bytes ---
+# d0..d8 pack byte 0x20 full (mask 0xff, value 0x01: d0=1, d1..d7=0) and
+# byte 0x21 partial (mask 0x01, value 0x01).  Full mask -> and 0x00 (direct
+# value); partial mask -> and 0xfe (bits 1..7 preserved).
+# RUN: yaml2obj bits.yaml -o bits.o
+# RUN: mcs251-lld crtbit.o bits.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=BITINIT=0xff8200 \
+# RUN:   --map=%t/b.map -o %t/b.elf
+# RUN: FileCheck %s --check-prefix=MAP <%t/b.map
+# MAP: BIT d0 = 0x00 byte 0x20 index 0 init 1
+# MAP: BIT d1 = 0x01 byte 0x20 index 1 init 0
+# MAP: BIT d8 = 0x08 byte 0x21 index 0 init 1
+# MAP: BITBYTE 0x20 mask 0xff value 0x01 owner crt-pool .mcs251.BSEG_BYTES init bit-rmw
+# MAP: BITBYTE 0x21 mask 0x01 value 0x01 owner crt-pool .mcs251.BSEG_BYTES init bit-rmw
+# --- the table bytes themselves (2 records, 6 bytes, ascending addresses) ---
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/b.elf 0xff8200 6 | FileCheck %s --check-prefix=REC
+# REC: 20 00 01 21 fe 01
+# RUN: FileCheck %s --check-prefix=SYMS <%t/b.map
+# SYMS-DAG: s_BITINIT = 0xff8200
+# SYMS-DAG: l_BITINIT = 0x0006
+# --- no XINIT record is synthesized for a bit byte under the profile ---
+# RUN: FileCheck %s --check-prefix=NOXINIT <%t/b.map
+# NOXINIT: l_XINIT = 0x0000
+# --- the CRT pool is reserved once, not twice ---
+# RUN: FileCheck %s --check-prefix=ONCE <%t/b.map
+# ONCE: l_BSEG_BYTES = 0x0010
+# ONCE: l_DSEG = 0x0010
+# --- the bit CRT carries no window clear: the first flow instructions after
+# --- the spx load are the bit-init ecall (BOOT+0x1E) and the globals walker
+# --- ecall (BOOT+0x55), never "mov 0x20,#0" (75 20 00)
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/b.elf 0xff050c 8 | FileCheck %s --check-prefix=NOCLEAR
+# NOCLEAR: 9a ff 05 1e 9a ff 05 55
+# NOCLEAR-NOT: 75 20 00
+
+# --- a zero-initialized automatic bit still gets a record (explicit clear
+# --- through the mask; power-on RAM may be polluted, NOBITS is never trusted).
+# --- One auto bit at index 0: mask 0x01 -> and 0xfe, or 0x00: the owned bit
+# --- is cleared, bits 1..7 keep whatever the board had.
+# RUN: yaml2obj zero.yaml -o zero.o
+# RUN: mcs251-lld crtbit.o zero.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=BITINIT=0xff8200 \
+# RUN:   --map=%t/z.map -o %t/z.elf
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/z.elf 0xff8200 3 | FileCheck %s --check-prefix=ZREC
+# ZREC: 20 fe 00
+# RUN: FileCheck %s --check-prefix=ZMAP <%t/z.map
+# ZMAP: BITBYTE 0x20 mask 0x01 value 0x00 owner crt-pool .mcs251.BSEG_BYTES init bit-rmw
+
+# --- a fixed-only byte is never accessed: mask 0 means NO record ---
+# f0 pins byte 0x20 (fixed, exclusive); the automatic bit lands at 0x21.  The
+# table holds exactly one record and the fixed byte's row keeps the user's
+# policy (no crt-clear wording under this CRT).
+# RUN: yaml2obj fixed.yaml -o fixed.o
+# RUN: mcs251-lld crtbit.o fixed.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=BITINIT=0xff8200 \
+# RUN:   --map=%t/f.map -o %t/f.elf
+# RUN: FileCheck %s --check-prefix=FIXED <%t/f.map
+# FIXED: BIT f0 fixed = 0x00 byte 0x20 index 0 init none
+# FIXED: BITBYTE 0x21 mask 0x01 value 0x01 owner crt-pool .mcs251.BSEG_BYTES init bit-rmw
+# FIXED: BITBYTE 0x20 mask 0x00 value 0x00 owner fixed f0 init none
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/f.elf 0xff8200 3 | FileCheck %s --check-prefix=FREC
+# FREC: 21 fe 01
+# RUN: FileCheck %s --check-prefix=FLEN <%t/f.map
+# FLEN: l_BITINIT = 0x0003
+
+# --- the bit CRT links cleanly with no bit objects: empty table, no access ---
+# --- (R1: the profile is present, so s_BITINIT/l_BITINIT still resolve; the
+# --- empty table reports l_BITINIT = 0)
+# RUN: yaml2obj plain.yaml -o plain.o
+# RUN: mcs251-lld crtbit.o plain.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --map=%t/p.map -o %t/p.elf
+# RUN: FileCheck %s --check-prefix=EMPTY <%t/p.map
+# EMPTY: l_BITINIT = 0x0000
+# EMPTY-NOT: BITBYTE
+
+# --- byte-reproducible: the same inputs relink byte-identically ---
+# RUN: mcs251-lld crtbit.o bits.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=BITINIT=0xff8200 \
+# RUN:   --map=%t/b2.map -o %t/b2.elf
+# RUN: cmp %t/b.elf %t/b2.elf && cmp %t/b.map %t/b2.map
+
+# --- an input XINIT record may not initialize an automatic bit byte under
+# --- the profile either (the ownership gate is unconditional)
+# RUN: yaml2obj conflict.yaml -o conflict.o
+# RUN: not mcs251-lld crtbit.o conflict.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=BITINIT=0xff8200 \
+# RUN:   -o %t/c.elf 2>&1 | FileCheck %s --check-prefix=XCONFLICT
+# XCONFLICT: XINIT record in .mcs251.xinit initializes byte 0x20 owned by automatic bit objects
+
+# --- bit objects under the profile require the BITINIT area ---
+# RUN: not mcs251-lld crtbit.o bits.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t/noarea.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=NOAREA
+# NOAREA: bit objects under the bit-aware CRT profile require --area-start=BITINIT
+# RUN: test ! -e %t/noarea.elf
+
+# --- the table obeys the always-on 24-bit CODE range bound ---
+# RUN: not mcs251-lld crtbit.o bits.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=BITINIT=0xffffff \
+# RUN:   -o %t/over.elf 2>&1 | FileCheck %s --check-prefix=OVER
+# OVER: CODE address overflow in .mcs251.bittable
+# RUN: test ! -e %t/over.elf
+
+# --- unknown profile version ---
+# RUN: yaml2obj bad-version.yaml -o bv.o
+# RUN: not mcs251-lld bv.o --area-start=CSEG=0xff0200 -o %t/bv.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BADVER
+# BADVER: bitprofile: unsupported protocol version
+
+# --- bad record_size field ---
+# RUN: yaml2obj bad-size.yaml -o bs.o
+# RUN: not mcs251-lld bs.o --area-start=CSEG=0xff0200 -o %t/bs.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BADSIZE
+# BADSIZE: bitprofile: unsupported record size
+
+# --- unknown profile kind ---
+# RUN: yaml2obj bad-kind.yaml -o bk.o
+# RUN: not mcs251-lld bk.o --area-start=CSEG=0xff0200 -o %t/bk.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BADKIND
+# BADKIND: bitprofile: unknown profile kind
+
+# --- unknown init strategy ---
+# RUN: yaml2obj bad-strategy.yaml -o bst.o
+# RUN: not mcs251-lld bst.o --area-start=CSEG=0xff0200 -o %t/bst.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BADSTRAT
+# BADSTRAT: bitprofile: unsupported init strategy
+
+# --- window fields that do not match the 0x20..0x2f pool ---
+# pool_base, pool_size and window_bits are one frozen triple; each field is
+# checked on its own (base 0x21, size 8, window 0x40) and all three land on
+# the same window-mismatch rejection.
+# RUN: yaml2obj bad-window.yaml -o bw.o
+# RUN: not mcs251-lld bw.o --area-start=CSEG=0xff0200 -o %t/bw.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BADWIN
+# BADWIN: bitprofile: profile window does not match the 0x20..0x2f bit pool
+# RUN: yaml2obj bad-poolsize.yaml -o bps.o
+# RUN: not mcs251-lld bps.o --area-start=CSEG=0xff0200 -o %t/bps.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BADWIN
+# RUN: yaml2obj bad-windowbits.yaml -o bwb.o
+# RUN: not mcs251-lld bwb.o --area-start=CSEG=0xff0200 -o %t/bwb.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BADWIN
+
+# --- unknown walker entry kind (entry_kind 2: not the frozen symbol entry) ---
+# RUN: yaml2obj bad-entry.yaml -o be.o
+# RUN: not mcs251-lld be.o --area-start=CSEG=0xff0200 -o %t/be.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BADENTRY
+# BADENTRY: bitprofile: unsupported entry kind
+
+# --- nonzero reserved field ---
+# RUN: yaml2obj bad-reserved.yaml -o br.o
+# RUN: not mcs251-lld br.o --area-start=CSEG=0xff0200 -o %t/br.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BADRES
+# BADRES: bitprofile: reserved fields must be zero
+
+# --- wrong section length (8 bytes): not the frozen 16-byte record ---
+# RUN: yaml2obj bad-length.yaml -o bl.o
+# RUN: not mcs251-lld bl.o --area-start=CSEG=0xff0200 -o %t/bl.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BADLEN
+# BADLEN: malformed .mcs251.bitprofile: expected a non-ALLOC 16-byte PROGBITS record with align 4
+
+# --- a profile carrier that is not the CRT: no __mcs251_bit_init anywhere ---
+# RUN: yaml2obj notcrt.yaml -o nc.o
+# RUN: not mcs251-lld nc.o --area-start=CSEG=0xff0200 -o %t/nc.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=NOTCRT
+# NOTCRT: the profile carrier nc.o does not define __mcs251_bit_init in executable code
+
+# --- old CRT + new-profile mix (design L13): the carrier defines the walker
+# --- in executable code but owns no BSEG_BYTES pool, so it is not the CRT.
+# --- Linked with the legacy IRQ CRT it must be rejected, never silently
+# --- treated as extra initialization next to the old clear.
+# RUN: yaml2obj walker-nopool.yaml -o wn.o
+# RUN: not mcs251-lld crtirq.o wn.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t/mix.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=MIX
+# MIX: the profile carrier wn.o does not own the 16-byte BSEG_BYTES pool
+# RUN: test ! -e %t/mix.elf
+
+# --- duplicate owner: two profile carriers in one link ---
+# (The second carrier deliberately defines no walker symbol: resolveSymbols
+# would otherwise reject the duplicated __mcs251_bit_init definition first,
+# which is also a rejection but not the one under test here.)
+# RUN: not mcs251-lld crtbit.o nc.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=BITINIT=0xff8200 \
+# RUN:   -o %t/dup.elf 2>&1 | FileCheck %s --check-prefix=DUP
+# DUP: duplicate profile carrier
+# RUN: test ! -e %t/dup.elf
+
+# --- S1 links (legacy CRT, no profile, no BITINIT configuration) keep the
+# --- pre-BT14 artifacts byte-identical: the identical bits object under
+# --- crt-irq still reports crt-clear+xinit, no bit-rmw wording, and NO
+# --- BITINIT boundary symbol may appear ANYWHERE in the map or in the
+# --- --keep-symbols ELF (R1: an S1 link carries no bit-init machinery, so
+# --- s_BITINIT/l_BITINIT must not be synthesized; the pre-fix S1-NOT was
+# --- anchored after the positive match, which the alphabetically earlier
+# --- Synth symbols never reach).  The implicit exclusions cover the input
+# --- before the first match, between matches, and after the last one.
+# RUN: mcs251-lld crtirq.o bits.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --map=%t/s1.map -o %t/s1.elf
+# RUN: FileCheck %s --check-prefix=S1 --implicit-check-not=BITINIT \
+# RUN:   --implicit-check-not=bit-rmw <%t/s1.map
+# S1: BITBYTE 0x20 mask 0xff value 0x01 owner crt-pool .mcs251.BSEG_BYTES init crt-clear+xinit
+# S1: BITBYTE 0x21 mask 0x01 value 0x01 owner crt-pool .mcs251.BSEG_BYTES init crt-clear+xinit
+
+# --- the same S1 link with --keep-symbols: the absence holds in the map and
+# --- in the final ELF symbol table (no l_BITINIT/s_BITINIT rows).
+# RUN: mcs251-lld crtirq.o bits.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --keep-symbols \
+# RUN:   --map=%t/s1ks.map -o %t/s1ks.elf
+# RUN: FileCheck %s --check-prefix=S1KS --implicit-check-not=BITINIT \
+# RUN:   --implicit-check-not=bit-rmw <%t/s1ks.map
+# S1KS: BITBYTE 0x20 mask 0xff value 0x01 owner crt-pool .mcs251.BSEG_BYTES init crt-clear+xinit
+# RUN: llvm-readobj --symbols %t/s1ks.elf | FileCheck %s \
+# RUN:   --check-prefix=S1KSELF --implicit-check-not=l_BITINIT \
+# RUN:   --implicit-check-not=s_BITINIT
+# S1KSELF: Name: __mcs251_stack_base
+
+#--- bits.yaml
+# Nine automatic objects d0..d8: byte 0x20 full mask (d0 init 1, d1..d7 init
+# 0), byte 0x21 partial mask 0x01 (d8 init 1).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '010101010000000001010001000000000101000100000000010100010000000001010001000000000101000100000000010100010000000001010001000000000101010100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: d0
+        Addend: 0
+      - Offset: 0xc
+        Type: 10
+        Symbol: d1
+        Addend: 0
+      - Offset: 0x14
+        Type: 10
+        Symbol: d2
+        Addend: 0
+      - Offset: 0x1c
+        Type: 10
+        Symbol: d3
+        Addend: 0
+      - Offset: 0x24
+        Type: 10
+        Symbol: d4
+        Addend: 0
+      - Offset: 0x2c
+        Type: 10
+        Symbol: d5
+        Addend: 0
+      - Offset: 0x34
+        Type: 10
+        Symbol: d6
+        Addend: 0
+      - Offset: 0x3c
+        Type: 10
+        Symbol: d7
+        Addend: 0
+      - Offset: 0x44
+        Type: 10
+        Symbol: d8
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: d0
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: d0
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: d1
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x8
+    Size: 1
+  - Name: d2
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x10
+    Size: 1
+  - Name: d3
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x18
+    Size: 1
+  - Name: d4
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x20
+    Size: 1
+  - Name: d5
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x28
+    Size: 1
+  - Name: d6
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x30
+    Size: 1
+  - Name: d7
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x38
+    Size: 1
+  - Name: d8
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x40
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- zero.yaml
+# One automatic bit z with declared init 0: the record {0x20, 0xfe, 0x00}
+# clears the bit through the mask (and_mask = ~mask) even when power-on RAM
+# holds 0xA5.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: z
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: z
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- fixed.yaml
+# A fixed reference pins byte 0x20 exclusively (SHN_ABS bit address 0); the
+# automatic bit lands at 0x21.  The fixed byte has mask 0: no record, no
+# access, its power-on value survives the CRT.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '01020001000000000101010100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: f0
+        Addend: 0
+      - Offset: 0xC
+        Type: 10
+        Symbol: auto
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: f0
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Value: 0
+    Index: SHN_ABS
+  - Name: auto
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x8
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- plain.yaml
+# No bit objects at all: the link must succeed with an empty table.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- conflict.yaml
+# An input XINIT record writing the automatic byte 0x20 stays a hard conflict
+# under the profile (ownership is unconditional).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200'
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '002000010001FF'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: z
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: z
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- bad-version.yaml
+# protocol_version = 2: unknown, fail closed.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00020010010100200010008000010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- bad-size.yaml
+# record_size field says 8 (the section is still 16 bytes).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010008010100200010008000010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- bad-kind.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010010020100200010008000010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- bad-strategy.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010010010200200010008000010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- bad-window.yaml
+# pool_base 0x0021: does not match the frozen 0x20..0x2f pool.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010010010100210010008000010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- bad-poolsize.yaml
+# pool_size 0x0008: the profile must declare exactly the 16-byte pool.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010010010100200008008000010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- bad-windowbits.yaml
+# window_bits 0x0040: must be the frozen 128-bit window.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010010010100200010004000010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- bad-entry.yaml
+# entry_kind 0x0002: only the frozen walker-symbol entry (0x0001) exists.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010010010100200010008000020000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- bad-reserved.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010010010100200010008000010001'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- bad-length.yaml
+# 8-byte section: not the frozen 16-byte record.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0001001001010020'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- notcrt.yaml
+# A valid profile in an ordinary TU: no __mcs251_bit_init anywhere, so the
+# values could never be applied.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010010010100200010008000010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
+
+#--- walker-nopool.yaml
+# A valid profile plus an executable __mcs251_bit_init definition, but no
+# BSEG_BYTES pool: not the CRT.  With crt-irq (the L13 old-CRT mix) and with
+# crt-bit (duplicate carrier) both links must fail.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'AA'
+  - Name: .mcs251.bitprofile
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '00010010010100200010008000010000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: __mcs251_bit_init
+    Type: STT_NOTYPE
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0
+    Size: 0
