@@ -1538,6 +1538,38 @@ public:
     emitASxxxxText("\t.area CSEG (CODE)");
   }
 
+  // P09 textdecode fix (direction (a), producer-side section split): the
+  // read-only byte image section.  A module that carries persistent bit
+  // objects will hold R_MCS251_BITADDR8 fields in its .text, and the linker
+  // answers that by decoding the *whole* .text as an instruction stream
+  // (BT13/BT15, BIT-OBJECT-CONTRACT.md 4.2: once on the producer's original
+  // bytes and once on the final post-relocation image).  RO constants and
+  // __code images appended to .text are data, not instructions, so such a
+  // module would be rejected as "not a decodable instruction stream".  The
+  // invariant the fix restores is producer-side: for a bit module, read-only
+  // byte images go to the canonical ELF .rodata section (SHT_PROGBITS +
+  // SHF_ALLOC, align 1), which lld classifies into the SAME CSEG region,
+  // area cursor, flash gate and s_CSEG/l_CSEG boundaries as .text --
+  // CODE-space semantics, the addressing channels (HI8/MID8/LO8 and
+  // R_MCS251_24 keep plain range checks for CSEG targets) and the G13a
+  // CODE-window budget are unchanged.
+  //
+  // Scope is deliberately the module-level bit-object property, not "a
+  // BITADDR8 fixup was actually emitted": every producer of R_MCS251_BITADDR8
+  // lowers a GlobalVariable carrying the mcs251-bit-object attribute
+  // (MCS251MCInstLower::LowerSymbolOperand), so ModuleHasBitObjects is the
+  // exact superset of modules whose .text can be whole-stream decoded, it is
+  // already final when globals are emitted (globals go through
+  // doFinalization, after every function body), and keying on the wider
+  // property can never leave a bit module's constants inside the decoded
+  // stream.  REL and assembly-text output keep the historical single-CSEG
+  // layout byte for byte (the bit-object protocol is ELF-object-only).
+  MCSection *selectROImageSection() {
+    if (ModuleHasBitObjects && usesELFObjects())
+      return OutContext.getObjectFileInfo()->getReadOnlySection();
+    return OutContext.getObjectFileInfo()->getTextSection();
+  }
+
   void emitInstruction(const MachineInstr *MI) override {
     // Merely taking a function's address must not create undefined references
     // to its parameter slots. Declare only slots actually referenced by code.
@@ -2219,7 +2251,9 @@ public:
       Reject();
 
     // Read-only globals and string literals stay in the established CSEG path.
-    OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
+    // A bit module splits them into .rodata (selectROImageSection) so its
+    // .text remains a pure, link-decodable instruction stream.
+    OutStreamer->switchSection(selectROImageSection());
     emitLinkage(GV, Sym);
     OutStreamer->emitLabel(Sym);
     emitROInitializer(DL, Init);
@@ -2334,7 +2368,10 @@ public:
       Bad("unsupported initializer (i8/i16/i32 scalars, nonempty arrays of "
           "integers, nonempty non-opaque structs of those at any nesting, "
           "&global pointer leaves, or the ROM zero image)");
-    OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
+    // AS4 keeps CODE-space semantics under the bit-module split as well:
+    // .rodata is the same CSEG region to the linker, so a __code image only
+    // leaves the *executable* section, never CODE space.
+    OutStreamer->switchSection(selectROImageSection());
     emitLinkage(GV, Sym);
     OutStreamer->emitLabel(Sym);
     emitROInitializer(DL, Init);

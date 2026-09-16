@@ -1,0 +1,304 @@
+#
+# P09 textdecode fix (producer-side RO split): the linker-side contract of the
+# fix.  lld's BT13/BT15 bit validation decodes the WHOLE .text of any section
+# that carries R_MCS251_BITADDR8, both before and after relocation.  The
+# producer (MCS251AsmPrinter selectROImageSection) therefore moves the read-only
+# byte images of a bit module into .rodata, which lld places in the same CSEG
+# region.  These cases pin all three sides of that contract:
+#
+#   positive: .text (pure bit-instruction stream) + .rodata (string bytes,
+#             referenced through the HI8/MID8/LO8 trio) links; the map places
+#             .rodata in CSEG right after .text; the string bytes reach the
+#             final image unchanged; the BITADDR8 fields get the bit slots.
+#   negative: the identical failure shapes stay rejected fail-closed --
+#             (a) the old producer shape (string bytes inside .text),
+#             (b) a genuinely bad opcode inside a BITADDR8 .text,
+#             (c) a truncated trailing bit instruction.
+#             Nothing about the linker protocol was relaxed; the fix is
+#             producer-side only.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+
+# --- positive: split layout links, bytes and bit slots verified ---
+# RUN: yaml2obj ro-split.yaml -o ro.o
+# RUN: mcs251-lld ro.o --area-start=CSEG=0xff0200 --map=%t/ro.map -o %t/ro.elf
+# RUN: FileCheck %s --check-prefix=MAP <%t/ro.map
+# MAP: l_CSEG = 0x0019
+# MAP: ro.o:.text 0xff0200 +0xc
+# MAP: ro.o:.rodata 0xff020c +0xd
+# MAP: BIT f = 0x00 byte 0x20 index 0
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/ro.elf 0xff0200 12 | FileCheck %s --check-prefix=TEXT
+# TEXT: a2 00 92 00 d2 00 74 0c 74 02 74 ff
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/ro.elf 0xff020c 13 | FileCheck %s --check-prefix=STR
+# STR: 4b 65 79 43 6f 64 65 3d 25 64 0d 0a 00
+
+# --- negative (a): the old producer shape -- string bytes inside .text ---
+# 'A2 00' then "KeyCode=%d\r\n\0": 0x4b ('K') at offset 0x2 is not an opcode.
+# RUN: yaml2obj str-in-text.yaml -o sit.o
+# RUN: not mcs251-lld sit.o --area-start=CSEG=0xff0200 -o %t/sit.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=SIT
+# RUN: test ! -e %t/sit.elf
+# SIT: MCS251 bit: .text is not a decodable instruction stream at offset 0x2
+
+# --- negative (b): a genuinely bad opcode inside a BITADDR8 .text ---
+# RUN: yaml2obj bad-opcode.yaml -o bo.o
+# RUN: not mcs251-lld bo.o --area-start=CSEG=0xff0200 -o %t/bo.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BO
+# RUN: test ! -e %t/bo.elf
+# BO: MCS251 bit: .text is not a decodable instruction stream at offset 0x4
+
+# --- negative (c): truncated trailing bit instruction (jb without rel8) ---
+# RUN: yaml2obj truncated.yaml -o tr.o
+# RUN: not mcs251-lld tr.o --area-start=CSEG=0xff0200 -o %t/tr.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=TR
+# RUN: test ! -e %t/tr.elf
+# TR: MCS251 bit: .text ends in a truncated instruction at offset 0x4
+
+#--- ro-split.yaml
+# The post-fix producer shape of a bit module that also holds string
+# constants: a pure instruction .text carrying three BITADDR8 fields plus a
+# HI8/MID8/LO8 address trio for the string, and the string itself in .rodata.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'A2009200D200740074007400'
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '4B6579436F64653D25640D0A00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: f
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: f
+        Addend: 0
+      - Offset: 0x3
+        Type: 11
+        Symbol: f
+        Addend: 0
+      - Offset: 0x5
+        Type: 11
+        Symbol: f
+        Addend: 0
+      - Offset: 0x7
+        Type: 3
+        Symbol: str
+        Addend: 0
+      - Offset: 0x9
+        Type: 4
+        Symbol: str
+        Addend: 0
+      - Offset: 0xB
+        Type: 5
+        Symbol: str
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: f
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: str
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .rodata
+    Value: 0x0
+    Size: 13
+
+#--- str-in-text.yaml
+# The pre-fix producer shape (what demo32/demo39 produced before the split):
+# the string constant lives in .text, so the whole-stream decode hits 'K'.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'A2004B6579436F64653D25640D0A00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: f
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: f
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: f
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- bad-opcode.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'A2009200FF00'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: f
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: f
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: f
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- truncated.yaml
+# '20 00' is a jb whose rel8 byte is missing: the stream ends mid-instruction.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'A20092002000'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: f
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: f
+        Addend: 0
+      - Offset: 0x5
+        Type: 11
+        Symbol: f
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: f
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
