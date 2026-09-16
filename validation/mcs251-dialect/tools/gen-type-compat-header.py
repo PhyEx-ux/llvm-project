@@ -24,11 +24,15 @@ IntWidth=LongWidth=32, MCS251.h).  ``WORD``/``INT`` therefore map to
 ``unsigned short``/``signed short`` to preserve the official 16-bit
 width; ``DWORD``/``LONG`` stay 32-bit.
 
-BOOL ruling: ``typedef bit BOOL`` maps to the ``bit`` dialect type, whose
-object code generation is a follow-up slice (BT06 P09, see
-mcs251_bit_compat.h approval boundaries).  The name is therefore
-REJECTED with a precise error naming the substitute (``_Bool`` /
-``unsigned char``), not silently mapped to a widening emulation.
+BOOL ruling (P09 design 6.5.6 flip, 2026-09-16): ``typedef bit BOOL`` maps
+to the ``bit`` dialect type.  The name was REJECTED with a precise error
+while the bit-object support chain was not landed; the flip condition
+reserved by the design ("the actual support chain passes") is now met
+(P09 identity-fix instance 1: the ISR x bit keepalive gate in the A4 v2
+capability scan classifies members by category, so a mixed
+``llvm.used`` compiles; see llvm/test/CodeGen/MCS251/isr-bit-keepalive.ll).
+BOOL is therefore mapped to the real ``bit`` type, never to a widening
+emulation.
 
 The stdint-shaped names (uint8_t & co.) are owned by C99 <stdint.h>:
 using them is legal after ``#include <stdint.h>``, but this header never
@@ -65,15 +69,17 @@ DEFINE_RE = re.compile(
 # here exactly once or the generator exits).  Keil source type -> our type.
 # ---------------------------------------------------------------------------
 
-REJECT_MSG_BOOL = (
-    "MCS251: BOOL maps to the Keil 'bit' type; bit-object code generation "
-    "is a follow-up slice (BT06 P09) -- use _Bool or unsigned char and "
-    "revisit after bit objects land")
+# P09 6.5.6 flip 2026-09-16: BOOL left the rejected bucket (see the
+# docstring); the former precise-error message retired with it.
 
 DISPOSITIONS = {
     # --- typedefs -----------------------------------------------------------
     # name: (kind, disposition, payload, reason)
-    "BOOL": ("typedef", "rejected", None, REJECT_MSG_BOOL),
+    # P09 6.5.6 flip 2026-09-16: BOOL rejected -> mapped to the real `bit`
+    # dialect type (the bit-object support chain passed; see the docstring).
+    "BOOL": ("typedef", "mapped", "bit",
+             "official `bit`; P09 6.5.6 flip 2026-09-16 (support chain "
+             "passed, identity gate fixed)"),
     "BYTE": ("typedef", "mapped", "unsigned char", "official unsigned char"),
     "WORD": ("typedef", "mapped", "unsigned short",
              "Keil C251 int is 16-bit, this target's int is 32-bit; "
@@ -302,11 +308,13 @@ HEADER_TOP = """\
 // Scope (XDATA-CODE-SLICE-TASK.md X4: "BT06 compat header extension, only
 // what the non-USB demos need").  Every DEF.H name is exactly one of:
 //   mapped    - emitted below (widths preserved: WORD/INT map to short,
-//               Keil C251 int is 16-bit, this target's int is 32-bit);
+//               Keil C251 int is 16-bit, this target's int is 32-bit;
+//               BOOL maps to the real `bit` type -- P09 design 6.5.6 flip
+//               2026-09-16, the bit-object support chain passed);
 //   external  - owned by a standard header (the stdint-shaped names);
 //               never emitted here, include <stdint.h> for them;
-//   rejected  - a precise compile-time error (BOOL: the Keil 'bit' type,
-//               whose object code generation is a BT06 P09 follow-up).
+//   rejected  - a precise compile-time error (none in the table today;
+//               the former BOOL freeze was lifted by the P09 flip).
 //
 // This header does NOT define the bare `bit`/`sbit` keywords (frontend,
 // -fmcs251-keil), does NOT emit SFR names (use the sfr-convert generated

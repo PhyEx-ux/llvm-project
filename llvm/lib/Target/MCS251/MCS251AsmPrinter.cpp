@@ -445,15 +445,18 @@ class MCS251AsmPrinter final : public AsmPrinter {
     return true;
   }
 
-  // \return the program-address-space function a verified keepalive member
-  // keeps alive: the function reference itself (the "AS4 direct" form) or a
-  // chain of single-operand no-op pointer casts (bitcast/addrspacecast, the
-  // standard address-space adaptation of a used member) ending at one.
-  // Anything else in a member position is not a verified keepalive item.
-  static const Function *getKeepaliveFunction(const Constant *C) {
+  // \return the terminal GlobalValue of a verified keepalive member: the
+  // global reference itself (the "AS4 direct" form) or a chain of
+  // single-operand no-op pointer casts (bitcast/addrspacecast, the standard
+  // address-space adaptation of a used member) ending at one.  Anything else
+  // in a member position is not a verified keepalive item.  The CALLER
+  // classifies the terminal (P09 identity fix: the ISR-function rule and the
+  // BT12 bit-object rule are two registered member kinds of the same frozen
+  // member shape).
+  static const GlobalValue *getKeepaliveTerminal(const Constant *C) {
     while (true) {
-      if (const auto *F = dyn_cast<Function>(C))
-        return F;
+      if (isa<Function>(C) || isa<GlobalVariable>(C))
+        return cast<GlobalValue>(C);
       const auto *CE = dyn_cast<ConstantExpr>(C);
       if (!CE || CE->getNumOperands() != 1)
         return nullptr;
@@ -608,14 +611,39 @@ class MCS251AsmPrinter final : public AsmPrinter {
       // rejected there. The container is never skipped by name or section
       // without this verification, and members that are not exactly
       // verified keepalive items (ordinary AS4 data or function pointers,
-      // malformed chains) keep the original rejection.
+      // malformed chains) keep the original rejection.  P09 identity fix:
+      // the per-member check itself is a CATEGORY classification -- a
+      // program-AS function (ISR keepalive) or a marked bit-object
+      // placeholder (BT12 bit-record keepalive) is a registered member
+      // kind; see the branch below.
       if (ModuleHasISRDefinitions && isMCS251KeepaliveRoot(GV)) {
+        // P09 identity fix (ISR x bit gate): classify each member by its
+        // terminal instead of demanding that every member be a program-AS
+        // function.  Two REGISTERED member kinds may share the llvm.used
+        // root of an ISR module: (i) the program-address-space function
+        // (the A2.2 ISR keepalive) and (ii) the marked bit-object
+        // placeholder (the BT12 bit-record keepalive) -- clang emits exactly
+        // this mixed container for the "ISR sets a persistent bit flag,
+        // main loop polls it" idiom, and each capability is independently
+        // registered in the A4 v2 identity, so their coexistence in one
+        // container is not an unregistered capability.  The member SHAPE
+        // rules are unchanged (fail-closed): any other terminal -- AS4/AS3
+        // data, an unmarked ordinary global, a malformed cast chain --
+        // keeps the original rejection, exactly like the all-function rule
+        // before it.
         const auto *ArrTy = cast<ArrayType>(GV.getInitializer()->getType());
         for (unsigned I = 0, E = ArrTy->getNumElements(); I != E; ++I) {
           const Constant *Member = GV.getInitializer()->getAggregateElement(I);
-          const Function *Kept = Member ? getKeepaliveFunction(Member) : nullptr;
-          if (!Kept || Kept->getAddressSpace() !=
-                           M.getDataLayout().getProgramAddressSpace())
+          const GlobalValue *Terminal =
+              Member ? getKeepaliveTerminal(Member) : nullptr;
+          if (const auto *Kept = dyn_cast_or_null<Function>(Terminal)) {
+            if (Kept->getAddressSpace() !=
+                M.getDataLayout().getProgramAddressSpace())
+              return false;
+            continue;
+          }
+          const auto *BitGV = dyn_cast_or_null<GlobalVariable>(Terminal);
+          if (!BitGV || !MCS251::isBitObjectGlobal(*BitGV))
             return false;
         }
         continue;

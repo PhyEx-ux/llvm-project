@@ -22,11 +22,13 @@
 // Scope (XDATA-CODE-SLICE-TASK.md X4: "BT06 compat header extension, only
 // what the non-USB demos need").  Every DEF.H name is exactly one of:
 //   mapped    - emitted below (widths preserved: WORD/INT map to short,
-//               Keil C251 int is 16-bit, this target's int is 32-bit);
+//               Keil C251 int is 16-bit, this target's int is 32-bit;
+//               BOOL maps to the real `bit` type -- P09 design 6.5.6 flip
+//               2026-09-16, the bit-object support chain passed);
 //   external  - owned by a standard header (the stdint-shaped names);
 //               never emitted here, include <stdint.h> for them;
-//   rejected  - a precise compile-time error (BOOL: the Keil 'bit' type,
-//               whose object code generation is a BT06 P09 follow-up).
+//   rejected  - a precise compile-time error (none in the table today;
+//               the former BOOL freeze was lifted by the P09 flip).
 //
 // This header does NOT define the bare `bit`/`sbit` keywords (frontend,
 // -fmcs251-keil), does NOT emit SFR names (use the sfr-convert generated
@@ -39,9 +41,10 @@
 #define __MCS251_TYPE_COMPAT_H__
 
 //===----------------------------------------------------------------------===//
-// Mapped types (18): widths preserved against Keil C251.
+// Mapped types (19): widths preserved against Keil C251.
 //===----------------------------------------------------------------------===//
 
+typedef bit BOOL;  // DEF.H line 6: official `bit`; P09 6.5.6 flip 2026-09-16 (support chain passed, identity gate fixed)
 typedef unsigned char BYTE;  // DEF.H line 8: official unsigned char
 typedef unsigned short WORD;  // DEF.H line 9: Keil C251 int is 16-bit, this target's int is 32-bit; unsigned short preserves the 16-bit width
 typedef unsigned long DWORD;  // DEF.H line 10: 32-bit in both worlds
@@ -62,11 +65,9 @@ typedef signed short s16;  // DEF.H line 37: 16-bit width preserved (see INT)
 typedef signed long s32;  // DEF.H line 38: official exact
 
 //===----------------------------------------------------------------------===//
-// Rejected (1): precise errors, never silent emulations.
+// Rejected (0): precise errors, never silent emulations.
 //===----------------------------------------------------------------------===//
 
-#define BOOL \
-    _Pragma("GCC error \"MCS251: BOOL maps to the Keil 'bit' type; bit-object code generation is a follow-up slice (BT06 P09) -- use _Bool or unsigned char and revisit after bit objects land\"") BOOL_rejected_marker
 
 //===----------------------------------------------------------------------===//
 // External ownership (6): C99 <stdint.h> provides these;

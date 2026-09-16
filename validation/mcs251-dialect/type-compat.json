@@ -7,9 +7,9 @@
       "kind": "typedef",
       "line": 6,
       "official": "bit",
-      "disposition": "rejected",
-      "expansion": null,
-      "reason": "MCS251: BOOL maps to the Keil 'bit' type; bit-object code generation is a follow-up slice (BT06 P09) -- use _Bool or unsigned char and revisit after bit objects land"
+      "disposition": "mapped",
+      "expansion": "bit",
+      "reason": "official `bit`; P09 6.5.6 flip 2026-09-16 (support chain passed, identity gate fixed)"
     },
     {
       "name": "BYTE",

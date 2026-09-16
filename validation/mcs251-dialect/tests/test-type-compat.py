@@ -90,12 +90,13 @@ def main() -> int:
                   and e["disposition"] == "mapped"]
     external = [e for e in entries if e["disposition"] == "external"]
     rejected = [e for e in entries if e["disposition"] == "rejected"]
-    check(len(mapped_td) == 18, "%d mapped typedefs, expected 18"
+    check(len(mapped_td) == 19, "%d mapped typedefs, expected 19"
           % len(mapped_td))
     check(len(mapped_mac) == 50, "%d mapped macros, expected 50"
           % len(mapped_mac))
     check(len(external) == 6, "%d external names, expected 6" % len(external))
-    check(len(rejected) == 1, "%d rejected names, expected 1" % len(rejected))
+    check(len(rejected) == 0, "%d rejected names, expected 0"
+          % len(rejected))
     check(data["sha256"] == gen.DEF_H_SHA256,
           "ledger sha256 does not match the frozen pin")
     for e in entries:
@@ -103,16 +104,18 @@ def main() -> int:
               "entry %s has a fourth-bucket disposition %r"
               % (e["name"], e["disposition"]))
         check(e["line"] > 0, "entry %s has no DEF.H line number" % e["name"])
-    print("ledger shape: 75 = 18 mapped typedefs + 50 mapped macros + "
-          "6 external + 1 rejected")
+    print("ledger shape: 75 = 19 mapped typedefs + 50 mapped macros + "
+          "6 external + 0 rejected")
 
     # ------------------------------------------------------------------
     # 2. Width ruling: the six 16-bit-width names map to short, everything
     #    mapped maps to the exact official type (or the recorded width
-    #    deviation).  Independently restated here, not copied from the
-    #    generator: Keil C251 int=16 vs this target int=32.
+    #    deviation); BOOL maps to the real `bit` type since the P09 6.5.6
+    #    flip (2026-09-16).  Independently restated here, not copied from
+    #    the generator: Keil C251 int=16 vs this target int=32.
     # ------------------------------------------------------------------
     EXPECT_TYPES = {
+        "BOOL": "bit",
         "BYTE": "unsigned char", "WORD": "unsigned short",
         "DWORD": "unsigned long", "CHAR": "signed char",
         "INT": "signed short", "LONG": "signed long",
@@ -141,8 +144,9 @@ def main() -> int:
             check(norm(official) == norm(ours),
                   "%s must map to the official type %s (got %s)"
                   % (name, official, ours))
-    print("type mapping: 18 names exact, 6 deliberate 16-bit width "
-          "deviations recorded with reasons")
+    print("type mapping: 19 names checked; 6 deliberate 16-bit width "
+          "deviations recorded with reasons, BOOL exact to the official "
+          "`bit`")
 
     # ------------------------------------------------------------------
     # 3. Mapped macro fidelity: entries whose reason says "official
@@ -162,12 +166,16 @@ def main() -> int:
           "official DEF.H after whitespace normalization")
 
     # ------------------------------------------------------------------
-    # 4. Rejected and external behavior in the header text.
+    # 4. Header text: BOOL maps to a real `bit` typedef (P09 6.5.6 flip
+    #    2026-09-16) and the retired reject macro stays retired; external
+    #    stdint names are documented, never emitted.
     # ------------------------------------------------------------------
     header = HEADER_PATH.read_text(encoding="utf-8")
-    check("#define BOOL" in header and "GCC error" in header
-          and "_Bool or unsigned char" in header,
-          "BOOL must carry the precise reject pragma")
+    check("typedef bit BOOL;" in header,
+          "BOOL must be emitted as a real `typedef bit BOOL;`")
+    check("#define BOOL" not in header and "GCC error" not in header,
+          "BOOL must not carry the retired precise-reject macro "
+          "(the P09 flip mapped it to the real `bit` type)")
     check("typedef" not in header.split("Rejected")[1].split("External")[0],
           "the rejected section must not contain a typedef mapping")
     for name in ("uint8_t", "uint16_t", "uint32_t",
@@ -177,8 +185,8 @@ def main() -> int:
               "external name %s must never be emitted" % name)
         check("// %s:" % name in header,
               "external name %s must be documented as a comment" % name)
-    print("rejected/external: BOOL precise error, stdint names documented "
-          "and never emitted")
+    print("header text: BOOL is a real `bit` typedef, reject macro retired, "
+          "stdint names documented and never emitted")
 
     # ------------------------------------------------------------------
     # 5. --check-header accepts the in-tree header and rejects crafted bad
@@ -189,11 +197,19 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        # 5a. silent downgrade of BOOL to unsigned char
+        # 5a. silent downgrade of BOOL back to a silent unsigned char
+        #     emulation (undoing the P09 6.5.6 flip).  The mutation must
+        #     actually change the input: the historical mutation anchored
+        #     on the retired `#define BOOL` reject macro stopped matching
+        #     after the flip and silently mutated nothing, so this now
+        #     anchors on the live typedef text and asserts a real byte
+        #     change before expecting --check-header to reject it.
         bad1 = header.replace(
-            '#define BOOL \\\n    _Pragma("GCC error \\"MCS251: BOOL maps',
-            'typedef unsigned char BOOL; /*downgraded*/ #define __x \\\n'
-            '    _Pragma("GCC error \\"MCS251: BOOL maps')
+            "typedef bit BOOL;",
+            "typedef unsigned char BOOL;", 1)
+        check(bad1 != header,
+              "BOOL-downgrade mutation must actually change the header "
+              "text (anchor `typedef bit BOOL;` not found)")
         bad1p = tdp / "bad1.h"
         bad1p.write_text(bad1, encoding="utf-8")
         check(run_generator(["--check-header", str(bad1p)],
@@ -276,12 +292,23 @@ def main() -> int:
         print("clang behaviour: header compiles, WORD/DWORD widths and "
               "MAKEWORD/MAKELONG values verified at IR level")
 
-        # 6b. BOOL is rejected with the precise message.
+        # 6b. BOOL maps to the real `bit` type and compiles; the IR must
+        #     carry the bit-object markers, not a widened scalar emulation.
+        #     (P09 6.5.6 flip 2026-09-16: before the flip this check
+        #     required the precise reject message.)
         p = comp('#include "mcs251_type_compat.h"\nBOOL flag;\n', "bool")
-        check(p.returncode != 0
-              and "BOOL maps to the Keil 'bit' type" in p.stderr,
-              "BOOL must be rejected with the precise message")
-        print("clang behaviour: BOOL rejected with the precise message")
+        check(p.returncode == 0 and "error" not in p.stderr,
+              "BOOL declaration must compile (mapped to the real `bit` "
+              "type): %s" % p.stderr.strip()[:300])
+        check(re.search(r"@flag = dso_local global i8 0", p.stdout)
+              is not None and '"mcs251-bit-object"' in p.stdout,
+              "BOOL must become a real bit object (flagged global), not a "
+              "widened emulation")
+        check("@llvm.used" in p.stdout and "ptr @flag" in p.stdout,
+              "the BOOL bit object must be reachable through llvm.used")
+        print("clang behaviour: BOOL maps to a real `bit` object and "
+              "compiles (bit-object attribute + llvm.used verified at IR "
+              "level)")
 
         # 6c. the stdint-shaped names stay usable through <stdint.h>.
         p = comp('#include "mcs251_type_compat.h"\n#include <stdint.h>\n'
