@@ -418,6 +418,45 @@ CODE、DATA、XDATA 分开做占用检查；BIT 的物理占用通过 BSEG_BYTES
 DSEG 默认搜索起点 0；REG_BANK_n 固定 n*8；BSEG_BYTES 搜索从 0x20 开始。
 不接受把显式 CODE 起始值冲突后自动搬到别处；合法基线不变，冲突输入明确失败。
 
+#### 5.1.1 G13a-S1 FE-bank 验收 profile `g13a-fe640`（2026-09-15 冻结，PM D1）
+
+上表基线之外，G13a 实施轮按 `G13A-CODE-DESIGN-draft.md` rev-2 §3-S1 冻结
+FE-bank 配方 `g13a-fe640` 为新验收 profile（构建层 `AREA_ARGS` 配方表，
+非链接器常量；上表基线布局保留为 `base` 配方供历史复现）：
+
+| AREA | `g13a-fe640` 起始地址 | 窗口 |
+| --- | --- | --- |
+| HOME / VECS | 不变（0xff0000 / 0xff0003） | - |
+| BOOT | selfstart 不变 0xff0100；IRQ 不变 0xff0500 | - |
+| CSEG | selfstart 不变 0xff0200；IRQ 不变 0xff0700 | 65024 / 63744 |
+| XINIT | **0xfe0000** | 槽 640B |
+| XDATA_INIT | **0xfe0280** | 64896B |
+
+- 推导（两条硬约束联立）：XINIT 槽按双口径留余量——旧世代全树扫描
+  （`GAP-G13A-PROBES/xinit-scan.json`，87 section / 76 demo）per-demo
+  最大 **258B**；当前工具代验收样本 demo 44 链接实测 **276B**
+  （`GAP-G13A-PROBES/results-s1.json`，l_XINIT=0x0114，两种口径不
+  混用）；按 2×276=552≤640 取槽 0x280=640B；最大映像 64807B（demo 58/62）
+  必须整体留在 FE bank → XDATA_INIT=0xFE0280，映像止于 0xFEFFA7（余 89B）。
+- **有效域**：per-demo XINIT 总量 ≤640B 且映像 ≤64896B；越界按实例确定性
+  重推导（`XDATA_INIT = 0xFF0000 − 映像` 两遍链接法）或 D6 `--area-end`
+  （独立立项，不属本 profile 容量承诺），不静默放大。XINIT/XDATA_INIT
+  消费 walker 以 16 位 WR4 载入表长（`crt-xdata-init-walker.asm` /
+  `crt-selfstart.asm`），单表上限 65535B；65536B 表端到端未验证，不作容量承诺。
+- **ROM 门禁（PM D3）**：本 profile 默认传参 `--flash-base=0xfc2800
+  --flash-size=0x3d800`（246K）。这是构建层默认参数，不改变 lld 门禁的
+  可选语义（仅在两参数齐备时激活）。门禁含空区域起点检查（配置的
+  CODE 类区域起点必须落在窗口内，见 `checkFlashGate`）；其新增拒绝面
+  已在实施轮全批重验后登记。
+- **放行范围（D1，强制）**：仅限 **G144K246 验收 profile** 及其板级
+  Flash/EEPROM 占用前提。G144 手册 ch21（印 710-711/PDF 744-745）：
+  "使用 MOV 方式可以读全部 FLASH 区域"，DRx = 基地址 `FC:2800h` +
+  EEPROM 目标地址；同章 :252 警告——**板级 ISP EEPROM/IAP 操作区设置
+  不得覆盖 FE 数据窗口，IAP 擦除不得以 XINIT/XDATA_INIT 区为目标**，
+  镜像烧录链必须保护这两个区域。**K128 不自动继承本 profile**（K128
+  ch21:187-207：EEPROM 恒自 FE:0000 起、不能用 MOVC 读取）。真机烧录
+  验证为 D2 前置项，QEMU 证据限界表述见 G13A 设计稿 §2.3。
+
 ### 5.2 DATA 与 overlay 的顺序规则
 
 先登记绝对预留/位字节预留，再按寄存器银行、BIT_BANK、DSEG、OSEG、ISEG、SSEG

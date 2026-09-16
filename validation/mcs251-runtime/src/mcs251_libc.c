@@ -60,16 +60,10 @@ char* strcpy(char* dst, const char* src)
     return r;
 }
 
-/* ---- strlen ---- */
-uint32_t strlen(const char* s)
-{
-    uint32_t n = 0u;
-    while (*s != 0) {
-        n++;
-        s++;
-    }
-    return n;
-}
+/* ---- strlen：已按 G13a-S2 切片原样拆出到独立 TU mcs251_str.c ----
+ * （G13A-CODE-DESIGN-draft.md rev-2 §3-S2 / PM D4：MCS251 lld 无
+ * --gc-sections，按需闭包要求独立对象；原型仍由 mcs251_libc.h 统一
+ * 提供，本 TU 不再定义，避免重复定义。） */
 
 /* ---- memcmp：标准 3 参（PM 裁定 2026-09-15，见 mcs251_libc.h） ---- */
 int memcmp(const void* s1, const void* s2, uint32_t n)

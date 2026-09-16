@@ -156,9 +156,15 @@ endforeach()
 #       rotate-expand.ll 是专门回归，且实测下译后对象无任何未解析符号
 #       （llvm-readelf -sW 的 UND 集为空）——故它与 umax/abs 同类，属
 #       "已下译、不产生链接期外部依赖"的常规 intrinsic，纳入白名单。
-set(_allow_desc "mcs251_msb32(精确), llvm.{lifetime.start,lifetime.end,umax,abs,ucmp,fshl,fshr}(前缀+重载后缀)")
-# b/c 白名单：全名相等或 intrinsic 正则
-set(_sym_allow_exact "mcs251_msb32")
+#    d) G13a-S3 追加：printf 家族跨 TU 提供者，全名相等——
+#       putchar（mcs251_putchar.o 提供，S2 切片）、out_char/out_str
+#       （mcs251_printf.o 提供，S3 起外部链接）、out_float
+#       （mcs251_printf_float.o 提供，S3 拆分）。与 mcs251_msb32 同为
+#       "运行时族内对象在链接期闭合"的精确符号；对不在 printf 家族
+#       闭包内的模块同样只是符号级放行，不放宽类型/intrinsic 红线。
+set(_allow_desc "mcs251_msb32(精确), putchar/out_char/out_str/out_float(精确, G13a-S3 printf 族跨 TU 提供者), llvm.{lifetime.start,lifetime.end,umax,abs,ucmp,fshl,fshr}(前缀+重载后缀)")
+# b/c/d 白名单：全名相等或 intrinsic 正则
+set(_sym_allow_exact "mcs251_msb32;putchar;out_char;out_str;out_float")
 set(_intr_re "^llvm\\.(lifetime\\.start|lifetime\\.end|umax|abs|ucmp|fshl|fshr)(\\.[A-Za-z0-9]+)*$")
 # 模块内定义的符号：define 行（函数）+ 行首 @name = 行（全局定义）
 set(_defined "")
@@ -185,7 +191,9 @@ foreach(r ${_refs})
   if(NOT _idx LESS 0)
     continue()
   endif()
-  if("${_rn}" STREQUAL "${_sym_allow_exact}")
+  # G13a-S3：精确符号白名单由单符号改列表成员判定（语义不变，全名相等）
+  list(FIND _sym_allow_exact "${_rn}" _allow_idx)
+  if(NOT _allow_idx LESS 0)
     continue()
   endif()
   if(_rn MATCHES "${_intr_re}")
@@ -203,8 +211,31 @@ set(MCS251RT_OBJECTS "")
 set(MCS251RT_MANIFEST "${MCS251RT_OUTDIR}/mcs251-runtime-objects.list")
 
 # 通用两步管道：clang -std=c11 -S -emit-llvm -> [IR 审计] -> llc -> ELF .o
-function(mcs251rt_add_module SRC OPT_LEVEL EXTRA_DEPS)
-  get_filename_component(STEM "${SRC}" NAME_WE)
+# （EXTRA_DEPS 经 ARGN 可选：无头依赖的模块（G13a-S2 mcs251_putchar.c）
+#   省略第三参调用，ARGN 为空时 ${EXTRA_DEPS} 展开为空。）
+# G13a-S3 追加式扩展（既有调用点零改动）：
+#   - ARGN 中以 "-" 开头的项作为额外 clang 参数（如 -DMCS251_PRINTF_
+#     NO_FLOAT、-fno-builtin），其余仍为头依赖；
+#   - ARGN 中 "STEM=<name>" 项覆盖输出基名（同源不同宏的双形态构建：
+#     mcs251_printf.c 完整形态与无浮点形态需要互不冲突的 .ll/.o 输出）。
+function(mcs251rt_add_module SRC OPT_LEVEL)
+  set(EXTRA_DEPS "")
+  set(EXTRA_FLAGS "")
+  set(STEM_OVERRIDE "")
+  foreach(_arg IN LISTS ARGN)
+    if(_arg MATCHES "^STEM=")
+      string(SUBSTRING "${_arg}" 5 -1 STEM_OVERRIDE)
+    elseif(_arg MATCHES "^-")
+      list(APPEND EXTRA_FLAGS "${_arg}")
+    else()
+      list(APPEND EXTRA_DEPS "${_arg}")
+    endif()
+  endforeach()
+  if(STEM_OVERRIDE STREQUAL "")
+    get_filename_component(STEM "${SRC}" NAME_WE)
+  else()
+    set(STEM "${STEM_OVERRIDE}")
+  endif()
   set(LL "${MCS251RT_OUTDIR}/${STEM}.ll")
   set(OBJ "${MCS251RT_OUTDIR}/${STEM}.o")
 
@@ -214,12 +245,13 @@ function(mcs251rt_add_module SRC OPT_LEVEL EXTRA_DEPS)
             -std=c11
             -DMCS251_RT_TARGET
             -${OPT_LEVEL} -I"${MCS251RT_SRC_DIR}"
+            ${EXTRA_FLAGS}
             -S -emit-llvm
             -o "${LL}"
             "${MCS251RT_SRC_DIR}/${SRC}"
     DEPENDS "${MCS251RT_SRC_DIR}/${SRC}" ${EXTRA_DEPS}
             ${MCS251RT_DEP_CLANG}
-    COMMENT "mcs251-runtime: ${SRC} -> ${STEM}.ll (-std=c11, -${OPT_LEVEL}, -emit-llvm)"
+    COMMENT "mcs251-runtime: ${SRC} -> ${STEM}.ll (-std=c11, -${OPT_LEVEL}, -emit-llvm${EXTRA_FLAGS})"
     VERBATIM)
 
   add_custom_command(OUTPUT "${OBJ}"
@@ -261,6 +293,43 @@ mcs251rt_add_module(mcs251_bitutil.c O0
 # libc 模块：-O0 管道（-O2 导致 PC-rel branch out of range）
 mcs251rt_add_module(mcs251_libc.c O0
   "${MCS251RT_SRC_DIR}/mcs251_libc.h")
+
+# G13a-S2 切片模块（G13A-CODE-DESIGN-draft.md rev-2 §3-S2 / PM D4）：
+# strlen 自 mcs251_libc.c 原样拆出为独立 TU（对象级按需闭包的最小粒度；
+# lld 无 --gc-sections，只有独立对象才能单独拉入），putchar 提供者补齐
+# （demo 41 类程序引用 printf 且未自带 putchar 时闭包所需；丢弃型 sink，
+# 语义边界见源文件头）。两者同 libc 模块用 -O0 管道；strlen 定义唯一
+# （mcs251_libc.c 已同步移除），签名协议与 Tag 28 语义零改动。
+mcs251rt_add_module(mcs251_str.c O0
+  "${MCS251RT_SRC_DIR}/mcs251_libc.h")
+mcs251rt_add_module(mcs251_putchar.c O0)
+
+# G13a-S3 切片模块（G13A-CODE-DESIGN-draft.md rev-2 §3-c）：printf 运行时
+# 拆出 _out_float + 无浮点引擎条件编译。三对象（同 libc 模块 -O0 管道；
+# 额外传 -ffreestanding -fno-builtin 对齐 drive.py 冻结的 B-S4 对象配方
+# ——printf/sprintf/putchar 是 libc 内建名，防 clang 以内建语义改写本
+# 家族的声明/调用）：
+#   mcs251_printf.o         完整形态（默认）：UND 含 _out_float，闭包须
+#                           再拉 mcs251_printf_float.o（浮点格式化可用）；
+#   mcs251_printf_float.o   out_float 完整实现（S3 自 mcs251_printf.c 原样
+#                           迁入，仅 static → 外部链接），UND 含
+#                           _out_char/_out_str（由 mcs251_printf.o 提供）；
+#   mcs251_printf_nofloat.o 无浮点引擎形态（-DMCS251_PRINTF_NO_FLOAT）：
+#                           %f/%F、%g/%G、%e/%E 落入未知格式符分支，对象
+#                           无 UND _out_float；仅当按
+#                           mcs251_printf_internal.h 冻结判定规则可证明
+#                           程序无浮点格式时方可选用（默认永远完整形态）。
+mcs251rt_add_module(mcs251_printf.c O0
+  STEM=mcs251_printf
+  -ffreestanding -fno-builtin
+  "${MCS251RT_SRC_DIR}/mcs251_libc.h;${MCS251RT_SRC_DIR}/mcs251_printf_internal.h")
+mcs251rt_add_module(mcs251_printf.c O0
+  STEM=mcs251_printf_nofloat
+  -ffreestanding -fno-builtin -DMCS251_PRINTF_NO_FLOAT
+  "${MCS251RT_SRC_DIR}/mcs251_libc.h;${MCS251RT_SRC_DIR}/mcs251_printf_internal.h")
+mcs251rt_add_module(mcs251_printf_float.c O0
+  -ffreestanding -fno-builtin
+  "${MCS251RT_SRC_DIR}/mcs251_libc.h;${MCS251RT_SRC_DIR}/mcs251_printf_internal.h")
 
 # ---------------------------------------------------------------------------
 # 清单：构建期产物（add_custom_command(OUTPUT)），依赖全部对象。

@@ -85,6 +85,10 @@ QEMU=${QEMU:-/home/liu/build-qemu/qemu-system-mcs251}
 MACHINE=${MACHINE:-stc32g144k246}
 GEN_CRT_V2="$REPO/validation/mcs251-elf/runtime/gen-crt-v2.sh"
 RT_SRC="$REPO/validation/mcs251-runtime/src/mcs251_printf.c"
+# G13a-S3: out_float split out of mcs251_printf.c into its own TU
+# (G13A-CODE-DESIGN-draft.md rev-2 section 3-c); the full-engine link this
+# script freezes must close _out_float with the split object.
+RT_FLOAT_SRC="$REPO/validation/mcs251-runtime/src/mcs251_printf_float.c"
 DIV_SRC="$REPO/llvm/lib/Target/MCS251/Runtime"
 DIALECT="$REPO/validation/mcs251-dialect/include"
 PORTING_GEN="$REPO/validation/mcs251-porting/generated"
@@ -125,6 +129,13 @@ build_runtime() {
   "$LLC" -mtriple=mcs251 -mcs251-memory-contract="$CONTRACT" -O2 \
     -verify-machineinstrs -mcs251-object-format=elf -filetype=obj \
     "$OUT/rt/printf.ll" -o "$OUT/rt/printf.o"
+  # G13a-S3: split float TU, same -O2 v2 recipe (full engine).
+  "$CLANG" --target=mcs251-unknown-none -std=c11 -ffreestanding -fno-builtin \
+    -DMCS251_RT_TARGET -O2 -Xclang -mcs251-memory-contract="$CONTRACT" \
+    -S -emit-llvm "$RT_FLOAT_SRC" -o "$OUT/rt/printf_float.ll"
+  "$LLC" -mtriple=mcs251 -mcs251-memory-contract="$CONTRACT" -O2 \
+    -verify-machineinstrs -mcs251-object-format=elf -filetype=obj \
+    "$OUT/rt/printf_float.ll" -o "$OUT/rt/printf_float.o"
   local f
   for f in divulong modulong; do
     "$CLANG" --target=mcs251-unknown-none -std=c11 -ffreestanding \
@@ -267,7 +278,7 @@ link_v2() { # <tag> <groupdir>
   local objs=()
   local o
   for o in "$dir"/*.o; do objs+=("$o"); done
-  objs+=("$OUT/rt/printf.o" "$OUT/rt/divulong.o" "$OUT/rt/modulong.o")
+  objs+=("$OUT/rt/printf.o" "$OUT/rt/printf_float.o" "$OUT/rt/divulong.o" "$OUT/rt/modulong.o")
   [ -f "$dir/nop-needed" ] && objs+=("$OUT/rt/nop.o")
   link_group "$tag" "$dir" "${objs[@]}" "$OUT/crt/crt-irq-v2.o"
 }

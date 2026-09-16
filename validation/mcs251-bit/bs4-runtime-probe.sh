@@ -52,6 +52,11 @@ HOSTCC=${HOSTCC:-/usr/bin/cc}
 MACHINE=${MACHINE:-stc32g144k246}
 GEN_CRT_V2="$ROOT/../mcs251-elf/runtime/gen-crt-v2.sh"
 RT_SRC="$ROOT/../mcs251-runtime/src/mcs251_printf.c"
+# G13a-S3: out_float was split out of mcs251_printf.c into its own TU
+# (G13A-CODE-DESIGN-draft.md rev-2 section 3-c); the full-engine link the
+# byte-exact f32 assertions below require must now close _out_float with
+# the split object, on both the target and the host side.
+RT_FLOAT_SRC="$ROOT/../mcs251-runtime/src/mcs251_printf_float.c"
 RT_INC="$ROOT/../mcs251-runtime/src"
 DIV_SRC="$ROOT/../../llvm/lib/Target/MCS251/Runtime"
 PROBE_C="$ROOT/bs4-runtime-probe.c"
@@ -89,6 +94,17 @@ mkdir -p -- "$OUT"
   -verify-machineinstrs -mcs251-object-format=elf -filetype=obj \
   "$OUT/printf.ll" -o "$OUT/printf.o"
 echo "runtime: mcs251_printf.c -> printf.o ($RT_OPT, v2 contract, -Werror clean)"
+
+# G13a-S3: the split float TU, same recipe (the f32 assertions below are the
+# point of this probe, so the FULL engine is mandatory here).
+"$CLANG" --target=mcs251-unknown-none -std=c11 -ffreestanding -fno-builtin \
+  -DMCS251_RT_TARGET -"$RT_OPT" -Wall -Wextra -Werror \
+  -Xclang -mcs251-memory-contract="$CONTRACT" \
+  -S -emit-llvm "$RT_FLOAT_SRC" -o "$OUT/printf_float.ll"
+"$LLC" -mtriple=mcs251 -mcs251-memory-contract="$CONTRACT" -"$RT_OPT" \
+  -verify-machineinstrs -mcs251-object-format=elf -filetype=obj \
+  "$OUT/printf_float.ll" -o "$OUT/printf_float.o"
+echo "runtime: mcs251_printf_float.c -> printf_float.o ($RT_OPT, v2 contract, -Werror clean)"
 
 # The six printf continuation slots and the seven sprintf slots are the
 # frozen cross-TU value channel (design section 4.7); pin them here so a
@@ -141,8 +157,10 @@ echo "probe: bs4-runtime-probe.c -> probe.o (v2, -O0)"
   -o "$OUT/main-host.o"
 "$HOSTCC" -std=c11 -O0 -fno-builtin -I"$RT_INC" -c "$RT_SRC" \
   -o "$OUT/printf-host.o"
+"$HOSTCC" -std=c11 -O0 -fno-builtin -I"$RT_INC" -c "$RT_FLOAT_SRC" \
+  -o "$OUT/printf-float-host.o"
 "$HOSTCC" -o "$OUT/probe-host.bin" "$OUT/probe-host.o" "$OUT/main-host.o" \
-  "$OUT/printf-host.o"
+  "$OUT/printf-host.o" "$OUT/printf-float-host.o"
 "$OUT/probe-host.bin" > "$OUT/host.transcript"
 echo "host: same probe + same runtime source under $HOSTCC -> host.transcript"
 
@@ -156,7 +174,7 @@ AREAS="--area-start=HOME=0xff0000 --area-start=VECS=0xff0003 \
 --area-start=XSEG=0x010000 --edata-end=0x3fff"
 # shellcheck disable=SC2086
 (cd "$OUT" && "$LLD" $AREAS --map=fw.map -o fw.elf \
-  probe.o printf.o divulong.o modulong.o crt.o)
+  probe.o printf.o printf_float.o divulong.o modulong.o crt.o)
 "$OBJCOPY" -O ihex "$OUT/fw.elf" "$OUT/fw.hex"
 echo "link: probe + printf + div/mod + v2 crt OK (map: fw.map)"
 
