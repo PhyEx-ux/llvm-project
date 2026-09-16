@@ -22,11 +22,14 @@
 #include "clang/AST/StmtOpenMP.h"
 #include "clang/Basic/AddressSpaces.h"
 #include "clang/Basic/DiagnosticSema.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetBuiltins.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Sema/ScopeInfo.h"
 #include "clang/Sema/Sema.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/APSInt.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
 #include <optional>
 
@@ -2073,6 +2076,366 @@ Sema::EnterMCS251DirectiveRestriction::EnterMCS251DirectiveRestriction(
 Sema::EnterMCS251DirectiveRestriction::~EnterMCS251DirectiveRestriction() {
   if (Entered)
     S.MCS251Ptr->exitDirectiveRestriction();
+}
+
+//===----------------------------------------------------------------------===//
+// G11 fixed placement (`mcu_place_at` / `mcu_bind_at` / `mcu_retain`),
+// G11-PLACEMENT-DESIGN.md revision 7 §2.2 / §3.1 / §8 (clang rows).
+//===----------------------------------------------------------------------===//
+
+void SemaMCS251::NoteMCS251PlacementDecl(Decl *D) {
+  PlacementDecls.push_back(D);
+}
+
+namespace {
+
+/// Re-evaluate an already validated placement address. The attribute handlers
+/// only accept integer constant expressions, so nullopt here means the
+/// declaration was already diagnosed and marked invalid.
+static std::optional<llvm::APSInt>
+evaluateMCS251PlacementAddress(ASTContext &Ctx, const Expr *E) {
+  if (!E || E->isValueDependent())
+    return std::nullopt;
+  return E->getIntegerConstantExpr(Ctx);
+}
+
+/// Printed form of a placement address in the frozen §8 messages:
+/// non-negative values as "0x<hex>" (matching the linker-side 0x%x forms); a
+/// negative constant is rejected in the attribute handler before it can reach
+/// a message, but the decimal spelling is kept as a safe fallback.
+static std::string formatMCS251PlacementAddress(const llvm::APSInt &V) {
+  llvm::SmallString<24> Str;
+  if (V.isNegative()) {
+    V.toString(Str, 10);
+    return std::string(Str);
+  }
+  V.toString(Str, 16);
+  return ("0x" + Str).str();
+}
+
+/// Source name carried by the frozen §8 "conflicting placement for %sym:
+/// 0x%x (%source) vs 0x%x (%source)" message. The attribute may be spelled
+/// through a macro (`#define BIND(A) __attribute__((mcu_bind_at(A)))`), whose
+/// location is a macro location for which SourceManager::getFilename gives no
+/// file; the expansion location names the file the user actually wrote.
+static StringRef getMCS251PlacementSourceName(ASTContext &Ctx,
+                                              SourceLocation Loc) {
+  const SourceManager &SM = Ctx.getSourceManager();
+  StringRef Name = SM.getFilename(SM.getExpansionLoc(Loc));
+  if (!Name.empty())
+    return Name;
+  return SM.getFilename(Loc);
+}
+
+/// Entity-level alignment constraint of §2.2. The `aligned` attribute is
+/// recorded on the individual declaration that carries it, and the
+/// redeclaration chain is only complete at translation-unit end, so the
+/// constraint a placement address must satisfy is the maximum over the whole
+/// chain. Consulting a single selected declaration (the one that carried the
+/// placement attribute, or the definition) made the answer depend on
+/// declaration order (review R4); place and bind, objects and functions all
+/// use this one aggregation.
+static CharUnits getMCS251EntityAlignment(ASTContext &Ctx,
+                                          const ValueDecl *VD) {
+  CharUnits Align = CharUnits::One();
+  for (const Decl *R : VD->redecls())
+    Align = std::max(Align, Ctx.getDeclAlign(R));
+  return Align;
+}
+
+} // namespace
+
+void SemaMCS251::CheckMCS251PlacementEntities() {
+  if (PlacementDecls.empty())
+    return;
+
+  ASTContext &Ctx = SemaRef.Context;
+  llvm::DenseSet<const Decl *> Seen;
+  // Only objects have a known span in Sema. Functions (including their
+  // trailing jump tables) must be checked using the final section span by
+  // G11-B/C, not an invented size or an IR instruction-count estimate.
+  // The three storage classes have independent layout ledgers.
+  struct PlacedRange {
+    uint64_t Begin, End;
+    unsigned StorageClass;
+  };
+  llvm::SmallVector<PlacedRange, 8> PlacedRanges;
+
+  for (Decl *D : PlacementDecls) {
+    auto *VD = dyn_cast<ValueDecl>(D);
+    if (!VD || D->isInvalidDecl())
+      continue;
+    if (!Seen.insert(VD->getCanonicalDecl()).second)
+      continue;
+
+    // Gather the attributes across the (now complete) redeclaration chain.
+    const MCS251PlaceAtAttr *FirstPlace = nullptr;
+    const MCS251PlaceAtAttr *ConflictingPlace = nullptr;
+    const MCS251BindAtAttr *FirstBind = nullptr;
+    const MCS251BindAtAttr *ConflictingBind = nullptr;
+    SourceLocation RetainLoc;
+    bool HasRetain = false;
+    const MCS251NoInitAttr *NoInit = nullptr;
+    bool HasInitializer = false;
+    for (const Decl *R : VD->redecls()) {
+      if (const auto *NI = R->getAttr<MCS251NoInitAttr>())
+        NoInit = NI;
+      if (const auto *RV = dyn_cast<VarDecl>(R))
+        HasInitializer |= RV->hasInit();
+      if (const auto *PA = R->getAttr<MCS251PlaceAtAttr>()) {
+        if (!FirstPlace) {
+          FirstPlace = PA;
+        } else if (!ConflictingPlace) {
+          auto A = evaluateMCS251PlacementAddress(Ctx, FirstPlace->getAddress());
+          auto B = evaluateMCS251PlacementAddress(Ctx, PA->getAddress());
+          if (A && B && *A != *B)
+            ConflictingPlace = PA;
+        }
+      }
+      if (const auto *BA = R->getAttr<MCS251BindAtAttr>()) {
+        if (!FirstBind) {
+          FirstBind = BA;
+        } else if (!ConflictingBind) {
+          auto A = evaluateMCS251PlacementAddress(Ctx, FirstBind->getAddress());
+          auto B = evaluateMCS251PlacementAddress(Ctx, BA->getAddress());
+          if (A && B && *A != *B)
+            ConflictingBind = BA;
+        }
+      }
+      if (const auto *RA = R->getAttr<MCS251RetainAttr>()) {
+        HasRetain = true;
+        RetainLoc = RA->getLocation();
+      }
+    }
+
+    auto FirstPlaceAddr = evaluateMCS251PlacementAddress(
+        Ctx, FirstPlace ? FirstPlace->getAddress() : nullptr);
+    auto FirstBindAddr =
+        evaluateMCS251PlacementAddress(Ctx, FirstBind ? FirstBind->getAddress() : nullptr);
+    if (FirstPlace && !FirstPlaceAddr)
+      continue;
+    if (FirstBind && !FirstBindAddr)
+      continue;
+
+    // Resolve the definition once: real definition first, then a tentative
+    // definition (which is storage too, §2.2 "bind ... 不产生 storage").
+    const VarDecl *VDDef = nullptr;
+    if (isa<VarDecl>(VD)) {
+      for (const Decl *R : VD->redecls()) {
+        const auto *RV = cast<VarDecl>(R);
+        if (RV->isThisDeclarationADefinition() == VarDecl::Definition) {
+          VDDef = RV;
+          break;
+        }
+      }
+      if (!VDDef) {
+        for (const Decl *R : VD->redecls()) {
+          const auto *RV = cast<VarDecl>(R);
+          if (RV->isThisDeclarationADefinition() == VarDecl::TentativeDefinition) {
+            VDDef = RV;
+            break;
+          }
+        }
+      }
+    }
+    const auto *FDDef =
+        isa<FunctionDecl>(VD)
+            ? cast<FunctionDecl>(VD)->getDefinition()
+            : nullptr;
+    bool HasDefinition = VDDef || FDDef;
+
+    SourceLocation PlaceLoc =
+        FirstPlace ? FirstPlace->getLocation() : SourceLocation();
+    SourceLocation BindLoc = FirstBind ? FirstBind->getLocation() : SourceLocation();
+    bool Diagnosed = false;
+
+    // No same-TU owned+bind combination is defined by §2.2. Reject it
+    // explicitly rather than choosing a meaning based on definition status.
+    if (FirstPlace && FirstBind) {
+      SemaRef.Diag(BindLoc, diag::err_attributes_are_not_compatible)
+          << "mcu::bind_at" << "mcu::place_at" << false;
+      Diagnosed = true;
+    }
+
+    // Conflicting addresses across declarations of the same entity.
+    if (!Diagnosed && (ConflictingPlace || ConflictingBind)) {
+      const Expr *FirstE = ConflictingPlace ? FirstPlace->getAddress()
+                                            : FirstBind->getAddress();
+      const Expr *SecondE = ConflictingPlace ? ConflictingPlace->getAddress()
+                                             : ConflictingBind->getAddress();
+      SourceLocation Loc = ConflictingPlace ? ConflictingPlace->getLocation()
+                                            : ConflictingBind->getLocation();
+      auto FirstV = evaluateMCS251PlacementAddress(Ctx, FirstE);
+      auto SecondV = evaluateMCS251PlacementAddress(Ctx, SecondE);
+      if (FirstV && SecondV) {
+        if (ConflictingPlace)
+          SemaRef.Diag(Loc, diag::err_mcs251_place_at_conflict)
+              << formatMCS251PlacementAddress(*FirstV)
+              << formatMCS251PlacementAddress(*SecondV);
+        else
+          SemaRef.Diag(Loc, diag::err_mcs251_bind_at_conflict)
+              << VD->getNameAsString()
+              << formatMCS251PlacementAddress(*FirstV)
+              << getMCS251PlacementSourceName(Ctx, BindLoc)
+              << formatMCS251PlacementAddress(*SecondV)
+              << getMCS251PlacementSourceName(Ctx, Loc);
+        Diagnosed = true;
+      }
+    }
+
+    if (!Diagnosed && HasRetain && (FirstBind || !HasDefinition)) {
+      SemaRef.Diag(RetainLoc, diag::err_mcs251_retain_no_definition);
+      Diagnosed = true;
+    }
+    if (!Diagnosed && NoInit) {
+      if (HasInitializer) {
+        SemaRef.Diag(NoInit->getLocation(), diag::err_mcs251_noinit_init);
+        Diagnosed = true;
+      } else if (!FirstPlace) {
+        SemaRef.Diag(NoInit->getLocation(),
+                     diag::err_mcs251_noinit_requires_placement);
+        Diagnosed = true;
+      }
+    }
+
+    // Rule 3: bind alone. No definition of any kind in this TU (§2.2: bind
+    // produces no storage), complete type, non-zero object size (§8 P-4: the
+    // zero-length-array extension is not relied on as the backstop).
+    if (!Diagnosed && FirstBind && !FirstPlace) {
+      if (HasDefinition) {
+        SemaRef.Diag(BindLoc, diag::err_mcs251_bind_at_init);
+        Diagnosed = true;
+      } else if (VDDef == nullptr && isa<VarDecl>(VD)) {
+        QualType T = VD->getType();
+        if (T->isIncompleteType()) {
+          SemaRef.Diag(BindLoc, diag::err_mcs251_place_incomplete);
+          Diagnosed = true;
+        } else if (Ctx.getTypeSizeInChars(T).isZero()) {
+          SemaRef.Diag(BindLoc, diag::err_mcs251_placement_zero_size) << VD;
+          Diagnosed = true;
+        }
+      }
+    }
+
+    if (!Diagnosed && FirstBind) {
+      uint64_t Align = getMCS251EntityAlignment(Ctx, VD).getQuantity();
+      // A bind function has no span, but explicit entry alignment still
+      // constrains its address (§2.2).
+      if (Align && FirstBindAddr->getZExtValue() % Align) {
+        SemaRef.Diag(BindLoc, diag::err_mcs251_place_at_alignment)
+            << formatMCS251PlacementAddress(*FirstBindAddr)
+            << static_cast<unsigned>(Align);
+        Diagnosed = true;
+      }
+    }
+
+    // Rule 4: place alone. Definition in this TU, complete type, non-zero
+    // object size, address satisfies the final declaration alignment, and no
+    // overlap with an earlier placed entity of this TU.
+    if (!Diagnosed && FirstPlace && !FirstBind) {
+      if (!HasDefinition) {
+        SemaRef.Diag(PlaceLoc, diag::err_mcs251_place_at_not_static);
+        Diagnosed = true;
+      } else {
+        if (VDDef) {
+          QualType T = VDDef->getType();
+          if (T->isIncompleteType()) {
+            SemaRef.Diag(PlaceLoc, diag::err_mcs251_place_incomplete);
+            Diagnosed = true;
+          } else if (Ctx.getTypeSizeInChars(T).isZero()) {
+            SemaRef.Diag(PlaceLoc, diag::err_mcs251_placement_zero_size)
+                << VDDef;
+            Diagnosed = true;
+          }
+        }
+        if (!Diagnosed) {
+          CharUnits Align = getMCS251EntityAlignment(Ctx, VD);
+          uint64_t A = FirstPlaceAddr->getZExtValue();
+          uint64_t AlignBytes = Align.getQuantity();
+          if (AlignBytes != 0 && A % AlignBytes != 0) {
+            SemaRef.Diag(PlaceLoc, diag::err_mcs251_place_at_alignment)
+                << formatMCS251PlacementAddress(*FirstPlaceAddr)
+                << static_cast<unsigned>(AlignBytes);
+            Diagnosed = true;
+          } else if (VDDef) {
+            uint64_t Size =
+                Ctx.getTypeSizeInChars(VDDef->getType()).getQuantity();
+            uint64_t End = A + Size;
+            unsigned AS = Ctx.getTargetAddressSpace(
+                VDDef->getType().getAddressSpace());
+            unsigned StorageClass = AS == 3 ? 1 : AS == 4 ? 2 : 0;
+            for (const auto &R : PlacedRanges) {
+              if (StorageClass == R.StorageClass && A < R.End && R.Begin < End) {
+                SemaRef.Diag(PlaceLoc, diag::err_mcs251_place_at_overlap)
+                    << formatMCS251PlacementAddress(*FirstPlaceAddr)
+                    << formatMCS251PlacementAddress(
+                           llvm::APSInt(llvm::APInt(64, End), false));
+                Diagnosed = true;
+                break;
+              }
+            }
+            if (!Diagnosed)
+              PlacedRanges.push_back({A, End, StorageClass});
+          }
+        }
+      }
+    }
+
+    // Rule 5: retain scope (§2.2 retain 条 / §6.5): only a placed definition
+    // may carry mcu_retain. A definition without placement gets
+    // err_mcs251_retain_requires_placement; a declaration-only entity (in
+    // particular a bind declaration, already refused in the handler) gets
+    // err_mcs251_retain_no_definition.
+    if (!Diagnosed && HasRetain && !FirstPlace) {
+      if (HasDefinition)
+        SemaRef.Diag(RetainLoc, diag::err_mcs251_retain_requires_placement);
+      else
+        SemaRef.Diag(RetainLoc, diag::err_mcs251_retain_no_definition);
+      Diagnosed = true;
+    }
+    // Rule 6: G11 identity input boundary (G11-A sixth round, 2026-09-16;
+    // input-boundary ruling, not an §8 row). The function-context component
+    // of a function-local static's stable symbol is, for a host the Itanium
+    // mangler does not mangle, the host's plain declaration name. In C mode
+    // (no "N" tag) that plain name is the only component domain that can
+    // equal a mangled identity: Itanium mangled names always start with
+    // "_Z", so a C host *declared* "_Z..." can collide with the mangled
+    // context of an overloadable C host of the same TU even when the two
+    // hosts have distinct IR names (e.g. via an asm label). A "_Z"-prefixed
+    // C identifier is reserved (C11 7.1.3), so the input is rejected here
+    // (fail-closed) instead of being encoded, which leaves every accepted
+    // identity string byte-identical. Scope is exactly the participating
+    // inputs: only a function-local static carrying one of the four G11
+    // attributes has a host component -- file-scope statics and external
+    // entities keep the plain top-level rule and are never rejected, and a
+    // C++ host (an extern "C" function declared "_Z..." included) is
+    // "N"-tagged and structurally isolated, so it is never rejected either.
+    if (!Diagnosed && (FirstPlace || FirstBind || HasRetain || NoInit)) {
+      const auto *Var = dyn_cast<VarDecl>(VD);
+      if (Var && Var->isStaticLocal() && !Ctx.getLangOpts().CPlusPlus) {
+        // Nearest enclosing FunctionDecl, mirroring the CodeGen identity
+        // helper (getMCS251StaticLocalHostFunction): closure contexts of
+        // blocks/captured statements are skipped; a lambda's operator() is
+        // itself the host (and C++ is out of scope here anyway).
+        const DeclContext *DC = Var->getDeclContext();
+        while (DC && !isa<FunctionDecl>(DC))
+          DC = DC->getParent();
+        if (const auto *Host = dyn_cast_or_null<FunctionDecl>(DC))
+          if (Host->getName().starts_with("_Z")) {
+            SemaRef.Diag(Host->getLocation(),
+                         diag::err_mcs251_placement_reserved_host_name)
+                << Host;
+            Diagnosed = true;
+          }
+      }
+    }
+    if (!Diagnosed && HasRetain && FirstPlace && HasDefinition) {
+      Decl *Def = VDDef ? static_cast<Decl *>(const_cast<VarDecl *>(VDDef))
+                        : static_cast<Decl *>(const_cast<FunctionDecl *>(FDDef));
+      if (!Def->hasAttr<RetainAttr>())
+        Def->addAttr(RetainAttr::CreateImplicit(Ctx, SourceRange(RetainLoc)));
+    }
+  }
 }
 
 } // namespace clang

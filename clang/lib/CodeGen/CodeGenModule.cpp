@@ -39,6 +39,7 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/Builtins.h"
+#include "clang/Basic/AddressSpaces.h"
 #include "clang/Basic/CodeGenOptions.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticFrontend.h"
@@ -73,6 +74,8 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/TargetParser/AArch64TargetParser.h"
@@ -1160,11 +1163,120 @@ CodeGenModule::StackProtectorAttribute(const Decl *D) const {
   return std::nullopt;
 }
 
+static void setMCS251PlacementAttributes(CodeGenModule &CGM, const Decl *D,
+                                         llvm::GlobalObject *GO);
+
+/// G11 fixed placement: does the *complete redeclaration chain* carry one of
+/// the G11 attributes? The attributes may sit on any declaration of the chain
+/// (a later redeclaration may carry mcu_place_at / mcu_retain while the
+/// definition is earlier), and the implicit RetainAttr of mcu_retain is only
+/// installed at TU end by SemaMCS251::CheckMCS251PlacementEntities, so this
+/// query is only meaningful after that pass has run.
+static bool hasMCS251FixedPlacement(const ValueDecl *VD) {
+  for (const Decl *R : VD->redecls())
+    if (R->hasAttr<MCS251PlaceAtAttr>() || R->hasAttr<MCS251BindAtAttr>() ||
+        R->hasAttr<MCS251RetainAttr>())
+      return true;
+  return false;
+}
+
+/// G11: a placed definition or a retained entity must exist in this TU even
+/// when nothing references it -- the fixed address is the contract.
+static bool isMCS251PlacedOrRetained(const ValueDecl *VD) {
+  for (const Decl *R : VD->redecls())
+    if (R->hasAttr<MCS251PlaceAtAttr>() || R->hasAttr<MCS251RetainAttr>())
+      return true;
+  return false;
+}
+
 void CodeGenModule::Release() {
   Module *Primary = getContext().getCurrentNamedModule();
   if (CXX20ModuleInits && Primary && !Primary->isHeaderLikeModule())
     EmitModuleInitializers(Primary);
+  const bool MCS251Target = getTriple().getArch() == llvm::Triple::mcs251;
+  // G11 late placement: the whole redeclaration chain is only known here, and
+  // Sema installs the implicit RetainAttr of mcu_retain at TU end. An internal
+  // definition that was processed before its placement/retain was visible is
+  // parked in the deferred table (unreferenced internal definitions are
+  // deferred even though they are definitions) and would never be emitted;
+  // send it back through the emission path so that the entity, its placement
+  // attributes and its llvm.used keepalive all exist at O0.
+  if (MCS251Target) {
+    llvm::SmallVector<GlobalDecl, 4> LateFixed;
+    for (const auto &Entry : DeferredDecls) {
+      const auto *VD = dyn_cast_or_null<ValueDecl>(Entry.second.getDecl());
+      if (!VD || VD->isInvalidDecl() || !hasMCS251FixedPlacement(VD))
+        continue;
+      // Only a definition produces storage; a bind declaration is
+      // materialized by EmitGlobal on its own path.
+      if (const auto *FD = dyn_cast<FunctionDecl>(VD)) {
+        if (!FD->doesThisDeclarationHaveABody())
+          continue;
+      } else if (const auto *Var = dyn_cast<VarDecl>(VD)) {
+        if (Var->isThisDeclarationADefinition() == VarDecl::DeclarationOnly)
+          continue;
+      } else {
+        continue;
+      }
+      LateFixed.push_back(Entry.second);
+    }
+    // Resend them through the emission path and drop the now-handled deferred
+    // entries, so "still in DeferredDecls" keeps meaning "not yet emitted".
+    for (const GlobalDecl &GD : LateFixed)
+      DeferredDecls.erase(getMangledName(GD));
+    for (const GlobalDecl &GD : LateFixed)
+      addDeferredDeclToEmit(GD);
+  }
   EmitDeferred();
+  // Definitions may have been emitted before a later placement/retain
+  // redeclaration. Refresh policy after Sema has seen the complete TU.
+  if (MCS251Target) {
+    for (const auto &Entry : MangledDeclNames) {
+      const auto *D = dyn_cast<ValueDecl>(Entry.first.getDecl());
+      auto *GO = dyn_cast_or_null<llvm::GlobalObject>(
+          GetGlobalValue(Entry.second));
+      if (!D || !GO)
+        continue;
+      setMCS251PlacementAttributes(*this, D, GO);
+      if (!GO->isDeclaration() &&
+          llvm::any_of(D->redecls(), [](const Decl *R) {
+            return R->hasAttr<MCS251RetainAttr>();
+          }) && !llvm::is_contained(LLVMUsed, llvm::WeakTrackingVH(GO)))
+        addUsedGlobal(GO);
+    }
+    // Function-local statics are emitted by CGDecl::EmitStaticVarDecl, whose
+    // global name is built outside the mangler (CGDecl getStaticDeclName), so
+    // neither the deferred table nor the mangled-name map above sees them.
+    // Their placement, noinit and retain policy is applied here, after the
+    // complete chain (including the TU-final implicit RetainAttr) is known.
+    // The map is keyed by Decl pointer, so the entries are sorted by global
+    // name first: the llvm.used member order must not depend on allocation
+    // addresses.
+    llvm::SmallVector<std::pair<const VarDecl *, llvm::GlobalObject *>, 4>
+        LocalStatics;
+    for (const auto &Entry : StaticLocalDeclMap) {
+      const auto *Var = dyn_cast_or_null<VarDecl>(Entry.first);
+      auto *GO = Entry.second
+                     ? dyn_cast_or_null<llvm::GlobalObject>(
+                           Entry.second->stripPointerCasts())
+                     : nullptr;
+      if (Var && GO)
+        LocalStatics.push_back({Var, GO});
+    }
+    llvm::sort(LocalStatics, [](const auto &L, const auto &R) {
+      return L.second->getName() < R.second->getName();
+    });
+    for (const auto &Entry : LocalStatics) {
+      const VarDecl *Var = Entry.first;
+      llvm::GlobalObject *GO = Entry.second;
+      setMCS251PlacementAttributes(*this, Var, GO);
+      if (!GO->isDeclaration() &&
+          llvm::any_of(Var->redecls(), [](const Decl *R) {
+            return R->hasAttr<MCS251RetainAttr>();
+          }) && !llvm::is_contained(LLVMUsed, llvm::WeakTrackingVH(GO)))
+        addUsedGlobal(GO);
+    }
+  }
   DeferredDecls.insert_range(EmittedDeferredDecls);
   EmittedDeferredDecls.clear();
   EmitVTablesOpportunistically();
@@ -3337,6 +3449,289 @@ void CodeGenModule::addSYCLModuleIdAttr(llvm::Function *Fn) {
   Fn->addFnAttr("sycl-module-id", getModule().getModuleIdentifier());
 }
 
+//===----------------------------------------------------------------------===//
+// G11 fixed placement IR representation (G11-PLACEMENT-DESIGN.md revision 7
+// §3.2 "IR 传递" and stable-symbol rule; G11-A slice: attribute
+// representation only -- the .mcu.fixed.* section emitter and the NOTE
+// writer are G11-B, the ledger is G11-C).
+//===----------------------------------------------------------------------===//
+
+// FNV-1a 32-bit over the absolute main source file path (§3.2 stable-symbol
+// rule for static entities).
+static uint32_t computeMCS251FNV1a32(llvm::StringRef S) {
+  uint32_t Hash = 2166136261u;
+  for (unsigned char C : S)
+    Hash = (Hash ^ C) * 16777619u;
+  return Hash;
+}
+
+// §3.2 stable_symbol: external entities are their declaration name; static
+// entities are "<TU-qualified>.<declaration name>" with
+// <TU-qualified> = <underscored basename> "." <8 hex digits FNV-1a(abs path)>.
+//
+// A function-local static additionally carries its *entity* context: two
+// functions of one TU may each declare `x`, and one function may contain
+// several same-named statics in different blocks. Both the context component
+// and the disambiguation ordinal are derived from the AST declaration
+// structure ONLY -- never from the emitted global name: an assembly label is
+// not injective (two entities may legitimately swap asm names across the
+// top-level/local boundary, and the '\01' prefix strip is not a bijection),
+// and LLVM's ".N" uniquing suffixes come from a module-wide counter
+// (ValueSymbolTable LastUnique) whose value depends on which entities were
+// emitted before this one, so it drifts between -O0 and -O2 (an
+// available_externally body is only emitted at -O1+) and with the
+// DeferredDecls DenseMap order. The identity shape is
+//   external entity       : <declaration name>
+//   file-scope static     : <TU-qualified>.<declaration name>
+//   function-local static : <TU-qualified>.<function>.<var>[.<ordinal>]
+// with <function> and <var> dot-free (identifier characters, or an Itanium
+// mangled name, whose alphabet never contains '.'). <ordinal> is the 1-based
+// source-order position of the static among the same-named static locals of
+// its function, appended from the second occurrence on. Uniqueness per TU:
+//  * the three domains have different dot-field counts (1 / 3 / 4-5), so
+//    they are pairwise disjoint as strings;
+//  * two local statics differ in the function field or in the ordinal;
+//  * the function field is injective per function entity: hosts the Itanium
+//    mangler decides to mangle (C++ entities and C overloadable functions,
+//    per shouldMangleCXXName) carry the full entity encoding, and the
+//    remaining unmangled hosts of one TU cannot share a declaration name --
+//    plain C and extern "C" have no function overloading once overloadable
+//    hosts are mangled away -- while plain (unmangled) C++ contexts are
+//    "N"-tagged so a reserved "_Z..."-spelled extern "C" name cannot collide
+//    with a mangled context.
+static const FunctionDecl *
+getMCS251StaticLocalHostFunction(const VarDecl *Var) {
+  // Static locals live in the nearest enclosing FunctionDecl context; the
+  // intermediate contexts of language closures (block literals, captured
+  // statements, and -- for a static declared directly in a lambda body -- the
+  // lambda's operator()) are skipped or *are* the host for lambdas.
+  const DeclContext *DC = Var->getDeclContext();
+  while (DC && !isa<FunctionDecl>(DC))
+    DC = DC->getParent();
+  return dyn_cast_or_null<FunctionDecl>(DC);
+}
+
+// The function-context component of a function-local static's stable symbol:
+// the Itanium mangled name (overload signature, class, closure type included)
+// for hosts the mangler itself decides to mangle, the plain function
+// declaration name for the rest. Depends only on the declaration
+// structure -- no asm labels, no emission, no opt level.
+static std::string getMCS251StaticLocalHostName(CodeGenModule &CGM,
+                                                const FunctionDecl *FD) {
+  MangleContext &MC = CGM.getCXXABI().getMangleContext();
+  // The branch is the mangler's own "needs mangling" verdict on the
+  // declaration, evaluated for BOTH language modes: ItaniumMangle's
+  // shouldMangleCXXName fires for C++ entities and, first of all, for C
+  // hosts marked __attribute__((overloadable)) (OverloadableAttr) -- two
+  // such same-named hosts are distinct entities with distinct mangled IR
+  // names, and keying this branch on LangOpts::CPlusPlus instead would give
+  // their same-named statics one shared identity. shouldMangleDeclName is
+  // deliberately NOT used: it additionally fires on __asm labels and on
+  // calling-convention / module-linkage / -funique-internal-linkage-names
+  // triggers, which would make the identity's namespace choice depend on an
+  // asm label (excluded from this scheme) and would re-encode asm-labelled
+  // extern "C" hosts that belong to the "N"-tagged plain-name namespace
+  // below.
+  if (MC.shouldMangleCXXName(FD)) {
+    GlobalDecl GD;
+    if (const auto *CD = dyn_cast<CXXConstructorDecl>(FD))
+      GD = GlobalDecl(CD, Ctor_Complete);
+    else if (const auto *DD = dyn_cast<CXXDestructorDecl>(FD))
+      GD = GlobalDecl(DD, Dtor_Complete);
+    else
+      GD = GlobalDecl(FD);
+    llvm::SmallString<256> Buffer;
+    llvm::raw_svector_ostream Out(Buffer);
+    // mangleName() would honour an asm label; mangleCXXName() is the pure
+    // Itanium encoding, so an __asm-renamed host function cannot leak another
+    // entity's name into an identity.
+    MC.mangleCXXName(GD, Out);
+    return std::string(Out.str());
+  }
+  // Unmangled host: the plain declaration name. In C++ only, tag "N" so the
+  // unmangled namespace stays disjoint from mangled contexts (Itanium mangled
+  // names always start with "_Z" and that prefix is reserved, and Clang
+  // accepts an extern "C" function *declared* with such a spelling, so the
+  // tag is load-bearing). Ordinary C hosts keep the plain name: unmangled C
+  // hosts never share a name (no C overloading exists without
+  // OverloadableAttr, and those took the mangled branch), and a C identifier
+  // spelled "_Z..." is reserved (C11 7.1.3), so it cannot legally name an
+  // unmangled host and collide with a mangled context.
+  return CGM.getLangOpts().CPlusPlus ? ("N" + FD->getName()).str()
+                                     : FD->getName().str();
+}
+
+// The 1-based source-order ordinal of Var among the static locals sharing its
+// name inside its host function (all of them, placed or not -- the count is
+// an AST property either way). The scan walks the host's DeclContext tree,
+// which holds block-scope statics directly and descends into the closure
+// contexts that are not FunctionDecls themselves (a static in a nested lambda
+// or in a nested function belongs to that nearer host and never appears
+// here). Stable sort by translation-unit source position; equivalent keys
+// keep the deterministic DeclContext order, never a pointer value.
+static unsigned getMCS251StaticLocalOrdinal(CodeGenModule &CGM,
+                                            const VarDecl *Var) {
+  const FunctionDecl *FD = getMCS251StaticLocalHostFunction(Var);
+  if (!FD)
+    return 1; // unreachable for a C/C++ static local (always function-scoped)
+  llvm::SmallVector<const VarDecl *, 8> Statics;
+  llvm::SmallVector<const DeclContext *, 8> Work(1, FD);
+  while (!Work.empty()) {
+    const DeclContext *DC = Work.pop_back_val();
+    for (const Decl *D : DC->decls()) {
+      if (const auto *V = dyn_cast<VarDecl>(D)) {
+        if (V->isStaticLocal())
+          Statics.push_back(V);
+        continue;
+      }
+      if (const auto *Sub = dyn_cast<DeclContext>(D))
+        if (isa<BlockDecl>(Sub) || isa<CapturedDecl>(Sub))
+          Work.push_back(Sub);
+    }
+  }
+  const SourceManager &SM = CGM.getContext().getSourceManager();
+  llvm::stable_sort(Statics, [&](const VarDecl *A, const VarDecl *B) {
+    return SM.isBeforeInTranslationUnit(A->getLocation(), B->getLocation());
+  });
+  const auto *Canon = Var->getCanonicalDecl();
+  unsigned Ordinal = 0;
+  for (const VarDecl *V : Statics) {
+    if (V->getName() != Var->getName())
+      continue;
+    ++Ordinal;
+    if (V->getCanonicalDecl() == Canon)
+      return Ordinal;
+  }
+  return 1; // defensive: not found (unreachable -- the host context owns Var)
+}
+
+static std::string computeMCS251StableSymbol(CodeGenModule &CGM,
+                                             const ValueDecl *D) {
+  if (D->hasExternalFormalLinkage())
+    return D->getName().str();
+  const auto &SM = CGM.getContext().getSourceManager();
+  llvm::SmallString<256> Path;
+  if (auto MainFile = SM.getFileEntryRefForID(SM.getMainFileID()))
+    Path = MainFile->getName();
+  else
+    Path = SM.getBufferOrFake(SM.getMainFileID()).getBufferIdentifier();
+  // Use the spelling of the source path, not the symlink's real path. The
+  // FileManager also honours -working-directory and virtual file systems.
+  SM.getFileManager().makeAbsolutePath(Path);
+  std::string TUQualified;
+  for (char C : llvm::sys::path::filename(Path))
+    TUQualified += (llvm::isAlnum((unsigned char)C) || C == '_') ? C : '_';
+  // The declaration-name component: file-scope statics keep the plain
+  // declaration name. A function-local static is identified by
+  // <function context>.<declaration name> plus the source-order ordinal for
+  // the second and later same-named statics of the same function (see the
+  // comment block above for the uniqueness argument).
+  std::string DeclName;
+  const auto *Var = dyn_cast<VarDecl>(D);
+  if (Var && Var->isStaticLocal()) {
+    if (const FunctionDecl *FD = getMCS251StaticLocalHostFunction(Var))
+      DeclName =
+          getMCS251StaticLocalHostName(CGM, FD) + "." + Var->getName().str();
+    else
+      DeclName = Var->getName().str();
+    unsigned Ordinal = getMCS251StaticLocalOrdinal(CGM, Var);
+    if (Ordinal > 1)
+      DeclName += "." + llvm::utostr(Ordinal);
+  } else
+    DeclName = D->getName().str();
+  return TUQualified + "." +
+         llvm::utohexstr(computeMCS251FNV1a32(Path), /*LowerCase=*/false,
+                         /*Width=*/8) +
+         "." + DeclName;
+}
+
+// Write the frozen IR representation of the G11 placement onto the entity's
+// GlobalObject:
+//   "mcs251-place"         = "A,storage_class,entity,ownership,flags" (§3.2)
+//   "mcs251-stable-symbol" = stable identity (§3.2)
+// Token vocabulary: storage_class = data|xdata|code (the §7 manifest
+// grammar), entity = object|function, ownership = owned|bind, flags = the
+// NOTE flags bitmask (bit0 retain; bit1 noinit).
+// GlobalVariables carry the strings as GlobalVariable attributes (the
+// "bss-section" pattern), functions as function attributes (the
+// "mcs251-isr-vector" pattern). The consumer is the G11-B emitter; this
+// slice emits no .mcu.fixed.* section and no NOTE.
+static void setMCS251PlacementAttributes(CodeGenModule &CGM, const Decl *D,
+                                         llvm::GlobalObject *GO) {
+  const auto *VD = dyn_cast_or_null<ValueDecl>(D);
+  if (!VD)
+    return;
+  // Attributes may live on any declaration of the entity (Sema guarantees
+  // the addresses agree), so walk the full redeclaration chain.
+  const MCS251PlaceAtAttr *Place = nullptr;
+  const MCS251BindAtAttr *Bind = nullptr;
+  bool Retain = false;
+  bool NoInit = false;
+  for (const Decl *R : VD->redecls()) {
+    NoInit |= R->hasAttr<MCS251NoInitAttr>();
+    if (!Place)
+      Place = R->getAttr<MCS251PlaceAtAttr>();
+    if (!Bind)
+      Bind = R->getAttr<MCS251BindAtAttr>();
+    if (!Retain)
+      Retain = R->hasAttr<MCS251RetainAttr>();
+  }
+  if (!Place && !Bind)
+    return;
+  const Expr *AddrExpr = Place ? Place->getAddress() : Bind->getAddress();
+  auto Addr = AddrExpr->getIntegerConstantExpr(CGM.getContext());
+  if (!Addr || Addr->isNegative() || Addr->ugt(0xFFFFFF))
+    return; // not reachable on a valid declaration (Sema diagnosed it)
+
+  // NOTE storage_class axis (§2.2): functions are CODE; AS4-qualified const
+  // objects are CODE-space objects (no EXECINSTR); AS3-qualified objects are
+  // XDATA; everything else is AS0-DATA.
+  StringRef StorageClass = "data";
+  StringRef Entity = "object";
+  if (isa<FunctionDecl>(VD)) {
+    StorageClass = "code";
+    Entity = "function";
+  } else if (VD->getType().getAddressSpace() != LangAS::Default) {
+    unsigned TargetAS = CGM.getContext().getTargetAddressSpace(
+        VD->getType().getAddressSpace());
+    if (TargetAS == MCS251XDataTargetAddressSpace)
+      StorageClass = "xdata";
+    else if (TargetAS == MCS251CodeTargetAddressSpace)
+      StorageClass = "code";
+  }
+  StringRef Ownership = Place ? "owned" : "bind";
+  unsigned Flags = (Retain ? 1 : 0) | (NoInit ? 2 : 0);
+  std::string Value =
+      (llvm::Twine("0x") + llvm::utohexstr(Addr->getZExtValue()) + "," +
+       StorageClass + "," + Entity + "," + Ownership + "," +
+       llvm::utostr(Flags))
+          .str();
+  std::string Stable = computeMCS251StableSymbol(CGM, VD);
+
+  // §2.2: the placement address must satisfy the entity-level alignment
+  // constraint, and the `aligned` attribute is recorded on the individual
+  // declaration that carries it. The chain is only complete at TU end, so the
+  // constraint is the maximum over the whole chain and the IR alignment
+  // carrier (read by the G11-B emitter) is raised to the same value the Sema
+  // check used -- otherwise a later `aligned` redeclaration would be checked
+  // but not emitted, and the result would depend on declaration order.
+  CharUnits EntityAlign = CharUnits::One();
+  for (const Decl *R : VD->redecls())
+    EntityAlign = std::max(EntityAlign, CGM.getContext().getDeclAlign(R));
+
+  if (auto *GV = dyn_cast<llvm::GlobalVariable>(GO)) {
+    GV->addAttribute("mcs251-place", Value);
+    GV->addAttribute("mcs251-stable-symbol", Stable);
+    if (GV->getAlign().valueOrOne() < llvm::Align(EntityAlign.getQuantity()))
+      GV->setAlignment(llvm::Align(EntityAlign.getQuantity()));
+  } else if (auto *F = dyn_cast<llvm::Function>(GO)) {
+    F->addFnAttr("mcs251-place", Value);
+    F->addFnAttr("mcs251-stable-symbol", Stable);
+    if (F->getAlign().valueOrOne() < llvm::Align(EntityAlign.getQuantity()))
+      F->setAlignment(llvm::Align(EntityAlign.getQuantity()));
+  }
+}
+
 void CodeGenModule::SetCommonAttributes(GlobalDecl GD, llvm::GlobalValue *GV) {
   const Decl *D = GD.getDecl();
   if (isa_and_nonnull<NamedDecl>(D))
@@ -3556,6 +3951,10 @@ void CodeGenModule::setNonAliasAttributes(GlobalDecl GD,
       GO->setSection(CSA->getName());
     else if (const auto *SA = D->getAttr<SectionAttr>())
       GO->setSection(SA->getName());
+
+    // G11-A: the placement IR representation rides the definitions too (the
+    // declaration side is covered in GetOrCreateLLVMGlobal / above).
+    setMCS251PlacementAttributes(*this, D, GO);
   }
 
   getTargetCodeGenInfo().setTargetAttributes(D, GO, *this);
@@ -3715,6 +4114,10 @@ void CodeGenModule::SetFunctionAttributes(GlobalDecl GD, llvm::Function *F,
   // which replaces the whole attribute set.
   if (const auto *IA = FD->getCanonicalDecl()->getAttr<MCS251InterruptAttr>())
     F->addFnAttr("mcs251-isr-vector", llvm::utostr(IA->getVector()));
+
+  // G11-A: declarations and definitions both carry the placement strings
+  // (the bind-only function path needs the declaration record).
+  setMCS251PlacementAttributes(*this, FD, F);
 
   // Add the Returned attribute for "this", except for iOS 5 and earlier
   // where substantial code, including the libstdc++ dylib, was compiled with
@@ -4461,6 +4864,17 @@ bool CodeGenModule::MustBeEmitted(const ValueDecl *Global) {
   if (LangOpts.EmitAllDecls)
     return true;
 
+  // Generic retain alone does not force frontend emission. G11 retain must
+  // keep even an otherwise unused internal definition for the NOTE emitter,
+  // and a placed entity is a fixed entity whose storage must exist whether or
+  // not anything references it. Both attributes may sit on any declaration of
+  // the chain, so the whole chain decides -- including the implicit RetainAttr
+  // that Sema installs on the definition only at TU end. This is what makes
+  // the emission decision after the TU-final attribute installation equal to
+  // the decision that a late mcu_place_at / mcu_retain requires.
+  if (isMCS251PlacedOrRetained(Global))
+    return true;
+
   // MCS251 ISR definitions must always be emitted: they carry the vector
   // table registration contract and must keep their llvm.used root, even
   // when internal and unreferenced. The keep-alive entry is added explicitly
@@ -4805,7 +5219,16 @@ void CodeGenModule::EmitGlobal(GlobalDecl GD) {
     }
   }
 
-  // Ignore declarations, they will be emitted on their first use.
+  // A bind declaration is itself a placement record, even without uses.
+  // Materialize an IR declaration (never storage) for the G11-B NOTE writer.
+  if (Global->hasAttr<MCS251BindAtAttr>()) {
+    if (const auto *VD = dyn_cast<VarDecl>(Global))
+      (void)GetAddrOfGlobalVar(VD);
+    else if (const auto *FD = dyn_cast<FunctionDecl>(Global))
+      (void)GetAddrOfFunction(FD);
+  }
+
+  // Ignore other declarations, they will be emitted on their first use.
   if (const auto *FD = dyn_cast<FunctionDecl>(Global)) {
     if (DeviceKernelAttr::isOpenCLSpelling(FD->getAttr<DeviceKernelAttr>()) &&
         FD->doesThisDeclarationHaveABody())
@@ -6137,6 +6560,11 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName, llvm::Type *Ty,
       if (const SectionAttr *SA = D->getAttr<SectionAttr>())
         GV->setSection(SA->getName());
     }
+
+    // G11-A: extern declarations carrying mcu_bind_at (or a placement
+    // inherited across redeclarations) carry the placement IR strings on the
+    // declaration global -- the bind-only record path consumed by G11-B/C.
+    setMCS251PlacementAttributes(*this, D, GV);
 
     // Handle XCore specific ABI requirements.
     if (getTriple().getArch() == llvm::Triple::xcore &&

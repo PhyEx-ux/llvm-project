@@ -72,7 +72,11 @@ public:
     IgnoredAttribute,
     UnknownAttribute,
   };
-  enum class Scope { NONE, CLANG, GNU, MSVC, OMP, HLSL, VK, GSL, RISCV };
+  // MCU is the vendor namespace of the MCS-251 G11 fixed placement
+  // attributes ([[mcu::place_at]], [[mcu::bind_at]], [[mcu::retain]]); see
+  // getScopeFromNormalizedScopeName in clang/lib/Basic/Attributes.cpp for
+  // the string mapping.
+  enum class Scope { NONE, CLANG, GNU, MSVC, OMP, HLSL, VK, GSL, RISCV, MCU };
   enum class AttrArgsInfo {
     None,
     Optional,

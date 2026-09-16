@@ -12822,6 +12822,56 @@ def err_mcs251_bit_acc_construct
             "supported in OpenACC constructs">;
 def note_mcs251_bit_construct_here
     : Note<"entered %select{OpenMP|OpenACC}0 construct here">;
+// G11 fixed placement diagnostics (G11-PLACEMENT-DESIGN.md revision 7, §8
+// clang table). Every message below is frozen verbatim by §8; do not reword
+// them. Fixture names in the §8 table map to clang/test/Sema/mcs251-g11-*.c.
+def err_mcs251_place_at_not_static
+    : Error<"`mcu::place_at` requires a static object or function definition">;
+def err_mcs251_address_not_representable
+    : Error<"placement address %0 is not representable in the MCS-251 "
+            "address model">;
+def err_mcs251_place_at_alignment
+    : Error<"placement address %0 does not satisfy alignment %1">;
+def err_mcs251_place_at_conflict
+    : Error<"conflicting `mcu::place_at` addresses %0 and %1">;
+def err_mcs251_place_at_overlap
+    : Error<"fixed placement range [%0, %1) overlaps another entity">;
+def err_mcs251_bind_at_init
+    : Error<"`mcu::bind_at` cannot have an initializer or function body">;
+// The bind conflict wording follows the placement conflict row of §8.
+def err_mcs251_bind_at_conflict
+    : Error<"conflicting placement for %0: %1 (%2) vs %3 (%4)">;
+def err_mcs251_noinit_requires_placement
+    : Error<"`noinit` requires a fixed placement (`place_at`) in this profile">;
+def err_mcs251_noinit_init
+    : Error<"`noinit` cannot be combined with an initializer">;
+def err_mcs251_place_incomplete
+    : Error<"fixed placement requires a complete type">;
+def err_mcs251_placement_zero_size
+    : Error<"fixed placement entity %0 must have a non-zero size">;
+def err_mcs251_address_space_unavailable
+    : Error<"address space %0 is not defined by the MCS-251 memory contract">;
+def err_mcs251_retain_no_definition
+    : Error<"`mcu::retain` requires a definition">;
+def err_mcs251_retain_requires_placement
+    : Error<"`mcu::retain` requires a fixed placement (`place_at`) in this "
+            "profile">;
+def err_mcs251_bind_at_linkage
+    : Error<"`mcu::bind_at` requires an entity with external linkage">;
+// G11 identity input boundary (G11-A sixth round, 2026-09-16). Not one of the
+// frozen §8 rows: this rejects an input class instead of encoding it. In C
+// mode the function-context component of a local static's stable symbol is
+// the host's plain declaration name -- the only component domain that can
+// equal an Itanium mangled identity (always "_Z"-prefixed; every other domain
+// is disjoint by structure: the "N" tag for unmangled C++ hosts, dot-field
+// counts across identity shapes, the TU hash across translation units). A C
+// identifier spelled "_Z..." is reserved (C11 7.1.3), so such a host is
+// rejected here rather than encoded; the fail-closed rejection leaves every
+// accepted identity string untouched.
+def err_mcs251_placement_reserved_host_name
+    : Error<"MCS251 fixed placement: host function %0 has a reserved "
+            "'_Z'-prefixed name that invades the Itanium mangled identity "
+            "namespace; rename the host function">;
 def err_omp_lambda_capture_in_declare_target_not_to : Error<
   "variable captured in declare target region must appear in a to clause">;
 def err_omp_device_type_mismatch : Error<

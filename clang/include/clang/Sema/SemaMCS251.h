@@ -226,6 +226,42 @@ public:
   void CheckTypeInputInDirectiveRestriction(QualType T, SourceLocation Loc,
                                             SourceRange Range);
 
+  //===--------------------------------------------------------------------===//
+  // G11 fixed placement (`mcu_place_at` / `mcu_bind_at` / `mcu_retain`),
+  // G11-PLACEMENT-DESIGN.md revision 7 §2.2 / §8 (clang rows).
+  //===--------------------------------------------------------------------===//
+
+  /// Record a declaration that just received a G11 placement attribute. The
+  /// redeclaration chain is not linked while attributes are processed (the
+  /// ISR handling hit the same boundary), so every entity-level rule that
+  /// needs other declarations, the final type, the initializer/body, or the
+  /// definition status is deferred: the handlers only perform checks on the
+  /// attribute arguments themselves (constant address, representability,
+  /// same-declaration repeats, automatic storage, linkage) and record the
+  /// declaration here for the translation-unit-final pass.
+  void NoteMCS251PlacementDecl(Decl *D);
+
+  /// Translation-unit-final G11 placement checks, called from
+  /// ActOnEndOfTranslationUnit (guarded to the MCS-251 target). Per entity
+  /// (canonical declaration), in this order and at most one diagnostic:
+  ///  1. `mcu_place_at` + `mcu_bind_at` combination: rejected as incompatible;
+  ///     no same-TU combination semantics are defined;
+  ///  2. cross-declaration address conflicts (err_mcs251_place_at_conflict);
+  ///  3. `mcu_bind_at` alone: no definition in this TU (an initializer, a
+  ///     body, or even a tentative definition is storage), complete type,
+  ///     non-zero object size (err_mcs251_bind_at_init /
+  ///     err_mcs251_place_incomplete / err_mcs251_placement_zero_size);
+  ///  4. `mcu_place_at`: definition in this TU, complete type, non-zero
+  ///     object size, alignment of the final declaration alignment, and
+  ///     overlap against the other placed entities of the TU
+  ///     (err_mcs251_place_at_not_static / err_mcs251_place_incomplete /
+  ///     err_mcs251_placement_zero_size / err_mcs251_place_at_alignment /
+  ///     err_mcs251_place_at_overlap);
+  ///  5. `mcu_retain` scope: only a placed definition may carry it;
+  ///     otherwise err_mcs251_retain_requires_placement (definition without
+  ///     placement) or err_mcs251_retain_no_definition (declaration only).
+  void CheckMCS251PlacementEntities();
+
 private:
   struct RestrictionFrame {
     SourceLocation DirectiveLoc;
@@ -243,6 +279,11 @@ private:
   /// and cached-token/delayed inputs are checked when their semantics
   /// actually run through the entry points above, not by source range.
   llvm::SmallVector<RestrictionFrame, 4> RestrictionFrames;
+
+  /// Declarations that received a G11 placement attribute and are waiting
+  /// for the translation-unit-final pass (see NoteMCS251PlacementDecl).
+  /// Deduplicated on the canonical declaration by the pass itself.
+  llvm::SmallVector<Decl *, 8> PlacementDecls;
 };
 
 } // namespace clang

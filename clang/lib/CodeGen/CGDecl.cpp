@@ -50,6 +50,24 @@ static_assert(clang::Sema::MaximumAlignment <= llvm::Value::MaximumAlignment,
               "Clang max alignment greater than what LLVM supports?");
 
 void CodeGenFunction::EmitDecl(const Decl &D, bool EvaluateConditionDecl) {
+  // G11-A: a block-scope mcu_bind_at declaration is itself a placement record
+  // even when it is never referenced. Block-scope declarations do not go
+  // through CodeGenModule::EmitGlobal, so the IR declaration (never storage)
+  // is materialized here for the G11-B NOTE writer; the placement attributes
+  // are written by the same CodeGenModule path as for file-scope
+  // declarations. Without this, an unreferenced block-scope bind loses its
+  // carrier already at the O0 frontend stage.
+  if (const auto *VD = dyn_cast<ValueDecl>(&D))
+    if (CGM.getTriple().getArch() == llvm::Triple::mcs251 &&
+        VD->hasAttr<MCS251BindAtAttr>()) {
+      if (const auto *Var = dyn_cast<VarDecl>(VD)) {
+        (void)CGM.GetAddrOfGlobalVar(Var);
+      } else if (const auto *FD = dyn_cast<FunctionDecl>(VD)) {
+        if (!FD->doesThisDeclarationHaveABody())
+          (void)CGM.GetAddrOfFunction(FD);
+      }
+    }
+
   switch (D.getKind()) {
   case Decl::BuiltinTemplate:
   case Decl::TranslationUnit:

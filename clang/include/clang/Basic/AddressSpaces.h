@@ -15,6 +15,7 @@
 #ifndef LLVM_CLANG_BASIC_ADDRESSSPACES_H
 #define LLVM_CLANG_BASIC_ADDRESSSPACES_H
 
+#include "llvm/TargetParser/MCS251TargetParser.h"
 #include <array>
 #include <cassert>
 #include <initializer_list>
@@ -140,6 +141,22 @@ inline bool isMCS251NamedDataAddressSpace(LangAS AS) {
   return isTargetAddressSpace(AS) &&
          (toTargetAddressSpace(AS) == MCS251XDataTargetAddressSpace ||
           toTargetAddressSpace(AS) == MCS251CodeTargetAddressSpace);
+}
+
+/// Look up numeric target ASes in the selected contract's Pointers table,
+/// rather than maintaining a second (v2-only) list in the frontend.
+inline bool isMCS251MappedTargetAddressSpace(
+    unsigned TargetAS, llvm::MCS251::MemoryContract Contract) {
+  if (!Contract.isSpecified())
+    Contract = {1, 2, 32, 8, 1}; // Same no-option default as MCS251TargetInfo.
+  auto Layout = llvm::MCS251::getLayoutDesc(
+      static_cast<llvm::MCS251::ASLayoutVersion>(Contract.ASLayoutVersion),
+      static_cast<llvm::MCS251::AS0PointerBits>(Contract.AS0PointerBits));
+  if (Layout)
+    for (const auto &Pointer : Layout->Pointers)
+      if (Pointer.AddressSpace == TargetAS)
+        return true;
+  return false;
 }
 
 } // namespace clang

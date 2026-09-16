@@ -1343,6 +1343,13 @@ void Sema::ActOnEndOfTranslationUnit() {
   // unterminated `begin declare variant`) can outlive the TU body and affect
   // anything that still runs afterwards (final rework, statement fix).
   MCS251().drainDirectiveRestrictions();
+  // G11 fixed placement: the entity-level rules (definition presence,
+  // completeness, zero-size, alignment, overlap, retain scope, cross-
+  // declaration conflicts) need the complete redeclaration chain and the
+  // final definition status, so they run exactly here. Skipped for PCH
+  // prefixes with the rest of the end-of-TU checking.
+  if (TUKind != TU_Prefix)
+    MCS251().CheckMCS251PlacementEntities();
   DiagnosePrecisionLossInComplexDivision();
   DiagnoseUnusedAPINotesSelectors();
 

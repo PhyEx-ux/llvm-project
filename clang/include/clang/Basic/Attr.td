@@ -1887,6 +1887,49 @@ def MCS251CodeAddressSpace : TypeAttr {
   let Documentation = [MCS251CodeAddressSpaceDocs];
 }
 
+// G11 fixed placement mechanisms (G11-PLACEMENT-DESIGN.md revision 7, §0.2
+// and §2.2). The three mechanisms are orthogonal:
+//   * mcu_place_at(A) -- an *owned* definition: the entity has storage (or a
+//     function body) in this TU and its VMA is fixed at A;
+//   * mcu_bind_at(A)  -- an *external* entity reference: no initializer, no
+//     body, no storage; the declaration must name an entity with external
+//     linkage that is defined (placed or not) in another TU;
+//   * mcu_retain      -- only legal on a placed *definition* (Sema rejects
+//     bind+retain and retain without a placement); it rides the existing
+//     RetainAttr -> llvm.used keepalive path.
+// The frozen C11 spellings are the GNU forms; the [[mcu::...]] vendor
+// spellings cover C++/C23 attribute syntax. Entity-level rules (definition
+// presence, completeness, zero-size, alignment, overlap, retain scope, and
+// cross-declaration conflicts) are diagnosed once at end of translation unit
+// by SemaMCS251::CheckMCS251PlacementEntities, because the redeclaration
+// chain is not linked while attributes are processed.
+def MCS251PlaceAt : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
+  let Spellings = [GCC<"mcu_place_at">, CXX11<"mcu", "place_at">];
+  let Subjects = SubjectList<[Var, Function], ErrorDiag>;
+  let Args = [ExprArgument<"Address">];
+  let Documentation = [MCS251PlacementDocs];
+}
+
+def MCS251BindAt : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
+  let Spellings = [GCC<"mcu_bind_at">, CXX11<"mcu", "bind_at">];
+  let Subjects = SubjectList<[Var, Function], ErrorDiag>;
+  let Args = [ExprArgument<"Address">];
+  let Documentation = [MCS251PlacementDocs];
+}
+
+def MCS251Retain : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
+  let Spellings = [GCC<"mcu_retain">, CXX11<"mcu", "retain">];
+  let Subjects = SubjectList<[Var, Function], ErrorDiag>;
+  let Documentation = [MCS251PlacementDocs];
+}
+
+// G11 §2.2/§8: noinit is an initialization policy on a placed object.
+def MCS251NoInit : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
+  let Spellings = [GNU<"noinit">];
+  let Subjects = SubjectList<[Var], ErrorDiag>;
+  let Documentation = [MCS251PlacementDocs];
+}
+
 def OpenCLNoSVM : Attr {
   let Spellings = [GNU<"nosvm">];
   let Subjects = SubjectList<[Var]>;

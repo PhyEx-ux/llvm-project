@@ -6648,6 +6648,23 @@ QualType Sema::BuildAddressSpaceAttr(QualType &T, LangAS ASIdx, Expr *AddrSpace,
       return QualType();
     }
 
+    // G11 (revision 2 §0.1 / §8, front-loaded): a numeric target address
+    // space that the MCS-251 memory contract does not map (e.g. 5) used to
+    // fall through to a backend layout-lookup fatal (probe 1[4]); intercept
+    // it here, on the same HandleAddressSpaceTypeAttribute path the
+    // `__xdata` keyword and address_space(3) share. AS 3 itself is mapped,
+    // so the equivalence with `__xdata` is untouched.
+    if (isTargetAddressSpace(ASIdx) &&
+        Context.getTargetInfo().getTriple().getArch() ==
+            llvm::Triple::mcs251 &&
+        !isMCS251MappedTargetAddressSpace(
+            toTargetAddressSpace(ASIdx),
+            Context.getTargetInfo().getTargetOpts().MCS251Memory)) {
+      Diag(AttrLoc, diag::err_mcs251_address_space_unavailable)
+          << toTargetAddressSpace(ASIdx);
+      return QualType();
+    }
+
     if (DiagnoseMultipleAddrSpaceAttributes(*this, T.getAddressSpace(), ASIdx,
                                             AttrLoc))
       return QualType();

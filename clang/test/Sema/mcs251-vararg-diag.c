@@ -177,19 +177,21 @@ void i64_variadic_arg(long long v) {
 //     arrays that decay into such pointers.
 // ---------------------------------------------------------------------------
 
-void bad_as_variadic_args(__attribute__((address_space(5))) int *p5,
+// G11 D5 / placement design §1.1: unmapped AS5 is now rejected at the
+// declaration by err_mcs251_address_space_unavailable, before variadic use.
+void bad_as_variadic_args(__attribute__((address_space(5))) int *p5, // expected-error {{address space 5 is not defined by the MCS-251 memory contract}}
                           __attribute__((address_space(7))) char *p7) {
-  vsum(1, p5); // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
+  vsum(1, p5);
   vsum(1, p7); // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
 }
 
-__attribute__((address_space(5))) int bad_a5[2];
+__attribute__((address_space(5))) int bad_a5[2]; // expected-error {{address space 5 is not defined by the MCS-251 memory contract}}
 __attribute__((address_space(7))) char bad_a7[2];
 
 void bad_as_array_variadic_args(void) {
-  // The as-written type is an array, but the argument decays to an AS5/AS7
-  // pointer in the variadic slot, so the same rejection applies.
-  vsum(1, bad_a5); // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
+  // AS5 was rejected at declaration; mapped AS7 still reaches the variadic
+  // pointer gate after array-to-pointer decay.
+  vsum(1, bad_a5);
   vsum(1, bad_a7); // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
 }
 

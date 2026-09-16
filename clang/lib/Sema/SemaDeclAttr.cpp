@@ -50,6 +50,7 @@
 #include "clang/Sema/SemaCUDA.h"
 #include "clang/Sema/SemaHLSL.h"
 #include "clang/Sema/SemaInternal.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "clang/Sema/SemaM68k.h"
 #include "clang/Sema/SemaMIPS.h"
 #include "clang/Sema/SemaMSP430.h"
@@ -6799,6 +6800,169 @@ static void handleMCS251InterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   FD->addAttr(::new (S.Context) MCS251InterruptAttr(S.Context, AL, Slot));
 }
 
+//===----------------------------------------------------------------------===//
+// G11 fixed placement (`mcu_place_at` / `mcu_bind_at` / `mcu_retain`),
+// G11-PLACEMENT-DESIGN.md revision 7 §2.2 / §8 (clang rows).
+//
+// The handlers only check what is decidable from the attribute arguments and
+// the declaration itself (constant/representable address, same-declaration
+// repeats, automatic storage, external linkage, bind+retain): the
+// redeclaration chain is not linked yet, so the entity-level rules (cross-
+// declaration conflicts, definition presence, completeness, zero-size,
+// alignment, overlap, retain scope) run once at the end of the translation
+// unit in SemaMCS251::CheckMCS251PlacementEntities. Every error path leaves
+// the declaration invalid so the later pass does not produce a second,
+// conflicting diagnostic.
+//===----------------------------------------------------------------------===//
+
+/// Shared form checks for the address argument of mcu_place_at / mcu_bind_at:
+/// exactly-one integer constant expression, non-negative, representable in
+/// the 24-bit MCS-251 address model (§8 err_mcs251_address_not_representable).
+/// Returns the value on success, nullopt after a diagnostic.
+static std::optional<uint64_t>
+checkMCS251PlacementAddressArg(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (AL.getNumArgs() != 1) {
+    S.Diag(AL.getLoc(), diag::err_attribute_wrong_number_arguments)
+        << AL << 1;
+    D->setInvalidDecl();
+    return std::nullopt;
+  }
+  Expr *AddrExpr = AL.getArgAsExpr(0);
+  if (AddrExpr->isValueDependent()) {
+    S.Diag(AL.getLoc(), diag::err_expr_not_ice)
+        << /*IsInteger=*/false << AddrExpr->getSourceRange();
+    D->setInvalidDecl();
+    return std::nullopt;
+  }
+  std::optional<llvm::APSInt> Addr =
+      AddrExpr->getIntegerConstantExpr(S.Context);
+  if (!Addr) {
+    S.Diag(AL.getLoc(), diag::err_expr_not_ice)
+        << /*IsInteger=*/false << AddrExpr->getSourceRange();
+    D->setInvalidDecl();
+    return std::nullopt;
+  }
+  if (Addr->isNegative() || Addr->ugt(0xFFFFFF)) {
+    S.Diag(AL.getLoc(), diag::err_mcs251_address_not_representable) << *Addr;
+    D->setInvalidDecl();
+    return std::nullopt;
+  }
+  return Addr->getZExtValue();
+}
+
+/// Printed form of a placement address for the conflicting-address message:
+/// "0x<hex>" for the values that passed the representability check.
+static std::string formatMCS251AttrAddress(uint64_t Addr) {
+  return "0x" + llvm::utohexstr(Addr);
+}
+
+/// Source name for the §8 "conflicting placement for %sym: 0x%x (%source) vs
+/// 0x%x (%source)" message. The attributes may be spelled through a macro
+/// (`#define BIND(A) __attribute__((mcu_bind_at(A)))`), whose location is a
+/// macro location for which SourceManager::getFilename reports no file; the
+/// expansion location names the file the user actually wrote.
+static StringRef getMCS251AttrSourceName(Sema &S, SourceLocation Loc) {
+  StringRef Name = S.SourceMgr.getFilename(S.SourceMgr.getExpansionLoc(Loc));
+  if (!Name.empty())
+    return Name;
+  return S.SourceMgr.getFilename(Loc);
+}
+
+static void handleMCS251PlaceAtAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  // §2.2: place_at fixes the VMA of a static-storage entity; automatic
+  // variables and parameters are rejected up front ("static object or
+  // function definition"). Non-static data members never reach the handler
+  // (Subjects covers Var/Function only, and C++ fields are FieldDecls).
+  if (const auto *VD = dyn_cast<VarDecl>(D)) {
+    if (VD->hasLocalStorage()) {
+      S.Diag(AL.getLoc(), diag::err_mcs251_place_at_not_static);
+      D->setInvalidDecl();
+      return;
+    }
+  }
+
+  // Same-declaration repeat with a different address: the immediate form of
+  // the §8 "same-declaration re-entry" conflict. Cross-declaration conflicts
+  // are diagnosed at the end of the translation unit.
+  std::optional<uint64_t> Addr = checkMCS251PlacementAddressArg(S, D, AL);
+  if (!Addr)
+    return;
+  if (const auto *Existing = D->getAttr<MCS251PlaceAtAttr>()) {
+    auto ExistingAddr = Existing->getAddress()->getIntegerConstantExpr(S.Context);
+    if (ExistingAddr && ExistingAddr->getZExtValue() != *Addr) {
+      S.Diag(AL.getLoc(), diag::err_mcs251_place_at_conflict)
+          << formatMCS251AttrAddress(ExistingAddr->getZExtValue())
+          << formatMCS251AttrAddress(*Addr);
+      D->setInvalidDecl();
+    }
+    // An identical repeat is idempotent; keep one attribute.
+    return;
+  }
+  D->addAttr(::new (S.Context) MCS251PlaceAtAttr(S.Context, AL, AL.getArgAsExpr(0)));
+  S.MCS251().NoteMCS251PlacementDecl(D);
+}
+
+static void handleMCS251BindAtAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  // §2.2: bind requires an entity with external linkage. File-scope statics,
+  // static locals, and automatic locals are all refused with the frozen
+  // linkage message; the declaration-identity repeat rules mirror place_at.
+  if (!cast<NamedDecl>(D)->hasExternalFormalLinkage()) {
+    S.Diag(AL.getLoc(), diag::err_mcs251_bind_at_linkage);
+    D->setInvalidDecl();
+    return;
+  }
+  // §2.2 / §6.5: a bind declaration carries no definition, so it cannot ride
+  // mcu_retain (either spelling order; §8 retain-bind.c).
+  if (D->hasAttr<MCS251RetainAttr>()) {
+    S.Diag(AL.getLoc(), diag::err_mcs251_retain_no_definition);
+    D->setInvalidDecl();
+    return;
+  }
+
+  std::optional<uint64_t> Addr = checkMCS251PlacementAddressArg(S, D, AL);
+  if (!Addr)
+    return;
+  if (const auto *Existing = D->getAttr<MCS251BindAtAttr>()) {
+    auto ExistingAddr = Existing->getAddress()->getIntegerConstantExpr(S.Context);
+    if (ExistingAddr && ExistingAddr->getZExtValue() != *Addr) {
+      S.Diag(AL.getLoc(), diag::err_mcs251_bind_at_conflict)
+          << cast<NamedDecl>(D)->getNameAsString()
+          << formatMCS251AttrAddress(ExistingAddr->getZExtValue())
+          << getMCS251AttrSourceName(S, Existing->getLocation())
+          << formatMCS251AttrAddress(*Addr)
+          << getMCS251AttrSourceName(S, AL.getLoc());
+      D->setInvalidDecl();
+    }
+    return;
+  }
+  D->addAttr(::new (S.Context) MCS251BindAtAttr(S.Context, AL, AL.getArgAsExpr(0)));
+  S.MCS251().NoteMCS251PlacementDecl(D);
+}
+
+static void handleMCS251RetainAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  // §2.2 / §6.5: retain rides a placed *definition* only. A bind declaration
+  // has no definition and no carrier for the retain bit — refused here in
+  // either spelling order (§8 retain-bind.c).
+  if (D->hasAttr<MCS251BindAtAttr>()) {
+    S.Diag(AL.getLoc(), diag::err_mcs251_retain_no_definition);
+    D->setInvalidDecl();
+    return;
+  }
+  if (D->hasAttr<MCS251RetainAttr>()) {
+    // A plain repeat is idempotent.
+    return;
+  }
+  D->addAttr(::new (S.Context) MCS251RetainAttr(S.Context, AL));
+  // The validated definition receives a correctly-spelled RetainAttr in
+  // the TU-final pass. Installing one here on an extern declaration would
+  // trigger generic retain's non-definition warning and removal.
+  // Record either way: without a placement on this declaration, the end-of-TU
+  // pass decides between err_mcs251_retain_requires_placement (definition
+  // without placement) and err_mcs251_retain_no_definition (declaration only,
+  // §8 retain-extern.c / retain-plain.c).
+  S.MCS251().NoteMCS251PlacementDecl(D);
+}
+
 static void handleInterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   // Dispatch the interrupt attribute based on the current target.
   switch (S.Context.getTargetInfo().getTriple().getArch()) {
@@ -7835,6 +7999,21 @@ ProcessDeclAttribute(Sema &S, Decl *D, const ParsedAttr &AL,
     break;
   case ParsedAttr::AT_Interrupt:
     handleInterruptAttr(S, D, AL);
+    break;
+  // G11 fixed placement (mcu_place_at / mcu_bind_at / mcu_retain); see the
+  // comment block above the handlers for the check scheduling.
+  case ParsedAttr::AT_MCS251PlaceAt:
+    handleMCS251PlaceAtAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_MCS251BindAt:
+    handleMCS251BindAtAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_MCS251Retain:
+    handleMCS251RetainAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_MCS251NoInit:
+    handleSimpleAttribute<MCS251NoInitAttr>(S, D, AL);
+    S.MCS251().NoteMCS251PlacementDecl(D);
     break;
   case ParsedAttr::AT_ARMInterruptSaveFP:
     S.ARM().handleInterruptSaveFPAttr(D, AL);

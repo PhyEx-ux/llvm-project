@@ -5384,6 +5384,55 @@ qualified with ``__code``.
   }];
 }
 
+def DocMCS251Placement : DocumentationCategory<"MCS-251 Fixed Placement"> {
+  let Content = [{
+Clang for the MCS-251 target provides three orthogonal fixed-placement
+mechanisms. ``mcu_place_at(A)`` defines a static entity whose virtual memory
+address is fixed at ``A``; ``mcu_bind_at(A)`` names an external entity
+defined in another translation unit without producing storage; and
+``mcu_retain`` keeps a placed definition alive. All three accept the GNU
+spelling (``__attribute__((mcu_place_at(A)))`` and friends) plus the
+``[[mcu::...]]`` vendor spelling.
+  }];
+}
+
+def MCS251PlacementDocs : Documentation {
+  let Category = DocMCS251Placement;
+  let Heading = "mcu_place_at, mcu_bind_at, mcu_retain (MCS-251)";
+  let Content = [{
+The ``mcu_place_at(A)`` attribute fixes the virtual memory address of the
+attributed entity at the integer constant expression ``A`` (which must be
+representable in the 24-bit MCS-251 address model and must satisfy the
+entity's alignment). The entity must be a static object or function
+*definition* somewhere in the translation unit; automatic variables,
+parameters, and non-static members are rejected. The type must be complete
+and, for objects, have a non-zero size. ``mcu_place_at`` composes with
+``noinit`` and ``mcu_retain``. Two placed entities in the same translation
+unit may not overlap, and two declarations of the same entity may not name
+different addresses.
+
+The ``mcu_bind_at(A)`` attribute names an external entity fixed at address
+``A`` in another translation unit. The declaration must not carry an
+initializer or a function body (it produces no storage), must have a
+complete, non-zero-size type (functions are exempt from the size rule), and
+must have external linkage: ``static`` entities cannot be bound.
+
+The ``mcu_retain`` attribute is only legal on an entity placed with
+``mcu_place_at`` in the same translation unit. It keeps the placed
+definition alive (through ``llvm.used``); it is rejected on ``mcu_bind_at``
+declarations and on entities without a fixed placement.
+
+``__attribute__((noinit))`` may be combined with ``mcu_place_at`` on an
+object definition without an initializer. It conveys the no-initialization
+policy to the placement emitter; it does not change the object's type.
+
+The frontend carries placement policy in IR. Object emission, fixed-region
+linking and final-image verification require the corresponding MCS-251
+placement backend and linker support; accepting an attribute in Sema alone
+is not proof of final-image placement.
+  }];
+}
+
 def OpenCLNoSVMDocs : Documentation {
   let Category = DocCatVariable;
   let Content = [{

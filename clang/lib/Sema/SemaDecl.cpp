@@ -3214,6 +3214,14 @@ static void checkNewAttributesAfterDef(Sema &S, Decl *New, const Decl *Old) {
       // SYCLExternalAttr may be added after a definition.
       ++I;
       continue;
+    } else if (S.Context.getTargetInfo().getTriple().getArch() ==
+                   llvm::Triple::mcs251 &&
+               isa<MCS251PlaceAtAttr, MCS251BindAtAttr, MCS251RetainAttr,
+                   MCS251NoInitAttr>(NewAttribute)) {
+      // G11 checks the complete redeclaration chain at TU end. Do not drop
+      // a late policy before those conflict/definition checks can see it.
+      ++I;
+      continue;
     }
 
     S.Diag(NewAttribute->getLocation(),

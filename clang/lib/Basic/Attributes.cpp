@@ -236,7 +236,9 @@ getScopeFromNormalizedScopeName(StringRef ScopeName) {
       .Case("vk", AttributeCommonInfo::Scope::VK)
       .Case("msvc", AttributeCommonInfo::Scope::MSVC)
       .Case("omp", AttributeCommonInfo::Scope::OMP)
-      .Case("riscv", AttributeCommonInfo::Scope::RISCV);
+      .Case("riscv", AttributeCommonInfo::Scope::RISCV)
+      // MCS-251 G11 fixed placement vendor namespace ([[mcu::...]]).
+      .Case("mcu", AttributeCommonInfo::Scope::MCU);
 }
 
 unsigned AttributeCommonInfo::calculateAttributeSpellingListIndex() const {
