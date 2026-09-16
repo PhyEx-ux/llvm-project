@@ -323,6 +323,13 @@ static unsigned mcs251InstrLen(ArrayRef<uint8_t> B, size_t Off) {
   case 0x32: // reti
   case 0xB3: // cpl c
   case 0xD3: // setb c
+  // XDATA channel (AS3): the classic MOVX @DPTR pair `movx a,@dptr` (E0) and
+  // `movx @dptr,a` (F0), emitted by MCS251MCCodeEmitter.cpp as bare single
+  // bytes (both have low nibble 0, so putOpcode adds no A5 escape).  A bit
+  // module's XDATA accesses interleave with its bit instructions, so without
+  // them the whole-section decode stops on any such byte.
+  case 0xE0: // movx a,@dptr
+  case 0xF0: // movx @dptr,a
     return 1;
   // Opcode + one specifier/operand byte.
   case 0x0E: // sra8/sra16

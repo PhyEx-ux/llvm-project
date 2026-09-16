@@ -1,0 +1,293 @@
+#
+# P09 instruction-table fix: the classic single-byte MOVX @DPTR pair (0xE0
+# `movx a,@dptr` / 0xF0 `movx @dptr,a`) must decode as 1-byte instructions in
+# the lld-side mirror of the MC code emitter (mcs251InstrLen).  The emitter
+# (MCTargetDesc/MCS251MCCodeEmitter.cpp, MOVXALD/MOVXAST) emits them as bare
+# single bytes; a bit module's XDATA accesses interleave with its bit
+# instructions, so without them the whole-section BITADDR8 decode stopped at
+# the first such byte (demo 59/13/82/12 failures at 0x9e/0x239/0x73/0x1e5).
+#
+# Cases:
+#   positive: an E0/F0 pair interleaved with bit instructions (both
+#             BITADDR8-carrying) links; the final image keeps every byte and
+#             the two bit slots resolve.
+#   negative: the added bytes are exact-length, not blanket acceptance --
+#             an unknown opcode right after the MOVX pair still fails at its
+#             exact offset, and a BITADDR8 field pointing at the E0 opcode
+#             byte itself is still not a bit-address operand.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+
+# --- positive: MOVX pair interleaved with bit instructions links ---
+# RUN: yaml2obj movx-interleaved.yaml -o mi.o
+# RUN: mcs251-lld mi.o --area-start=CSEG=0xff0200 --map=%t/mi.map -o %t/mi.elf
+# RUN: FileCheck %s --check-prefix=MAP <%t/mi.map
+# MAP: BIT b0 = 0x00 byte 0x20 index 0
+# MAP: BIT b1 = 0x01 byte 0x20 index 1
+# RUN: %python %S/Inputs/dump-elf-bytes.py %t/mi.elf 0xff0200 16 | FileCheck %s --check-prefix=TEXT
+# The relocated fields carry the allocated slots (b0 -> 0x00, b1 -> 0x01).
+# TEXT: d2 00 e0 f0 a5 eb 7a 51 84 92 01 74 0c 13 33 aa
+
+# --- negative (a): an unknown opcode after the MOVX pair still fails closed ---
+# 'D2 00 E0 F0 FF': the MOVX bytes decode, FF at offset 0x4 does not.
+# RUN: yaml2obj bad-after-movx.yaml -o bam.o
+# RUN: not mcs251-lld bam.o --area-start=CSEG=0xff0200 -o %t/bam.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=BAD
+# RUN: test ! -e %t/bam.elf
+# BAD: MCS251 bit: .text is not a decodable instruction stream at offset 0x4
+
+# --- negative (b): the added lengths widen what decodes, not what a field ---
+#     may attach to.
+# 'E0 F0 74 00' with the BITADDR8 at 0x3: after the MOVX bytes decode (1 byte
+# each), 74 is a real 2-byte `mov a,#imm8`, and the zero-filled field sits one
+# byte into it -- but 74 is not a bit opcode, so the field position is rejected.
+# MOVX itself is likewise never a host for a bit field (it has no bit-address
+# operand), so no E0/F0 position can become a laundering site.
+# RUN: yaml2obj field-on-movx.yaml -o fom.o
+# RUN: not mcs251-lld fom.o --area-start=CSEG=0xff0200 -o %t/fom.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=FIELD
+# RUN: test ! -e %t/fom.elf
+# FIELD: MCS251 bit: BITADDR8 field at 0x3 in .text is not the bit-address operand of a bit instruction
+
+# --- negative (c): E0/F0 consume exactly one byte; a truncated tail still fails ---
+# 'D2 00 E0 F0 74': the field decodes, the MOVX pair decodes, then 74
+# (mov a,#imm8) has no immediate byte left -- the stream ends mid-instruction.
+# RUN: yaml2obj truncated-after-movx.yaml -o tam.o
+# RUN: not mcs251-lld tam.o --area-start=CSEG=0xff0200 -o %t/tam.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=TRUNC
+# RUN: test ! -e %t/tam.elf
+# TRUNC: MCS251 bit: .text ends in a truncated instruction at offset 0x4
+
+#--- movx-interleaved.yaml
+# The .text byte stream is a producer-shaped window: 'D2 00' setb <bit>,
+# 'E0'/'F0' the MOVX pair (real UART1.c emits '... A5 EB F0 ...' at 0x9c and
+# 13/main.c emits '... 83 E0 A5 F8 ...' at 0x239), 'A5 EB' the A5-escaped
+# classic mov a,rn, '7A 51 84' a 3-byte native move (DPXL region write),
+# '92 00' mov <bit>,c, then '74 0C', '13', '33', 'AA' single/double classics.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200E0F0A5EB7A51849200740C1333AA'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '01010001000000000101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: b0
+        Addend: 0
+      - Offset: 0xC
+        Type: 10
+        Symbol: b1
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: b0
+        Addend: 0
+      - Offset: 0xA
+        Type: 11
+        Symbol: b1
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: b0
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+  - Name: b1
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x8
+    Size: 1
+
+#--- bad-after-movx.yaml
+# The same opening window, but an unknown opcode byte (FF) directly after the
+# MOVX pair: the added E0/F0 lengths must not weaken the unknown-opcode rule.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200E0F0FF'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: b0
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: b0
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: b0
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- field-on-movx.yaml
+# The MOVX pair decodes as two 1-byte instructions; the zero-filled BITADDR8
+# field then sits one byte into the following `74 00` (mov a,#imm8), which is
+# a decodable instruction but not a bit-address opcode.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'E0F07400'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: b0
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x3
+        Type: 11
+        Symbol: b0
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: b0
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
+
+#--- truncated-after-movx.yaml
+# 'D2 00' setb<bit>, 'E0' and 'F0' the MOVX pair, then '74' with no immediate
+# byte: the stream ends mid-instruction and must fail closed.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'D200E0F074'
+  - Name: .mcs251.bit
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '0101000100000000'
+  - Name: .rela.mcs251.bit
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .mcs251.bit
+    Relocations:
+      - Offset: 0x4
+        Type: 10
+        Symbol: b0
+        Addend: 0
+  - Name: .rela.text
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: 11
+        Symbol: b0
+        Addend: 0
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: b0
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.bit
+    Value: 0x0
+    Size: 1
