@@ -7,7 +7,11 @@
 ; RUN: llvm-readobj --sections --section-data --relocations %t/ptrleaf.o | FileCheck %s --check-prefix=PTRL
 ; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/addend.ll -o %t/addend.o
 ; RUN: llvm-readobj --sections --section-data --relocations %t/addend.o | FileCheck %s --check-prefix=ADDEND
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/huge.ll -o %t/huge.o 2>&1 | FileCheck %s --check-prefix=HUGE
+; G13b: under the default (v2) contract a >65535 all-zero object is placed
+; (SHF_MCS251_XSEG_SPLIT, no record); a v1 object keeps the frozen gate.
+; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/huge.ll -o %t/huge.o
+; RUN: llvm-readobj --sections %t/huge.o | FileCheck %s --check-prefix=SPLIT
+; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/huge.ll -o %t/huge-v1.o 2>&1 | FileCheck %s --check-prefix=HUGE
 ; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/align.ll -o %t/align.o 2>&1 | FileCheck %s --check-prefix=ALIGN
 ; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/gepnull.ll -o %t/gepnull.o 2>&1 | FileCheck %s --check-prefix=ALG
 ; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/inttoptr.ll -o %t/inttoptr.o 2>&1 | FileCheck %s --check-prefix=ALG
@@ -20,8 +24,10 @@
 ;   u16 payload_size (0 = clear only), payload
 ; through the byte-of-24 relocation channel. `const __xdata` stays in XSEG
 ; (const is a write discipline, the storage class is the address space).
-; Extern-only TUs emit no placement at all. A single object is capped at
-; 65535 bytes (XSEG objects never straddle a 64K window).
+; Extern-only TUs emit no placement at all. A single unmarked object is
+; capped at 65535 bytes (XSEG objects never straddle a 64K window); G13b:
+; a v2 object may declare ONE larger all-zero object via
+; SHF_MCS251_XSEG_SPLIT with no record (the linker synthesizes records).
 ;
 ; X3-R2: a stored pointer leaf is a BIG-ENDIAN 4-byte container whose low
 ; 24 bits are the canonical address: the most significant byte (always
@@ -105,6 +111,20 @@
 ; ADDEND: 0x7 R_MCS251_24 _g 0x4
 
 ; HUGE: LLVM ERROR: MCS251: __xdata global 'big': object size 65536 does not fit the 16-bit XDATA record limit (65535 bytes; XSEG objects never straddle a 64K window)
+; G13b (check prefix SPLIT): the v2 object marks the 65536-byte all-zero
+; object as one logical section (SHF_MCS251_XSEG_SPLIT, D3 v2 producer
+; capability) and emits NO XDATA_INIT record -- the linker places the
+; section across windows and synthesizes the per-window clear-only v1
+; records.
+; SPLIT: Name: .mcs251.XSEG._big
+; SPLIT: Type: SHT_NOBITS
+; SPLIT: Flags [ (0x40000003)
+; SPLIT-NEXT:       SHF_ALLOC (0x2)
+; SPLIT-NEXT:       SHF_MCS251_XSEG_SPLIT (0x40000000)
+; SPLIT-NEXT:       SHF_WRITE (0x1)
+; SPLIT-NEXT:     ]
+; SPLIT: Size: 65536
+; SPLIT-NOT: xdata_init
 ; ALIGN: LLVM ERROR: MCS251: __xdata global 'a': storage must be byte-aligned
 ; W3b: the default contract is v2, so initializer algebra (GEP over null,
 ; inttoptr, addrspacecast) is rejected by the registered-capability gate of

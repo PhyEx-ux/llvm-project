@@ -1328,6 +1328,18 @@ enum : unsigned {
   // it (the automatic migration is a v2 placement policy).
   SHF_MCS251_EDATA_MOVABLE = 0x20000000,
 
+  // G13b: the section is ONE logical XDATA object larger than the 16-bit
+  // XDATA record limit (65535 bytes).  A v2 ELF object marks an all-zero
+  // `__xdata` object with this bit and emits no XDATA_INIT record for it
+  // (a single v1 record cannot describe more than 65535 bytes); the linker
+  // places the section as one contiguous range -- possibly across a 64K
+  // window -- and synthesizes per-window clear-only v1 records for the CRT
+  // walker.  Sections without the bit keep the single-window ruling (one
+  // object never straddles a window; 65535-byte cap).  v1 objects must not
+  // carry it (linker-side hard error: splitting is a v2 placement policy,
+  // same mechanism as SHF_MCS251_EDATA_MOVABLE).
+  SHF_MCS251_XSEG_SPLIT = 0x40000000,
+
   /// All sections with the "d" flag are grouped together by the linker to form
   /// the data section and the dp register is set to the start of the section by
   /// the boot code.

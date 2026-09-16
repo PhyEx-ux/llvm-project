@@ -190,6 +190,18 @@ class MCS251AsmPrinter final : public AsmPrinter {
            Contract->ASLayoutVersion == 2;
   }
 
+  // G13b: the v2 ELF-object predicate that gates the XSEG-split capability.
+  // Same mechanism as marksEDataMovable() (D3 ruling): only a v2 object may
+  // declare a >65535-byte all-zero __xdata object (SHF_MCS251_XSEG_SPLIT,
+  // no XDATA_INIT record -- the linker synthesizes the per-window records).
+  // A v1 object keeps the frozen 16-bit record gate byte for byte.
+  bool marksXsegSplit() const {
+    const std::optional<MCS251::MemoryContract> &Contract =
+        getMCS251TM().getMemoryContract();
+    return usesELFObjects() && Contract && Contract->isSpecified() &&
+           Contract->ASLayoutVersion == 2;
+  }
+
   // The slot value is canonical decimal text ("0" and "1" are legal;
   // The canonical-decimal slot check is shared with the Verifier and the
   // target contract check through MCS251ISR::parseCanonicalSlot; the object
@@ -2293,12 +2305,17 @@ public:
 
   // AS3 (`__xdata`, including `const __xdata`) and AS4 (`__code`) objects.
   //
-  // AS3: one `.mcs251.XSEG.<sym>` NOBITS section per object (X3 ruling: XSEG
-  // objects never straddle a 64K window; per-object sections let the linker
-  // align each object into its window) plus one `.mcs251.xdata_init` record
-  // carrying the 24-bit destination through the byte-of-24 channel. A single
-  // object is capped at 16 bits (the u16 record fields cannot describe more;
-  // >64K single objects are out of profile for the corpus and the boards).
+  // AS3: one `.mcs251.XSEG.<sym>` NOBITS section per object (X3 ruling: an
+  // unmarked XSEG object never straddles a 64K window; per-object sections
+  // let the linker align each object into its window) plus one
+  // `.mcs251.xdata_init` record carrying the 24-bit destination through the
+  // byte-of-24 channel.  A single object is capped at 16 bits (the u16
+  // record fields cannot describe more).  G13b two-state ruling: a v2 object
+  // may declare ONE logical all-zero object of any size by marking the
+  // section SHF_MCS251_XSEG_SPLIT and emitting NO record -- the linker
+  // places it as one contiguous range, possibly across a 64K window, and
+  // synthesizes per-window clear-only v1 records for the CRT walker.
+  // Unmarked sections keep the single-window ruling byte for byte.
   //
   // AS4: a read-only CODE-space image emitted exactly like the ordinary RO
   // path (in place in CSEG); an uninitialized/tentative definition is the
@@ -2345,34 +2362,63 @@ public:
         Bad("unsupported initializer (byte-aligned i8/i16/i32 scalars, "
             "arrays and structs of integers and &global pointer leaves; "
             "expression algebra is not supported)");
-      if (!Size || Size > UINT16_MAX)
-        Bad("object size " + Twine(Size) + " does not fit the 16-bit XDATA "
+      // G13b: the 16-bit limit is a RECORD-format constraint, not an
+      // address-space limit.  Two states for Size > UINT16_MAX:
+      //  - a nonzero initializer stays rejected (a single v1 record's u16
+      //    object_size/payload_size fields cannot describe more);
+      //  - an all-zero object stays ONE logical XSEG section: a v2 object
+      //    marks it SHF_MCS251_XSEG_SPLIT and emits NO record -- the linker
+      //    places it as one contiguous range and synthesizes per-window
+      //    clear-only v1 records.  A v1 object keeps the frozen gate byte
+      //    for byte (the split capability is a v2 producer capability, D3,
+      //    same mechanism as SHF_MCS251_EDATA_MOVABLE).
+      // Size <= UINT16_MAX keeps the established path unchanged: the record
+      // is emitted exactly as before and no flag is set (existing objects
+      // and all fixtures stay byte-identical).
+      const bool HasPayload = !Init->isNullValue();
+      if (Size > UINT16_MAX) {
+        if (HasPayload)
+          Bad("payload cannot exceed the 16-bit XDATA record limit (65535 "
+              "bytes); zero-initialized objects are split by the linker "
+              "into per-window records");
+        if (!marksXsegSplit())
+          Bad("object size " + Twine(Size) + " does not fit the 16-bit XDATA "
+              "record limit (65535 bytes; XSEG objects never straddle a 64K "
+              "window)");
+      } else if (!Size) {
+        Bad("object size 0 does not fit the 16-bit XDATA "
             "record limit (65535 bytes; XSEG objects never straddle a 64K "
             "window)");
+      }
+      const bool XsegSplit = Size > UINT16_MAX;
 
       MCSection *XSEG = OutContext.getELFSection(
           (Twine(".mcs251.XSEG.") + Sym->getName()).str(), ELF::SHT_NOBITS,
-          ELF::SHF_ALLOC | ELF::SHF_WRITE);
+          ELF::SHF_ALLOC | ELF::SHF_WRITE |
+              (XsegSplit ? ELF::SHF_MCS251_XSEG_SPLIT : 0));
       OutStreamer->switchSection(XSEG);
       emitLinkage(GV, Sym);
       OutStreamer->emitLabel(Sym);
       OutStreamer->emitZeros(Size);
 
-      // Sparse XDATA init record v1 (frozen; mirrors the DSEG XINIT v1 shape
-      // with the destination widened to 24 bits):
-      //   u8  bank        canonical bits [23:16] -- the value DPXL loads
-      //   u16 window      canonical bits [15:0], big-endian
-      //   u16 object_size, u16 payload_size (0 = "clear only"), payload.
-      // The CRT consumer loop is the X4 slice; this side only freezes the
-      // format. A `const __xdata` object keeps its record: const is a write
-      // discipline, the storage class comes from the address space.
-      OutStreamer->switchSection(TLOF.getXDATAInitSection());
-      emitXDATAInitAddress(Sym);
-      OutStreamer->emitIntValue(Size, 2);
-      bool HasPayload = !Init->isNullValue();
-      OutStreamer->emitIntValue(HasPayload ? Size : 0, 2);
-      if (HasPayload)
-        emitMutableInitializer(DL, Init);
+      if (!XsegSplit) {
+        // Sparse XDATA init record v1 (frozen; mirrors the DSEG XINIT v1
+        // shape with the destination widened to 24 bits):
+        //   u8  bank        canonical bits [23:16] -- the value DPXL loads
+        //   u16 window      canonical bits [15:0], big-endian
+        //   u16 object_size, u16 payload_size (0 = "clear only"), payload.
+        // The CRT consumer loop is the X4 slice; this side only freezes the
+        // format. A `const __xdata` object keeps its record: const is a
+        // write discipline, the storage class comes from the address space.
+        // A split object emits none (a single v1 record cannot describe it;
+        // the linker synthesizes the per-window records).
+        OutStreamer->switchSection(TLOF.getXDATAInitSection());
+        emitXDATAInitAddress(Sym);
+        OutStreamer->emitIntValue(Size, 2);
+        OutStreamer->emitIntValue(HasPayload ? Size : 0, 2);
+        if (HasPayload)
+          emitMutableInitializer(DL, Init);
+      }
 
       OutStreamer->switchSection(
           OutContext.getObjectFileInfo()->getTextSection());

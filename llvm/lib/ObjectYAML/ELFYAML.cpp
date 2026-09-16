@@ -787,6 +787,7 @@ void ScalarBitSetTraits<ELFYAML::ELF_SHF>::bitset(IO &IO,
   case ELF::EM_MCS251:
     BCase(SHF_MCS251_OVERLAY);
     BCase(SHF_MCS251_EDATA_MOVABLE);
+    BCase(SHF_MCS251_XSEG_SPLIT);
     break;
   case ELF::EM_X86_64:
     BCase(SHF_X86_64_LARGE);

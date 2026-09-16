@@ -1,0 +1,1135 @@
+#
+# G13b: the XSEG-split contract end to end (design G13B-XDATA-DESIGN-draft.md
+# r4, slices S1+S2 -- this file runs after both, the "S2 unlock": llc emits
+# SHF_MCS251_XSEG_SPLIT and the linker accepts it).
+#
+# Fixture provenance (design section 2.7.5 honesty rule):
+#   * the POSITIVE corpus (big65536/65537/131072) is REAL llc output from the
+#     S1 emitter (v2 identity objects, flagged XSEG section, no input
+#     record) -- not hand-patched ELF;
+#   * the hand-built negative fixtures use the edata-window.test pattern:
+#     yaml2obj emits the v1 flag word and seteflags.py rewrites e_flags to
+#     the v2 word 0x102 in place (yaml2obj only registers the v1 enum).
+#
+# Covered here:
+#   * G-T1: 65536 all-zero object links; exactly 2 synthesized clear-only
+#     records, byte-compared by the independent oracle
+#     (Inputs/g13b-record-oracle.py reads the output ELF directly and does
+#     integer comparison against the design derivation table -- never
+#     against the linker's own output, G-T12);
+#   * G-T11-MAIN: the 24-combo positive matrix (phase x size x seq/pin),
+#     record counts and record bytes per the section 3.1.3 derivation table;
+#   * G-T11-BASE: the same 24 combos with UNFLAGGED sections all still
+#     reject at the 64K-window size gate (G-T6 negatives stay rejected);
+#   * G-T13: the three synthesis layout gates (G3 missing --area-start,
+#     G1 CODE overlap, G2 24-bit overflow) at the synthesis point;
+#   * SM1-SM4 + D3: the anti-abuse state machine (v1+flag, PROGBITS+flag,
+#     flag-bit misuse, input record covering a split section head/mid/tail);
+#   * I2.1-I2.6: the cross-window placement invariants (cursor advance,
+#     capacity semantics with lower bound, one-past pointer gate, 16-bit
+#     channel gate, overlap gate, unflagged pin straddle still rejects).
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj v1flag.yaml -o v1flag.o
+# RUN: yaml2obj progbits.yaml -o progbits-v1.o
+# RUN: yaml2obj nowrite.yaml -o nowrite-v1.o
+# RUN: yaml2obj unknownbit.yaml -o unknownbit-v1.o
+# RUN: yaml2obj overlaybit.yaml -o overlaybit-v1.o
+# RUN: yaml2obj sm1.yaml -o sm1-v1.o
+# RUN: yaml2obj sm4head.yaml -o sm4head-v1.o
+# RUN: yaml2obj sm4mid.yaml -o sm4mid-v1.o
+# RUN: yaml2obj sm4tail.yaml -o sm4tail-v1.o
+# RUN: yaml2obj rel16.yaml -o rel16-v1.o
+# RUN: yaml2obj ptrpast.yaml -o ptrpast-v1.o
+# RUN: yaml2obj ptronepast.yaml -o ptronepast-v1.o
+# RUN: yaml2obj ovl.yaml -o ovl-v1.o
+# RUN: yaml2obj i21neg.yaml -o i21neg-v1.o
+# RUN: yaml2obj i21pos.yaml -o i21pos-v1.o
+# RUN: yaml2obj i22lo.yaml -o i22lo-v1.o
+# RUN: yaml2obj i26.yaml -o i26-v1.o
+# RUN: %python seteflags.py progbits-v1.o nowrite-v1.o unknownbit-v1.o
+# RUN: %python seteflags.py overlaybit-v1.o sm1-v1.o
+# RUN: %python seteflags.py sm4head-v1.o sm4mid-v1.o sm4tail-v1.o
+# RUN: %python seteflags.py rel16-v1.o ptrpast-v1.o ptronepast-v1.o
+# RUN: %python seteflags.py ovl-v1.o i21neg-v1.o i21pos-v1.o i26-v1.o i22lo-v1.o
+#
+# --- real S1 llc corpus (v2 producer output; NOT hand-patched) ---
+# RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf big65536.ll -o big65536.o
+# RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf big65537.ll -o big65537.o
+# RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf big131072.ll -o big131072.o
+# RUN: yaml2obj big65536.yaml -o big65536-hand.o
+# RUN: %python seteflags.py big65536-hand.o
+#
+# input-shape (G-T1 at the object level): the emitter flags the section and
+# emits no record section; the hand fixture is shape-equivalent.
+# RUN: llvm-readobj --sections big65536.o | FileCheck %s --check-prefix=OBJ
+# OBJ: Name: .mcs251.XSEG._big
+# OBJ: Flags [ (0x40000003)
+# OBJ-NEXT:       SHF_ALLOC (0x2)
+# OBJ-NEXT:       SHF_MCS251_XSEG_SPLIT (0x40000000)
+# OBJ-NEXT:       SHF_WRITE (0x1)
+# OBJ-NEXT:     ]
+# OBJ-NOT: Name: .mcs251.xdata_init
+# RUN: llvm-readobj --sections big65536-hand.o | FileCheck %s --check-prefix=OBJ
+#
+# --- G-T1 end to end: one 65536 object, two records, byte-exact ---
+# RUN: mcs251-lld big65536.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --map=e2e.map -o e2e.elf
+# RUN: grep 's_XSEG = 0x10000' e2e.map
+# RUN: grep 'l_XSEG = 0x10000' e2e.map
+# RUN: grep 's_XDATA_INIT = 0xff9000' e2e.map
+# RUN: grep 'l_XDATA_INIT = 0x000e' e2e.map
+# G-T12: independent byte oracle, expected table = design section 3.1.3 row
+# (phase 0x010000, 65536): [0x010000,+0xffff) [0x01ffff,+1).
+# RUN: %python %S/Inputs/g13b-record-oracle.py --elf e2e.elf --map e2e.map \
+# RUN:   --section-start 0x010000 --section-end 0x020000 \
+# RUN:   --expect 0x010000:0xffff,0x01ffff:0x1
+# The hand-built shape-equivalent fixture links to the same records.
+# RUN: mcs251-lld big65536-hand.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --map=e2ehand.map -o e2ehand.elf
+# RUN: %python %S/Inputs/g13b-record-oracle.py --elf e2ehand.elf --map e2ehand.map \
+# RUN:   --section-start 0x010000 --section-end 0x020000 \
+# RUN:   --expect 0x010000:0xffff,0x01ffff:0x1
+#
+# --- G-T11-MAIN: 24-combo positive matrix (real llc corpus) ---
+# RUN: %python matrix.py main . %S/Inputs/g13b-record-oracle.py
+#
+# --- G-T11-BASE: the same 24 combos, unflagged: all reject at the size gate ---
+# RUN: yaml2obj base65535.yaml -o base65535.o
+# RUN: %python matrix.py base . %S/Inputs/g13b-record-oracle.py
+#
+# --- D3: the split flag is a v2 producer capability ---
+# RUN: not mcs251-lld v1flag.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o v1flag.elf 2>&1 | FileCheck %s --check-prefix=V1FLAG
+# V1FLAG: XSEG section carries the XSEG-split flag outside its v2 contract: .mcs251.XSEG._big
+#
+# --- SM2: a split-flagged XSEG-named section must be NOBITS ---
+# RUN: not mcs251-lld progbits-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o progbits.elf 2>&1 | FileCheck %s --check-prefix=PROGB
+# PROGB: XSEG must be writable NOBITS: .mcs251.XSEG._big
+#
+# --- SM3: the accepted shape is bit-exact ALLOC|WRITE|SPLIT ---
+# RUN: not mcs251-lld nowrite-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o nowrite.elf 2>&1 | FileCheck %s --check-prefix=NOWRITE
+# NOWRITE: XSEG must be writable NOBITS: .mcs251.XSEG._big
+# RUN: not mcs251-lld overlaybit-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o overlaybit.elf 2>&1 | FileCheck %s --check-prefix=OVLBIT
+# OVLBIT: XSEG must be writable NOBITS: .mcs251.XSEG._big
+# RUN: not mcs251-lld unknownbit-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o unknownbit.elf 2>&1 | FileCheck %s --check-prefix=UNKB
+# UNKB: unsupported ALLOC section flags for .mcs251.XSEG._big
+#
+# --- SM1 gate: the split bit only ever rides an `.mcs251.XSEG`-named section ---
+# A different name carrying the bit never reaches the XSEG branch: it is an
+# unsupported ALLOC section (never silently assigned to some other Region).
+# RUN: not mcs251-lld sm1-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o sm1.elf 2>&1 | FileCheck %s --check-prefix=SM1
+# SM1: unsupported ALLOC section .mcs251.NOTXSEG
+#
+# --- SM4: no INPUT record may cover a split section (head/mid/tail) ---
+# RUN: not mcs251-lld sm4head-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o sm4head.elf 2>&1 | FileCheck %s --check-prefix=SM4H
+# SM4H: input XDATA_INIT record in .mcs251.xdata_init covers split-XSEG section .mcs251.XSEG._big: [0x10000,0x10001)
+# RUN: not mcs251-lld sm4mid-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o sm4mid.elf 2>&1 | FileCheck %s --check-prefix=SM4M
+# SM4M: input XDATA_INIT record in .mcs251.xdata_init covers split-XSEG section .mcs251.XSEG._big: [0x18000,0x18001)
+# RUN: not mcs251-lld sm4tail-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o sm4tail.elf 2>&1 | FileCheck %s --check-prefix=SM4T
+# SM4T: input XDATA_INIT record in .mcs251.xdata_init covers split-XSEG section .mcs251.XSEG._big: [0x1ffff,0x20000)
+#
+# --- I2.4: the 16-bit channel still fails closed on the big section ---
+# RUN: not mcs251-lld rel16-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o rel16.elf 2>&1 | FileCheck %s --check-prefix=REL16
+# REL16: XDATA symbol _big truncated to 16 bits (use the 24-bit relocation channel) in .rodata
+#
+# --- I2.3: the stored-pointer gate is by SECTION RANGE, one-past included ---
+# RUN: not mcs251-lld ptrpast-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o ptrpast.elf 2>&1 | FileCheck %s --check-prefix=PTPAST
+# PTPAST: stored XDATA pointer in .rodata resolves outside the target object _big: 0x20001 not in [0x10000,0x20000] (one-past-end is the last legal value)
+# RUN: mcs251-lld ptronepast-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --map=ptop.map -o ptronepast.elf
+# RUN: grep 'l_XDATA_INIT = 0x000e' ptop.map
+#
+# --- I2.5: nothing may be placed inside the big section's range ---
+# RUN: not mcs251-lld ovl-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --area-start=.mcs251.XSEG.tiny=0x010010 \
+# RUN:   -o ovl.elf 2>&1 | FileCheck %s --check-prefix=OVL
+# OVL: XDATA overlap for .mcs251.XSEG.tiny
+#
+# --- I2.1: the cursor advances across windows; later windows are computed
+# --- from the ADVANCED cursor (big 65537 at 0x010001, then a 65535
+# --- unmarked object jumps to 0x30000, hole pushes past the capacity gate)
+# RUN: not mcs251-lld i21neg-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --area-start=.mcs251.XSEG._big=0x010001 \
+# RUN:   --xdata-size=0x21000 -o i21neg.elf 2>&1 | FileCheck %s --check-prefix=I21N
+# I21N: XDATA capacity [0x30000,0x3ffff) exceeds --xdata-size=135168 in .mcs251.XSEG.small
+# positive twin: big 65536 at 0x010001 leaves exactly one full window of
+# tail -- the 65535 unmarked object lands [0x20001,0x30000) with NO jump.
+# l_XSEG spans s_XSEG (0x010000, the area start) to the last byte + 1
+# (0x030000), i.e. 0x20000; the only records are the big object's TWO
+# synthesized clear-only records (14 bytes = 0x000e).
+# RUN: mcs251-lld i21pos-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --area-start=.mcs251.XSEG._big=0x010001 \
+# RUN:   --map=i21pos.map -o i21pos.elf
+# RUN: grep 'l_XSEG = 0x20000' i21pos.map
+# RUN: grep 'l_XDATA_INIT = 0x000e' i21pos.map
+# RUN: %python %S/Inputs/g13b-record-oracle.py --elf i21pos.elf --map i21pos.map \
+# RUN:   --section-start 0x010001 --section-end 0x020001 \
+# RUN:   --expect 0x010001:0xffff,0x020000:0x1
+#
+# --- I2.2: capacity is [Lo,Hi) inside [Base,Base+N); the lower bound holds ---
+# RUN: not mcs251-lld i22lo-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --area-start=.mcs251.XSEG._big=0x0 \
+# RUN:   --xdata-size=0x21000 -o i22lo.elf 2>&1 | FileCheck %s --check-prefix=I22LO
+# I22LO: XDATA capacity [0x0000,0x10000) exceeds --xdata-size=135168 in .mcs251.XSEG._big
+# exact fit at the upper bound links; one byte over rejects.
+# RUN: mcs251-lld big65536.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --xdata-size=0x10000 --map=i22ex.map -o i22ex.elf
+# RUN: grep 'l_XDATA_INIT = 0x000e' i22ex.map
+# RUN: not mcs251-lld big65536.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --xdata-size=0xffff -o i22ov.elf 2>&1 \
+# RUN:   | FileCheck %s --check-prefix=I22OV
+# I22OV: XDATA capacity [0x10000,0x20000) exceeds --xdata-size=65535 in .mcs251.XSEG._big
+#
+# --- I2.6: an unflagged section's pin may still not straddle a window ---
+# RUN: not mcs251-lld i26-v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 --area-start=.mcs251.XSEG.small=0x01fff0 \
+# RUN:   -o i26.elf 2>&1 | FileCheck %s --check-prefix=I26
+# I26: explicit --area-start=.mcs251.XSEG.small places the section across a 64K window boundary: [0x1fff0,0x20010)
+#
+# --- G-T13 gate 3: the synthesis point requires the XDATA_INIT start itself ---
+# (layoutCode's own check cannot fire: this link has NO input record section)
+# RUN: not mcs251-lld big65536.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   -o g3.elf 2>&1 | FileCheck %s --check-prefix=G3
+# G3: missing --area-start=XDATA_INIT
+#
+# --- G-T13 gate 1: a CODE section occupying the synth-table area rejects ---
+# The synth table starts at max(--area-start=XDATA_INIT, input table tail),
+# i.e. 0xff9000 here; CSEG=0xff9000 puts the 1-byte .text exactly on it.
+# (CSEG=0xff8ffe would NOT overlap: .text would end at 0xff8fff.)
+# RUN: not mcs251-lld big65536.o --area-start=CSEG=0xff9000 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xff9000 -o g1.elf 2>&1 | FileCheck %s --check-prefix=G1
+# G1: CODE overlap for .mcs251.xdata_init.synth
+#
+# --- G-T13 gate 2: a start near the 24-bit top overflows the synth table ---
+# RUN: not mcs251-lld big65536.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 \
+# RUN:   --area-start=XDATA_INIT=0xfffff8 -o g2.elf 2>&1 | FileCheck %s --check-prefix=G2
+# G2: CODE address overflow in .mcs251.xdata_init.synth
+
+#--- seteflags.py
+#!/usr/bin/env python3
+"""Rewrite e_flags to the v2 word (yaml2obj only registers the v1 enum)."""
+import pathlib, sys
+OFF = 36
+for name in sys.argv[1:]:
+    p = pathlib.Path(name)
+    b = bytearray(p.read_bytes())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = bytes.fromhex("00000102")
+    p.write_bytes(bytes(b))
+
+#--- matrix.py
+#!/usr/bin/env python3
+"""G13b G-T11 matrices.
+
+main mode: the 24-combo POSITIVE matrix over the real S1 llc corpus
+  (phase x size x {sequential, per-section pin}); asserts the link, the
+  record count (l_XDATA_INIT/7), the section placement in the map, and
+  byte-exact records via the independent oracle, against the design
+  section 3.1.3 derivation table.
+base mode: the same 24 combos over an UNFLAGGED object patched to each
+  size; every one must still reject at the 64K-window size gate.
+"""
+import os, re, struct, subprocess, sys
+
+def run(args):
+    return subprocess.run(args, capture_output=True, text=True)
+
+def link(obj, out, extra, workdir):
+    # objects and outputs live in the lit workdir (cwd is already %t)
+    cmd = ["mcs251-lld", obj,
+           "--area-start=CSEG=0xff0200",
+           "--area-start=XDATA_INIT=0xff9000",
+           "--map=" + out + ".map", "-o", out + ".elf"] + extra
+    return run(cmd)
+
+def map_value(map_path, name):
+    m = re.search(r"^\s*" + name + r"\s*=\s*0x([0-9a-fA-F]+)\s*$",
+                  open(map_path).read(), re.M)
+    return int(m.group(1), 16) if m else None
+
+# design section 3.1.3: record counts, phase (low 16 bits) x size
+COUNTS = {
+    0x00000: {0x10000: 2, 0x10001: 3, 0x20000: 4},
+    0x00001: {0x10000: 2, 0x10001: 2, 0x20000: 4},
+    0x0ffff: {0x10000: 2, 0x10001: 3, 0x20000: 4},
+    0x1ffff: {0x10000: 2, 0x10001: 3, 0x20000: 4},
+}
+# design section 3.1.3: expected records.  The table below holds offsets
+# relative to the PROBE BASE's own 64K window floor (base & ~0xffff), which
+# is also the frame the per-cell check below rebases into.  The design
+# derivation table writes its offsets relative to the fixed floor 0x010000;
+# for phase 0x1ffff (base 0x02ffff) that is one window up, so those three
+# rows are rebased by -0x10000 here (drop the bank contribution once --
+# rebasing must not add a second window offset on top of the absolute one).
+EXPECT = {
+    (0x00000, 0x10000): [(0x00000, 0xFFFF), (0x0FFFF, 1)],
+    (0x00000, 0x10001): [(0x00000, 0xFFFF), (0x0FFFF, 1), (0x10000, 1)],
+    (0x00000, 0x20000): [(0x00000, 0xFFFF), (0x0FFFF, 1),
+                         (0x10000, 0xFFFF), (0x1FFFF, 1)],
+    (0x00001, 0x10000): [(0x00001, 0xFFFF), (0x10000, 1)],
+    (0x00001, 0x10001): [(0x00001, 0xFFFF), (0x10000, 2)],
+    (0x00001, 0x20000): [(0x00001, 0xFFFF), (0x10000, 0xFFFF),
+                         (0x1FFFF, 1), (0x20000, 1)],
+    (0x0ffff, 0x10000): [(0x0FFFF, 1), (0x10000, 0xFFFF)],
+    (0x0ffff, 0x10001): [(0x0FFFF, 1), (0x10000, 0xFFFF), (0x1FFFF, 1)],
+    (0x0ffff, 0x20000): [(0x0FFFF, 1), (0x10000, 0xFFFF),
+                         (0x1FFFF, 1), (0x20000, 0xFFFF)],
+    (0x1ffff, 0x10000): [(0x0FFFF, 1), (0x10000, 0xFFFF)],
+    (0x1ffff, 0x10001): [(0x0FFFF, 1), (0x10000, 0xFFFF), (0x1FFFF, 1)],
+    (0x1ffff, 0x20000): [(0x0FFFF, 1), (0x10000, 0xFFFF),
+                         (0x1FFFF, 1), (0x20000, 0xFFFF)],
+}
+PHASE_BASES = [(0x00000, 0x010000), (0x00001, 0x010001),
+               (0x0ffff, 0x01ffff), (0x1ffff, 0x02ffff)]
+SIZES = [0x10000, 0x10001, 0x20000]
+
+def design_split(base, size):
+    """The design section 3.1.2 split algorithm, rebased onto `base`'s own
+    64K window floor -- an INDEPENDENT re-derivation that EXPECT must agree
+    with.  Guards against the bank-offset double-add this table once had:
+    the expected table is regenerated here from first principles and any
+    disagreement is reported instead of silently checked."""
+    w = base & ~0xFFFF
+    out, cur, rem = [], base, size
+    while rem:
+        wend = (cur & ~0xFFFF) + 0x10000
+        ln = min(rem, 0xFFFF, wend - cur)
+        out.append((cur - w, ln))
+        cur += ln
+        rem -= ln
+    return out
+
+def selftest():
+    bad = 0
+    for phase, base in PHASE_BASES:
+        for size in SIZES:
+            derived = design_split(base, size)
+            if derived != EXPECT[(phase, size)]:
+                print("SELFTEST FAIL phase=0x%x size=0x%x: EXPECT=%s derived=%s"
+                      % (phase, size, EXPECT[(phase, size)], derived))
+                bad += 1
+            if COUNTS[phase][size] != len(derived):
+                print("SELFTEST FAIL counts phase=0x%x size=0x%x: %d != %d"
+                      % (phase, size, COUNTS[phase][size], len(derived)))
+                bad += 1
+    return bad
+
+def main_matrix(workdir, oracle):
+    failures = selftest()
+    if failures:
+        print("main matrix: %d SELFTEST FAILURES" % failures)
+        return 1
+    for phase, base in PHASE_BASES:
+        for size in SIZES:
+            for mode in ("seq", "pin"):
+                obj = "big%d.o" % size
+                out = "main_%x_%d_%s" % (base, size, mode)
+                if mode == "seq":
+                    extra = ["--area-start=XSEG=0x%06x" % base]
+                else:
+                    extra = ["--area-start=XSEG=0x010000",
+                             "--area-start=.mcs251.XSEG._big=0x%06x" % base]
+                r = link(obj, out, extra, workdir)
+                if r.returncode != 0:
+                    print("FAIL %s: rc=%d\n%s%s" % (out, r.returncode,
+                                                    r.stdout, r.stderr))
+                    failures += 1
+                    continue
+                l_init = map_value(out + ".map", "l_XDATA_INIT")
+                want_records = EXPECT[(phase, size)]
+                if l_init != 7 * len(want_records):
+                    print("FAIL %s: l_XDATA_INIT=0x%x, want 7*%d"
+                          % (out, l_init, len(want_records)))
+                    failures += 1
+                    continue
+                m = re.search(r"\.mcs251\.XSEG\._big 0x([0-9a-fA-F]+) "
+                              r"\+0x([0-9a-fA-F]+)",
+                              open(out + ".map").read())
+                if not m or int(m.group(1), 16) != base \
+                        or int(m.group(2), 16) != size:
+                    print("FAIL %s: bad section placement %s" % (out, m))
+                    failures += 1
+                    continue
+                w = base & ~0xFFFF
+                expect = ",".join("0x%x:0x%x" % (w + off, ln)
+                                  for off, ln in want_records)
+                o = run([sys.executable, oracle,
+                         "--elf", out + ".elf", "--map", out + ".map",
+                         "--section-start", "0x%x" % base,
+                         "--section-end", "0x%x" % (base + size),
+                         "--expect", expect])
+                if o.returncode != 0:
+                    print("FAIL %s oracle:\n%s%s" % (out, o.stdout, o.stderr))
+                    failures += 1
+    print("main matrix: %s" % ("PASS (24/24)" if not failures
+                               else "%d FAILURES" % failures))
+    return 1 if failures else 0
+
+# --- G-T11-BASE: patch an unflagged 65535 object to each size ---
+def patch_xseg_size(path, newsize):
+    d = bytearray(open(path, "rb").read())
+    e_shoff, = struct.unpack_from(">I", d, 0x20)
+    ents, num, strx = struct.unpack_from(">HHH", d, 0x2E)
+    stro = e_shoff + strx * ents
+    stroff, = struct.unpack_from(">I", d, stro + 0x10)
+    def name(n):
+        return d[stroff + n:d.index(b"\0", stroff + n)].decode()
+    for i in range(num):
+        o = e_shoff + i * ents
+        n = name(struct.unpack_from(">I", d, o)[0])
+        if n.startswith(".mcs251.XSEG"):
+            struct.pack_into(">I", d, o + 0x14, newsize)
+        elif n == ".symtab":
+            symoff, = struct.unpack_from(">I", d, o + 0x10)
+            symsize, = struct.unpack_from(">I", d, o + 0x14)
+            for si in range(symsize // 16):
+                so = symoff + si * 16
+                st_name, _, st_size = struct.unpack_from(">III", d, so)
+                if st_name and st_size == 0xffff:
+                    struct.pack_into(">I", d, so + 8, newsize)
+    open(path, "wb").write(d)
+
+def base_matrix(workdir, oracle):
+    failures = 0
+    for size in SIZES:
+        obj = "base_%d.o" % size
+        subprocess.run(["cp", "base65535.o", obj], check=True)
+        patch_xseg_size(obj, size)
+        for phase, base in PHASE_BASES:
+            for mode in ("seq", "pin"):
+                out = "base_%x_%d_%s" % (base, size, mode)
+                if mode == "seq":
+                    extra = ["--area-start=XSEG=0x%06x" % base]
+                else:
+                    extra = ["--area-start=XSEG=0x010000",
+                             "--area-start=.mcs251.XSEG._big=0x%06x" % base]
+                r = link(obj, out, extra, workdir)
+                if r.returncode == 0:
+                    print("FAIL %s: unflagged %d-byte object linked"
+                          % (out, size))
+                    failures += 1
+                elif "exceeds the 64K window" not in r.stderr:
+                    print("FAIL %s: wrong message: %s" % (out, r.stderr))
+                    failures += 1
+    print("base matrix: %s" % ("PASS (24/24)" if not failures
+                               else "%d FAILURES" % failures))
+    return 1 if failures else 0
+
+if __name__ == "__main__":
+    mode, workdir, oracle = sys.argv[1], sys.argv[2], sys.argv[3]
+    os.chdir(workdir)
+    sys.exit(main_matrix(workdir, oracle) if mode == "main"
+             else base_matrix(workdir, oracle))
+
+#--- big65536.ll
+target triple = "mcs251-unknown-none"
+@big = addrspace(3) global [65536 x i8] zeroinitializer, align 1
+
+define void @f() {
+  ret void
+}
+
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
+#--- big65537.ll
+target triple = "mcs251-unknown-none"
+@big = addrspace(3) global [65537 x i8] zeroinitializer, align 1
+
+define void @f() {
+  ret void
+}
+
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
+#--- big131072.ll
+target triple = "mcs251-unknown-none"
+@big = addrspace(3) global [131072 x i8] zeroinitializer, align 1
+
+define void @f() {
+  ret void
+}
+
+
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_f", i32 1, i32 0}
+#--- attr.hex (the registered minimal v2 identity carrier, same payload as
+#    every v2 test fixture: XSmall placement 8, object protocol 2)
+41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+#--- big65536.yaml
+# hand-built shape-equivalent twin of the real llc object (provenance noted
+# in the header): v2 identity via seteflags.py, flagged XSEG, no records.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- base65535.yaml
+# G-T11-BASE base object: UNFLAGGED XSEG (v1 identity stays), patched to
+# {65536, 65537, 131072} by matrix.py before each link.  The v1 identity
+# carrier (the frozen 52-byte note) is required so the link reaches the
+# G13b size gate instead of stopping at identity validation; the record
+# section is deliberately absent -- the gate fires in layout, before any
+# record parsing (design section 2.7.5 fixture shape).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 65535
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+    Size: 65535
+#--- v1flag.yaml
+# D3 negative: the flag on a v1 object (e_flags stays 0x1) is malformed.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- progbits.yaml
+# SM2 negative: split flag + PROGBITS XSEG-named section (v2 via seteflags).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 16
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- nowrite.yaml
+# SM3 negative: the WRITE bit is missing.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- unknownbit.yaml
+# SM3 negative: an extra unknown ALLOC flag next to the split bit.
+# The victim bit is 0x08000000, a processor-range bit that has no yaml2obj
+# key for EM_MCS251; a `Flags:` list only accepts REGISTERED bit names (a
+# raw number fails parsing with "unknown bit value"), so the raw sh_flags
+# word is supplied through the ShFlags override -- the yaml2obj mechanism
+# for hand-built invalid objects (ShFlags and Flags are mutually exclusive).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    ShFlags: 0x48000003
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- overlaybit.yaml
+# SM3 negative: OVERLAY rides next to the split bit.  ShFlags is used for
+# the same reason as in unknownbit.yaml: the victim combination must be an
+# exact raw word, and OVERLAY is expressible as a key name either way, but
+# spelling the whole word keeps the shape identical to its sibling case.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    ShFlags: 0x50000003
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- sm1.yaml
+# SM1 negative: the split bit rides a NON-XSEG name (v2 identity so the
+# rejection under test is the name/Region rule, not the v2 identity gate).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.NOTXSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.NOTXSEG
+#--- sm4head.yaml
+# SM4 negative: an input record covers the section's FIRST byte.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.xdata_init
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '01000000010000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- sm4mid.yaml
+# SM4 negative: an input record covers a MIDDLE byte (0x010000+0x8000).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.xdata_init
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '01800000010000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- sm4tail.yaml
+# SM4 negative: an input record covers the section's LAST byte.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.xdata_init
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '01ffff00010000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- rel16.yaml
+# I2.4 negative: a 16-bit relocation field must not carry the big address.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .rela.rodata
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .rodata
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_16
+        Symbol: _big
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- ptrpast.yaml
+# I2.3 negative: a stored pointer to base+Size+1 (past one-past-end).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .rela.rodata
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .rodata
+    Relocations:
+      - Offset: 1
+        Type: R_MCS251_24
+        Symbol: _big
+        Addend: 65537
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- ptronepast.yaml
+# I2.3 positive: base+Size (one-past-end) is the last legal pointer value.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .rela.rodata
+    Type: SHT_RELA
+    Link: .symtab
+    Info: .rodata
+    Relocations:
+      - Offset: 1
+        Type: R_MCS251_24
+        Symbol: _big
+        Addend: 65536
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- ovl.yaml
+# I2.5 negative: a tiny unflagged object pinned INSIDE the big section.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.XSEG.tiny
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+  - Name: tiny
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.tiny
+#--- i21neg.yaml
+# I2.1 negative: big 65537 pinned at 0x010001 ends at 0x020002; the window
+# math for the following 65535 unmarked object must read the ADVANCED
+# cursor (window 0x02 tail: 0xfffe < 0xffff), jump to 0x030000 and leave a
+# hole that pushes the capacity gate over.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65537
+  - Name: .mcs251.XSEG.small
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 65535
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+  - Name: small
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.small
+#--- i21pos.yaml
+# I2.1 positive twin: big 65536 at 0x010001 ends at 0x020001; the 65535
+# unmarked object fits the advanced cursor's window tail exactly
+# ([0x020001,0x030000), no jump, no hole).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.XSEG.small
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 65535
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+  - Name: small
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.small
+#--- i22lo.yaml
+# I2.2 negative (r4 lower bound): the pinned big section lies BELOW Base;
+# the capacity gate must reject on Lo < Base even though Hi fits.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+#--- i26.yaml
+# I2.6 negative: an UNFLAGGED section's explicit pin may not straddle.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.XSEG.small
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 32
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+  - Name: small
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.small

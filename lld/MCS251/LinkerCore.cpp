@@ -44,6 +44,11 @@ static constexpr uint32_t SHF_MCS251_OVERLAY = 0x10000000;
 // MCS251 processor flag range next to SHF_MCS251_OVERLAY and is mirrored in
 // llvm/BinaryFormat/ELF.h for the producer and the object tools.
 static constexpr uint32_t SHF_MCS251_EDATA_MOVABLE = 0x20000000;
+// G13b (design §3.1, D3 ruling): the producer's "this XSEG section is ONE
+// logical all-zero object larger than the 16-bit record limit" mark.  Lives
+// in the MCS251 processor flag range next to SHF_MCS251_OVERLAY and is
+// mirrored in llvm/BinaryFormat/ELF.h for the producer and the object tools.
+static constexpr uint32_t SHF_MCS251_XSEG_SPLIT = 0x40000000;
 static constexpr uint32_t ABI_FLAGS = 0x00000001;
 // W4 (design §4.2): the v2 object-protocol e_flags value.  The low byte is
 // the object protocol version (2, agreeing with Tag 4); bit 8 is the
@@ -188,6 +193,13 @@ struct InputSection {
   // DSEG window and may migrate the whole section to [max(0x100,DsegStart),
   // --edata-end] only when that window cannot hold it.
   bool EDataMovable = false;
+  // G13b: the producer marked this XSEG section as ONE logical all-zero
+  // object larger than the 16-bit record limit (SHF_MCS251_XSEG_SPLIT, v2
+  // objects only).  The linker places it as one contiguous range -- possibly
+  // across a 64K window -- and synthesizes per-window clear-only v1
+  // XDATA_INIT records for it.  Unmarked XSEG sections keep the frozen
+  // single-window ruling (65535-byte cap, bank-jump placement).
+  bool XsegSplit = false;
   // True only for sections lld itself created (vector slots, synthesized bit
   // XINIT): they are trusted owners and are exempt from input-side checks.
   bool Synthesized = false;
@@ -517,9 +529,11 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
 
   // The mask names every flag a *placement* rule may see.  SHF_MCS251_EDATA_MOVABLE
   // is a capability bit carried by the section's own Region rule below, so it
-  // must not be rejected here; every other processor/OS bit stays unsupported.
+  // must not be rejected here; likewise SHF_MCS251_XSEG_SPLIT (the G13b
+  // logical->64K-object mark).  Every other processor/OS bit stays unsupported.
   const uint64_t Common = ELF::SHF_ALLOC | ELF::SHF_WRITE | ELF::SHF_EXECINSTR |
-                          SHF_MCS251_OVERLAY | SHF_MCS251_EDATA_MOVABLE;
+                          SHF_MCS251_OVERLAY | SHF_MCS251_EDATA_MOVABLE |
+                          SHF_MCS251_XSEG_SPLIT;
   if (S.Flags & ~Common)
     return fail(Err, "unsupported ALLOC section flags for " + N);
   if (N == ".text" || N.starts_with(".text.")) {
@@ -541,8 +555,13 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
     return true;
   }
   // X3: the XDATA initialization records.  A CODE-class ROM area exactly like
-  // XINIT (same allocation, same boundary-symbol and flash-gate class), never
-  // synthesized by the linker -- it only places, parses and validates.
+  // XINIT (same allocation, same boundary-symbol and flash-gate class) -- it
+  // places, parses and validates.  G13b (D4): one bounded exception to the
+  // historical "never synthesized" contract -- clear-only v1 records
+  // synthesized from an input XSEG section carrying SHF_MCS251_XSEG_SPLIT
+  // enter the linker-owned XDATA_INIT output and go through the same
+  // structural, single-window, XSEG-containment and non-overlap validation
+  // as input records (validateXDATAInit).
   if (N == ".mcs251.xdata_init" || N.starts_with(".mcs251.xdata_init.")) {
     if (S.Type != ELF::SHT_PROGBITS || S.Flags != ELF::SHF_ALLOC)
       return fail(Err, "invalid XDATA_INIT section " + N);
@@ -663,8 +682,20 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
     return true;
   }
   if (N.starts_with(".mcs251.XSEG")) {
+    // G13b: an XSEG slice may carry the split capability (one logical
+    // all-zero object larger than the 16-bit record limit).  The bit is a
+    // v2 placement policy exactly like SHF_MCS251_EDATA_MOVABLE (D3, G8
+    // mechanism): a v1 object carrying it is malformed rather than silently
+    // tolerated, and the accepted shape stays bit-exact
+    // ALLOC|WRITE[|SHF_MCS251_XSEG_SPLIT] NOBITS (SM3) -- any other flag
+    // combination keeps the historical rejection.
+    S.XsegSplit = (S.Flags & SHF_MCS251_XSEG_SPLIT) != 0;
+    if (S.XsegSplit && (!S.File || S.File->EFlags != ABI_FLAGS_V2))
+      return fail(Err, "XSEG section carries the XSEG-split flag outside "
+                       "its v2 contract: " + N);
     if (S.Type != ELF::SHT_NOBITS ||
-        S.Flags != (ELF::SHF_ALLOC | ELF::SHF_WRITE))
+        S.Flags != (ELF::SHF_ALLOC | ELF::SHF_WRITE |
+                    (S.XsegSplit ? SHF_MCS251_XSEG_SPLIT : 0)))
       return fail(Err, "XSEG must be writable NOBITS: " + N);
     S.Region = "XSEG";
     return true;
@@ -3221,12 +3252,17 @@ bool Linker::layoutData() {
   uint32_t XsegCursor = areaStart("XSEG", 0);
   for (InputSection *S : AllSections)
     if (S->Region == "XSEG") {
-      // X3 ruling: one XSEG section is one object, and an XDATA object never
-      // straddles a 64K window (the record format has a single bank byte,
-      // and the XINIT v1 copier walks one contiguous range).  A single
-      // object is therefore capped at 16 bits -- larger objects exceed the
-      // corpus and the boards and cannot be described by any record.
-      if (S->Size > 0xffff) {
+      // X3 ruling: one XSEG section is one object, and an UNMARKED XDATA
+      // object never straddles a 64K window (the record format has a single
+      // bank byte, and the XINIT v1 copier walks one contiguous range).  A
+      // single unmarked object is therefore capped at 16 bits -- larger
+      // unmarked objects exceed the corpus and the boards and cannot be
+      // described by any record (G-T11-BASE negatives keep this gate).
+      // G13b: a split-XSEG section (SHF_MCS251_XSEG_SPLIT, v2 objects only)
+      // is one logical object the producer declared larger than the record
+      // limit; the cap does not apply to it -- the linker places it as one
+      // contiguous range and synthesizes the per-window records itself.
+      if (S->Size > 0xffff && !S->XsegSplit) {
         std::string Msg;
         raw_string_ostream OS(Msg);
         OS << "XSEG section " << S->Name << " (" << S->Size
@@ -3239,7 +3275,11 @@ bool Linker::layoutData() {
         Place = areaStart(S->Name, 0);
         // An explicit per-section start is honored verbatim: a start that
         // would straddle a window is a layout error, never silently jumped.
-        if (S->Size &&
+        // G13b (I2.6): for a split section straddling IS the point -- the
+        // check is exempted and the verbatim start stands (the 24-bit
+        // rangeFits, the overlap gate and the capacity gate below still
+        // apply).  Unmarked sections keep the rejection byte for byte.
+        if (!S->XsegSplit && S->Size &&
             ((Place ^ (Place + S->Size - 1)) & 0xff0000ULL) != 0) {
           std::string Msg;
           raw_string_ostream OS(Msg);
@@ -3248,12 +3288,17 @@ bool Linker::layoutData() {
              << format_hex(Place + S->Size, 6, false) << ")";
           return fail(Err, Msg);
         }
-      } else if (S->Size) {
-        // Sequential placement keeps each object inside one 64K window: when
-        // the tail of the current window cannot hold the whole object, the
-        // cursor jumps to the next bank start.  The hole this leaves counts
-        // toward the l_XSEG span (the existing span semantics) and touches
-        // neither DSEG nor the stack.
+      } else if (S->Size && !S->XsegSplit) {
+        // Sequential placement keeps each unmarked object inside one 64K
+        // window: when the tail of the current window cannot hold the whole
+        // object, the cursor jumps to the next bank start.  The hole this
+        // leaves counts toward the l_XSEG span (the existing span
+        // semantics) and touches neither DSEG nor the stack.  A split
+        // section skips the jump: it is placed at the cursor and spans as
+        // many windows as it needs (single contiguous range, design §2.5
+        // proposition A).  The cursor is allowed to advance to any phase;
+        // the next unmarked object's window math below reads the ADVANCED
+        // cursor (I2.1).
         const uint64_t WindowEnd = (XsegCursor & 0xff0000ULL) + 0x10000;
         if (uint64_t(S->Size) > WindowEnd - XsegCursor)
           Place = WindowEnd;
@@ -3289,6 +3334,84 @@ bool Linker::layoutData() {
           return fail(Err, Msg);
         }
       }
+  }
+
+  // G13b: synthesize clear-only v1 XDATA_INIT records for every split-XSEG
+  // section (SHF_MCS251_XSEG_SPLIT).  Runs after the whole XSEG loop (every
+  // flagged section has its final address) and after layoutCode has placed
+  // the input XDATA_INIT sections (their CODE reservations are final, so
+  // reserveCode below sees the full ledger).  Split algorithm (design
+  // §3.1.2): len = min(remaining, 0xFFFF, window tail) -- the u16 record
+  // field and the frozen single-window property both bound one record; the
+  // record destinations tile [S->Address, S->Address+Size) exactly, in
+  // order, by construction (the synthesis-specific coverage invariant --
+  // validateXDATAInit does not check coverage, see §2.7.4 of the design).
+  // Unmarked XSEG sections are never touched: their producer-emitted input
+  // records stay the only description.
+  if (llvm::any_of(AllSections, [](const InputSection *S) {
+        return S->Region == "XSEG" && S->XsegSplit && S->Size != 0;
+      })) {
+    std::vector<uint8_t> Data;
+    for (InputSection *S : AllSections)
+      if (S->Region == "XSEG" && S->XsegSplit && S->Size != 0) {
+        uint64_t Cur = S->Address;
+        uint64_t Remaining = S->Size;
+        while (Remaining) {
+          const uint64_t WindowEnd = (Cur & 0xff0000ULL) + 0x10000;
+          const uint64_t Len = std::min(std::min(Remaining, uint64_t(0xffff)),
+                                        WindowEnd - Cur);
+          Data.push_back(static_cast<uint8_t>(Cur >> 16));
+          Data.push_back(static_cast<uint8_t>((Cur >> 8) & 0xff));
+          Data.push_back(static_cast<uint8_t>(Cur & 0xff));
+          Data.push_back(static_cast<uint8_t>(Len >> 8));
+          Data.push_back(static_cast<uint8_t>(Len & 0xff));
+          Data.push_back(0); // payload_size = 0: clear only
+          Data.push_back(0);
+          Cur += Len;
+          Remaining -= Len;
+        }
+      }
+    // G3 (design §2.7.8): the layoutCode "missing --area-start" check only
+    // sees sections that EXIST as input; a link whose only XDATA_INIT table
+    // is the synthesized one has no input record section, so the synthesis
+    // point re-checks the requirement itself (XINIT bit-record precedent:
+    // the allocateBitSlots self-check).
+    if (!hasAreaStart("XDATA_INIT"))
+      return fail(Err, "missing --area-start=XDATA_INIT");
+    uint32_t Start = areaStart("XDATA_INIT", 0);
+    for (InputSection *S : AllSections)
+      if (S->Region == "XDATA_INIT" && S->Size)
+        Start = std::max(Start, S->Address + static_cast<uint32_t>(S->Size));
+    auto Syn = std::make_unique<InputSection>();
+    Syn->Name = ".mcs251.xdata_init.synth";
+    Syn->Type = ELF::SHT_PROGBITS;
+    Syn->Flags = ELF::SHF_ALLOC;
+    Syn->Size = Data.size();
+    Syn->Align = 1;
+    Syn->Address = Start;
+    Syn->Region = "XDATA_INIT";
+    Syn->IsAlloc = true;
+    Syn->IsLoadable = true;
+    Syn->Synthesized = true;
+    Syn->Data = std::move(Data);
+    // G1/G2 (design §3.1.2): the synthesized table occupies real CODE space
+    // and must reserve it through the same ledger every ordinary CODE section
+    // and the XINIT synthesis use: reserveCode() enforces the always-on
+    // 24-bit address limit (G2, rangeFits) and rejects any overlap with an
+    // already occupied CODE range (G1) -- the region after the XDATA_INIT
+    // cursor tail is NOT implicitly free.
+    if (!reserveCode(Syn->Address, static_cast<uint32_t>(Syn->Size),
+                     Syn->Name))
+      return false;
+    for (size_t I = 0; I != Syn->Data.size(); ++I) {
+      const uint32_t A = Syn->Address + static_cast<uint32_t>(I);
+      if (Image.count(A))
+        return fail(Err, "synthesized XDATA_INIT byte overlaps CODE at 0x" +
+                             Twine::utohexstr(A));
+      Image[A] = Syn->Data[I];
+    }
+    AllSections.push_back(Syn.get());
+    OwnedSynth.push_back(std::move(Syn));
   }
 
   Synth["s_DSEG"] = 0;
@@ -4086,8 +4209,12 @@ bool Linker::validateXInit() {
 //   * the destination must lie entirely inside one allocated XSEG slice
 //     (last byte included; crossing out of the slice is an error),
 //   * no two records may overlap in their destinations.
-// The linker never synthesizes XDATA_INIT bytes; the CRT consumer loop is
-// the X4 slice.
+// G13b (D4): the linker does not synthesize XDATA_INIT bytes, except for
+// clear-only v1 records synthesized from an input XSEG section carrying
+// SHF_MCS251_XSEG_SPLIT; every synthesized record is emitted into the
+// linker-owned XDATA_INIT output and is subject to the same XDATA_INIT
+// structural, single-window, XSEG-containment, and non-overlap validation
+// as input records.  The CRT consumer loop is the X4 slice.
 bool Linker::validateXDATAInit() {
   struct DestUse {
     uint64_t Lo, Hi;
@@ -4137,6 +4264,23 @@ bool Linker::validateXDATAInit() {
                          "slice: [" +
                              Hex(Dest) + "," + Hex(DestEnd) + ") in " +
                              S->Name);
+      // G13b SM4: for a split-XSEG section the link-time form of
+      // "zero-initialized" is "no INPUT record covers any of it" -- a
+      // nonzero initializer would have made the producer emit a record
+      // (rejected there for >64K objects), so a covering record can only be
+      // a hand-made ELF or a broken producer gate; either is a hard link
+      // error.  The check is INPUT-record-only: a SYNTHESIZED record's
+      // destination necessarily lies inside its own flagged section and
+      // must not be rejected here (the Dests loop below consumes every
+      // section, hence the Synthesized split).
+      if (!S->Synthesized)
+        for (InputSection *D : AllSections)
+          if (D->Region == "XSEG" && D->XsegSplit && D->Size != 0 &&
+              Dest < D->Address + D->Size && D->Address < DestEnd)
+            return fail(Err, "input XDATA_INIT record in " + S->Name +
+                                 " covers split-XSEG section " + D->Name +
+                                 ": [" + Hex(Dest) + "," + Hex(DestEnd) +
+                                 ")");
       Dests.push_back({Dest, DestEnd, S->Name});
       Offset += 7 + PayloadSize;
     }
