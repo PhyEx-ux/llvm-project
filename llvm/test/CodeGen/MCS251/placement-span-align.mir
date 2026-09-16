@@ -1,0 +1,59 @@
+# G11-B R3 (review 2026-09-16 §三): the span-align fixture of the design's
+# four-function-span matrix (§5, probe4 obligation N2-2) -- a placed function
+# whose body contains a REAL ALIGNMENT DIRECTIVE and its byte effect: the
+# second machine basic block carries (align 16), so emitBasicBlockStart emits
+# 14 zero padding bytes between the 2-byte entry sequence and the aligned
+# block, INSIDE the entity's fixed section. (IR-level construction is not
+# reachable: the target supports no inline asm streamer and sets no loop
+# alignment; MIR block alignment is the producer-side construction surface.)
+#
+# Span identities are hard assertions from the real object:
+#   NOTE.size == sh_size >= st_size  (equality: no same-section payload)
+# with the 14 alignment bytes included in BOTH the section span and the
+# body-label span. The NOTE record's `align` field stays the ENTITY align
+# (1); the block alignment is a pure in-body byte effect.
+#
+# RUN: llc -mtriple=mcs251 -O2 -filetype=obj -mcs251-object-format=elf -start-after=finalize-isel %s -o %t.o
+# RUN: llvm-readobj --sections --symbols --section-data %t.o | FileCheck %s --check-prefix=ELF
+# ELF: Name: .mcu.fixed.algn
+# ELF: Type: SHT_PROGBITS
+# ELF: Size: 17
+# The byte image: 2 code bytes (the dead-register fold leaves a lone sjmp),
+# 14 alignment zeros up to offset 16, then the 1-byte eret at offset 16.
+# ELF: 0000: 800E0000 00000000 00000000 00000000
+# ELF: 0010: AA
+# ELF: Name: _algn
+# ELF: Value: 0x0
+# ELF: Size: 17
+# ELF: Type: Function
+# ELF: Section: .mcu.fixed.algn
+#
+# RUN: %python %S/Inputs/check-placement-note.py %t.o algn 2 1 0 0xFC7100 17 1 0
+
+--- |
+  target triple = "mcs251-unknown-none"
+
+  define void @algn() addrspace(4) #0 {
+  entry:
+    ret void
+  }
+
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_algn", i32 1, i32 0, i32 0}
+
+  attributes #0 = { "mcs251-place"="0xFC7100,code,function,owned,0" "mcs251-stable-symbol"="algn" }
+...
+---
+name:            algn
+alignment:       1
+body:             |
+  bb.0.entry:
+    successors: %bb.1
+    $r0 = MOV8ri 1
+    $r1 = MOV8ri 2
+    $r2 = MOV8ri 3
+    SJMP %bb.1
+
+  bb.1 (align 16):
+    ERET
+...

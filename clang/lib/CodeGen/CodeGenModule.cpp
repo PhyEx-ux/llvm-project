@@ -1189,6 +1189,26 @@ static bool isMCS251PlacedOrRetained(const ValueDecl *VD) {
   return false;
 }
 
+/// G11-B R2: does this IR carrier hold a BIND placement contract? Reads the
+/// frozen G11-A attribute grammar "0x<A>,<class>,<entity>,<ownership>,<flags>"
+/// (§3.2) -- on that frozen vocabulary the substring ",bind," can only be the
+/// ownership field, so the substring test is exact. Used by Release() to
+/// register every bind carrier (an external declaration carrying
+/// mcu_bind_at) into llvm.compiler.used before optimization can delete it.
+static bool isMCS251BindCarrierIR(llvm::GlobalObject &GO) {
+  std::optional<llvm::StringRef> V;
+  if (auto *F = dyn_cast<llvm::Function>(&GO)) {
+    llvm::Attribute A = F->getFnAttribute("mcs251-place");
+    if (A.isValid() && A.isStringAttribute())
+      V = A.getValueAsString();
+  } else if (auto *G = dyn_cast<llvm::GlobalVariable>(&GO)) {
+    llvm::Attribute A = G->getAttribute("mcs251-place");
+    if (A.isValid() && A.isStringAttribute())
+      V = A.getValueAsString();
+  }
+  return V && V->contains(",bind,");
+}
+
 void CodeGenModule::Release() {
   Module *Primary = getContext().getCurrentNamedModule();
   if (CXX20ModuleInits && Primary && !Primary->isHeaderLikeModule())
@@ -1276,6 +1296,31 @@ void CodeGenModule::Release() {
           }) && !llvm::is_contained(LLVMUsed, llvm::WeakTrackingVH(GO)))
         addUsedGlobal(GO);
     }
+    // G11-B R2 (review 2026-09-16 §二): register the bind carriers into
+    // llvm.compiler.used at exactly this point -- after both refresh passes
+    // above have written the final "mcs251-place" attributes onto every IR
+    // carrier of the TU, and BEFORE the optimization pipeline runs (it only
+    // starts after Release() returns; it is what deletes an unreferenced
+    // external declaration, taking the placement attribute with it). This
+    // is the coordinator's pre-ruled keepalive root (llvm.compiler.used,
+    // never llvm.used): an internal emission mechanism with no user-visible
+    // keepalive semantics -- mcu_retain keeps its place_at-definition-only
+    // boundary. Bind carriers are external DECLARATIONS by contract, so
+    // they bypass addCompilerUsedGlobal's definition assert and join
+    // LLVMCompilerUsed directly. The G11-B emitter (llc) re-applies the
+    // same registration at its AsmPrinter entry for hand-written IR / llc
+    // pipelines; the two layers have distinct jobs (that one is the
+    // receiving face, this one closes the clang -O2 end-to-end path).
+    llvm::SmallVector<llvm::GlobalValue *, 4> BindCarriers;
+    for (llvm::GlobalVariable &G : getModule().globals())
+      if (isMCS251BindCarrierIR(G))
+        BindCarriers.push_back(&G);
+    for (llvm::Function &F : getModule())
+      if (isMCS251BindCarrierIR(F))
+        BindCarriers.push_back(&F);
+    for (llvm::GlobalValue *GV : BindCarriers)
+      if (!llvm::is_contained(LLVMCompilerUsed, llvm::WeakTrackingVH(GV)))
+        LLVMCompilerUsed.emplace_back(GV);
   }
   DeferredDecls.insert_range(EmittedDeferredDecls);
   EmittedDeferredDecls.clear();

@@ -48,6 +48,7 @@
 #include "TargetInfo/MCS251TargetInfo.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringExtras.h"
@@ -86,6 +87,7 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/SHA256.h"
 
 using namespace llvm;
 
@@ -172,6 +174,50 @@ class MCS251AsmPrinter final : public AsmPrinter {
   // the machine stream, collected during function emission and folded into
   // FunctionSignatures before the object identity is published.
   StringSet<> PendingHelperSymbols;
+
+  //===-------------------------------------------------------------------===//
+  // G11-B: fixed-placement bookkeeping (all state is per module and reset in
+  // emitStartOfAsmFile, mirroring ISRRecordCount/BitRecordCount).
+  //===-------------------------------------------------------------------===//
+
+  // The placement contract of one entity, decoded from the frozen G11-A IR
+  // attribute pair (see getMCS251Placement below for the grammar).  The
+  // field encodings are the NOTE schema v1 encodings (design §3.2).
+  struct MCS251PlacementSpec {
+    uint32_t Address = 0;     // 24-bit value, zero-extended in the NOTE.
+    uint8_t StorageClass = 0; // NOTE v1: 0=AS0-DATA, 1=XDATA, 2=CODE.
+    uint8_t Entity = 0;       // NOTE v1: 0=object, 1=function.
+    uint8_t Ownership = 0;    // NOTE v1: 0=owned, 1=bind.
+    uint32_t Flags = 0;       // bit0 retain (owned records only), bit1 noinit.
+    std::string Stable;
+  };
+  // The `.mcu.fixed.*` section names already claimed by one placed entity:
+  // the design's emitter-side single-entity invariant (a second entity
+  // resolving to an existing fixed-section name is an internal invariant
+  // violation -- the section must never merge two placed entities).
+  StringSet<> EmittedFixedSections;
+
+  // One NOTE record per placed entity of this TU, in emission order; the
+  // NOTE writer in emitEndOfAsmFile appends the bind carriers and renders
+  // the whole table into the single `.mcs251.placement` section.
+  struct MCS251PlacementNoteEntry {
+    MCS251PlacementSpec Spec;
+    uint32_t Align = 1;
+    uint32_t Size = 0;            // objects and bind records: a constant.
+    const MCExpr *SizeExpr = nullptr; // functions: <stable>.end-<stable>.begin
+  };
+  SmallVector<MCS251PlacementNoteEntry, 4> PlacementNoteEntries;
+
+  // The fixed-section span label pair of the function currently being
+  // emitted (nullptr outside runOnMachineFunction of a placed function).
+  struct MCS251ActiveFixedFunction {
+    MCS251PlacementSpec Spec;
+    uint32_t Align = 1;
+    MCSectionELF *Section = nullptr;
+    MCSymbol *Begin = nullptr;
+    MCSymbol *End = nullptr;
+  };
+  std::unique_ptr<MCS251ActiveFixedFunction> ActiveFixedFunction;
 
   const MCS251TargetMachine &getMCS251TM() const {
     return static_cast<const MCS251TargetMachine &>(TM);
@@ -486,6 +532,254 @@ class MCS251AsmPrinter final : public AsmPrinter {
            F.hasFnAttribute("mcs251-isr-vector");
   }
 
+  //===--------------------------------------------------------------------===//
+  // G11-B: fixed placement (design G11-PLACEMENT-DESIGN.md rev 7, §3.2).
+  //
+  // G11-A publishes each placed entity's contract on the GlobalObject as the
+  // frozen IR attribute pair
+  //   "mcs251-place"         = "0x<HEX A>,<data|xdata|code>,<object|function>,
+  //                            <owned|bind>,<decimal flags>"  (flags bit0
+  //                            retain, bit1 noinit)
+  //   "mcs251-stable-symbol" = the stable identity (external entities keep
+  //                            the declaration name; statics are TU-qualified)
+  // and this emitter consumes it to build the `.mcu.fixed.<stable-symbol>`
+  // sections and the `.mcs251.placement` SHT_NOTE record table.  The NOTE
+  // schema v1, the envelope (namesz=7 + 8 storage bytes) and the layout-hash
+  // field set are frozen in the design; this is the single producer.
+  //===--------------------------------------------------------------------===//
+
+  static Attribute getMCS251PlacementAttribute(const GlobalObject *GO,
+                                               StringRef Kind) {
+    if (const auto *F = dyn_cast<Function>(GO))
+      return F->getFnAttribute(Kind);
+    return cast<GlobalVariable>(GO)->getAttribute(Kind);
+  }
+
+  // \return the placement contract of \p GO, or std::nullopt when the entity
+  // carries no "mcs251-place" attribute.  A malformed value is an internal
+  // producer bug (G11-A Sema/CodeGen guarantee the shape) and fails closed.
+  static std::optional<MCS251PlacementSpec>
+  getMCS251Placement(const GlobalObject *GO) {
+    Attribute Place = getMCS251PlacementAttribute(GO, "mcs251-place");
+    if (!Place.isValid() || !Place.isStringAttribute())
+      return std::nullopt;
+    MCS251PlacementSpec Spec;
+    SmallVector<StringRef, 5> Fields;
+    SplitString(Place.getValueAsString(), Fields, ",");
+    auto Bad = [GO]() -> std::optional<MCS251PlacementSpec> {
+      report_fatal_error("MCS251: malformed mcs251-place attribute on '" +
+                         Twine(GO->getName()) + "'");
+      return std::nullopt;
+    };
+    if (Fields.size() != 5 || !Fields[0].starts_with("0x") ||
+        Fields[0].size() > 10)
+      return Bad();
+    unsigned long long Parsed;
+    if (Fields[0].substr(2).getAsInteger(16, Parsed) || Parsed > 0xFFFFFF)
+      return Bad();
+    Spec.Address = uint32_t(Parsed);
+    auto ClassOf = [](StringRef S) -> std::optional<uint8_t> {
+      if (S == "data")
+        return uint8_t(0);
+      if (S == "xdata")
+        return uint8_t(1);
+      if (S == "code")
+        return uint8_t(2);
+      return std::nullopt;
+    };
+    auto EntityOf = [](StringRef S) -> std::optional<uint8_t> {
+      if (S == "object")
+        return uint8_t(0);
+      if (S == "function")
+        return uint8_t(1);
+      return std::nullopt;
+    };
+    auto OwnOf = [](StringRef S) -> std::optional<uint8_t> {
+      if (S == "owned")
+        return uint8_t(0);
+      if (S == "bind")
+        return uint8_t(1);
+      return std::nullopt;
+    };
+    std::optional<uint8_t> SC = ClassOf(Fields[1]);
+    std::optional<uint8_t> EN = EntityOf(Fields[2]);
+    std::optional<uint8_t> OW = OwnOf(Fields[3]);
+    if (!SC || !EN || !OW)
+      return Bad();
+    Spec.StorageClass = *SC;
+    Spec.Entity = *EN;
+    Spec.Ownership = *OW;
+    unsigned long long Flags;
+    if (Fields[4].getAsInteger(10, Flags) || Flags > 3)
+      return Bad();
+    Spec.Flags = uint32_t(Flags);
+    if (Spec.Ownership == 1 && (Spec.Flags & 1))
+      // Sema rejects retain on bind declarations; the writer re-checks
+      // fail-closed (a bind record with flags.bit0=1 is malformed).
+      return Bad();
+    Attribute Stable = getMCS251PlacementAttribute(GO, "mcs251-stable-symbol");
+    if (!Stable.isValid() || !Stable.isStringAttribute() ||
+        Stable.getValueAsString().empty() ||
+        Stable.getValueAsString().size() > 255)
+      return Bad();
+    Spec.Stable = Stable.getValueAsString().str();
+    return Spec;
+  }
+
+  // The G11 section name: exactly one entity per `.mcu.fixed.*` section
+  // (design §3.2 "each fixed entity gets a dedicated section"; the stable
+  // symbol's TU qualifier keeps the names of one TU distinct).
+  static std::string getMCS251FixedSectionName(const MCS251PlacementSpec &P) {
+    return std::string(".mcu.fixed.") + P.Stable;
+  }
+
+  // G11-B R1 (review 2026-09-16, Alice §一): the `.mcu.fixed.*` namespace is
+  // reserved for entities REGISTERED by the placement emitters
+  // (claimMCS251FixedSection). A function or global object that reaches
+  // emission with an ordinary EXPLICIT section assignment (C
+  // __attribute__((section(".mcu.fixed.*"))), IR `section "...")`) enters the
+  // same sections without any NOTE record -- it silently violates the
+  // one-entity-per-section invariant, the NOTE.size == sh_size identity and
+  // the span anti-merge guarantee, no matter whether it is emitted before or
+  // after the placed entity (a zero-size second FUNC is the same hole: its
+  // bytes are zero, but it is still an unregistered entity symbol in the
+  // section). The check is therefore at the EMISSION ENTRY of every
+  // function/global and never consults registration state: the only legal
+  // way into a fixed section is the "mcs251-place" attribute, which never
+  // uses the generic explicit-section path (a placed entity's section is
+  // derived from its stable symbol and the emitters reject contradictory
+  // explicit sections). Order-independent by construction.
+  static bool isMCS251FixedSectionName(StringRef S) {
+    return S.starts_with(".mcu.fixed.");
+  }
+
+  // H_source (design §3.2 rev 7 B1): SHA-256 of the BE-packed
+  // (schema_version, storage_class, entity, ownership, address, align,
+  // flags) -- four u8 then three u32 -- truncated to the low 32 bits of the
+  // digest read big-endian.  `size`, the stable symbol, the source file and
+  // the line never participate: the hash must be computable at record
+  // assembly time, while the size fixup resolves only after layout.
+  static uint32_t computeMCS251LayoutHash(const MCS251PlacementSpec &P,
+                                          uint32_t Align) {
+    const uint8_t F[16] = {
+        uint8_t(1), P.StorageClass, P.Entity, P.Ownership,
+        uint8_t(P.Address >> 24), uint8_t(P.Address >> 16),
+        uint8_t(P.Address >> 8), uint8_t(P.Address),
+        uint8_t(Align >> 24), uint8_t(Align >> 16), uint8_t(Align >> 8),
+        uint8_t(Align),
+        uint8_t(P.Flags >> 24), uint8_t(P.Flags >> 16),
+        uint8_t(P.Flags >> 8), uint8_t(P.Flags)};
+    SHA256 Hash;
+    Hash.update(StringRef(reinterpret_cast<const char *>(F), sizeof(F)));
+    std::array<uint8_t, 32> Digest = Hash.final();
+    return (uint32_t(Digest[28]) << 24) | (uint32_t(Digest[29]) << 16) |
+           (uint32_t(Digest[30]) << 8) | uint32_t(Digest[31]);
+  }
+
+  // N5 (design §3.2 "keepalive root processing"): the single-point member
+  // classification consumed by the identity census, the storage-reservation
+  // scan, the global emission gate and (by not being reached) the Reject
+  // chain.  ISR and Bit keep their frozen rules; Placement is the G11 class
+  // (an entity carrying the "mcs251-place" attribute).  The coordinator's
+  // pre-ruling (2026-09-16) additionally admits BIND CARRIERS -- external
+  // declarations kept alive in llvm.compiler.used by this emitter -- as a
+  // distinct classified kind, so a bind carrier container is registration
+  // data, not an unregistered capability.  This grants no user-visible
+  // keepalive semantics: mcu_retain keeps its "place_at definition only"
+  // boundary.
+  enum class MCS251KeepaliveMemberKind { ISR, Bit, Placement, Bind, Unmarked };
+
+  MCS251KeepaliveMemberKind
+  classifyMCS251KeepaliveMember(const Constant *Member,
+                                const DataLayout &DL) const {
+    const GlobalValue *Terminal = getKeepaliveTerminal(Member);
+    if (!Terminal)
+      return MCS251KeepaliveMemberKind::Unmarked;
+    if (const auto *F = dyn_cast<Function>(Terminal)) {
+      // T06 rule unchanged: in a module that defines interrupt entries, a
+      // program-address-space function member is the ISR keepalive kind.
+      if (ModuleHasISRDefinitions &&
+          F->getAddressSpace() == DL.getProgramAddressSpace())
+        return MCS251KeepaliveMemberKind::ISR;
+      if (getMCS251Placement(F))
+        return MCS251KeepaliveMemberKind::Placement;
+      return MCS251KeepaliveMemberKind::Unmarked;
+    }
+    if (const auto *GV = dyn_cast<GlobalVariable>(Terminal)) {
+      if (MCS251::isBitObjectGlobal(*GV))
+        return MCS251KeepaliveMemberKind::Bit;
+      std::optional<MCS251PlacementSpec> P = getMCS251Placement(GV);
+      if (P && P->Ownership == 1)
+        return MCS251KeepaliveMemberKind::Bind;
+      if (P)
+        return MCS251KeepaliveMemberKind::Placement;
+      return MCS251KeepaliveMemberKind::Unmarked;
+    }
+    return MCS251KeepaliveMemberKind::Unmarked;
+  }
+
+  // The container-level shape check (llvm.used / llvm.compiler.used,
+  // appending, pointer array, "llvm.metadata", no materialized use) shared
+  // by every consumer of the classification.
+  static bool isMCS251KeepaliveContainer(const GlobalVariable &GV) {
+    if (GV.getName() != "llvm.used" && GV.getName() != "llvm.compiler.used")
+      return false;
+    if (!GV.hasInitializer() || !GV.hasAppendingLinkage())
+      return false;
+    const auto *ArrTy = dyn_cast<ArrayType>(GV.getInitializer()->getType());
+    if (!ArrTy || !ArrTy->getElementType()->isPointerTy())
+      return false;
+    if (!GV.hasSection() || GV.getSection() != "llvm.metadata")
+      return false;
+    if (!GV.materialized_use_empty())
+      return false;
+    return true;
+  }
+
+  enum class MCS251KeepaliveRootKind {
+    NotRoot,
+    Classified,
+    UnmarkedMember,
+    Unengaged
+  };
+
+  // Classify one keepalive container by its members.  `Classified` is the
+  // exemption answer the storage scan and the emission gate consume;
+  // `UnmarkedMember` is the fail-closed verdict for a container with any
+  // member outside the registered kinds (the old census rule).  The gate
+  // ENGAGES for the historical root set (an ISR module's llvm.used, T06)
+  // and for every container carrying a placement member (G11 -- the
+  // placement keepalive exists in ordinary modules too); a container with
+  // neither property keeps the historical ordinary walk (`Unengaged`), so
+  // non-placement inputs keep their frozen diagnostic positions byte for
+  // byte.  An empty container is NotRoot (nothing to register).
+  MCS251KeepaliveRootKind
+  classifyMCS251KeepaliveRoot(const GlobalVariable &GV,
+                              const DataLayout &DL) const {
+    if (!isMCS251KeepaliveContainer(GV))
+      return MCS251KeepaliveRootKind::NotRoot;
+    const auto *ArrTy = cast<ArrayType>(GV.getInitializer()->getType());
+    if (ArrTy->getNumElements() == 0)
+      return MCS251KeepaliveRootKind::NotRoot;
+    bool Engage = ModuleHasISRDefinitions;
+    bool AnyUnmarked = false;
+    for (unsigned I = 0, E = ArrTy->getNumElements(); I != E; ++I) {
+      const Constant *Member = GV.getInitializer()->getAggregateElement(I);
+      MCS251KeepaliveMemberKind Kind =
+          classifyMCS251KeepaliveMember(Member, DL);
+      if (Kind == MCS251KeepaliveMemberKind::Placement ||
+          Kind == MCS251KeepaliveMemberKind::Bind)
+        Engage = true;
+      else if (Kind == MCS251KeepaliveMemberKind::Unmarked)
+        AnyUnmarked = true;
+    }
+    if (!Engage)
+      return MCS251KeepaliveRootKind::Unengaged;
+    return AnyUnmarked ? MCS251KeepaliveRootKind::UnmarkedMember
+                       : MCS251KeepaliveRootKind::Classified;
+  }
+
+
   // BT12: the keepalive container that registers bit-object placeholders. It is
   // the standard llvm.used / llvm.compiler.used structure (appending linkage,
   // array-of-pointers initializer, "llvm.metadata" section), and every member
@@ -611,54 +905,27 @@ class MCS251AsmPrinter final : public AsmPrinter {
     SmallPtrSet<const Constant *, 32> SeenConstants;
     const DataLayout &DL = M.getDataLayout();
     for (const GlobalVariable &GV : M.globals()) {
-      // T06 step 8(i): the only AS4-pointer exemption is a per-member path
-      // check of a structurally verified llvm.used keepalive container (A2.2
-      // "AS4 direct" or the standard single-operand cast chain). It applies
-      // only to modules that actually define interrupt entries (T06 rework
-      // R2): a module without ISR definitions keeps the original gate
-      // behavior, so an AS4 cast root over ordinary functions is still
-      // rejected by the ordinary walk below. The exemption is computed
-      // without touching the shared seen-sets, so the same cast constant
-      // escaping through an ordinary global or an instruction is still
-      // rejected there. The container is never skipped by name or section
-      // without this verification, and members that are not exactly
-      // verified keepalive items (ordinary AS4 data or function pointers,
-      // malformed chains) keep the original rejection.  P09 identity fix:
-      // the per-member check itself is a CATEGORY classification -- a
-      // program-AS function (ISR keepalive) or a marked bit-object
-      // placeholder (BT12 bit-record keepalive) is a registered member
-      // kind; see the branch below.
-      if (ModuleHasISRDefinitions && isMCS251KeepaliveRoot(GV)) {
-        // P09 identity fix (ISR x bit gate): classify each member by its
-        // terminal instead of demanding that every member be a program-AS
-        // function.  Two REGISTERED member kinds may share the llvm.used
-        // root of an ISR module: (i) the program-address-space function
-        // (the A2.2 ISR keepalive) and (ii) the marked bit-object
-        // placeholder (the BT12 bit-record keepalive) -- clang emits exactly
-        // this mixed container for the "ISR sets a persistent bit flag,
-        // main loop polls it" idiom, and each capability is independently
-        // registered in the A4 v2 identity, so their coexistence in one
-        // container is not an unregistered capability.  The member SHAPE
-        // rules are unchanged (fail-closed): any other terminal -- AS4/AS3
-        // data, an unmarked ordinary global, a malformed cast chain --
-        // keeps the original rejection, exactly like the all-function rule
-        // before it.
-        const auto *ArrTy = cast<ArrayType>(GV.getInitializer()->getType());
-        for (unsigned I = 0, E = ArrTy->getNumElements(); I != E; ++I) {
-          const Constant *Member = GV.getInitializer()->getAggregateElement(I);
-          const GlobalValue *Terminal =
-              Member ? getKeepaliveTerminal(Member) : nullptr;
-          if (const auto *Kept = dyn_cast_or_null<Function>(Terminal)) {
-            if (Kept->getAddressSpace() !=
-                M.getDataLayout().getProgramAddressSpace())
-              return false;
-            continue;
-          }
-          const auto *BitGV = dyn_cast_or_null<GlobalVariable>(Terminal);
-          if (!BitGV || !MCS251::isBitObjectGlobal(*BitGV))
-            return false;
-        }
+      // T06 step 8(i) + BT12 + G11-B (design §3.2 N5 "keepalive root
+      // processing"): the only exemptions for llvm.used/llvm.compiler.used
+      // are per-MEMBER classification checks of a structurally verified
+      // container -- never a bare name/section test.  The single-point
+      // predicate classifyMCS251KeepaliveMember decides: an ISR member (a
+      // program-AS function of an ISR module, T06 unchanged), a marked
+      // bit-object placeholder (BT12) or a placement carrier (G11 --
+      // including the pre-ruled bind carriers of llvm.compiler.used) is a
+      // registered member kind; ANY unmarked member keeps the original
+      // fail-closed verdict (return false), exactly like the all-function
+      // rule before it.  The exemption is computed without touching the
+      // shared seen-sets, so the same constant escaping through an ordinary
+      // global or an instruction is still rejected there.
+      switch (classifyMCS251KeepaliveRoot(GV, M.getDataLayout())) {
+      case MCS251KeepaliveRootKind::Classified:
         continue;
+      case MCS251KeepaliveRootKind::UnmarkedMember:
+        return false;
+      case MCS251KeepaliveRootKind::NotRoot:
+      case MCS251KeepaliveRootKind::Unengaged:
+        break;
       }
       // X3: AS3 (__xdata) and AS4 (__code) globals are placed storage with
       // a v1 object protocol (per-object .mcs251.XSEG.* NOBITS sections plus
@@ -1075,14 +1342,138 @@ public:
   }
 
   bool runOnMachineFunction(MachineFunction &MF) override {
+    // G11-B R1: fail-closed fixed-namespace guard at the emission entry of
+    // EVERY function, before any byte or section exists. Runs first so the
+    // placement-specific diagnostic is reported even when the intruder is
+    // emitted before (or without) any placed entity.
+    if (const Function &F = MF.getFunction();
+        F.hasSection() && isMCS251FixedSectionName(F.getSection()))
+      report_fatal_error(
+          "MCS251: function '" + Twine(F.getName()) +
+          "' explicitly assigns fixed placement section '" + F.getSection() +
+          "': .mcu.fixed.* sections are reserved for mcs251-place entities");
     // T06 card steps 8/9: the final machine boundary is validated before any
     // byte of the function is emitted.
     verifyFinalMachineBoundary(MF);
     SetupMachineFunction(MF);
     emitParameterSlots(MF);
+    // G11-B: arm the fixed-section emission of a placed function before the
+    // body goes out; emitFunctionEntryLabel switches the streamer into the
+    // dedicated `.mcu.fixed.<stable-symbol>` section (nothing may precede
+    // the entry byte there -- MCS-251 emits no function-alignment padding,
+    // so the section starts exactly at the entry label) and
+    // finishPlacedFunction drops the span end label after the jump-table
+    // columns the base emitter appends in this same section.
+    ActiveFixedFunction.reset();
+    if (std::optional<MCS251PlacementSpec> P =
+            getMCS251Placement(&MF.getFunction())) {
+      beginPlacedFunction(MF, *P);
+    }
     emitFunctionBody();
+    if (ActiveFixedFunction)
+      finishPlacedFunction();
     emitISRRecords(MF); // A3.5: ISR definitions, ELF object output only.
     return false;
+  }
+
+  // G11-B: prepare the dedicated fixed section of a placed function. The
+  // actual section switch happens at the entry label (the base
+  // emitFunctionHeader re-selects the ordinary text section itself, and the
+  // constant pool / linkage directives it emits carry no bytes).
+  void beginPlacedFunction(MachineFunction &MF, const MCS251PlacementSpec &P) {
+    auto Bad = [&](const Twine &What) {
+      report_fatal_error("MCS251: fixed function '" + Twine(MF.getName()) +
+                         "': " + What);
+    };
+    if (!getMCS251TM().emitsObjectFile() || !usesELFObjects())
+      Bad("fixed placement requires ELF object output "
+          "(-filetype=obj -mcs251-object-format=elf)");
+    const Function &F = MF.getFunction();
+    if (P.Entity != 1 || P.Ownership != 0)
+      Bad("the mcs251-place attribute of a function definition must be "
+          "'function,owned'");
+    // G11-B R1: a placed function's section is derived from the stable
+    // symbol -- any explicit section is contradictory input (and a
+    // `.mcu.fixed.*` one would claim a foreign fixed section).
+    if (F.hasSection())
+      Bad("a placed function must not carry an explicit section (the "
+          "dedicated .mcu.fixed.<stable> section is derived from the "
+          "placement attribute)");
+    // G11-B review [建议] (2026-09-16, probe /tmp/g11b-review-alice/prefix.ll):
+    // the base emitFunctionHeader emits IR prefix data BEFORE the entry
+    // label, while the stream is still in the ordinary text section -- four
+    // prefix bytes would silently live outside the entity's fixed section
+    // and outside every span identity. Prologue data lands after the entry
+    // label but is still emitter-fed data this contract has no ruling for.
+    // Both are rejected fail-closed; the entry-label geometry claim below
+    // is thereby scoped to inputs without prefix/prologue data.
+    if (F.hasPrefixData() || F.hasPrologueData())
+      Bad("prefix/prologue data is not supported on a fixed placement "
+          "function");
+    claimMCS251FixedSection(P, &F);
+    const uint32_t Align = F.getAlign().valueOrOne().value();
+    ActiveFixedFunction = std::make_unique<MCS251ActiveFixedFunction>();
+    ActiveFixedFunction->Spec = P;
+    ActiveFixedFunction->Section = getMCS251FixedSection(P, Align);
+    ActiveFixedFunction->Align = Align;
+    // Temporary notype labels (no symbol-table presence, no size): they are
+    // the design's auxiliary location labels of the span fixup, never a
+    // second entity of the section.
+    ActiveFixedFunction->Begin = OutContext.createTempSymbol(
+        Twine(".mcu.span.") + P.Stable + ".begin");
+    ActiveFixedFunction->End = OutContext.createTempSymbol(
+        Twine(".mcu.span.") + P.Stable + ".end");
+  }
+
+  // G11-B: close the span of a placed function. Runs after emitFunctionBody
+  // returned, i.e. after the base emitter appended the jump-table columns
+  // to this function's section (BasePrinter calls emitJumpTableInfo at the
+  // very end of the body) -- so <stable>.end sits after every payload byte
+  // of the entity and the NOTE size field (end - begin) equals the section
+  // span sh_size, not just the body-label span st_size.
+  void finishPlacedFunction() {
+    OutStreamer->switchSection(ActiveFixedFunction->Section);
+    OutStreamer->emitLabel(ActiveFixedFunction->End);
+    MCS251PlacementNoteEntry Entry;
+    Entry.Spec = ActiveFixedFunction->Spec;
+    Entry.Align = ActiveFixedFunction->Align;
+    Entry.SizeExpr = MCBinaryExpr::createSub(
+        MCSymbolRefExpr::create(ActiveFixedFunction->End, OutContext),
+        MCSymbolRefExpr::create(ActiveFixedFunction->Begin, OutContext),
+        OutContext);
+    PlacementNoteEntries.push_back(std::move(Entry));
+    // Stay in the fixed section until the next entity switches away (the
+    // ASxxxx area text only exists for the inspection stream, which fixed
+    // placement never reaches -- it requires ELF object output).
+  }
+
+  // G11-B: the fixed section of a placed function starts exactly at its
+  // entry label. Scoped claim (review 2026-09-16 [建议], probe
+  // /tmp/g11b-review-alice/prefix.ll): for a placed function WITHOUT prefix
+  // or prologue data -- the shapes beginPlacedFunction rejects fail-closed
+  // -- the base header emits no bytes before the entry label on this target
+  // (no function-alignment padding, byte-addressed machine), so switching
+  // here keeps the entity's defined symbol at offset 0 with the
+  // <stable>.begin label in front of it. (For a general IR function the base
+  // header CAN emit bytes before the entry label -- prefix data stays in
+  // the ordinary .text; that is exactly why those inputs are rejected for
+  // fixed functions instead of "placed".)
+  void emitFunctionBodyEnd() override {}
+
+  void emitFunctionEntryLabel() override {
+    if (ActiveFixedFunction) {
+      OutStreamer->switchSection(ActiveFixedFunction->Section);
+      // The base emitFunctionBody unconditionally switches back to
+      // MF->getSection() before the epilog ("in case basic block sections
+      // was used"), which would drop CurrentFnEnd -- and the .size label
+      // difference with it -- into the ordinary text section.  Pointing
+      // MF's section here keeps every later switch (epilog end label, the
+      // jump-table columns emitJumpTableInfo appends, our span end label)
+      // inside the entity's dedicated section.
+      MF->setSection(ActiveFixedFunction->Section);
+      OutStreamer->emitLabel(ActiveFixedFunction->Begin);
+    }
+    AsmPrinter::emitFunctionEntryLabel();
   }
 
   // BRJT (S3, design §3.2.3.4 + §3.2.4 L1): emit each jump table as a
@@ -1680,6 +2071,9 @@ public:
   ///
   /// Returns true when the module is representable by the v1 object identity.
   bool classifyModule(Module &M) {
+    // G11-B pre-ruling hook: keep the bind carriers alive before any
+    // capability walk or optimization-time deletion can observe them.
+    registerMCS251BindCarriers(M);
     // ISR identity of the module decides where the A2.2 keepalive exemption
     // applies (object gate, storage-reservation scan, global emission).
     ModuleHasISRDefinitions =
@@ -2038,6 +2432,11 @@ public:
       emitASxxxxText("\t.mcs251_isr_nonobject");
     ISRRecordCount = 0;
     BitRecordCount = 0;
+    // G11-B: per-module placement bookkeeping (idempotent with the
+    // doInitialization run; classifyModule itself is idempotent).
+    EmittedFixedSections.clear();
+    PlacementNoteEntries.clear();
+    ActiveFixedFunction.reset();
     if (llvm::any_of(M, [](const Function &F) {
           return !F.isDeclaration() &&
                  // G2 B-S2: a variadic definition owns a slot area even with
@@ -2047,19 +2446,20 @@ public:
                  (F.arg_size() > 1 || F.isVarArg());
         }) ||
         llvm::any_of(M.globals(), [this](const GlobalVariable &GV) {
-          // T06 rework R1: precisely verified ISR keepalive metadata is
-          // registration data and reserves no storage. The standard llvm.used
-          // root has appending linkage and is NOT a constant, so the
-          // exclusion needs this structural verification -- never a bare
-          // name/section test. Real mutable globals keep triggering the
-          // reservation exactly as before.
-          // BT12: a persistent bit-object placeholder is also registration
-          // data (identity, not bytes) and reserves no ordinary RAM byte, and
-          // so is its verified keepalive container.
+          // T06 rework R1 + BT12 + G11-B (design §3.2 N5): keepalive
+          // metadata whose members all classify (ISR / Bit / Placement /
+          // Bind) is registration data and reserves no storage. The
+          // standard llvm.used root has appending linkage and is NOT a
+          // constant, so the exclusion needs this structural verification --
+          // never a bare name/section test. Real mutable globals keep
+          // triggering the reservation exactly as before.
           return !GV.isDeclaration() && !GV.isConstant() &&
                  !MCS251::isBitObjectGlobal(GV) &&
                  !isMCS251BitObjectKeepaliveRoot(GV) &&
-                 !(ModuleHasISRDefinitions && isMCS251KeepaliveRoot(GV));
+                 !(ModuleHasISRDefinitions && isMCS251KeepaliveRoot(GV)) &&
+                 classifyMCS251KeepaliveRoot(
+                     GV, GV.getParent()->getDataLayout()) !=
+                     MCS251KeepaliveRootKind::Classified;
         })) {
       // REL synthesizes the A record. ELF needs an actual NOBITS reservation.
       if (usesELFObjects()) {
@@ -2099,6 +2499,174 @@ public:
       emitBitObjectRecords(M);
   }
 
+  //===--------------------------------------------------------------------===//
+  // G11-B: the placement NOTE writer and the bind-carrier keepalive.
+  //===--------------------------------------------------------------------===//
+
+  // The coordinator's pre-ruling (2026-09-16): an unreferenced bind
+  // external declaration does not survive an O2 pipeline (G11-A round
+  // evidence: the declaration disappears and takes the placement attribute
+  // with it), so every bind carrier of this module is kept alive in
+  // llvm.compiler.used. RESPONSIBILITY SPLIT (review 2026-09-16 R2): the
+  // AUTHORITATIVE registration now happens in the A layer --
+  // clang CodeGenModule::Release() appends the bind carriers to
+  // llvm.compiler.used after the final attributes are written and before
+  // the optimization pipeline runs, which is the only point that closes the
+  // clang -O2 end-to-end path. THIS copy is the B receiving face for
+  // hand-written IR and llc-side pipelines (llc -O2 does not delete
+  // unreferenced declarations itself; clang's optimizer does) -- a
+  // belt-and-braces registration so the NOTE writer below never silently
+  // loses a carrier that reached llc. This is an INTERNAL emission
+  // mechanism of the emitter -- it grants no user-visible keepalive
+  // semantics: mcu_retain keeps its "place_at definition only" boundary,
+  // llvm.used is untouched, and place/retain definitions stay alive through
+  // the A-layer llvm.used roots. Runs before classifyModule's census so the
+  // container is seen through the same member classification (kind Bind).
+  // Idempotent.
+  void registerMCS251BindCarriers(Module &M) {
+    SmallVector<GlobalValue *, 8> Carriers;
+    for (GlobalVariable &GV : M.globals()) {
+      std::optional<MCS251PlacementSpec> P = getMCS251Placement(&GV);
+      if (P && P->Ownership == 1)
+        Carriers.push_back(&GV);
+    }
+    for (Function &F : M) {
+      std::optional<MCS251PlacementSpec> P = getMCS251Placement(&F);
+      if (P && P->Ownership == 1)
+        Carriers.push_back(&F);
+    }
+    if (Carriers.empty())
+      return;
+    // Erase-and-rebuild in the ModuleUtils appendToUsedList shape (kept
+    // local: the target must not grow a TransformUtils dependency).
+    // Members already registered are preserved verbatim; when every carrier
+    // is already registered the second (idempotent) run rebuilds nothing.
+    SmallSetVector<Constant *, 16> Init;
+    GlobalVariable *GV = M.getGlobalVariable("llvm.compiler.used");
+    if (GV) {
+      if (Constant *C = GV->getInitializer())
+        for (unsigned I = 0, E = C->getNumOperands(); I != E; ++I)
+          Init.insert(cast<Constant>(C->getOperand(I)));
+      bool AllPresent = true;
+      for (GlobalValue *Carrier : Carriers)
+        if (llvm::none_of(Init, [&](Constant *Member) {
+              return getKeepaliveTerminal(Member) == Carrier;
+            }))
+          AllPresent = false;
+      if (AllPresent)
+        return;
+      GV->eraseFromParent();
+    }
+    Type *EltTy = PointerType::getUnqual(M.getContext());
+    for (GlobalValue *Carrier : Carriers)
+      Init.insert(ConstantExpr::getPointerBitCastOrAddrSpaceCast(Carrier,
+                                                                 EltTy));
+    ArrayType *ATy = ArrayType::get(EltTy, Init.size());
+    GV = new GlobalVariable(M, ATy, /*isConstant=*/true,
+                            GlobalValue::AppendingLinkage,
+                            ConstantArray::get(ATy, Init.getArrayRef()),
+                            "llvm.compiler.used");
+    GV->setSection("llvm.metadata");
+  }
+
+  // The `.mcs251.placement` SHT_NOTE table (design §3.2/§3.3): one section
+  // per TU, envelope namesz=7 ("MCS251\0" incl. NUL; the name field's
+  // storage is padded to 8 bytes), type=1 (placement v1), descsz = the sum
+  // of the 4-byte record_size prologue and each record's padded payload.
+  // Every multi-byte field is big-endian like the whole ELF32-BE object.
+  // The function span's `size` field is written as the MC symbol
+  // difference <stable>.end - <stable>.begin: a fixup that resolves only
+  // in finish() after the final layout (long-branch relaxation included),
+  // which is exactly the design's "no layout-time constant exists at
+  // doFinalization" ruling; both labels are temporary notype symbols of
+  // the entity's own section, so the difference folds without a
+  // relocation. Owned objects keep the constant path.
+  void emitPlacementNote(Module &M) {
+    const DataLayout &DL = M.getDataLayout();
+    // Bind carriers are recorded here (globals then functions, module
+    // order); owned entities were recorded at their emission.
+    for (GlobalVariable &GV : M.globals()) {
+      std::optional<MCS251PlacementSpec> P = getMCS251Placement(&GV);
+      if (!P || P->Ownership != 1)
+        continue;
+      MCS251PlacementNoteEntry Entry;
+      Entry.Spec = *P;
+      Entry.Align = GV.getAlign().valueOrOne().value();
+      if (P->Entity == 0) {
+        // A bind object's size is its declared sizeof (the cross-carrier
+        // comparison input); zero is malformed (P-4: Sema owns the check,
+        // the writer re-validates fail-closed).
+        uint64_t Size = DL.getTypeAllocSize(GV.getValueType());
+        if (!Size)
+          report_fatal_error("MCS251: malformed placement NOTE: bind "
+                             "object '" +
+                             Twine(GV.getName()) + "' has size 0");
+        Entry.Size = uint32_t(Size);
+      } // bind function: size 0 = "no size constraint".
+      PlacementNoteEntries.push_back(std::move(Entry));
+    }
+    for (Function &F : M) {
+      std::optional<MCS251PlacementSpec> P = getMCS251Placement(&F);
+      if (!P || P->Ownership != 1)
+        continue;
+      MCS251PlacementNoteEntry Entry;
+      Entry.Spec = *P;
+      Entry.Align = F.getAlign().valueOrOne().value();
+      PlacementNoteEntries.push_back(std::move(Entry));
+    }
+    if (PlacementNoteEntries.empty())
+      return; // no placed entity in this TU: no section, byte-for-byte
+              // unchanged output for placement-free modules.
+    if (!getMCS251TM().emitsObjectFile() || !usesELFObjects())
+      report_fatal_error(
+          "MCS251 placement requires ELF object output "
+          "(-filetype=obj -mcs251-object-format=elf)");
+
+    SmallVector<uint32_t, 8> RecordSizes;
+    uint64_t DescSize = 0;
+    for (const MCS251PlacementNoteEntry &E : PlacementNoteEntries) {
+      // 24 fixed payload bytes + stable_len + stable + padding to a 4-byte
+      // multiple; record_size counts everything after its own 4 bytes.
+      uint32_t Tail = 24 + 1 + uint32_t(E.Spec.Stable.size());
+      uint32_t RecordSize = Tail + ((4 - (Tail % 4)) % 4);
+      RecordSizes.push_back(RecordSize);
+      DescSize += 4 + RecordSize;
+    }
+    MCSectionELF *Note = OutContext.getELFSection(".mcs251.placement",
+                                                  ELF::SHT_NOTE, /*Flags=*/0);
+    Note->setAlignment(Align(4));
+    OutStreamer->switchSection(Note);
+    OutStreamer->emitIntValue(7, 4); // namesz, "MCS251\0" including the NUL
+    OutStreamer->emitIntValue(DescSize, 4);
+    OutStreamer->emitIntValue(1, 4); // type: placement record table v1
+    OutStreamer->emitBytes(StringRef("MCS251\0\0", 8));
+    for (unsigned I = 0, E = PlacementNoteEntries.size(); I != E; ++I) {
+      const MCS251PlacementNoteEntry &Entry = PlacementNoteEntries[I];
+      const MCS251PlacementSpec &P = Entry.Spec;
+      OutStreamer->emitIntValue(RecordSizes[I], 4);
+      OutStreamer->emitIntValue(1, 1); // schema_version
+      OutStreamer->emitIntValue(P.StorageClass, 1);
+      OutStreamer->emitIntValue(P.Entity, 1);
+      OutStreamer->emitIntValue(P.Ownership, 1);
+      OutStreamer->emitIntValue(P.Address, 4);
+      if (Entry.SizeExpr)
+        OutStreamer->emitValue(Entry.SizeExpr, 4);
+      else
+        OutStreamer->emitIntValue(Entry.Size, 4);
+      OutStreamer->emitIntValue(Entry.Align, 4);
+      OutStreamer->emitIntValue(P.Flags, 4);
+      OutStreamer->emitIntValue(computeMCS251LayoutHash(P, Entry.Align), 4);
+      OutStreamer->emitIntValue(P.Stable.size(), 1);
+      OutStreamer->emitBytes(P.Stable);
+      unsigned Pad =
+          RecordSizes[I] - (24 + 1 + uint32_t(P.Stable.size()));
+      if (Pad)
+        OutStreamer->emitZeros(Pad);
+    }
+    OutStreamer->switchSection(
+        OutContext.getObjectFileInfo()->getTextSection());
+  }
+
   // A4/W2+W3b: publish the v2 identity section for a v2-contract ELF object
   // that passed the capability gate.  The payload is assembled by the
   // registered-value codec and validated by the strict decoder before a
@@ -2111,6 +2679,10 @@ public:
   // it is the only v2 identity carrier: the v1 note was suppressed in
   // initSections because EFlagsV2 was installed first.
   void emitEndOfAsmFile(Module &M) override {
+    // G11-B: the placement NOTE is written for every object identity (the
+    // v1 explicit contract and the v2 default alike) and before the v2
+    // attributes section; it is a no-op for placement-free modules.
+    emitPlacementNote(M);
     if (!ModuleV2Identity)
       return; // v1 identity objects emit no extra identity bytes (unchanged).
     const std::optional<MCS251::MemoryContract> &Contract =
@@ -2159,6 +2731,18 @@ public:
   }
 
   void emitGlobalVariable(const GlobalVariable *GV) override {
+    // G11-B R1: fail-closed fixed-namespace guard at the emission entry of
+    // EVERY global object (same rule as the function guard in
+    // runOnMachineFunction). The object-side explicit-section intrusion is
+    // rejected here with the placement-specific diagnostic BEFORE any
+    // dispatch (the generic custom-section rejection further below is not a
+    // placement contract check and historically let the wording obscure the
+    // real problem); order-independent by construction.
+    if (GV->hasSection() && isMCS251FixedSectionName(GV->getSection()))
+      report_fatal_error(
+          "MCS251: global '" + Twine(GV->getName()) +
+          "' explicitly assigns fixed placement section '" + GV->getSection() +
+          "': .mcu.fixed.* sections are reserved for mcs251-place entities");
     // BT12: a persistent bit object is identity, not storage. It was already
     // turned into a kind-1 `.mcs251.bit` record (definition) or left as an
     // undefined reference (extern) by emitStartOfAsmFile; it must never reach
@@ -2191,6 +2775,37 @@ public:
     // escapes an ordinary global keeps the ordinary rejection.
     if (isMCS251BitObjectKeepaliveRoot(*GV)) {
       AsmPrinter::emitGlobalVariable(GV);
+      return;
+    }
+
+    // G11-B (design §3.2 N5, the third pass-through): a keepalive container
+    // whose members all classify -- ISR, bit, placement (fixed carriers)
+    // and, by the coordinator's pre-ruling, llvm.compiler.used bind
+    // carriers -- is registration data, not bytes. The classification is
+    // the same single-point predicate the census and the storage scan
+    // consume; a container with any unmarked member keeps the ordinary
+    // rejection path below (the Reject chain is unchanged for it).
+    if (classifyMCS251KeepaliveRoot(*GV, GV->getParent()->getDataLayout()) ==
+        MCS251KeepaliveRootKind::Classified) {
+      AsmPrinter::emitGlobalVariable(GV);
+      return;
+    }
+
+    // G11-B: a placed entity emits into its dedicated `.mcu.fixed.*`
+    // section (owned) or carries no storage at all (bind: an external
+    // declaration whose NOTE record the writer at the end of the file
+    // owns). The dispatch precedes the AS3/AS4 emitters: a placed __xdata
+    // or __code object belongs to its fixed section, never to the ordinary
+    // per-object XSEG/CSEG paths.
+    if (std::optional<MCS251PlacementSpec> Placement = getMCS251Placement(GV)) {
+      if (Placement->Ownership == 1) {
+        if (!GV->isDeclaration())
+          report_fatal_error("MCS251: bind placement carrier '" +
+                             Twine(GV->getName()) +
+                             "' must be an external declaration");
+        return; // no storage, no section, no init records
+      }
+      emitFixedPlacementGlobal(GV, Placement->StorageClass, *Placement);
       return;
     }
 
@@ -2302,6 +2917,182 @@ public:
   //===--------------------------------------------------------------------===//
   // X3: address-space placement emitters.
   //===--------------------------------------------------------------------===//
+
+  //===--------------------------------------------------------------------===//
+  // G11-B: fixed placement emitters.
+  //===--------------------------------------------------------------------===//
+
+  // The storage-class consistency axis (design §2.2 N2): the NOTE
+  // storage_class is the authoritative orthogonal field, NOT the ELF
+  // section type -- CODE class sections are PROGBITS (EXECINSTR only for
+  // functions), AS0-DATA and XDATA class sections are NOBITS with WRITE.
+  // The retain flag rides the section iff NOTE flags.bit0=1 (design §3.2:
+  // the attribute bit is the only writer of SHF_GNU_RETAIN; the generic
+  // TLOF used/retain path is never taken for a fixed entity).
+  MCSectionELF *getMCS251FixedSection(const MCS251PlacementSpec &P,
+                                      uint32_t AlignVal) {
+    unsigned Type, Flags = ELF::SHF_ALLOC;
+    if (P.StorageClass == 2) { // CODE
+      Type = ELF::SHT_PROGBITS;
+      if (P.Entity == 1)
+        Flags |= ELF::SHF_EXECINSTR;
+    } else { // AS0-DATA / XDATA
+      Type = ELF::SHT_NOBITS;
+      Flags |= ELF::SHF_WRITE;
+    }
+    if (P.Flags & 1)
+      Flags |= ELF::SHF_GNU_RETAIN;
+    MCSectionELF *Sec = OutContext.getELFSection(
+        getMCS251FixedSectionName(P), Type, Flags);
+    Sec->setAlignment(Align(AlignVal));
+    return Sec;
+  }
+
+  // The emitter-side single-entity invariant (design §3.2 rev 5/6): the
+  // second placed entity resolving to an already-existing `.mcu.fixed.*`
+  // section name is an internal invariant violation -- fail loudly instead
+  // of letting one entity's span swallow the other's bytes.
+  void claimMCS251FixedSection(const MCS251PlacementSpec &P,
+                               const GlobalObject *GO) {
+    std::string Name = getMCS251FixedSectionName(P);
+    if (!EmittedFixedSections.insert(Name).second)
+      report_fatal_error(Twine("MCS251: section " + Name +
+                               " disagrees with placement NOTE for ") +
+                         getSymbolName(GO));
+  }
+
+  // An owned placed object: exactly one sized defined symbol at offset 0 of
+  // its dedicated `.mcu.fixed.<stable-symbol>` section. The class dispatch:
+  //   AS0-DATA -- NOBITS zero fill plus the sparse XINIT record (the linker
+  //               places the section at A; the record's dest relocation
+  //               resolves to the entity entry);
+  //   XDATA    -- NOBITS zero fill plus the `.mcs251.xdata_init` record;
+  //   CODE     -- the PROGBITS read-only image is the section itself (no
+  //               EXECINSTR, no init record).
+  // noinit (flags.bit1) suppresses the XINIT/XDATA_INIT record entirely:
+  // the entity's bytes are never cleared or copied at startup (the data
+  // sections stay NOBITS zero-fill / the ROM image stands as emitted).
+  void emitFixedPlacementGlobal(const GlobalVariable *GV,
+                                uint8_t StorageClass,
+                                const MCS251PlacementSpec &P) {
+    StringRef Qual = StorageClass == 1   ? "__xdata"
+                     : StorageClass == 2 ? "__code"
+                                         : "data";
+    auto Bad = [&](const Twine &What) {
+      report_fatal_error("MCS251: fixed " + Qual + " global '" +
+                         GV->getName() + "': " + What);
+    };
+    // The fixed-section protocol and the NOTE exist only in ELF objects.
+    if (!getMCS251TM().emitsObjectFile() || !usesELFObjects())
+      Bad("fixed placement requires ELF object output "
+          "(-filetype=obj -mcs251-object-format=elf)");
+    if (GV->isThreadLocal() || GV->hasSection() || GV->hasComdat() ||
+        (!GV->hasExternalLinkage() && !GV->hasLocalLinkage()) ||
+        GV->getVisibility() != GlobalValue::DefaultVisibility ||
+        GV->getDLLStorageClass() != GlobalValue::DefaultStorageClass)
+      Bad("unsupported placement or linkage");
+    if (StorageClass == 0 && GV->getAddressSpace() != 0)
+      Bad("storage class 'data' requires the default address space");
+    if (StorageClass == 1 && GV->getAddressSpace() != 3)
+      Bad("storage class 'xdata' requires __xdata (address_space(3))");
+    if (StorageClass == 2 && GV->getAddressSpace() != 0 &&
+        GV->getAddressSpace() != 4)
+      Bad("storage class 'code' requires __code (address_space(4)) or a "
+          "default-address-space const entity");
+
+    const DataLayout &DL = GV->getDataLayout();
+    const Constant *Init = GV->getInitializer();
+    uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
+    if (!Size)
+      Bad("zero-size entity is not placeable");
+    const bool NoInit = (P.Flags & 2) != 0;
+    if (NoInit && !Init->isNullValue())
+      Bad("noinit entity must be zero-initialized");
+
+    claimMCS251FixedSection(P, GV);
+    const uint32_t Align = GV->getAlign().valueOrOne().value();
+    MCSectionELF *Sec = getMCS251FixedSection(P, Align);
+    MCSymbol *Sym = getSymbol(GV);
+
+    if (StorageClass == 2) {
+      // CODE class: the ROM image is the section payload. The ordinary RO
+      // rules apply to the initializer shape; a declared alignment above 1
+      // is honored by the section's own sh_addralign (the entity sits at
+      // offset 0, so the linker's A % align check is the whole story --
+      // the byte image itself is emitted packed like every other RO image).
+      if (!isSupportedROInitializer(Init, DL, /*AllowZeroImage=*/true,
+                                    /*AllowStructs=*/true))
+        Bad("unsupported initializer (i8/i16/i32 scalars, nonempty arrays "
+            "of integers, nonempty non-opaque structs of those at any "
+            "nesting, &global pointer leaves, or the ROM zero image)");
+      OutStreamer->emitSymbolAttribute(Sym, MCSA_ELF_TypeObject);
+      OutStreamer->emitELFSize(Sym, MCConstantExpr::create(Size, OutContext));
+      OutStreamer->switchSection(Sec);
+      emitLinkage(GV, Sym);
+      OutStreamer->emitLabel(Sym);
+      emitROInitializer(DL, Init);
+      OutStreamer->switchSection(
+          OutContext.getObjectFileInfo()->getTextSection());
+      emitASxxxxText("\t.area CSEG (CODE)");
+    } else {
+      if (!isSupportedMutableInitializer(Init, DL))
+        Bad("unsupported initializer (byte-aligned i8/i16/i32 scalars, "
+            "arrays and structs of integers and &global pointer leaves; "
+            "expression algebra is not supported)");
+      if (StorageClass == 1 && Size > UINT16_MAX)
+        // FIXED XDATA keeps the non-split ruling (§4.1): a fixed section
+        // never carries SHF_MCS251_XSEG_SPLIT and the v1 record's u16
+        // fields cannot describe a larger single object.
+        Bad("object size " + Twine(Size) + " does not fit the 16-bit XDATA "
+            "record limit (65535 bytes; fixed objects are never split)");
+      OutStreamer->emitSymbolAttribute(Sym, MCSA_ELF_TypeObject);
+      OutStreamer->emitELFSize(Sym, MCConstantExpr::create(Size, OutContext));
+      OutStreamer->switchSection(Sec);
+      emitLinkage(GV, Sym);
+      OutStreamer->emitLabel(Sym);
+      OutStreamer->emitZeros(Size);
+
+      const auto &TLOF =
+          static_cast<const MCS251TargetObjectFile &>(getObjFileLowering());
+      if (!NoInit) {
+        bool HasPayload = !Init->isNullValue();
+        if (StorageClass == 0) {
+          // The same sparse XINIT record the ordinary DSEG path emits; the
+          // destination relocation names the entity symbol, which the
+          // linker resolves to A once the NOTE places the section.
+          OutStreamer->switchSection(TLOF.getXINITSection());
+          emitASxxxxText("\t.area XINIT (CODE)");
+          OutStreamer->emitValue(MCSymbolRefExpr::create(Sym, OutContext), 2);
+          OutStreamer->emitIntValue(Size, 2);
+          OutStreamer->emitIntValue(HasPayload ? Size : 0, 2);
+          if (HasPayload)
+            emitMutableInitializer(DL, Init);
+        } else {
+          // The v1 xdata_init record (24-bit destination through the
+          // byte-of-24 channel), exactly like the unplaced XSEG path.
+          OutStreamer->switchSection(TLOF.getXDATAInitSection());
+          emitXDATAInitAddress(Sym);
+          OutStreamer->emitIntValue(Size, 2);
+          OutStreamer->emitIntValue(HasPayload ? Size : 0, 2);
+          if (HasPayload)
+            emitMutableInitializer(DL, Init);
+        }
+      }
+      OutStreamer->switchSection(
+          OutContext.getObjectFileInfo()->getTextSection());
+      emitASxxxxText("\t.area CSEG (CODE)");
+    }
+
+    // The NOTE record: an owned object's size is a layout-time constant
+    // (the design keeps the constant write for objects; only the function
+    // span needs the symbol-difference fixup).
+    MCS251PlacementNoteEntry Entry;
+    Entry.Spec = P;
+    Entry.Align = Align;
+    Entry.Size = uint32_t(Size);
+    PlacementNoteEntries.push_back(std::move(Entry));
+  }
+
 
   // AS3 (`__xdata`, including `const __xdata`) and AS4 (`__code`) objects.
   //
