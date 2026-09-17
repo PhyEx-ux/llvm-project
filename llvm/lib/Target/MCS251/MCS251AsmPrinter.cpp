@@ -563,6 +563,28 @@ class MCS251AsmPrinter final : public AsmPrinter {
     Attribute Place = getMCS251PlacementAttribute(GO, "mcs251-place");
     if (!Place.isValid() || !Place.isStringAttribute())
       return std::nullopt;
+    // G11-N1 (blocking fix, 2026-09-17): a P09 bit object is object
+    // identity, not a byte storage entity. The dispatcher diverts every bit
+    // object into the `.mcs251.bit` record path before the placement
+    // dispatch, so an owned bit placeholder that also carries the
+    // "mcs251-place" attribute would silently lose the placement (no
+    // `.mcu.fixed.*` section, no NOTE); the bind census
+    // (registerMCS251BindCarriers / emitPlacementNote) would conversely emit
+    // a "DATA/object/bind size=1" NOTE whose size is the i8 handle size,
+    // misrepresenting the bit identity as a one-byte DATA object. The
+    // design schema has no bit storage class, so the A-layer producer never
+    // generates this pair; as the receiving face for hand-written IR, this
+    // reader rejects the double marking fail-closed instead of choosing one
+    // of the two meanings. (The legal Bit+Placement keepalive container uses
+    // DIFFERENT entities and never reaches this test: the bit member carries
+    // no "mcs251-place".)
+    if (const auto *GV = dyn_cast<GlobalVariable>(GO))
+      if (MCS251::isBitObjectGlobal(*GV))
+        report_fatal_error(
+            "MCS251: bit object '" + Twine(GV->getName()) +
+            "' also carries the mcs251-place attribute: a bit entity is "
+            "object identity without a byte storage class and cannot be "
+            "placed or bound");
     MCS251PlacementSpec Spec;
     SmallVector<StringRef, 5> Fields;
     SplitString(Place.getValueAsString(), Fields, ",");
@@ -3008,6 +3030,26 @@ public:
     const bool NoInit = (P.Flags & 2) != 0;
     if (NoInit && !Init->isNullValue())
       Bad("noinit entity must be zero-initialized");
+
+    // G11-N2 (blocking fix, 2026-09-17): the AS0 fixed path writes the object
+    // size into the two u16 fields of the sparse XINIT record and the
+    // `.mcu.fixed.*` section is a 16-bit-addressed NOBITS entity. The
+    // ordinary DSEG path already refuses a mutable object whose size does not
+    // fit in 16 bits ("mutable global size must fit in 16 bits"); the fixed
+    // path used to bypass that gate, emitting size/payload-size fields
+    // truncated to 0 (and, with an initializer, still appending the full
+    // payload after the zeroed length). Restore the same guard with the same
+    // wording before any fixed section or initialization record is emitted.
+    //
+    // This also covers a >65535 noinit AS0 fixed object: noinit only
+    // suppresses the initialization record, while the section and the NOTE
+    // size remain 16-bit-addressed protocol values. Admitting such an object
+    // is an explicit design decision (registered as an unsupported boundary
+    // this round), NOT a side effect of this guard, so it is rejected too --
+    // the guard sits before the `if (!NoInit)` initialization-record gate,
+    // so it applies to both initialization shapes.
+    if (StorageClass == 0 && Size > UINT16_MAX)
+      report_fatal_error("MCS251: mutable global size must fit in 16 bits");
 
     claimMCS251FixedSection(P, GV);
     const uint32_t Align = GV->getAlign().valueOrOne().value();

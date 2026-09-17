@@ -12858,6 +12858,27 @@ def err_mcs251_retain_requires_placement
             "profile">;
 def err_mcs251_bind_at_linkage
     : Error<"`mcu::bind_at` requires an entity with external linkage">;
+// G11-N1/N3 blocking-fix input boundaries (2026-09-17). Neither is a frozen
+// §8 row: each rejects an input class the placement contract cannot describe
+// instead of inventing an encoding for it (fail-closed).
+//
+// N1: the P09 `bit` placeholder is object identity (a kind-1 `.mcs251.bit`
+// record / a symbolic BITADDR8 reference), not a byte object, and the NOTE
+// schema has no bit storage class. Accepting `place_at` silently dropped the
+// constraint; accepting `bind_at` encoded the handle as a 1-byte DATA object.
+def err_mcs251_placement_bit
+    : Error<"fixed placement on a 'bit' entity %0 is not supported: a bit "
+            "entity is object identity, not byte storage, and the placement "
+            "contract has no bit storage class">;
+// N3: a dependent-type entity's byte size does not exist before
+// instantiation, so the TU-final layout queries cannot run on it. This
+// profile does not implement instantiation-time placement checking; the
+// input is refused explicitly instead of being silently skipped (and instead
+// of crashing in the size query, which treated dependent types as complete).
+def err_mcs251_placement_dependent_type
+    : Error<"fixed placement of the dependent-type entity %0 is not "
+            "supported in this profile: instantiation-time placement "
+            "checking is not implemented">;
 // G11 identity input boundary (G11-A sixth round, 2026-09-16). Not one of the
 // frozen §8 rows: this rejects an input class instead of encoding it. In C
 // mode the function-context component of a local static's stable symbol is

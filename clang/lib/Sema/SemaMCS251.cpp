@@ -2217,6 +2217,47 @@ void SemaMCS251::CheckMCS251PlacementEntities() {
     if (FirstBind && !FirstBindAddr)
       continue;
 
+    // G11-N3 (blocking fix, 2026-09-17): a dependent-type entity has no byte
+    // size yet, so no layout rule below can run on it. The completeness test
+    // is NOT sufficient here -- Type::isIncompleteType documents that
+    // dependent types are never treated as incomplete, so the size query at
+    // err_mcs251_placement_zero_size / the overlap ledger would reach
+    // ASTContext::getTypeSizeInChars on a type whose size does not exist and
+    // crash the compiler (reproduced: SIGSEGV in getTypeInfoImpl via
+    // CheckMCS251PlacementEntities, -fsyntax-only, no instantiation needed).
+    // This profile does not implement instantiation-time placement checking,
+    // so the input is rejected explicitly BEFORE any layout query. This is a
+    // deliberate fail-closed input boundary, not a silent skip: the entity
+    // never reaches the emitter, and instantiation-time checking is
+    // registered as a future extension.
+    QualType EntityTy = VD->getType();
+    if (!EntityTy.isNull() && (EntityTy->isDependentType() ||
+                               EntityTy->isInstantiationDependentType())) {
+      SemaRef.Diag(VD->getLocation(),
+                   diag::err_mcs251_placement_dependent_type)
+          << VD;
+      continue;
+    }
+
+    // G11-N1 (blocking fix, 2026-09-17): the G11 placement contract has no
+    // bit storage class. A P09 `bit` entity is object identity -- a kind-1
+    // `.mcs251.bit` record or a symbolic BITADDR8 reference -- never a byte
+    // object, so it can neither own a `.mcu.fixed.*` section / NOTE record
+    // nor bind (a "DATA/object/bind size=1" record would misrepresent the
+    // handle as a one-byte DATA object). Both directions used to be accepted
+    // and silently produced a misleading or constraint-free object. This
+    // slice rejects the combination instead of inventing a bit storage class
+    // (design schema unchanged) or swapping the emitter dispatch (which
+    // would emit bit identity as bytes).
+    if (EntityTy->isMCS251BitType()) {
+      SourceLocation BitLoc = FirstPlace  ? FirstPlace->getLocation()
+                              : FirstBind ? FirstBind->getLocation()
+                              : NoInit    ? NoInit->getLocation()
+                                          : RetainLoc;
+      SemaRef.Diag(BitLoc, diag::err_mcs251_placement_bit) << VD;
+      continue;
+    }
+
     // Resolve the definition once: real definition first, then a tentative
     // definition (which is storage too, §2.2 "bind ... 不产生 storage").
     const VarDecl *VDDef = nullptr;
