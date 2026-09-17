@@ -467,3 +467,115 @@ u8  stable_len; u8 stable_symbol[stable_len]; 填充到 4 字节倍数
 | PM 决策点 4（report 通道） | 设计采纳单一方案：placement report + symtab 通道；"输出 ELF 内嵌 audit 节"备选已否决（改默认输出、违背字节不变纪律） | §6.4、§3.4、§4 两栏表 | 设计已采纳（PM veto window 至 G11-A 开工） | PLANNED→G11-D |
 | PM 决策点 5（retain 范围） | 设计裁定：retain 仅限 place_at 定义、bind+retain Sema 拒（§2.2，唯一方案） | §6.5、§2.2 | 设计已采纳（PM veto window 至 G11-A 开工） | PLANNED→G11-A+G11-B |
 | PM 决策点 6（固定 CODE 窗） | 设计采纳单一方案：强制显式 CODE 窗；"型号预设窗口注入"备选已否决（型号知识不进链接器） | §6.6、§2.2 | 设计已采纳（PM veto window 至 G11-A 开工） | PLANNED→G11-C |
+
+## 实施补记（G11-B R2 复批建议②；2026-09-17，G11-C 收尾实例追加）
+
+本节仅登记已实现并已验证的 A/B 保活职责时点与接收面，不改变任何既有裁定；修订 8 由协调员另行应用，本节不与其冲突。
+
+* **A 层注册时点（clang）**：`CodeGenModule::Release()` 内、**最终属性刷新之后、优化管线之前**，把每个 bind（`mcu_bind_at`）载体的全局值注册进 `llvm.compiler.used` 容器。选此时点的理由：`Release()` 前的属性刷新（`mcs251-place`/`mcs251-stable-symbol` 写入）是最后一次可写 IR 属性的时机，而 `compiler.used` 必须在优化前成型——否则优化器会把"仅有声明、无普通引用"的 bind 载体当死值删除（`addUsedGlobal` 的既有机制见 `CodeGenModule.cpp` 的 `RetainAttr` 路径；bind 走同一容器通道，仅成员分类不同）。
+* **B 层接收面（llc）**：`registerMCS251BindCarriers`（AsmPrinter 侧）作为**手写 IR 接收面的双保险**存在——clang 产物已由 A 层保证容器成员身份，手写 IR/直接 llc 输入则由 B 层在对象发射前把 bind 载体补进同一 keepalive 分类谓词（`classifyMCS251KeepaliveMember` 的 `Placement` 类），使两条输入路径在"bind 载体不被当普通 RAM 预留/不被 Reject 链拒绝"上等价。
+* **边界**：两者都只影响 keepalive 容器身份，不改变 §3.2 的节发射几何、NOTE 记录或任何链接端裁定；混合容器四格（ISR/Bit/Placement/Unmarked）验收面不变。
+
+---
+
+## 修订 8（2026-09-17，协调员；应用 N4/N7 裁定）
+
+本修订按 **PM-RULINGS R-2026-09-17-1**（用户拍板，采纳 `G11-N4N7-DESIGN-Alice.md` 的设计推荐）应用。历史修订 2–7 不回写；下文各段**替换**所指节的相应文字，未列出的条款维持原状；实施状态一律记"设计裁定完成，实施/验收未完成"。
+
+| 项 | 落点 | 依据 |
+|---|---|---|
+| N4 身份编码（方案甲′） | §3.2 身份段 | R-2026-09-17-1 第 1 项 |
+| N4 命名字段裁定 | §3.3 相应段 | R-2026-09-17-1 第 1 项 |
+| N4 符号关联载体 `.mcs251.placement.names` | §3.2 schema 增补（S0 补裁） | R-2026-09-17-1 第 2 项 |
+| N7 noinit 合并政策（选项甲：owned 权威） | §2.2 增补 + §3.2 合并表两行 + §7 增补 | R-2026-09-17-1 第 3 项 |
+| 实施补记表述纠正 | §实施补记 | G11-C R2 评审 §五 |
+
+### 8.1 实体身份与 stable-symbol（N4 修订；替换 §3.2 身份段）
+
+G11 的实体身份键为 `stable_symbol`，不是 ELF 符号名。身份只由 AST 声明结构、既定 TU 限定和局部静态源序号产生；asm-label、IR/ELF 发射名、模块级临时编号、发射顺序及优化级均不得进入身份。
+
+令 `T = 下划线化的主源文件基名 + "." + 8 位大写十六进制 FNV-1a(拼写路径绝对化后的主源文件路径)`。路径绝对化、符号链接拼写和前导零规则沿用已提交实现，不改用 realpath。
+
+对非函数局部静态的对象或函数，定义顶层身份分量 `E(D)`：
+
+1. 在 C 和 C++ 两种语言模式下均查询目标 Itanium `MangleContext::shouldMangleCXXName(D)`。
+2. 谓词为真时，`E(D)` 为对应声明的纯 `mangleCXXName` 编码；函数重载签名、命名空间、类上下文及具体模板参数由该编码承载。不得使用会遵循 asm-label 的 `mangleName`，也不得从 LLVM GlobalValue 的名字反推身份。
+3. 谓词为假时，`E(D)` 为声明标识符原文，不加语言模式标签；因此普通 C 与对应 C++ `extern "C"` 声明具有相同分量。
+4. 谓词为假且声明名以 `_Z` 开头时，若该实体参与 G11 顶层身份生成，则 Sema 拒绝，诊断说明其侵入 Itanium mangled identity namespace，要求重命名声明。该规则同时适用于 C 和 C++；asm-label 不构成豁免。无 G11 身份的普通实体不因本规则被拒绝。
+
+身份形状为：
+
+- external formal linkage 实体：`E(D)`；
+- 非局部 internal 实体，包括匿名命名空间实体：`T + "." + E(D)`；
+- 函数局部静态：沿用 `T + "." + H(host) + "." + 声明名 [+ "." + 源序号]`。
+
+函数局部静态的 `H(host)` 及源序号算法不变：需要 mangling 的宿主使用纯 Itanium 编码；C++ 未 mangle 宿主使用 `N+声明名`；普通 C 宿主使用裸声明名，并继续执行既定 C `_Z` 宿主输入边界拒绝。源序号由同宿主内同名静态局部声明的 AST 源顺序决定，从第二个起追加，统计不以是否带 G11 属性为条件。
+
+**身份域隔离。** 本期可表示的单个名字分量不含 `.`。external、非局部 internal、函数局部静态分别具有 1、3、4 或 5 个点分字段，三个域互不相交。顶层域内部，mangled 分量以 `_Z` 开头，裸分量通过实际 Sema 输入边界排除该前缀；局部宿主域继续使用既定 `_Z` / `N` 首字符隔离和 C 输入边界。不能仅以"保留标识符"代替实际拒绝。
+
+名字分量为空、含不受本期编码支持的分隔形态，或最终身份超出 NOTE 的 255 字节上限时，必须明确诊断，不得截断、散列缩短、追加发射去重号或回退到裸名。依赖模板声明的检查时点由模板支持裁定负责；未完成实例化的声明不得被送入要求具体实体的编码路径。
+
+TU 限定用于分离不同翻译单元的 internal 实体；它不能代替同一 TU 内的命名空间编码。32 位 FNV-1a 沿用冻结合约，不承诺任意路径集合上的数学无碰撞；相同逻辑源路径及 stdin 身份限制不因本修订消失。不可区分的碰撞不得通过重命名 ELF 符号静默修补。
+
+ELF 符号保持目标自然装配名及显式 asm-label，internal 实体保持 STB_LOCAL。placement report 的来源键仍为 `(输入文件, ELF 符号名, stable_symbol)`；跨对象语义合并仍以 `stable_symbol` 分组。
+
+**匿名命名空间裁定**：同 TU 的 `A::{anonymous}::x` 与 `B::{anonymous}::x` 由完整 mangling 区分（不是由 TU 哈希区分）；同一匿名命名空间在同 TU 重开的同一实体得同一身份；不同 TU 中相同匿名命名空间拼写由 `T` 隔离；不把"匿名命名空间都有 `_GLOBAL__N_1`"误认为必然碰撞。
+
+**不解决**：asm-label 不进入身份（不同声明名实体身份不同，即使 asm-label 相同；同一声明身份在不同 TU 指定不同 asm-label 则 placement 合并必须拒绝不一致关联）；不扩展 weak/COMDAT、多版本 ctor/dtor、隐式模板实例、LTO、命名模块；不重开 TU 路径哈希/stdin 唯一性/未发射宿主局部静态独立保活；不提供新旧 C++ stable 兼容层或双名回退。
+
+### 8.2 命名字段（N4 修订；替换 §3.3 相应段）
+
+`PlacementNames` 的键及 bind-only Synth 输出名均为记录显式关联的实际 ELF 符号名；值中的 `Stable` 仍为 stable_symbol。两者不要求字符串相等。
+
+stable 分组内的记录必须指向同一链接符号身份：对于 external owned/bind 合并，ELF 名不一致即 `conflicting placement`，不得把它们当作别名。不同 stable 分组若试图占用同一 external ELF 名，也必须在填充符号映射时拒绝，禁止 map 插入覆盖或静默去重。internal 符号仍按输入文件作用域处理，不增加全局裸名唯一性要求。
+
+resolveSymbols、重定位数值源、errorUndefined、目标存储类分类及 Synth 输出继续按实际 ELF 名查表。不得从 stable 推导、去前缀或 demangle 得到查表键。
+
+manifest-only 且无任何 NOTE/输入符号可提供关联时，维持已有显式回退：manifest 的 stable token 同时作为其输出符号名；这不是 C++ 名字推导机制。manifest 与 NOTE 合取时使用 NOTE 的显式关联。
+
+### 8.3 新增输入节 `.mcs251.placement.names`（N4 载体，S0 补裁）
+
+保留 placement NOTE v1 字节布局与 `layout_hash` 算法不变；**新增专用关联 NOTE**（不静默扩展 v1 记录）：
+
+- 输入节 `.mcs251.placement.names`，SHT_NOTE、flags=0、align=4；name `MCS251\0`、namesz=7、按 4 字节填充；**type=2**（placement-name association，不表示 placement schema version=2）。
+- desc 全部多字节数值为 BE：`u32 association_version = 1`；`u32 entry_count`；重复 `entry_count` 次：`u32 placement_record_index`（按本文件 `.mcs251.placement` 内物理记录顺序从 0 编号）、`u32 elf_name_len`、`u8 elf_name[elf_name_len]`（实际 ELF 符号名字节，无终止 NUL）、补零至 4 字节边界。
+- writer 对每份 placement 记录写恰一条关联；index 不得重复或越界；名字不得为空或含嵌入 NUL；reader 用有界长度检查，拒绝截断、非规范填充、缺条目或多条目。
+- B 从该实体的最终 MC 符号取实际 ELF 名；该名字**只进入关联载体，不反向参与 stable 生成**。bind 的关联符号必须作为 undefined external 符号存在（即使无普通代码引用），此举不产生 storage。
+- owned 关联必须与固定节唯一主符号的实际名字一致；bind 关联必须指向本输入文件相应的 undefined external 符号，不允许猜测或按顺序配对。
+- 关联节**不进入输出镜像**；关联正确性由结构检查、输入 symtab 与显式身份一致性检查承担，不能声称 `layout_hash` 覆盖名字关联。
+- **旧对象接受边界**：无关联节的旧 owned 记录可按既定专用节主符号规则恢复；**无关联节的旧 bind 对象不得猜测关联，必须拒绝并要求重新生成**；不支持新旧身份编码混合恢复为同一实体。
+
+### 8.4 noinit 初始化政策（N7 选项甲；§2.2 增补）
+
+`noinit` 仅可作用于本 TU 中具有 `place_at` 定义的对象，且完整 redeclaration chain 上不得存在显式初始化器。`bind_at` 声明不得携带 `noinit`；同 TU 的 place/bind 互斥规则不变。
+
+noinit 是**定义侧存储的启动初始化政策**，不是引用侧类型或地址约束。跨 TU 的普通 bind 可以引用 noinit owned 定义，无须重复声明 noinit。bind NOTE 的 `flags.bit1` 恒为 0，语义为"不施加初始化政策"，**不是**"要求提供者初始化"。
+
+owned 与 bind 合并时，noinit 以 owned 为权威；bind-only 不建立初始化政策。bind `flags.bit1=1` 为 malformed，B、C 和 verifier 均须防御拒绝，不能忽略后继续。
+
+本裁定不改变 noinit 的冷启动值不确定性，不保证用户代码、DMA 或其他运行时主体不写该对象；承诺范围是本镜像受审计的启动初始化路径。fail-closed 不要求把"声明未携带政策"解释成一个无法表达的相反政策。
+
+### 8.5 §3.2 合并表替换行（N7 选项甲）
+
+| 字段 | 合并规则 | 不满足时 |
+|---|---|---|
+| flags.bit1 noinit | **owned 权威**：合法 bind 位恒 0（表示不施加政策，不参与相等比较）；存在 owned 取其值，仅 bind 取 0 | bind 带 bit1 → malformed |
+| flags.bit0 retain | **owned 权威**：合法 bind 位恒 0；存在 owned 取其值，仅 bind 取 0 | bind 带 bit0 → malformed |
+
+NOTE flags 注释与未知输入段同步为：`flags.bit0 retain` 与 `flags.bit1 noinit` 仅 owned 记录可为 1；其余位必须为 0。bind 记录 flags 必须为 0，非零按 malformed 拒绝。
+
+### 8.6 §7 manifest 约束增补（N7 选项甲）
+
+manifest `[bind]` 不得与 `[noinit]` 或 `[retain]` 组合；组合为 malformed。非 bind 的 `[noinit]` 是对 owned 初始化政策的显式约束，不能把一个实际带初始化记录的 owned 对象"链接时改成 noinit"。没有实际 owned 存储的 manifest-only 项不得借 `[noinit]` 宣称已验证外部初始化政策。
+
+### 8.7 实施补记表述纠正（依 G11-C R2 评审 §五）
+
+- A 层时点表述改为"**`Release()` 内**前述属性刷新之后、优化管线之前"（避免读成 Release 外发生）。
+- B 层不得把 bind 统一描述为 `Placement` 类——`MS251AsmPrinter.cpp` 存在**独立 `Bind` 类**（bind 全局对象返回 Bind；函数路径与 ISR 情况另有分类），如实描述，不把不同分类压成单一 Placement。
+- A 层 bind 是**直接加入 `LLVMCompilerUsed`**，不是经 `addUsedGlobal`；文案应避免与 retain 的 `llvm.used` 混同。
+
+### 8.8 实施状态与排程（§4 S0 同步）
+
+- **设计裁定状态**：N4（甲′+关联载体）、N7（甲）已裁定并落于本修订；D-S4c 类型号前提不适用于 G11。
+- **实现状态**：N7=甲 已在 G11-C 落地（单一决策点 `placementMergedFlag`、bind flags≠0 一律 malformed，reader/manifest 两处）；N4 的 A 身份编码与 B 关联载体 writer 属**第二批 A/B 修复切片**（未实施）；C 的关联 NOTE 消费增量在 B 载体落地后补；D 独立解析关联 NOTE。
+- 在 A/B 增量、C 单一决策点及 D 独立复核测试闭合前，一律记"**设计裁定完成，实施/验收未完成**"。
