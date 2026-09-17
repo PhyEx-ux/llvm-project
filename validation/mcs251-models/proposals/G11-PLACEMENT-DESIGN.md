@@ -579,3 +579,25 @@ manifest `[bind]` 不得与 `[noinit]` 或 `[retain]` 组合；组合为 malform
 - **设计裁定状态**：N4（甲′+关联载体）、N7（甲）已裁定并落于本修订；D-S4c 类型号前提不适用于 G11。
 - **实现状态**：N7=甲 已在 G11-C 落地（单一决策点 `placementMergedFlag`、bind flags≠0 一律 malformed，reader/manifest 两处）；N4 的 A 身份编码与 B 关联载体 writer 属**第二批 A/B 修复切片**（未实施）；C 的关联 NOTE 消费增量在 B 载体落地后补；D 独立解析关联 NOTE。
 - 在 A/B 增量、C 单一决策点及 D 独立复核测试闭合前，一律记"**设计裁定完成，实施/验收未完成**"。
+
+---
+
+## 修订 9（2026-09-17，协调员；N1/N2/N3 阻塞缺陷修复的实施追认）
+
+依据：`/home/liu/LLVM_STC32/G11-N1N3-IMPL-REVIEW-Alice.md` §五（评审给出的精确追认条文）。三项均为**设计未覆盖的组合/边界**，实施先落地（提交 `4f36ea576`），本修订追认其规范地位。历史修订不回写。
+
+### 9.1 P09 bit 实体与 G11 属性
+
+当前 profile **不支持**在实体自身 canonical type 为 MCS251 bit 的声明上使用 `place_at`、`bind_at`、`retain` 或 `noinit`。该限制覆盖 `__bit`、Keil `bit` 及其 typedef/cv 形式；合法声明上的组合由 Sema 明确拒绝（`err_mcs251_placement_bit`），已由既有声明或属性规则诊断的非法输入可维持原诊断。B 层对同一 GlobalVariable 同时携带 bit-object 标记与 placement 标记的输入**防御拒绝**（`getMCS251Placement()` 单点入口），覆盖 owned、bind 和 asm/object 输出。**该限制不扩展**到仅返回或接受 bit 的函数实体、普通 `_BitInt`/位域对象，也不禁止不同实体组成的 Bit+Placement 混合 keepalive 容器。
+
+### 9.2 固定 DATA owned 对象尺寸
+
+当前 B 层支持的固定 AS0-DATA owned 对象，其分配尺寸须为 **1 至 65535 字节**，包含 noinit 对象；超过上限明确拒绝（文案与普通 mutable 路径逐字一致），**不分裂**。非 noinit 对象的 XINIT size/payload-size 必须可由 **u16** 无损表示；对 noinit 采用同一上限属于**本期支持边界**。**此条不将 placement NOTE 的 u32 size 或 ELF 尺寸字段改为 u16，不新增 bind 声明尺寸门，不改变 CODE 类或 XDATA 既有规则。** 满足此生产端限制**不替代**链接端地址、窗口和跨度校验。
+
+（评审补充：手写 IR 的 AS0 CODE 对象与 DATA bind 声明不经过该尺寸限制——这不是漏修，而是本条范围仅到 AS0-DATA owned 对象发射。）
+
+### 9.3 依赖类型输入边界
+
+当前 Sema 对参与 G11 属性检查、且实体类型为 **dependent 或 instantiation-dependent** 的声明明确报错（`err_mcs251_placement_dependent_type`），在实体尺寸、对齐等布局查询之前终止该实体的后续 placement 检查与隐式 retain 安装。范围包括**依赖变量类型、依赖别名/数组及依赖函数类型**，并非仅三种模板变量写法。当前**不**将其静默跳过或延迟到实例化；**实例化期 placement 检查属于后续扩展**。此限制**不是**所有模板声明的一概禁用：类型具体的模板内实体或具体特化仍受既有规则检查；依赖地址参数继续由既有 ICE 规则拒绝。
+
+两个新增诊断在 TU-final 检查中优先于旧的布局/组合诊断，但**不压过已发生的 handler 错误**。体验改进 note（非规范）：bit 使用者需移除 G11 属性或改用真正的字节存储实体；依赖类型使用者需把属性移至具体类型定义/特化。**重命名不能解决 N1/N3，故不加入 rename 建议。**
