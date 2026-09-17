@@ -481,6 +481,15 @@ private:
   /// for the same decl.
   llvm::DenseSet<GlobalDecl> DiagnosedConflictingDefinitions;
 
+  /// MCS251 G11-N6: canonical declarations that already produced the
+  /// "stable symbol too long" error. The placement IR strings are installed
+  /// idempotently from several call sites (definition emission, declaration
+  /// emission, and the TU-final refresh pass), and the identity is recomputed
+  /// identically each time, so this set -- keyed by the canonical declaration,
+  /// exactly like DiagnosedConflictingDefinitions above -- is what keeps the
+  /// error reported once per entity instead of once per call.
+  llvm::DenseSet<const Decl *> MCS251StableTooLongReported;
+
   /// A queue of (optional) vtables to consider emitting.
   std::vector<const CXXRecordDecl*> DeferredVTables;
 
@@ -1127,6 +1136,14 @@ public:
   /// plain external or internal (a tentative that would actually become
   /// COMMON under -fcommon, an explicit common attribute, weak-ish forms).
   void EmitMCS251BitGlobalVarDefinition(const VarDecl *D);
+
+  /// G11-N6 diagnostic deduplication. The "stable symbol too long" error is
+  /// produced by setMCS251PlacementAttributes, which runs once per emitted
+  /// global *and* once per entity from the TU-final refresh pass; returns true
+  /// exactly once per canonical declaration so the entity is diagnosed once.
+  bool markMCS251StableTooLongReported(const Decl *D) {
+    return MCS251StableTooLongReported.insert(D->getCanonicalDecl()).second;
+  }
 
   /// Return the address of the given function. If Ty is non-null, then this
   /// function will use the specified type if it has to create it.

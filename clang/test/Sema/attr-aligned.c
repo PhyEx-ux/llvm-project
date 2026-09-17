@@ -2,11 +2,21 @@
 // RUN: %clang_cc1 -triple i586-intel-elfiamcu -fsyntax-only -verify %s
 
 int x __attribute__((aligned(3))); // expected-error {{requested alignment is not a power of 2}}
-int y __attribute__((aligned(1ull << 33))); // expected-error {{requested alignment must be 4294967296 bytes or smaller}}
-int y __attribute__((aligned(1ull << 32)));
+int y __attribute__((aligned(1ull << 33))); // expected-error {{requested alignment must be 268435456 bytes or smaller}}
+// G11 second-batch N5: this value was *accepted and silently dropped* before
+// the fix. The cached alignment is a 32-bit count of bits, so 2^32 bytes
+// (2^35 bits) wrapped to zero and the object kept its natural alignment; the
+// attribute is no longer silently dropped, so it is now rejected at the
+// largest representable power-of-two bound. This does NOT fix upstream
+// PR26444 (that would need a wider alignment cache) and does not claim to:
+// the accepted set for mcs251 is narrowed, not widened.
+int y __attribute__((aligned(1ull << 32))); // expected-error {{requested alignment must be 268435456 bytes or smaller}}
 
 // PR26444
-int y __attribute__((aligned(1 << 29)));
+// Same as above: accepted-and-dropped before the fix, rejected now.
+int y __attribute__((aligned(1 << 29))); // expected-error {{requested alignment must be 268435456 bytes or smaller}}
+// The largest power of two representable in the 32-bit bit-count cache: still
+// accepted (this line is unchanged).
 int y __attribute__((aligned(1 << 28)));
 
 // PR3254
@@ -17,7 +27,7 @@ short g0_chk[__alignof__(g0) == 4 ? 1 : -1];
 short g0_chk[__alignof__(g0) == 16 ? 1 : -1];
 
 // GH50534
-int z __attribute__((aligned((__int128_t)0x1234567890abcde0ULL << 64))); // expected-error {{requested alignment must be 4294967296 bytes or smaller}}
+int z __attribute__((aligned((__int128_t)0x1234567890abcde0ULL << 64))); // expected-error {{requested alignment must be 268435456 bytes or smaller}}
 #endif
 
 typedef char ueber_aligned_char __attribute__((aligned(8)));

@@ -561,4 +561,14 @@ def warn_dyndbg_unable_to_create_target : Warning<
 
 def err_dyndbg_no_instrumentation : Error<
     "'-fdynamic-debugging' unsupported with instrumentation (PGO/code coverage)">;
+
+// G11-N6 length diagnostic (design rev.8 §8.1: an identity beyond the NOTE's
+// 255-byte representable limit must be diagnosed; truncating, hashing it
+// shorter, appending an emission-time disambiguator and falling back to a bare
+// name are all forbidden). Reported by the CodeGen identity helper, so it
+// belongs to this group rather than the Sema one.
+def err_mcs251_stable_symbol_too_long
+    : Error<"MCS251 fixed placement: the generated stable symbol for %1 is "
+            "%0 bytes long, which exceeds the %2-byte limit representable in "
+            "the placement note; rename or relocate the entity">;
 }

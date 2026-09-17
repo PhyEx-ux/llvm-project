@@ -16,6 +16,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/OpenACCClause.h"
 #include "clang/AST/ExprOpenMP.h"
+#include "clang/AST/Mangle.h"
 #include "clang/AST/OpenMPClause.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/StmtOpenACC.h"
@@ -31,6 +32,7 @@
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
+#include <memory>
 #include <optional>
 
 namespace clang {
@@ -2150,6 +2152,15 @@ void SemaMCS251::CheckMCS251PlacementEntities() {
     return;
 
   ASTContext &Ctx = SemaRef.Context;
+  // G11-N4 (§8.1 rule 4): the top-level identity input boundary needs the
+  // mangler's own "needs mangling" verdict on the declaration. Build the
+  // target's mangling context the same way CodeGen does
+  // (ASTContext::createMangleContext honours the target CXX ABI) and ask the
+  // same virtual predicate (MangleContext::shouldMangleCXXName), so Sema and
+  // the identity computation cannot disagree about which entities are
+  // mangled. G11 attributes are MCS251-only (TargetSpecificAttr), so this is
+  // the Itanium mangler for every input that can reach here.
+  std::unique_ptr<MangleContext> MangleCtx(Ctx.createMangleContext());
   llvm::DenseSet<const Decl *> Seen;
   // Only objects have a known span in Sema. Functions (including their
   // trailing jump tables) must be checked using the final section span by
@@ -2434,26 +2445,51 @@ void SemaMCS251::CheckMCS251PlacementEntities() {
         SemaRef.Diag(RetainLoc, diag::err_mcs251_retain_no_definition);
       Diagnosed = true;
     }
-    // Rule 6: G11 identity input boundary (G11-A sixth round, 2026-09-16;
-    // input-boundary ruling, not an §8 row). The function-context component
-    // of a function-local static's stable symbol is, for a host the Itanium
-    // mangler does not mangle, the host's plain declaration name. In C mode
-    // (no "N" tag) that plain name is the only component domain that can
-    // equal a mangled identity: Itanium mangled names always start with
-    // "_Z", so a C host *declared* "_Z..." can collide with the mangled
-    // context of an overloadable C host of the same TU even when the two
-    // hosts have distinct IR names (e.g. via an asm label). A "_Z"-prefixed
-    // C identifier is reserved (C11 7.1.3), so the input is rejected here
-    // (fail-closed) instead of being encoded, which leaves every accepted
-    // identity string byte-identical. Scope is exactly the participating
-    // inputs: only a function-local static carrying one of the four G11
-    // attributes has a host component -- file-scope statics and external
-    // entities keep the plain top-level rule and are never rejected, and a
-    // C++ host (an extern "C" function declared "_Z..." included) is
-    // "N"-tagged and structurally isolated, so it is never rejected either.
+    // Rule 6: G11 identity input boundary. Two disjoint cases.
+    //
+    // (6a) top-level identity domain (G11-N4, §8.1 rule 4, 2026-09-17). The
+    // top-level component E(D) of an entity the mangler decides not to mangle
+    // is the declaration's identifier verbatim -- with no language-mode tag,
+    // so a C declaration and the corresponding C++ extern "C" declaration
+    // share it. Itanium mangled names always start with "_Z", and the
+    // top-level domain contains both, so an unmangled declaration *named*
+    // "_Z..." would collide with the encoding of a different entity. Sema
+    // rejects exactly that participating input class, in BOTH language modes
+    // (an extern "C" declaration named "_Z..." included); an asm label is not
+    // an exemption, because the label never enters the identity. The verdict
+    // is the same MangleContext::shouldMangleCXXName query CodeGen uses, so
+    // the two layers cannot disagree about which entities are mangled.
+    // Entities without a G11 attribute are not affected.
     if (!Diagnosed && (FirstPlace || FirstBind || HasRetain || NoInit)) {
       const auto *Var = dyn_cast<VarDecl>(VD);
-      if (Var && Var->isStaticLocal() && !Ctx.getLangOpts().CPlusPlus) {
+      const bool IsStaticLocal = Var && Var->isStaticLocal();
+      if (!IsStaticLocal) {
+        if (!MangleCtx->shouldMangleCXXName(VD) &&
+            VD->getName().starts_with("_Z")) {
+          SemaRef.Diag(VD->getLocation(),
+                       diag::err_mcs251_placement_reserved_identity_name)
+              << VD;
+          Diagnosed = true;
+        }
+      } else if (!Ctx.getLangOpts().CPlusPlus) {
+        // (6b) function-local static host domain (G11-A sixth round,
+        // 2026-09-16; input-boundary ruling, not an §8 row). The
+        // function-context component of a function-local static's stable
+        // symbol is, for a host the Itanium mangler does not mangle, the
+        // host's plain declaration name. In C mode (no "N" tag) that plain
+        // name is the only component domain that can equal a mangled
+        // identity: Itanium mangled names always start with "_Z", so a C host
+        // *declared* "_Z..." can collide with the mangled context of an
+        // overloadable C host of the same TU even when the two hosts have
+        // distinct IR names (e.g. via an asm label). A "_Z"-prefixed C
+        // identifier is reserved (C11 7.1.3), so the input is rejected here
+        // (fail-closed) instead of being encoded, which leaves every accepted
+        // identity string byte-identical. Scope is exactly the participating
+        // inputs: only a function-local static carrying one of the four G11
+        // attributes has a host component, and a C++ host (an extern "C"
+        // function declared "_Z..." included) is "N"-tagged and structurally
+        // isolated, so it is never rejected either. This rule is unchanged by
+        // the N4 revision.
         // Nearest enclosing FunctionDecl, mirroring the CodeGen identity
         // helper (getMCS251StaticLocalHostFunction): closure contexts of
         // blocks/captured statements are skipped; a lambda's operator() is

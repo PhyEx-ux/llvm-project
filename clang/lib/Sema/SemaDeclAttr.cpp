@@ -4908,6 +4908,21 @@ void Sema::AddAlignedAttr(Decl *D, const AttributeCommonInfo &CI, Expr *E,
   uint64_t MaximumAlignment = Sema::MaximumAlignment;
   if (Context.getTargetInfo().getTriple().isOSBinFormatCOFF())
     MaximumAlignment = std::min(MaximumAlignment, uint64_t(8192));
+  // G11-N5 (2026-09-17): the alignment is cached below as a 32-bit count of
+  // *bits* (setCachedAlignmentValue(AlignVal * getCharWidth())), so an
+  // alignment whose product with the target character width does not fit in
+  // unsigned wraps to zero and the constraint is silently dropped -- e.g. on
+  // the common 8-bit char width, aligned(0x20000000) and aligned(1ull << 32)
+  // both degrade to "no alignment" instead of being rejected (reproduced on
+  // x86 as well as on mcs251, so this is a general Sema defect, not a G11
+  // one). Lower the bound to the largest power of two that is representable
+  // in the cache; the existing err_attribute_aligned_too_great diagnostic then
+  // reports it. This is a pure tightening for the overflowing range.
+  MaximumAlignment = std::min(
+      MaximumAlignment,
+      uint64_t(1)
+          << llvm::Log2_32(std::numeric_limits<unsigned>::max() /
+                           Context.getCharWidth()));
   if (Alignment > MaximumAlignment) {
     Diag(AttrLoc, diag::err_attribute_aligned_too_great)
         << MaximumAlignment << E->getSourceRange();

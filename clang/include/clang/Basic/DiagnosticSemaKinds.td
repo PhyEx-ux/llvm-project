@@ -12893,6 +12893,26 @@ def err_mcs251_placement_reserved_host_name
     : Error<"MCS251 fixed placement: host function %0 has a reserved "
             "'_Z'-prefixed name that invades the Itanium mangled identity "
             "namespace; rename the host function">;
+// G11-N4 top-level identity input boundary (design rev.8 §8.1 rule 4,
+// 2026-09-17). The top-level identity component of a declaration the mangler
+// does not mangle is the declaration's identifier verbatim and carries no
+// language-mode tag, so C and the corresponding C++ extern "C" declaration
+// share one component; Itanium mangled components always start with "_Z".
+// An unmangled "_Z"-prefixed name participating in G11 identity generation
+// would therefore collide with the encoding of a different entity. This is an
+// input boundary, not one of the frozen §8 message rows: the input is refused
+// instead of being encoded, which leaves every accepted identity string
+// untouched. Applies in both language modes; asm labels are not an exemption
+// (they never enter the identity).
+def err_mcs251_placement_reserved_identity_name
+    : Error<"MCS251 fixed placement: entity %0 has a reserved '_Z'-prefixed "
+            "name that invades the Itanium mangled identity namespace; rename "
+            "the declaration">;
+// G11-N6's length diagnostic deliberately does NOT live here: the final
+// identity only exists in the CodeGen identity helper
+// (CodeGenModule::setMCS251PlacementAttributes), whose translation unit
+// includes the Frontend diagnostic group rather than this one. It is defined
+// in DiagnosticFrontendKinds.td (err_mcs251_stable_symbol_too_long).
 def err_omp_lambda_capture_in_declare_target_not_to : Error<
   "variable captured in declare target region must appear in a to clause">;
 def err_omp_device_type_mismatch : Error<

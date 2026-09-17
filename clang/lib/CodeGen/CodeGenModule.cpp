@@ -3510,8 +3510,10 @@ static uint32_t computeMCS251FNV1a32(llvm::StringRef S) {
   return Hash;
 }
 
-// §3.2 stable_symbol: external entities are their declaration name; static
-// entities are "<TU-qualified>.<declaration name>" with
+// §3.2 stable_symbol (as revised by §8.1): the identity component of a
+// non-function-local-static entity is E(D) -- the pure Itanium encoding when
+// MangleContext::shouldMangleCXXName fires, the bare declaration identifier
+// otherwise. Internal entities are "<TU-qualified>.<E(D)>" with
 // <TU-qualified> = <underscored basename> "." <8 hex digits FNV-1a(abs path)>.
 //
 // A function-local static additionally carries its *entity* context: two
@@ -3525,10 +3527,21 @@ static uint32_t computeMCS251FNV1a32(llvm::StringRef S) {
 // (ValueSymbolTable LastUnique) whose value depends on which entities were
 // emitted before this one, so it drifts between -O0 and -O2 (an
 // available_externally body is only emitted at -O1+) and with the
-// DeferredDecls DenseMap order. The identity shape is
-//   external entity       : <declaration name>
-//   file-scope static     : <TU-qualified>.<declaration name>
+// DeferredDecls DenseMap order. The identity shape (G11-PLACEMENT-DESIGN.md
+// revision 8 §8.1) is
+//   external entity       : E(D)
+//   file-scope static     : <TU-qualified>.<E(D)>
 //   function-local static : <TU-qualified>.<function>.<var>[.<ordinal>]
+// where E(D) is the mangler's own verdict (MangleContext::shouldMangleCXXName,
+// queried in BOTH language modes) resolved to the pure Itanium encoding when
+// it fires and to the declaration's identifier verbatim otherwise -- so a
+// top-level C++ entity with namespace / class context / overload signature /
+// concrete template arguments carries all of them in E(D), and a plain C and
+// the corresponding C++ extern "C" declaration share one component. E(D) is
+// never derived from an asm label or from the emitted global name. The
+// unmangled "_Z"-prefixed input class never reaches this function: Sema
+// rejects it for both language modes (see SemaMCS251::
+// CheckMCS251PlacementEntities, Rule 6).
 // with <function> and <var> dot-free (identifier characters, or an Itanium
 // mangled name, whose alphabet never contains '.'). <ordinal> is the 1-based
 // source-order position of the static among the same-named static locals of
@@ -3544,6 +3557,9 @@ static uint32_t computeMCS251FNV1a32(llvm::StringRef S) {
 //    hosts are mangled away -- while plain (unmangled) C++ contexts are
 //    "N"-tagged so a reserved "_Z..."-spelled extern "C" name cannot collide
 //    with a mangled context.
+//  * in the top-level domain the mangled components all start with "_Z" and
+//    the bare ones are excluded from that prefix by the Sema input boundary,
+//    so the two do not intersect.
 static const FunctionDecl *
 getMCS251StaticLocalHostFunction(const VarDecl *Var) {
   // Static locals live in the nearest enclosing FunctionDecl context; the
@@ -3561,38 +3577,65 @@ getMCS251StaticLocalHostFunction(const VarDecl *Var) {
 // for hosts the mangler itself decides to mangle, the plain function
 // declaration name for the rest. Depends only on the declaration
 // structure -- no asm labels, no emission, no opt level.
-static std::string getMCS251StaticLocalHostName(CodeGenModule &CGM,
-                                                const FunctionDecl *FD) {
+// Pure Itanium encoding of a declaration, shared by the two identity consumers
+// that need one (the top-level component E(D) and the local-static host
+// component). Returns false -- and leaves Result untouched -- when the mangler
+// itself decides the declaration needs no mangling, so each caller keeps its
+// own separate policy for the unmangled case (see the two wrappers below;
+// they must NOT be collapsed into one, because the top-level unmangled form is
+// the bare declaration name while the local-static host form is "N"-tagged in
+// C++). shouldMangleDeclName is deliberately NOT used: it additionally fires
+// on __asm labels and on calling-convention / module-linkage /
+// -funique-internal-linkage-names triggers, which would make the identity's
+// namespace choice depend on an asm label (excluded from this scheme).
+// mangleName() is deliberately NOT used either: it honours an asm label, so an
+// __asm-renamed declaration could leak another entity's name into an identity.
+static bool getMCS251PureMangledName(CodeGenModule &CGM, const NamedDecl *D,
+                                     std::string &Result) {
   MangleContext &MC = CGM.getCXXABI().getMangleContext();
-  // The branch is the mangler's own "needs mangling" verdict on the
+  // The predicate is the mangler's own "needs mangling" verdict on the
   // declaration, evaluated for BOTH language modes: ItaniumMangle's
   // shouldMangleCXXName fires for C++ entities and, first of all, for C
-  // hosts marked __attribute__((overloadable)) (OverloadableAttr) -- two
-  // such same-named hosts are distinct entities with distinct mangled IR
-  // names, and keying this branch on LangOpts::CPlusPlus instead would give
-  // their same-named statics one shared identity. shouldMangleDeclName is
-  // deliberately NOT used: it additionally fires on __asm labels and on
-  // calling-convention / module-linkage / -funique-internal-linkage-names
-  // triggers, which would make the identity's namespace choice depend on an
-  // asm label (excluded from this scheme) and would re-encode asm-labelled
-  // extern "C" hosts that belong to the "N"-tagged plain-name namespace
-  // below.
-  if (MC.shouldMangleCXXName(FD)) {
-    GlobalDecl GD;
-    if (const auto *CD = dyn_cast<CXXConstructorDecl>(FD))
-      GD = GlobalDecl(CD, Ctor_Complete);
-    else if (const auto *DD = dyn_cast<CXXDestructorDecl>(FD))
-      GD = GlobalDecl(DD, Dtor_Complete);
-    else
-      GD = GlobalDecl(FD);
-    llvm::SmallString<256> Buffer;
-    llvm::raw_svector_ostream Out(Buffer);
-    // mangleName() would honour an asm label; mangleCXXName() is the pure
-    // Itanium encoding, so an __asm-renamed host function cannot leak another
-    // entity's name into an identity.
-    MC.mangleCXXName(GD, Out);
-    return std::string(Out.str());
-  }
+  // declarations marked __attribute__((overloadable)) (OverloadableAttr) --
+  // two such same-named declarations are distinct entities with distinct
+  // mangled IR names, and keying this branch on LangOpts::CPlusPlus instead
+  // would give them one shared identity.
+  if (!MC.shouldMangleCXXName(D))
+    return false;
+  GlobalDecl GD;
+  if (const auto *CD = dyn_cast<CXXConstructorDecl>(D))
+    GD = GlobalDecl(CD, Ctor_Complete);
+  else if (const auto *DD = dyn_cast<CXXDestructorDecl>(D))
+    GD = GlobalDecl(DD, Dtor_Complete);
+  else
+    GD = GlobalDecl(D);
+  llvm::SmallString<256> Buffer;
+  llvm::raw_svector_ostream Out(Buffer);
+  MC.mangleCXXName(GD, Out);
+  Result = std::string(Out.str());
+  return true;
+}
+
+// The top-level identity component E(D) of §8.1: the pure Itanium encoding
+// when the mangler decides the declaration needs mangling, otherwise the
+// declaration's identifier verbatim with NO language-mode tag -- so a plain C
+// declaration and the corresponding C++ extern "C" declaration share the
+// component. asm labels never enter. The unmangled "_Z"-prefixed case cannot
+// reach here: Sema rejects that input class for every entity participating in
+// G11 identity generation (both language modes).
+static std::string getMCS251TopLevelIdentityComponent(CodeGenModule &CGM,
+                                                      const ValueDecl *D) {
+  std::string Mangled;
+  if (getMCS251PureMangledName(CGM, D, Mangled))
+    return Mangled;
+  return D->getName().str();
+}
+
+static std::string getMCS251StaticLocalHostName(CodeGenModule &CGM,
+                                                const FunctionDecl *FD) {
+  std::string Mangled;
+  if (getMCS251PureMangledName(CGM, FD, Mangled))
+    return Mangled;
   // Unmangled host: the plain declaration name. In C++ only, tag "N" so the
   // unmangled namespace stays disjoint from mangled contexts (Itanium mangled
   // names always start with "_Z" and that prefix is reserved, and Clang
@@ -3652,8 +3695,12 @@ static unsigned getMCS251StaticLocalOrdinal(CodeGenModule &CGM,
 
 static std::string computeMCS251StableSymbol(CodeGenModule &CGM,
                                              const ValueDecl *D) {
+  // §8.1 identity shape. external formal linkage: E(D) alone. Non-local
+  // internal (a file-scope static, and an anonymous-namespace entity, which
+  // has internal linkage): <TU-qualified>.<E(D)>. Function-local statics keep
+  // the pre-revision shape <TU-qualified>.<host>.<declaration name>.
   if (D->hasExternalFormalLinkage())
-    return D->getName().str();
+    return getMCS251TopLevelIdentityComponent(CGM, D);
   const auto &SM = CGM.getContext().getSourceManager();
   llvm::SmallString<256> Path;
   if (auto MainFile = SM.getFileEntryRefForID(SM.getMainFileID()))
@@ -3666,11 +3713,13 @@ static std::string computeMCS251StableSymbol(CodeGenModule &CGM,
   std::string TUQualified;
   for (char C : llvm::sys::path::filename(Path))
     TUQualified += (llvm::isAlnum((unsigned char)C) || C == '_') ? C : '_';
-  // The declaration-name component: file-scope statics keep the plain
-  // declaration name. A function-local static is identified by
+  // The entity component: a function-local static is identified by
   // <function context>.<declaration name> plus the source-order ordinal for
   // the second and later same-named statics of the same function (see the
-  // comment block above for the uniqueness argument).
+  // comment block above for the uniqueness argument); every other internal
+  // entity uses E(D), which the anonymous-namespace ruling of §8.1 requires
+  // so that A::{anonymous}::x and B::{anonymous}::x stay distinct without
+  // leaning on the TU hash alone.
   std::string DeclName;
   const auto *Var = dyn_cast<VarDecl>(D);
   if (Var && Var->isStaticLocal()) {
@@ -3683,7 +3732,7 @@ static std::string computeMCS251StableSymbol(CodeGenModule &CGM,
     if (Ordinal > 1)
       DeclName += "." + llvm::utostr(Ordinal);
   } else
-    DeclName = D->getName().str();
+    DeclName = getMCS251TopLevelIdentityComponent(CGM, D);
   return TUQualified + "." +
          llvm::utohexstr(computeMCS251FNV1a32(Path), /*LowerCase=*/false,
                          /*Width=*/8) +
@@ -3752,6 +3801,25 @@ static void setMCS251PlacementAttributes(CodeGenModule &CGM, const Decl *D,
        llvm::utostr(Flags))
           .str();
   std::string Stable = computeMCS251StableSymbol(CGM, VD);
+
+  // G11-N6: the placement NOTE stores stable_symbol with a u8 length field, so
+  // 255 bytes is the largest representable identity. §8.1 requires an explicit
+  // diagnostic in that case; it forbids truncating, hashing the name shorter,
+  // appending an emission-time disambiguator, or falling back to a bare name.
+  // The final identity exists only here, so the check lives here -- the G11-B
+  // emitter's fail-closed guard at 255 bytes stays as defence in depth for
+  // hand-written IR, which does not pass through this function. This function
+  // is entered more than once per entity (declaration emission, definition
+  // emission and the TU-final refresh pass), so the error is deduplicated per
+  // canonical declaration; the attributes themselves are installed
+  // idempotently by the callers regardless.
+  if (Stable.size() > 255) {
+    if (CGM.markMCS251StableTooLongReported(VD))
+      CGM.getDiags().Report(VD->getLocation(),
+                            diag::err_mcs251_stable_symbol_too_long)
+          << static_cast<unsigned>(Stable.size()) << VD << 255u;
+    return;
+  }
 
   // §2.2: the placement address must satisfy the entity-level alignment
   // constraint, and the `aligned` attribute is recorded on the individual

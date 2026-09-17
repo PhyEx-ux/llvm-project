@@ -1898,32 +1898,39 @@ def MCS251CodeAddressSpace : TypeAttr {
 //     bind+retain and retain without a placement); it rides the existing
 //     RetainAttr -> llvm.used keepalive path.
 // The frozen C11 spellings are the GNU forms; the [[mcu::...]] vendor
-// spellings cover C++/C23 attribute syntax. Entity-level rules (definition
-// presence, completeness, zero-size, alignment, overlap, retain scope, and
-// cross-declaration conflicts) are diagnosed once at end of translation unit
-// by SemaMCS251::CheckMCS251PlacementEntities, because the redeclaration
-// chain is not linked while attributes are processed.
+// spellings cover C++ (CXX11) and C23 (C23) attribute syntax. The C23
+// spelling is registered separately because the CXX11 spelling is not visible
+// in C mode (G11 second-batch A fix, demo review item 2). Entity-level rules
+// (definition presence, completeness, zero-size, alignment, overlap, retain
+// scope, and cross-declaration conflicts) are diagnosed once at end of
+// translation unit by SemaMCS251::CheckMCS251PlacementEntities, because the
+// redeclaration chain is not linked while attributes are processed.
 def MCS251PlaceAt : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
-  let Spellings = [GCC<"mcu_place_at">, CXX11<"mcu", "place_at">];
+  let Spellings = [GCC<"mcu_place_at">, CXX11<"mcu", "place_at">,
+                   C23<"mcu", "place_at">];
   let Subjects = SubjectList<[Var, Function], ErrorDiag>;
   let Args = [ExprArgument<"Address">];
   let Documentation = [MCS251PlacementDocs];
 }
 
 def MCS251BindAt : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
-  let Spellings = [GCC<"mcu_bind_at">, CXX11<"mcu", "bind_at">];
+  let Spellings = [GCC<"mcu_bind_at">, CXX11<"mcu", "bind_at">,
+                   C23<"mcu", "bind_at">];
   let Subjects = SubjectList<[Var, Function], ErrorDiag>;
   let Args = [ExprArgument<"Address">];
   let Documentation = [MCS251PlacementDocs];
 }
 
 def MCS251Retain : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
-  let Spellings = [GCC<"mcu_retain">, CXX11<"mcu", "retain">];
+  let Spellings = [GCC<"mcu_retain">, CXX11<"mcu", "retain">,
+                   C23<"mcu", "retain">];
   let Subjects = SubjectList<[Var, Function], ErrorDiag>;
   let Documentation = [MCS251PlacementDocs];
 }
 
 // G11 §2.2/§8: noinit is an initialization policy on a placed object.
+// No vendor spelling is registered: only the GNU spelling is promised (demo
+// review item 2).
 def MCS251NoInit : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
   let Spellings = [GNU<"noinit">];
   let Subjects = SubjectList<[Var], ErrorDiag>;

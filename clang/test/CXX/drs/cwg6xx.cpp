@@ -654,14 +654,19 @@ namespace cwg648 { // cwg648: 2.7
 
 namespace cwg649 { // cwg649: 3.5
 #if __cplusplus >= 201103L
-// Maximum alignment is 8192 bytes for Windows, and 4 GB for Linux
+// Maximum alignment is 8192 bytes for Windows; elsewhere it is the largest
+// power of two representable in the 32-bit bit-count alignment cache
+// (268435456 bytes at an 8-bit char width). G11 second-batch N5 narrowed
+// the non-Windows bound from 2^32 bytes, which was reported but never
+// honoured, to the representable value; aligning to it is not a way to ask
+// for a larger alignment.
 alignas(0x200000000) int n;
-// since-cxx11-error-re@-1 {{{{requested alignment must be (8192|4294967296) bytes or smaller}}}}
+// since-cxx11-error-re@-1 {{{{requested alignment must be (8192|268435456) bytes or smaller}}}}
 struct alignas(0x200000000) X {};
-// since-cxx11-error-re@-1 {{{{requested alignment must be (8192|4294967296) bytes or smaller}}}}
+// since-cxx11-error-re@-1 {{{{requested alignment must be (8192|268435456) bytes or smaller}}}}
 struct Y {
   int n alignas(0x200000000);
-  // since-cxx11-error-re@-1 {{{{requested alignment must be (8192|4294967296) bytes or smaller}}}}
+  // since-cxx11-error-re@-1 {{{{requested alignment must be (8192|268435456) bytes or smaller}}}}
 };
   struct alignas(256) Z {};
   // This part is superseded by cwg2130 and eventually by aligned allocation support.

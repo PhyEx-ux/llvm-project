@@ -3,17 +3,26 @@
 // RUN: %clang_cc1 -triple mcs251 -std=c11 -Werror -O1 -emit-llvm -o - %s | FileCheck %s
 // RUN: %clang_cc1 -triple mcs251 -std=c11 -Werror -O2 -emit-llvm -o - %s | FileCheck %s
 // RUN: %clang_cc1 -triple mcs251 -std=c11 -Werror -O3 -emit-llvm -o - %s | FileCheck %s
-// G11 identity input boundary (G11-A sixth round): in C mode the host
-// component of a local static's stable symbol is the host's plain declaration
-// name -- the only component domain that can equal an Itanium mangled
-// identity (always "_Z"-prefixed). The first RUN compiles the R5 cross-domain
-// probe (a plain C host *declared* with the exact Itanium spelling of the
-// overloadable host below, kept distinct at IR level by an asm label) and
-// requires the Sema input-boundary rejection: the reserved "_Z"-prefixed host
-// name must not be silently encoded into a stable symbol that the overloadable
-// host's static also produces (the 12/12 collision of review R5). A "_Z"-
-// spelled file-scope static is *not* rejected: it has no host component and
-// its identity domain is disjoint by dot-field count.
+// G11 identity input boundary (G11-A sixth round, extended by G11-N4): in C
+// mode the host component of a local static's stable symbol is the host's
+// plain declaration name -- the only component domain that can equal an
+// Itanium mangled identity (always "_Z"-prefixed). The first RUN compiles the
+// R5 cross-domain probe (a plain C host *declared* with the exact Itanium
+// spelling of the overloadable host below, kept distinct at IR level by an asm
+// label) and requires the Sema input-boundary rejection: the reserved
+// "_Z"-prefixed host name must not be silently encoded into a stable symbol
+// that the overloadable host's static also produces (the 12/12 collision of
+// review R5).
+//
+// G11-N4 migration (the only expectation change of this fix): the *top-level*
+// component is now also bounded, so a "_Z"-spelled file-scope static is
+// rejected too. Before revision 8 its identity was <TU>.<name>, three dotted
+// fields, and the old argument was that this domain is disjoint from the
+// mangled one by field count -- but the *name* field itself is still an
+// unmangled component that can be byte-equal to another entity's whole
+// encoding (here: the overloadable host's static identity component), so the
+// input is refused in both domains now. The assertion below is therefore a
+// diagnostic expectation, not an accepted declaration.
 // The remaining RUNs compile the renamed (legal) TU: the only fix for the
 // rejected input is renaming the host. Both statics' identities are then
 // distinct by construction, keep their exact placements, stay kept alive,
@@ -22,9 +31,11 @@
 #define P(A) __attribute__((mcu_place_at(A), mcu_retain))
 
 #ifdef NEGATIVE
-// Accepted (no host component, 3-field identity domain): the boundary must
-// not over-reject file-scope entities.
-static int _Zfile_scope_sink P(0x400);
+// Rejected since G11-N4 (§8.1 rule 4): the top-level component of an unmangled
+// C declaration carries no language-mode tag, so a bare "_Z"-prefixed name
+// would collide with it. An asm label is not an exemption (the label is not an
+// identity input).
+static int _Zfile_scope_sink P(0x400); // expected-error {{MCS251 fixed placement: entity '_Zfile_scope_sink' has a reserved '_Z'-prefixed name that invades the Itanium mangled identity namespace; rename the declaration}}
 // The R5 probe, verbatim. The plain C host's declaration name "_Z4hosti" is
 // byte-equal to the Itanium encoding of the overloadable `host(int)` below;
 // the asm label only keeps the two *hosts* apart at IR level.
