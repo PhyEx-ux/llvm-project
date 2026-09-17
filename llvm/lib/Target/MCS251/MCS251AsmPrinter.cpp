@@ -205,6 +205,12 @@ class MCS251AsmPrinter final : public AsmPrinter {
     uint32_t Align = 1;
     uint32_t Size = 0;            // objects and bind records: a constant.
     const MCExpr *SizeExpr = nullptr; // functions: <stable>.end-<stable>.begin
+    // G11-N4 (design rev 8 §8.3): the entity's FINAL MC symbol. Its name is
+    // the actual ELF symbol name written into the `.mcs251.placement.names`
+    // association NOTE -- never derived from Stable (no de-prefixing, no
+    // demangling), so asm-labels and target mangling are preserved verbatim.
+    // The symbol is read at end-of-file, after every definition is emitted.
+    const MCSymbol *ELFSym = nullptr;
   };
   SmallVector<MCS251PlacementNoteEntry, 4> PlacementNoteEntries;
 
@@ -216,6 +222,9 @@ class MCS251AsmPrinter final : public AsmPrinter {
     MCSectionELF *Section = nullptr;
     MCSymbol *Begin = nullptr;
     MCSymbol *End = nullptr;
+    // G11-N4: the function's own final MC symbol (the fixed section's one
+    // defined symbol, at offset 0); its name is the owned association.
+    const MCSymbol *Sym = nullptr;
   };
   std::unique_ptr<MCS251ActiveFixedFunction> ActiveFixedFunction;
 
@@ -1438,6 +1447,10 @@ public:
     ActiveFixedFunction->Spec = P;
     ActiveFixedFunction->Section = getMCS251FixedSection(P, Align);
     ActiveFixedFunction->Align = Align;
+    // G11-N4: capture the entity's final MC symbol now; its name is the
+    // owned association of the `.mcs251.placement.names` NOTE and must equal
+    // the fixed section's unique defined symbol name.
+    ActiveFixedFunction->Sym = getSymbol(&F);
     // Temporary notype labels (no symbol-table presence, no size): they are
     // the design's auxiliary location labels of the span fixup, never a
     // second entity of the section.
@@ -1459,6 +1472,7 @@ public:
     MCS251PlacementNoteEntry Entry;
     Entry.Spec = ActiveFixedFunction->Spec;
     Entry.Align = ActiveFixedFunction->Align;
+    Entry.ELFSym = ActiveFixedFunction->Sym;
     Entry.SizeExpr = MCBinaryExpr::createSub(
         MCSymbolRefExpr::create(ActiveFixedFunction->End, OutContext),
         MCSymbolRefExpr::create(ActiveFixedFunction->Begin, OutContext),
@@ -2603,6 +2617,94 @@ public:
   // doFinalization" ruling; both labels are temporary notype symbols of
   // the entity's own section, so the difference folds without a
   // relocation. Owned objects keep the constant path.
+  // G11-N4 (design rev 8 §8.3): the `.mcs251.placement.names` association
+  // NOTE. Kept separate from the v1 record table on purpose -- the v1 byte
+  // layout and its `layout_hash` algorithm are frozen and carry no ELF name,
+  // no symbol index and no symbol-reference relocation, so the
+  // stable_symbol -> actual ELF symbol mapping cannot be recovered from them
+  // (asm-labels and target mangling break the "external stable == declaration
+  // name" assumption). Every multi-byte field is big-endian.
+  //
+  // `record_index` counts the physical records of THIS file's
+  // `.mcs251.placement` from 0, i.e. exactly the emission order the v1 writer
+  // above renders. Incidentally the record_index of each entry equals the
+  // index into `.mcs251.placement`.  Emitted after the v1 table so the
+  // association always accompanies the records it annotates ("无关联节的旧
+  // bind 对象必须拒绝" is a C-side consumer rule; this writer can never
+  // produce such an object).
+  //
+  // Ownership-specific validation, fail-closed:
+  //   owned -- the association must be the fixed section's unique principal
+  //            symbol: defined, in section, and the section must be exactly
+  //            the `.mcu.fixed.<stable>` section derived from this record.
+  //            A mismatch is an internal invariant violation and is reported,
+  //            never silently resolved to "some" symbol;
+  //   bind  -- the association must be an undefined external symbol of this
+  //            input. It is explicitly registered (MCSA_Global) so it appears
+  //            in the input symbol table even without an ordinary code
+  //            reference; registering an undefined symbol creates no storage,
+  //            no section and no relocation.
+  void emitPlacementNames(ArrayRef<MCS251PlacementNoteEntry> Entries) {
+    SmallVector<StringRef, 8> ELFNames;
+    uint64_t DescSize = 8; // association_version + entry_count
+    for (unsigned I = 0, N = Entries.size(); I != N; ++I) {
+      const MCS251PlacementNoteEntry &Entry = Entries[I];
+      const MCS251PlacementSpec &P = Entry.Spec;
+      if (!Entry.ELFSym)
+        report_fatal_error("MCS251: placement record " + Twine(I) +
+                           " (stable '" + P.Stable +
+                           "') has no ELF association symbol");
+      StringRef Name = Entry.ELFSym->getName();
+      if (Name.empty())
+        report_fatal_error("MCS251: placement association for record " +
+                           Twine(I) + " (stable '" + P.Stable +
+                           "') is empty");
+      if (Name.contains('\0'))
+        report_fatal_error("MCS251: placement association for record " +
+                           Twine(I) + " (stable '" + P.Stable +
+                           "') contains an embedded NUL");
+      if (P.Ownership == 0) {
+        std::string Expected = getMCS251FixedSectionName(P);
+        if (!Entry.ELFSym->isInSection() ||
+            Entry.ELFSym->getSection().getName() != Expected)
+          report_fatal_error(
+              "MCS251: owned placement record " + Twine(I) + " (stable '" +
+              P.Stable + "') associates ELF symbol '" + Name +
+              "' which is not the unique principal symbol of fixed section '" +
+              Expected + "'");
+      } else if (!Entry.ELFSym->isUndefined()) {
+        report_fatal_error(
+            "MCS251: bind placement record " + Twine(I) + " (stable '" +
+            P.Stable + "') associates ELF symbol '" + Name +
+            "' which is not an undefined external symbol of this input");
+      }
+      ELFNames.push_back(Name);
+      uint64_t E = 8 + Name.size(); // record_index + elf_name_len + bytes
+      DescSize += E + ((4 - (E % 4)) % 4);
+    }
+    MCSectionELF *Names = OutContext.getELFSection(".mcs251.placement.names",
+                                                   ELF::SHT_NOTE, /*Flags=*/0);
+    Names->setAlignment(Align(4));
+    OutStreamer->switchSection(Names);
+    OutStreamer->emitIntValue(7, 4); // namesz, "MCS251\0" including the NUL
+    OutStreamer->emitIntValue(DescSize, 4);
+    OutStreamer->emitIntValue(2, 4); // type: placement-name association
+    OutStreamer->emitBytes(StringRef("MCS251\0\0", 8));
+    OutStreamer->emitIntValue(1, 4); // association_version
+    OutStreamer->emitIntValue(Entries.size(), 4);
+    for (unsigned I = 0, N = Entries.size(); I != N; ++I) {
+      StringRef Name = ELFNames[I];
+      OutStreamer->emitIntValue(I, 4); // placement_record_index
+      OutStreamer->emitIntValue(Name.size(), 4);
+      OutStreamer->emitBytes(Name);
+      unsigned Pad = (4 - ((8 + Name.size()) % 4)) % 4;
+      if (Pad)
+        OutStreamer->emitZeros(Pad);
+    }
+    OutStreamer->switchSection(
+        OutContext.getObjectFileInfo()->getTextSection());
+  }
+
   void emitPlacementNote(Module &M) {
     const DataLayout &DL = M.getDataLayout();
     // Bind carriers are recorded here (globals then functions, module
@@ -2611,6 +2713,10 @@ public:
       std::optional<MCS251PlacementSpec> P = getMCS251Placement(&GV);
       if (!P || P->Ownership != 1)
         continue;
+      if (!GV.isDeclaration() || !GV.hasExternalLinkage())
+        report_fatal_error("MCS251: bind placement carrier '" +
+                           Twine(GV.getName()) +
+                           "' must be an external declaration");
       MCS251PlacementNoteEntry Entry;
       Entry.Spec = *P;
       Entry.Align = GV.getAlign().valueOrOne().value();
@@ -2625,15 +2731,29 @@ public:
                              Twine(GV.getName()) + "' has size 0");
         Entry.Size = uint32_t(Size);
       } // bind function: size 0 = "no size constraint".
+      // G11-N4 §8.3: the bind association must exist as an undefined external
+      // symbol even when no code references it. Registering here (before the
+      // ELF writer builds the symbol table) is what puts it in the input
+      // symbol table; it allocates no storage and emits no relocation.
+      MCSymbol *Sym = getSymbol(&GV);
+      OutStreamer->emitSymbolAttribute(Sym, MCSA_Global);
+      Entry.ELFSym = Sym;
       PlacementNoteEntries.push_back(std::move(Entry));
     }
     for (Function &F : M) {
       std::optional<MCS251PlacementSpec> P = getMCS251Placement(&F);
       if (!P || P->Ownership != 1)
         continue;
+      if (!F.isDeclaration() || !F.hasExternalLinkage())
+        report_fatal_error("MCS251: bind placement carrier '" +
+                           Twine(F.getName()) +
+                           "' must be an external declaration");
       MCS251PlacementNoteEntry Entry;
       Entry.Spec = *P;
       Entry.Align = F.getAlign().valueOrOne().value();
+      MCSymbol *Sym = getSymbol(&F);
+      OutStreamer->emitSymbolAttribute(Sym, MCSA_Global);
+      Entry.ELFSym = Sym;
       PlacementNoteEntries.push_back(std::move(Entry));
     }
     if (PlacementNoteEntries.empty())
@@ -2687,6 +2807,10 @@ public:
     }
     OutStreamer->switchSection(
         OutContext.getObjectFileInfo()->getTextSection());
+    // G11-N4: the association NOTE follows the v1 table, in the same physical
+    // record order. Placement-free modules returned above, so this is a no-op
+    // (no section, byte-for-byte unchanged output) for them.
+    emitPlacementNames(PlacementNoteEntries);
   }
 
   // A4/W2+W3b: publish the v2 identity section for a v2-contract ELF object
@@ -3031,23 +3155,28 @@ public:
     if (NoInit && !Init->isNullValue())
       Bad("noinit entity must be zero-initialized");
 
-    // G11-N2 (blocking fix, 2026-09-17): the AS0 fixed path writes the object
-    // size into the two u16 fields of the sparse XINIT record and the
-    // `.mcu.fixed.*` section is a 16-bit-addressed NOBITS entity. The
-    // ordinary DSEG path already refuses a mutable object whose size does not
-    // fit in 16 bits ("mutable global size must fit in 16 bits"); the fixed
-    // path used to bypass that gate, emitting size/payload-size fields
-    // truncated to 0 (and, with an initializer, still appending the full
-    // payload after the zeroed length). Restore the same guard with the same
-    // wording before any fixed section or initialization record is emitted.
+    // G11-N2 (blocking fix, 2026-09-17; wording narrowed per review S3, design
+    // rev 9.2): the AS0 fixed path writes the object size into the two u16
+    // fields (size, payload-size) of the sparse XINIT record. The ordinary
+    // DSEG path already refuses a mutable object whose size does not fit in
+    // 16 bits ("mutable global size must fit in 16 bits"); the fixed path used
+    // to bypass that gate, emitting size/payload-size fields truncated to 0
+    // (and, with an initializer, still appending the full payload after the
+    // zeroed length). Restore the same guard with the same wording before any
+    // fixed section or initialization record is emitted.
     //
-    // This also covers a >65535 noinit AS0 fixed object: noinit only
-    // suppresses the initialization record, while the section and the NOTE
-    // size remain 16-bit-addressed protocol values. Admitting such an object
-    // is an explicit design decision (registered as an unsupported boundary
-    // this round), NOT a side effect of this guard, so it is rejected too --
-    // the guard sits before the `if (!NoInit)` initialization-record gate,
-    // so it applies to both initialization shapes.
+    // Scope of the 16-bit limit: it is these two XINIT protocol fields, not
+    // the ELF section size, the symbol st_size or the placement NOTE size --
+    // those stay u32 (design §3.2/§8.3). The guard does not extend to
+    // CODE-class objects or to bind declarations, which never pass through
+    // the AS0-DATA owned XINIT writer.
+    //
+    // noinit: no initialization record is emitted at all, so no XINIT field
+    // is written. Applying the same 1..65535 limit to a noinit AS0-DATA owned
+    // object is an explicit design decision (rev 9.2: the support boundary of
+    // this slice), NOT truncation of an existing record; the guard therefore
+    // sits before the `if (!NoInit)` gate so both shapes are rejected
+    // identically.
     if (StorageClass == 0 && Size > UINT16_MAX)
       report_fatal_error("MCS251: mutable global size must fit in 16 bits");
 
@@ -3132,6 +3261,7 @@ public:
     Entry.Spec = P;
     Entry.Align = Align;
     Entry.Size = uint32_t(Size);
+    Entry.ELFSym = Sym;
     PlacementNoteEntries.push_back(std::move(Entry));
   }
 
