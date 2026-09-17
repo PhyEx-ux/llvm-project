@@ -20,10 +20,12 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <set>
 #include <string>
@@ -122,6 +124,94 @@ static constexpr unsigned Reserved = 14;    // u16, must be 0
 // The walker entry the profile carrier must define in executable code.
 static constexpr StringRef BitInitWalkerName = "__mcs251_bit_init";
 
+// G11 (design rev 7 §3.2/§3.3): the fixed-placement object contract.  The
+// `.mcs251.placement` SHT_NOTE carrier is whitelisted by its exact name, and
+// every record follows the frozen v1 layout (all fields big-endian):
+//   u32 record_size (= alignTo(25 + stable_len, 4), canonical)
+//   u8  schema_version (=1), storage_class, entity, ownership
+//   u32 address (24-bit), size, align, flags, layout_hash
+//   u8  stable_len; u8 stable[stable_len]; zero padding to a 4-byte multiple
+// The envelope is namesz=7 ("MCS251\0" plus one pad byte, 8 storage bytes),
+// type=1.  Unknown encodings, truncation and non-canonical record sizes are
+// malformed and fail closed.  layout_hash never participates in any link
+// decision (rev 7 B1); the linker judges only by explicit fields.
+static constexpr StringRef PlacementNoteSectionName = ".mcs251.placement";
+static constexpr StringRef FixedSectionPrefix = ".mcu.fixed.";
+static constexpr uint32_t PlacementNoteNameSize = 7;
+static constexpr uint32_t PlacementNoteType = 1;
+static constexpr uint8_t PlacementSchemaVersion = 1;
+// storage_class encoding (frozen §3.2 record v1).
+enum PlacementStorageClass : uint8_t {
+  PSC_AS0_DATA = 0,
+  PSC_XDATA = 1,
+  PSC_CODE = 2,
+};
+// entity encoding.
+enum PlacementEntity : uint8_t {
+  PE_OBJECT = 0,
+  PE_FUNCTION = 1,
+};
+// ownership encoding.
+enum PlacementOwnership : uint8_t {
+  PO_OWNED = 0,
+  PO_BIND = 1,
+};
+// flags bits (bit0 retain -- owned records only; bit1 noinit).
+static constexpr uint32_t PlacementFlagRetain = 1;
+static constexpr uint32_t PlacementFlagNoInit = 2;
+
+static StringRef placementClassName(uint8_t C) {
+  switch (C) {
+  case PSC_AS0_DATA:
+    return "data";
+  case PSC_XDATA:
+    return "xdata";
+  case PSC_CODE:
+    return "code";
+  }
+  return "?";
+}
+
+// One parsed placement NOTE record.  Structural decoding happens in loadFile
+// (so --print-input exercises it); every semantic association -- sections,
+// entity symbols, cross-object grouping -- is mergePlacement's job.
+struct PlacementNoteRecord {
+  uint32_t Offset = 0; // Record base inside the NOTE section.
+  uint8_t StorageClass = 0;
+  uint8_t Entity = 0;
+  uint8_t Ownership = 0;
+  uint32_t Address = 0;
+  uint32_t Size = 0;
+  uint32_t Align = 1;
+  uint32_t Flags = 0;
+  uint32_t LayoutHash = 0; // Carried for the LinkerResult report row only.
+  std::string Stable;
+};
+
+// H(F) (design §3.2 rev 7 B1): SHA-256 of the BE-packed
+// (schema_version, storage_class, entity, ownership, address, align, flags)
+// -- four u8 then three u32 -- truncated to the low 32 bits of the digest
+// read big-endian.  `size` and the stable symbol never participate.  The
+// link uses this only to annotate the merged report row; acceptance,
+// merging and placement decisions read explicit fields only.
+static uint32_t placementLayoutHash(uint8_t StorageClass, uint8_t Entity,
+                                    uint8_t Ownership, uint32_t Address,
+                                    uint32_t Align, uint32_t Flags) {
+  const uint8_t F[16] = {
+      PlacementSchemaVersion, StorageClass, Entity, Ownership,
+      uint8_t(Address >> 24), uint8_t(Address >> 16), uint8_t(Address >> 8),
+      uint8_t(Address),
+      uint8_t(Align >> 24),   uint8_t(Align >> 16),   uint8_t(Align >> 8),
+      uint8_t(Align),
+      uint8_t(Flags >> 24),   uint8_t(Flags >> 16),   uint8_t(Flags >> 8),
+      uint8_t(Flags)};
+  SHA256 Hash;
+  Hash.update(ArrayRef<uint8_t>(F, sizeof(F)));
+  std::array<uint8_t, 32> Digest = Hash.final();
+  return (uint32_t(Digest[28]) << 24) | (uint32_t(Digest[29]) << 16) |
+         (uint32_t(Digest[30]) << 8) | uint32_t(Digest[31]);
+}
+
 struct InputSection;
 struct InputFile;
 struct InputSymbol;
@@ -203,6 +293,11 @@ struct InputSection {
   // True only for sections lld itself created (vector slots, synthesized bit
   // XINIT): they are trusted owners and are exempt from input-side checks.
   bool Synthesized = false;
+  // G11: the placement storage class mergePlacement() pinned onto a FIXED
+  // Region section (PSC_*), or 0xff while unset/not a placement section.
+  // classifySection deliberately leaves it unset: the NOTE lives in another
+  // section of the same object, so only the merge stage can decide.
+  uint8_t PlacementClass = 0xff;
   std::vector<uint8_t> Data;
   std::vector<Relocation> Relocs;
   std::string Region;
@@ -236,6 +331,10 @@ struct InputFile {
   // BT14: at most one `.mcs251.bitprofile` per object; presence means this
   // object is the bit-aware CRT (see BitProfileRec above).
   InputSection *BitProfileSection = nullptr;
+  // G11: at most one `.mcs251.placement` NOTE carrier per object; the parsed
+  // records are structural-only until mergePlacement() runs.
+  InputSection *PlacementSection = nullptr;
+  std::vector<PlacementNoteRecord> PlacementRecords;
   // P-4 (freeze 2026-09-14): the decoded Tag 28 signature table.  Present for
   // every v2 object (the codec rejects a v2 identity without it), so
   // HasSignatures distinguishes the pre-P4 object the freeze makes a hard
@@ -530,12 +629,23 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
   // The mask names every flag a *placement* rule may see.  SHF_MCS251_EDATA_MOVABLE
   // is a capability bit carried by the section's own Region rule below, so it
   // must not be rejected here; likewise SHF_MCS251_XSEG_SPLIT (the G13b
-  // logical->64K-object mark).  Every other processor/OS bit stays unsupported.
+  // logical->64K-object mark) and SHF_GNU_RETAIN (G11: the retain marker is
+  // accepted for `.mcu.fixed.*` only, compared with the bit masked out).
+  // Every other processor/OS bit stays unsupported.
   const uint64_t Common = ELF::SHF_ALLOC | ELF::SHF_WRITE | ELF::SHF_EXECINSTR |
                           SHF_MCS251_OVERLAY | SHF_MCS251_EDATA_MOVABLE |
-                          SHF_MCS251_XSEG_SPLIT;
+                          SHF_MCS251_XSEG_SPLIT | ELF::SHF_GNU_RETAIN;
   if (S.Flags & ~Common)
     return fail(Err, "unsupported ALLOC section flags for " + N);
+  // G11 F1(iii) belt: with SHF_GNU_RETAIN inside the mask, every non-fixed
+  // carrier of the bit must be rejected by one uniform frozen message, never
+  // by whatever exact-compare a later Region branch happens to perform (and
+  // never silently, whatever flags that branch tolerates).  The acceptance
+  // direction for fixed sections is NOT here: classifySection only shapes,
+  // and mergePlacement() cross-checks the bit against NOTE flags.bit0.
+  if ((S.Flags & ELF::SHF_GNU_RETAIN) && !N.starts_with(FixedSectionPrefix))
+    return fail(Err, "section " + N + " carries SHF_GNU_RETAIN outside "
+                         ".mcu.fixed.*");
   if (N == ".text" || N.starts_with(".text.")) {
     if (S.Type != ELF::SHT_PROGBITS || S.Flags != (ELF::SHF_ALLOC | ELF::SHF_EXECINSTR))
       return fail(Err, "invalid flags or type for " + N);
@@ -700,6 +810,34 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
     S.Region = "XSEG";
     return true;
   }
+  // G11 (design §3.3): the fixed-placement sections.  classifySection only
+  // freezes the SHAPES the emitter may produce -- a CODE entity is PROGBITS
+  // (functions add EXECINSTR, CODE-space const objects do not), a DATA/XDATA
+  // entity is writable NOBITS -- and both may carry SHF_GNU_RETAIN (masked
+  // out here; mergePlacement() asserts it against NOTE flags.bit0).  The
+  // storage class itself lives in the NOTE record of the same object and is
+  // pinned onto the section by mergePlacement().  OVERLAY / EDATA_MOVABLE /
+  // XSEG_SPLIT stay rejected: a fixed entity is never an overlay group
+  // member, never an EDATA migration candidate (F7) and never a split
+  // logical object (§4.1 FIXED x XSEG_SPLIT isolation ruling).
+  if (N.starts_with(FixedSectionPrefix)) {
+    if (!S.File || S.File->EFlags != ABI_FLAGS_V2)
+      return fail(Err, "fixed placement section requires a v2 object "
+                       "identity: " + N);
+    if (S.Flags & (SHF_MCS251_OVERLAY | SHF_MCS251_EDATA_MOVABLE |
+                   SHF_MCS251_XSEG_SPLIT))
+      return fail(Err, "unsupported ALLOC section flags for " + N);
+    const uint64_t F = S.Flags & ~uint64_t(ELF::SHF_GNU_RETAIN);
+    const bool CodeShape =
+        S.Type == ELF::SHT_PROGBITS &&
+        (F == ELF::SHF_ALLOC || F == (ELF::SHF_ALLOC | ELF::SHF_EXECINSTR));
+    const bool DataShape = S.Type == ELF::SHT_NOBITS &&
+                           F == (ELF::SHF_ALLOC | ELF::SHF_WRITE);
+    if (!CodeShape && !DataShape)
+      return fail(Err, "invalid flags or type for " + N);
+    S.Region = "FIXED";
+    return true;
+  }
   return fail(Err, "unsupported ALLOC section " + N);
 }
 
@@ -741,11 +879,19 @@ static bool validateMetaSection(const InputSection &S, raw_ostream &Err) {
   // is decided later, after symbols resolve.  Unknown shapes stay loud
   // errors, never silently ignored.
   if (N == BitProfileSectionName)
-    return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 &&
-               S.Align == 4 && S.Size == BitProfileRecordSize ||
+    return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 && S.Align == 4 &&
+               S.Size == BitProfileRecordSize ||
            fail(Err, "malformed " + BitProfileSectionName +
                          ": expected a non-ALLOC 16-byte PROGBITS record "
                          "with align 4");
+  // G11: the placement NOTE carrier, exact name only, mirroring the
+  // .note.mcs251.abi shape (SHT_NOTE, no flags, align 4).  Whether a v1
+  // object may carry it is decided by the claim path in loadFile() (V1 EOL:
+  // fail closed, PM ruling R-2026-09-16-1); the record decode and every
+  // semantic association belong to mergePlacement().
+  if (N == PlacementNoteSectionName)
+    return S.Type == ELF::SHT_NOTE && S.Flags == 0 && S.Align == 4 ||
+           fail(Err, "malformed " + PlacementNoteSectionName);
   if (N == ".symtab")
     return S.Type == ELF::SHT_SYMTAB && S.Flags == 0 ||
            fail(Err, "malformed .symtab");
@@ -995,6 +1141,16 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
   if (!MB)
     return fail(Err, Path + ": cannot read input");
   F.Buffer = std::move(*MB);
+  // G11 P-3 (design §8): archive inputs -- classic `!<arch>\n` and thin
+  // `!<thin>\n` alike -- are rejected with one frozen message before the
+  // generic object-file sniff, because placement objects must be linked
+  // directly (this linker has no archive member extraction, probe 2[C]).
+  {
+    StringRef Head = F.Buffer->getBuffer().take_front(8);
+    if (Head == "!<arch>\n" || Head == "!<thin>\n")
+      return fail(Err, "archive inputs are not supported: " + Path +
+                           " (link placement objects directly)");
+  }
   Expected<std::unique_ptr<ObjectFile>> Obj =
       ObjectFile::createObjectFile(F.Buffer->getMemBufferRef());
   if (!Obj)
@@ -1015,8 +1171,22 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
     return fail(Err, Path + ": invalid MCS251 ELF header");
   F.EFlags = H.e_flags;
   // SPEC §3.1: strict identity and ET_REL structural checks.
-  if (H.e_ident[ELF::EI_OSABI] != ELF::ELFOSABI_NONE ||
-      H.e_ident[ELF::EI_ABIVERSION] != 0 ||
+  // G11-C integration note (2026-09-17): the generic ELF writer upgrades
+  // EI_OSABI from NONE to ELFOSABI_GNU for any object whose sections carry
+  // GNU-ABI markers -- SHF_GNU_RETAIN (the G11 retain carrier) does exactly
+  // that -- so a legal retain placement object arrives as OSABI=GNU.  GNU
+  // is therefore accepted CONDITIONALLY: the object must actually carry a
+  // retain-flagged section (checked after the section loop), which keeps
+  // the P2-4 frozen negative -- a GNU-marked object without any GNU
+  // section -- rejected with this same message.  Every other byte of the
+  // identity contract is unchanged (flagged for Alice's review).
+  bool GnuOsabiPending = false;
+  if (H.e_ident[ELF::EI_OSABI] != ELF::ELFOSABI_NONE) {
+    if (H.e_ident[ELF::EI_OSABI] != ELF::ELFOSABI_GNU)
+      return fail(Err, Path + ": invalid MCS251 ELF identity");
+    GnuOsabiPending = true;
+  }
+  if (H.e_ident[ELF::EI_ABIVERSION] != 0 ||
       H.e_ident[ELF::EI_VERSION] != ELF::EV_CURRENT)
     return fail(Err, Path + ": invalid MCS251 ELF identity");
   if (H.e_entry != 0 || H.e_phoff != 0 || H.e_phnum != 0 ||
@@ -1030,6 +1200,7 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
     return fail(Err, Path + ": " + toString(RawSections.takeError()));
   F.Sections.resize(RawSections->size());
   InputSection *V2AttrsSection = nullptr;
+  bool SawGnuRetain = false; // G11-C: justifies a pending OSABI=GNU mark.
   for (uint32_t I = 0; I != RawSections->size(); ++I) {
     const ELF32BE::Shdr &H = (*RawSections)[I];
     auto S = std::make_unique<InputSection>();
@@ -1094,6 +1265,23 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
                              ".mcs251.bitprofile per object");
       F.BitProfileSection = S.get();
     }
+    if (S->Name == PlacementNoteSectionName) {
+      // G11: one placement NOTE carrier per object.  V1 EOL (PM ruling
+      // R-2026-09-16-1): a v1-contract module carrying the placement NOTE
+      // fails closed -- no compatibility branch is written.  The record
+      // decode runs after the symbol table is loaded (the structural pass
+      // below); --print-input exercises it.
+      if (F.EFlags != ABI_FLAGS_V2)
+        return fail(Err, Path + ": " + PlacementNoteSectionName +
+                             " requires a v2 object identity (the v1 memory "
+                             "contract is EOL)");
+      if (H.sh_entsize != 0 || H.sh_link != 0 || H.sh_info != 0)
+        return fail(Err, Path + ": malformed " + PlacementNoteSectionName);
+      if (F.PlacementSection)
+        return fail(Err, Path + ": at most one " +
+                             PlacementNoteSectionName + " per object");
+      F.PlacementSection = S.get();
+    }
     if (S->Name == MCS251Attributes::SectionName) {
       // A4W4-R1 fix: the claim path validates the *complete* frozen carrier
       // shape itself, unconditionally.  validateMetaSection() gives the
@@ -1124,7 +1312,12 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
                              MCS251Attributes::SectionName + " per object");
       V2AttrsSection = S.get();
     }
-    if (S->IsAlloc && S->Align != 1)
+    // G11: a `.mcu.fixed.*` section legitimately carries the entity's
+    // alignment (the emitter emits sh_addralign == the placement align, e.g.
+    // 4 for an aligned function); the layout-time check is `A % align == 0`
+    // in layoutFixed*, not this generic ALLOC rule.
+    if (S->IsAlloc && S->Align != 1 &&
+        !StringRef(S->Name).starts_with(FixedSectionPrefix))
       return fail(Err, Path + ": ALLOC section alignment must be 1: " + S->Name);
     if (!S->IsNobits) {
       Expected<ArrayRef<uint8_t>> Contents = ELF.getSectionContents(H);
@@ -1134,8 +1327,15 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
       }
       S->Data.assign(Contents->begin(), Contents->end());
     }
+    SawGnuRetain |= (H.sh_flags & ELF::SHF_GNU_RETAIN) != 0;
     F.Sections[I] = std::move(S);
   }
+  // G11-C: an OSABI=GNU object must justify the mark (see the identity
+  // note above); classifySection already confines SHF_GNU_RETAIN to
+  // `.mcu.fixed.*`, so this is exactly "the object carries a retain
+  // placement section".
+  if (GnuOsabiPending && !SawGnuRetain)
+    return fail(Err, Path + ": invalid MCS251 ELF identity");
   // W4 (design §4): the two identity forms are exclusive and neither is
   // repaired from the other.  e_flags picks the branch and the branch is
   // total: a v2 object must carry exactly one decoded carrier, a v1 object
@@ -1347,6 +1547,114 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
         return fail(Err, Path + ": MCS251 bit: symbol_reference must be zero; "
                              "the association is carried by the bit RELA");
       F.BitRecords.push_back(R);
+    }
+  }
+
+  // G11: decode the placement NOTE records (structural pass only; the
+  // section<->record<->symbol association is mergePlacement's).  Everything
+  // here fails closed with the frozen `malformed placement NOTE` wording:
+  // envelope, canonical record_size arithmetic, unknown encodings, unknown
+  // flag bits, 24-bit address, power-of-two align, bind-record retain,
+  // zero-size bind objects (P-4) and non-zero bind function sizes.
+  if (F.PlacementSection) {
+    const InputSection &P = *F.PlacementSection;
+    const ArrayRef<uint8_t> B(P.Data);
+    auto Bad = [&](const Twine &Reason) {
+      return fail(Err, "malformed placement NOTE in " + Path + ": " +
+                           Reason.str());
+    };
+    if (B.size() < 20) // 12-byte header + the 8-byte name storage.
+      return Bad("truncated note header");
+    if (read32BE(B, 0) != PlacementNoteNameSize ||
+        memcmp(B.data() + 12, "MCS251\0", 7) != 0)
+      return Bad("note name is not MCS251\\0 with namesz 7");
+    if (B[19] != 0)
+      return Bad("note name padding is not zero");
+    if (read32BE(B, 8) != PlacementNoteType)
+      return Bad("unknown placement note type");
+    const uint32_t DescSz = read32BE(B, 4);
+    // The name occupies 8 storage bytes (7 + one pad), so the record table
+    // starts at 20 and descsz covers exactly the rest of the section.
+    if (DescSz != B.size() - 20)
+      return Bad("descsz does not cover the record table");
+    size_t Off = 20;
+    while (Off != B.size()) {
+      if (B.size() - Off < 29) // 4 + 25 fixed payload bytes minimum.
+        return Bad("truncated record at offset " + Twine(Off));
+      const uint32_t RecSize = read32BE(B, Off);
+      PlacementNoteRecord R;
+      R.Offset = Off;
+      const uint8_t *P4 = B.data() + Off + 4;
+      const uint8_t Ver = P4[0];
+      R.StorageClass = P4[1];
+      R.Entity = P4[2];
+      R.Ownership = P4[3];
+      R.Address = read32BE(B, Off + 8);
+      R.Size = read32BE(B, Off + 12);
+      R.Align = read32BE(B, Off + 16);
+      R.Flags = read32BE(B, Off + 20);
+      R.LayoutHash = read32BE(B, Off + 24);
+      const uint8_t StableLen = B[Off + 28];
+      if (B.size() - Off - 29 < StableLen)
+        return Bad("truncated stable symbol at offset " + Twine(Off));
+      R.Stable.assign(reinterpret_cast<const char *>(B.data() + Off + 29),
+                      StableLen);
+      if (Ver != PlacementSchemaVersion)
+        return Bad("unsupported schema version " + Twine(unsigned(Ver)));
+      if (R.StorageClass > PSC_CODE)
+        return Bad("unknown storage_class " + Twine(unsigned(R.StorageClass)));
+      if (R.Entity > PE_FUNCTION)
+        return Bad("unknown entity " + Twine(unsigned(R.Entity)));
+      if (R.Ownership > PO_BIND)
+        return Bad("unknown ownership " + Twine(unsigned(R.Ownership)));
+      if (R.Address > 0xffffff)
+        return Bad("address 0x" + Twine::utohexstr(R.Address) +
+                   " exceeds the 24-bit space");
+      if (R.Flags & ~(PlacementFlagRetain | PlacementFlagNoInit))
+        return Bad("unknown flags 0x" + Twine::utohexstr(R.Flags));
+      if (R.Ownership == PO_BIND && R.Flags != 0)
+        // N7 ruling R-2026-09-17-1 (option A): the owned record is the
+        // single authority for the flags of a group, so a legal bind record
+        // carries all-zero known flags -- retain AND noinit alike.
+        return Bad("bind record for " + R.Stable +
+                   " carries non-zero flags");
+      if (R.Ownership == PO_BIND && R.Entity == PE_OBJECT && R.Size == 0)
+        return Bad("bind object " + R.Stable + " has size 0");
+      if (R.Ownership == PO_BIND && R.Entity == PE_FUNCTION && R.Size != 0)
+        return Bad("bind function " + R.Stable + " has a non-zero size");
+      if (R.Align == 0 || (R.Align & (R.Align - 1)) != 0 || R.Align > 0x1000000)
+        return Bad("align " + Twine(R.Align) + " is not a power of two");
+      if (StableLen == 0)
+        return Bad("empty stable symbol");
+      // Canonical record arithmetic: the payload after the record_size word
+      // is 25 fixed bytes + stable_len + padding to the next 4-byte multiple
+      // (G11-B review [建议]: non-canonical zero padding is malformed).
+      const uint32_t Canonical =
+          (25u + StableLen + 3u) & ~uint32_t(3);
+      if (RecSize != Canonical)
+        return Bad("record_size " + Twine(RecSize) + " is not the canonical "
+                   "alignTo(25+stable_len,4) value " + Twine(Canonical));
+      // B1 (review 2026-09-17): validate the FULL record span before the
+      // cursor moves.  Passing the fixed-field and stable-length checks is
+      // not enough: the canonical record_size includes the zero padding, and
+      // a last record truncated inside its padding would otherwise advance
+      // Off past B.size(), underflow the next `B.size() - Off` (unsigned)
+      // and parse fields outside the section.  The comparison is written as
+      // a subtraction so it can never overflow.
+      if (B.size() - Off < size_t(4) + RecSize)
+        return Bad("truncated record at offset " + Twine(Off) +
+                   " (record_size " + Twine(RecSize) +
+                   " does not fit the remaining NOTE data)");
+      // B1: the canonical padding after the stable symbol must be all zero
+      // (the span check above proved these bytes exist).
+      for (uint32_t I = 25 + StableLen; I != RecSize; ++I)
+        if (B[Off + 4 + I] != 0)
+          return Bad("record at offset " + Twine(Off) +
+                     " has non-zero padding");
+      if (StringRef(R.Stable).contains('\0'))
+        return Bad("stable symbol contains a NUL");
+      F.PlacementRecords.push_back(std::move(R));
+      Off += 4 + RecSize;
     }
   }
 
@@ -1677,6 +1985,9 @@ private:
   bool allocate(InputSection &S, uint32_t Lo, uint32_t Hi);
   bool reserve(uint32_t Start, uint32_t Size, StringRef What);
   bool applyRelocations();
+  // The P-6(b) write-counting core (P6Writes == nullptr in production).
+  bool applyRelocationsImpl(
+      std::map<std::pair<InputSection *, uint32_t>, unsigned> *P6Writes);
   bool validateBitAddrFields();
   bool applyVectorJumps();
   bool validateIRQFinalAssets();
@@ -1703,6 +2014,59 @@ private:
   std::vector<InputSection *> SynthSections;
   std::vector<std::pair<InputSection *, uint32_t>> SynthExpect;
   std::vector<std::pair<InputSection *, InputSymbol *>> VectorJumps;
+
+  // G11 (design §2.2 N2 / §3.3): the placement-name table for entities with
+  // no owned definition in the link (bind-only NOTE records and manifest-only
+  // rows).  The KEY is the ELF symbol name -- never assumed equal to the
+  // stable symbol (C++ mangling and asm-labels diverge; rev 5 ruling); the
+  // stable identity is only carried for the report.  Owned<->bind groups
+  // never enter this table (they resolve through Globals), and
+  // validatePlacementResolution() rejects a name that collides with an
+  // unplaced definition.
+  struct PlacementNameEntry {
+    uint32_t Address = 0;
+    uint32_t Size = 0;
+    uint8_t StorageClass = 0;
+    uint8_t Entity = 0;
+    std::string Stable;
+    std::string File; // First source file, for diagnostics.
+  };
+  std::map<std::string, PlacementNameEntry> PlacementNames;
+
+  // G11: the merged placement contract rows (LinkerResult::Placement),
+  // produced by mergePlacement().
+  std::vector<LinkerResult::PlacementRecord> PlacementRows;
+
+  // G11: per-owned-FIXED-section placement facts pinned by mergePlacement()
+  // (the NOTE record's address/align plus the entity symbol), consumed by
+  // the three layoutFixed* passes and the CODE-window diagnostics.
+  struct FixedPlacementInfo {
+    uint32_t Address = 0;
+    uint32_t Align = 1;
+    const InputSymbol *Sym = nullptr;
+    const InputFile *File = nullptr;
+  };
+  std::map<InputSection *, FixedPlacementInfo> FixedInfo;
+
+  // N7 single decision point (PM ruling R-2026-09-17-1, option A: the owned
+  // record is authoritative): the merged noinit bit of a group is the owned
+  // record's value when one exists, and 0 otherwise.  No owned<->bind
+  // equality comparison is performed (the rev-7 merge-table row is
+  // replaced); any future policy change lands in this one function.  The
+  // merged retain bit follows the same authority shape.
+  static bool placementMergedFlag(bool GroupHasOwned, bool OwnedFlag) {
+    return GroupHasOwned && OwnedFlag;
+  }
+
+  bool mergePlacement(LinkerResult &Result);
+  bool validatePlacementResolution();
+  bool validatePlacementSymbolNames();
+  bool layoutFixedCode();
+  bool layoutFixedData();
+  bool layoutFixedXdata();
+  // F9/F10/F11 shared target classification (design §2.2): PSC_* when the
+  // target's storage class is decidable, -1 when unknown.
+  int placementTargetClass(const InputSymbol *Target) const;
 };
 
 uint32_t Linker::areaStart(StringRef Name, uint32_t Default) const {
@@ -1773,8 +2137,17 @@ bool Linker::resolveSymbols() {
     for (auto &S : F->Symbols)
       if (S.Bind != ELF::STB_LOCAL && !S.Defined) {
         auto It = Globals.find(S.Name);
+        // G11 (§3.3 insertion 1): a bind-only placement name carries its
+        // address directly -- the table was fully built by mergePlacement()
+        // before this loop, and groups with an owned definition never enter
+        // it (they resolve through Globals above).
         if (It != Globals.end())
           S.Address = It->second->Address;
+        else {
+          auto PIt = PlacementNames.find(S.Name);
+          if (PIt != PlacementNames.end())
+            S.Address = PIt->second.Address;
+        }
       }
   return true;
 }
@@ -2386,6 +2759,811 @@ bool Linker::synthesizeIRQVectors() {
   return true;
 }
 
+//===----------------------------------------------------------------------===//
+// G11 (design rev 7 §3.3, plus PM rulings R-2026-09-16-1 and
+// R-2026-09-17-1): fixed placement -- merge, resolution, layout.
+//
+// mergePlacement() runs between validateIdentitySet() and resolveSymbols():
+// every input it needs (per-file NOTE records, FIXED sections and their
+// symbols, the manifest lines) already exists, and PlacementNames must be
+// complete before resolveSymbols' second loop reads it.  The N4 carrier
+// (.mcs251.placement.names) is deliberately NOT consumed here: it belongs
+// to a later producer slice, so bind records are associated with their ELF
+// symbol through the same file's undefined global symbol matching the
+// stable name (external entities keep stable == declaration name today).
+//===----------------------------------------------------------------------===//
+
+// One manifest row (design §7): `place <stable> <A> [align=N] [size=N]
+// [retain] [noinit] [bind] [data|xdata|code]`, `#` comments.  A row carries
+// no entity field; a manifest-only row therefore classifies as an object
+// (the fail-closed side of the F11 function gate).
+struct ManifestPlacement {
+  std::string Stable;
+  uint32_t Address = 0;
+  uint32_t Align = 1;
+  uint32_t Size = 0;
+  bool HasAlign = false, HasSize = false;
+  bool Retain = false, NoInit = false, Bind = false;
+  bool HasClass = false;
+  uint8_t StorageClass = 0;
+};
+
+static bool parseManifestLine(StringRef Line, ManifestPlacement &Out,
+                              raw_ostream &Err) {
+  auto Bad = [&](const std::string &Sym) {
+    return fail(Err, "malformed placement manifest entry for " + Sym);
+  };
+  Line = Line.trim();
+  if (Line.empty() || Line.starts_with("#"))
+    return true; // Comment / blank: not an entry.
+  SmallVector<StringRef, 8> Toks;
+  SplitString(Line, Toks, " \t");
+  std::string Stable = Toks.size() > 1 ? Toks[1].str() : Line.str();
+  if (Toks.size() < 3 || Toks[0] != "place")
+    return Bad(Stable);
+  Out.Stable = Toks[1].str();
+  if (Out.Stable.empty())
+    return Bad(Stable);
+  if (Toks[2].getAsInteger(0, Out.Address) || Out.Address > 0xffffff)
+    return Bad(Stable);
+  for (unsigned I = 3; I < Toks.size(); ++I) {
+    const StringRef T = Toks[I];
+    if (T == "retain")
+      Out.Retain = true;
+    else if (T == "noinit")
+      Out.NoInit = true;
+    else if (T == "bind")
+      Out.Bind = true;
+    else if (T == "data" || T == "xdata" || T == "code") {
+      Out.HasClass = true;
+      Out.StorageClass = T == "data"   ? uint8_t(PSC_AS0_DATA)
+                         : T == "xdata" ? uint8_t(PSC_XDATA)
+                                        : uint8_t(PSC_CODE);
+    } else if (T.starts_with("align=")) {
+      if (T.substr(6).getAsInteger(0, Out.Align) || Out.Align == 0 ||
+          (Out.Align & (Out.Align - 1)) != 0)
+        return Bad(Stable);
+      Out.HasAlign = true;
+    } else if (T.starts_with("size=")) {
+      if (T.substr(5).getAsInteger(0, Out.Size))
+        return Bad(Stable);
+      Out.HasSize = true;
+    } else
+      return Bad(Stable);
+  }
+  // N7 ruling R-2026-09-17-1 (manifest side): a [bind] row is a pure name
+  // declaration -- combining it with [noinit] or [retain] is malformed.
+  if (Out.Bind && (Out.NoInit || Out.Retain))
+    return Bad(Stable);
+  return true;
+}
+
+// The `section %name disagrees with placement NOTE for %sym` family: every
+// structural/semantic disagreement between a FIXED section, its NOTE record
+// and its entity symbol lands here (§2.2 consistency, main-symbol
+// constraints, entity counting, owned span identity).
+static bool placementDisagrees(raw_ostream &Err, StringRef SectionName,
+                               const Twine &Sym) {
+  return fail(Err, "section " + SectionName +
+                       " disagrees with placement NOTE for " + Sym.str());
+}
+
+bool Linker::mergePlacement(LinkerResult &Result) {
+  // ---- Stage 1: manifest rows ---------------------------------------- //
+  std::vector<ManifestPlacement> Manifest;
+  for (StringRef Line : Config.PlacementManifest) {
+    ManifestPlacement M;
+    if (!parseManifestLine(Line, M, Err))
+      return false;
+    if (!M.Stable.empty())
+      Manifest.push_back(std::move(M));
+  }
+
+  // ---- Stage 2: per-file owned section <-> record association --------- //
+  struct GroupEntry {
+    // Source provenance.
+    std::string FileRef;
+    InputFile *File = nullptr;
+    // Fields (NOTE authoritative; manifest rows may leave class/size unset).
+    uint8_t StorageClass = 0;
+    uint8_t Entity = PE_OBJECT;
+    uint8_t Ownership = PO_OWNED;
+    uint32_t Address = 0;
+    uint32_t Size = 0;
+    uint32_t Align = 1;
+    uint32_t Flags = 0;
+    bool HasClass = false;
+    bool HasSize = false;
+    bool HasAlign = false;   // Manifest rows only.
+    bool Retain = false;     // Manifest rows only.
+    bool NoInit = false;     // Manifest rows only.
+    bool IsManifest = false;
+    std::string Stable;
+    std::string SymName; // ELF symbol name (the PlacementNames key).
+    InputSection *Sec = nullptr; // Owned entries only.
+  };
+  std::map<std::string, std::vector<GroupEntry>> Groups;
+
+  for (auto &F : Files) {
+    // Bind records: associate the ELF symbol carrier (rev 5 ruling: the key
+    // is the ELF symbol name; for external entities the stable symbol IS
+    // the declaration name, and a missing carrier is a producer contract
+    // violation -- fail closed rather than guess a key).
+    for (const PlacementNoteRecord &R : F->PlacementRecords) {
+      GroupEntry E;
+      E.File = F.get();
+      E.FileRef = F->Path;
+      E.StorageClass = R.StorageClass;
+      E.Entity = R.Entity;
+      E.Ownership = R.Ownership;
+      E.Address = R.Address;
+      E.Size = R.Size;
+      E.Align = R.Align;
+      E.Flags = R.Flags;
+      E.HasClass = true;
+      E.HasSize = true;
+      E.Stable = R.Stable;
+      if (R.Ownership == PO_BIND) {
+        // Discover the ELF symbol carrier: the bind TU's undefined global
+        // symbol for the declaration.  The MCS251 C ABI assembles user
+        // names with a leading underscore while the stable symbol keeps
+        // the declaration name, so the key is DISCOVERED from the symbol
+        // table (stable and "_"+stable are the two legal carrier shapes),
+        // never assumed equal to the stable (rev 5 naming ruling).
+        std::string CarrierName;
+        unsigned CarrierHits = 0;
+        for (const InputSymbol &S : F->Symbols)
+          if (!S.Defined && S.Bind == ELF::STB_GLOBAL &&
+              (S.Name == R.Stable || S.Name == "_" + R.Stable)) {
+            if (CarrierName.empty() || CarrierName == S.Name) {
+              CarrierName = S.Name;
+              ++CarrierHits;
+            } else
+              return fail(Err, "malformed placement NOTE in " + F->Path +
+                                   ": bind record for " + R.Stable +
+                                   " has ambiguous symbol carriers " +
+                                   CarrierName + " and " + S.Name);
+          }
+        if (CarrierHits == 0)
+          return fail(Err, "malformed placement NOTE in " + F->Path +
+                               ": bind record for " + R.Stable +
+                               " has no matching undefined symbol");
+        E.SymName = CarrierName;
+      }
+      Groups[R.Stable].push_back(std::move(E));
+    }
+
+    // Owned sections: every `.mcu.fixed.*` section of this file must pair
+    // with exactly one owned record of this file, hold exactly one entity
+    // symbol, and agree on shape, span and retain.  Records appearing twice
+    // for one section are left to the group-level P-5 checks (duplicate
+    // owned vs identity collision); a section with no record, or a record
+    // with no section, is a disagreement.
+    for (auto &SP : F->Sections) {
+      InputSection *S = SP.get();
+      if (S->Region != "FIXED")
+        continue;
+      const StringRef Stable =
+          StringRef(S->Name).substr(FixedSectionPrefix.size());
+      const PlacementNoteRecord *Rec = nullptr;
+      unsigned OwnedRecordCount = 0;
+      for (const PlacementNoteRecord &R : F->PlacementRecords)
+        if (R.Stable == Stable && R.Ownership == PO_OWNED) {
+          if (!OwnedRecordCount)
+            Rec = &R; // Deterministic first record for the section facts.
+          ++OwnedRecordCount;
+        }
+      if (OwnedRecordCount == 0)
+        return placementDisagrees(Err, S->Name, Stable);
+      // Entity counting (rev 6 frozen boundary): every defined STT_FUNC /
+      // STT_OBJECT counts, whatever its st_size and binding; the count must
+      // be exactly 1.  The auxiliary-symbol allowance is bounded (review
+      // B4, 2026-09-17): a local STT_NOTYPE label is admitted only in the
+      // LJTI/fixup shape -- no size, strictly inside the payload region
+      // (a position label at offset 0 would alias the entity entry, and the
+      // frozen LJTI labels always sit in the payload after it); a local
+      // STT_SECTION symbol is admitted only as the CANONICAL section anchor
+      // the ELF object writer emits -- empty name, offset 0, size 0, this
+      // section as its subject.  A named, offset, or sized symbol is an
+      // entity-shaped claim, never writer metadata, and fails closed.
+      const InputSymbol *Main = nullptr;
+      unsigned Entities = 0;
+      for (const InputSymbol &Sym : F->Symbols)
+        if (Sym.Defined && Sym.Sec == S) {
+          if (Sym.Type == ELF::STT_FUNC || Sym.Type == ELF::STT_OBJECT) {
+            ++Entities;
+            Main = &Sym;
+          } else if (Sym.Bind == ELF::STB_LOCAL &&
+                     Sym.Type == ELF::STT_NOTYPE && Sym.Size == 0 &&
+                     Sym.Value > 0 && Sym.Value < S->Size) {
+            continue; // LJTI/fixup position label (no name/size contract).
+          } else if (Sym.Bind == ELF::STB_LOCAL &&
+                     Sym.Type == ELF::STT_SECTION && Sym.Size == 0 &&
+                     Sym.Value == 0 && Sym.Name.empty()) {
+            continue; // Canonical section anchor (structural ELF metadata).
+          } else {
+            return placementDisagrees(Err, S->Name, Sym.Name);
+          }
+        }
+      if (Entities != 1 || !Main)
+        return placementDisagrees(Err, S->Name, Stable);
+      // B4(iii): the NOTE entity must correspond to the main symbol's ELF
+      // type -- a NOTE "function" over an STT_OBJECT (or the reverse) is a
+      // producer contract violation, never a silently accepted alias.
+      if ((Rec->Entity == PE_FUNCTION) != (Main->Type == ELF::STT_FUNC))
+        return placementDisagrees(Err, S->Name, Main->Name);
+      if (Main->Value != 0)
+        return placementDisagrees(Err, S->Name, Main->Name);
+      if (Rec->Entity == PE_OBJECT ? Main->Size != S->Size
+                                   : Main->Size > S->Size)
+        return placementDisagrees(Err, S->Name, Main->Name);
+      // Entity span identity: NOTE.size == sh_size (the symbol-difference
+      // fixup the emitter wrote; a function's st_size may be smaller).
+      if (Rec->Size != S->Size)
+        return placementDisagrees(Err, S->Name, Main->Name);
+      // §2.2 storage-class consistency.
+      const uint64_t FNoRetain = S->Flags & ~uint64_t(ELF::SHF_GNU_RETAIN);
+      if (Rec->StorageClass == PSC_CODE) {
+        if (S->Type != ELF::SHT_PROGBITS)
+          return placementDisagrees(Err, S->Name, Main->Name);
+      } else {
+        if (S->Type != ELF::SHT_NOBITS ||
+            FNoRetain != (ELF::SHF_ALLOC | ELF::SHF_WRITE) ||
+            (S->Flags & ELF::SHF_EXECINSTR))
+          return placementDisagrees(Err, S->Name, Main->Name);
+      }
+      // F1(ii) RETAIN double-direction assertion.
+      const bool NoteRetain = (Rec->Flags & PlacementFlagRetain) != 0;
+      const bool SecRetain = (S->Flags & ELF::SHF_GNU_RETAIN) != 0;
+      if (NoteRetain && !SecRetain)
+        return fail(Err, "fixed section " + S->Name +
+                             " declares retain but lacks SHF_GNU_RETAIN");
+      if (SecRetain && !NoteRetain)
+        return fail(Err, "fixed section " + S->Name +
+                             " carries SHF_GNU_RETAIN but placement NOTE "
+                             "flags.bit0=0");
+      // B3 (review 2026-09-17): the fixed section's own sh_addralign is a
+      // second, independent alignment claim.  The emitter writes the same
+      // entity alignment into the section header and the NOTE, so a
+      // disagreement means the object carries two contradicting contracts
+      // (a large sh_addralign was previously never cross-checked at all).
+      // The comparison uses S->Align (sh_addralign normalized to at least
+      // 1): the emitter can only write a real alignment, and a raw 0 is
+      // unspecified-1 by the frozen layout, so a conforming producer is
+      // accepted byte for byte.
+      if (S->Align != Rec->Align)
+        return placementDisagrees(Err, S->Name, Main->Name);
+      // Pin the class (F9/F10/F11 consume it; F11 also needs IsCode on
+      // CODE-class sections, EXECINSTR or not).
+      S->PlacementClass = Rec->StorageClass;
+      if (Rec->StorageClass == PSC_CODE)
+        S->IsCode = true;
+      FixedInfo[S] = {Rec->Address, Rec->Align, Main, F.get()};
+      // Annotate EVERY owned NOTE entry of this file that names this
+      // section.  B7 (review 2026-09-17): a duplicate record used to skip
+      // the association entirely and leave SymName empty for this file,
+      // manufacturing a bogus identity difference against other inputs
+      // (base,other,base reported "conflicting" instead of the duplicate
+      // verdict its identity set deserves).
+      for (auto &E : Groups[Rec->Stable])
+        if (E.File == F.get() && E.Ownership == PO_OWNED && !E.IsManifest) {
+          E.Sec = S;
+          E.SymName = Main->Name;
+        }
+    }
+    // An owned record whose derived section does not exist in this file.
+    for (const PlacementNoteRecord &R : F->PlacementRecords)
+      if (R.Ownership == PO_OWNED) {
+        bool Paired = llvm::any_of(
+            F->Sections, [&](const std::unique_ptr<InputSection> &SP) {
+              return SP->Region == "FIXED" &&
+                     StringRef(SP->Name).substr(FixedSectionPrefix.size()) ==
+                         StringRef(R.Stable);
+            });
+        if (!Paired)
+          return placementDisagrees(
+              Err, std::string(".mcu.fixed.") + R.Stable, R.Stable);
+      }
+  }
+
+  // Manifest rows join the stable groups.
+  for (const ManifestPlacement &M : Manifest) {
+    GroupEntry E;
+    E.FileRef = "(manifest)";
+    E.Stable = M.Stable;
+    E.SymName = M.Stable; // Manifest-only fallback naming (rev 5 ruling).
+    E.Address = M.Address;
+    E.Align = M.HasAlign ? M.Align : 1;
+    E.HasAlign = M.HasAlign;
+    E.Retain = M.Retain;
+    E.NoInit = M.NoInit;
+    E.Size = M.Size;
+    E.HasSize = M.HasSize;
+    E.HasClass = M.HasClass;
+    E.StorageClass = M.StorageClass;
+    E.Entity = PE_OBJECT; // No entity field in the grammar.
+    E.Ownership = M.Bind ? uint8_t(PO_BIND) : uint8_t(PO_OWNED);
+    E.Flags = (M.Retain ? PlacementFlagRetain : 0) |
+              (M.NoInit ? PlacementFlagNoInit : 0);
+    E.IsManifest = true;
+    Groups[M.Stable].push_back(std::move(E));
+  }
+
+  // ---- Stage 3: per-group merge (P-5 order) --------------------------- //
+  auto Conflict = [&](const GroupEntry &A, const GroupEntry &B) {
+    return fail(Err, "conflicting placement for " + A.Stable + ": 0x" +
+                         Twine::utohexstr(A.Address) + " (" + A.FileRef +
+                         ") vs 0x" + Twine::utohexstr(B.Address) + " (" +
+                         B.FileRef + ")");
+  };
+  auto ManifestClash = [&](const std::string &Sym, uint32_t A, uint32_t B) {
+    return fail(Err, "conflicting placement constraints (NOTE vs manifest) "
+                     "for " +
+                         Sym + ": 0x" + Twine::utohexstr(A) + " vs 0x" +
+                         Twine::utohexstr(B));
+  };
+  // B3 (review 2026-09-17): the merged align is a binding contract, not a
+  // report annotation.  One wording serves the layout passes and this
+  // merge-time check for the storage-less groups.
+  auto AlignmentViolation = [&](StringRef Sym, uint32_t A, uint32_t Al) {
+    return fail(Err, "fixed placement for " + Sym.str() + " at 0x" +
+                         Twine::utohexstr(A) + " violates alignment " +
+                         Twine(Al));
+  };
+  for (auto &G : Groups) {
+    const std::vector<GroupEntry> &Ents = G.second;
+    const std::string &Stable = G.first;
+    // P-5(1)/(2), rebuilt per the review's B7: FIRST build the complete
+    // owned identity set, THEN decide.  The identity-collision verdict is
+    // taken over every owned pair before any duplicate-owned verdict, so
+    // the diagnostic no longer depends on input order (base,base,other and
+    // base,other,base both report the identity collision); only a group
+    // whose owned identities are ALL equal is a duplicate record.
+    std::vector<const GroupEntry *> Owned;
+    for (const GroupEntry &E : Ents)
+      if (E.Ownership == PO_OWNED && !E.IsManifest)
+        Owned.push_back(&E);
+    for (size_t I = 1; I < Owned.size(); ++I)
+      if (Owned[0]->StorageClass != Owned[I]->StorageClass ||
+          Owned[0]->Entity != Owned[I]->Entity ||
+          Owned[0]->SymName != Owned[I]->SymName)
+        return Conflict(*Owned[0], *Owned[I]);
+    if (Owned.size() > 1)
+      return fail(Err, "placement NOTE duplicate owned record for " + Stable +
+                       " in " + Owned[0]->FileRef + " and " +
+                       Owned[1]->FileRef);
+    const GroupEntry *FirstOwned = Owned.empty() ? nullptr : Owned[0];
+    // B2 (review 2026-09-17): the seed has THREE explicit sources -- the
+    // owned NOTE record, the first bind NOTE record, or (when no NOTE names
+    // this stable at all) the explicit manifest fields.  The old
+    // unconditional "first non-manifest record" dereferenced find_if's
+    // end() for a manifest-only group.
+    const GroupEntry *Seed = FirstOwned;
+    if (!Seed)
+      for (const GroupEntry &E : Ents)
+        if (!E.IsManifest) {
+          Seed = &E; // First bind NOTE record.
+          break;
+        }
+    const bool HasOwned = FirstOwned != nullptr;
+    const bool ManifestOnly = Seed == nullptr;
+    uint8_t MClass = 0, MEntity = PE_OBJECT;
+    uint32_t MAddress = 0, MSize = 0, MAlign = 1;
+    bool MNoInit = false, MRetain = false;
+    if (!ManifestOnly) {
+      MClass = Seed->StorageClass;
+      MEntity = Seed->Entity;
+      MAddress = Seed->Address;
+      MSize = Seed->Size;
+      MAlign = Seed->Align;
+      MNoInit = (Seed->Flags & PlacementFlagNoInit) != 0;
+      MRetain = (Seed->Flags & PlacementFlagRetain) != 0;
+    } else {
+      // Manifest-only group: the contract is built from the explicit
+      // fields alone.  storage_class has no NOTE fallback here, so a group
+      // with no explicit class is malformed (§7 缺字段语义: "两者皆无 →
+      // 拒"); two explicit classes and two explicit sizes must agree among
+      // themselves, and the align merge keeps the stricter value.
+      const GroupEntry *ClassRow = nullptr;
+      const GroupEntry *SizeRow = nullptr;
+      for (const GroupEntry &E : Ents) {
+        if (!E.IsManifest)
+          continue;
+        // Retain/noinit need an owned definition as their carrier; a
+        // manifest-only group has none (§2.2 retain scope), and this covers
+        // the seed row too (the merge loop below skips it).
+        if (E.Retain || E.NoInit)
+          return fail(Err, "malformed placement manifest entry for " + Stable);
+        if (E.HasClass) {
+          if (ClassRow && ClassRow->StorageClass != E.StorageClass)
+            return ManifestClash(Stable, ClassRow->Address, E.Address);
+          if (!ClassRow)
+            ClassRow = &E;
+        }
+        if (E.HasSize) {
+          if (SizeRow && SizeRow->Size != E.Size)
+            return ManifestClash(Stable, SizeRow->Address, E.Address);
+          if (!SizeRow)
+            SizeRow = &E;
+        }
+        if (E.Address != Ents.front().Address)
+          return ManifestClash(Stable, Ents.front().Address, E.Address);
+      }
+      if (!ClassRow)
+        return fail(Err, "malformed placement manifest entry for " + Stable);
+      Seed = &Ents.front();
+      MClass = ClassRow->StorageClass;
+      MEntity = PE_OBJECT; // The manifest grammar has no entity field.
+      MAddress = Seed->Address;
+      MSize = SizeRow ? SizeRow->Size : 0;
+      MAlign = Seed->Align; // HasAlign ? Align : 1 on every row.
+    }
+    const bool HasNote = !ManifestOnly && !Seed->IsManifest;
+    for (const GroupEntry &E : Ents) {
+      if (&E == Seed || (E.Ownership == PO_OWNED && !E.IsManifest))
+        continue; // Seed and (already-checked) owned duplicates.
+      if (E.IsManifest) {
+        // NOTE-vs-manifest: explicit fields must agree; absent fields
+        // inherit.  bit1/bit0 follow the owned-authoritative policy (the
+        // manifest's declaration is never an equality constraint).
+        if (E.HasClass && E.StorageClass != MClass)
+          return ManifestClash(Stable, MAddress, E.Address);
+        if (E.Address != MAddress)
+          return ManifestClash(Stable, MAddress, E.Address);
+        if (E.HasSize && HasNote && E.Size != MSize)
+          return ManifestClash(Stable, MAddress, E.Address);
+        if (E.HasAlign && E.Align != 1 && MAlign != 1 && E.Align != MAlign)
+          return ManifestClash(Stable, MAddress, E.Address);
+        if (E.Align != 1)
+          MAlign = std::max(MAlign, E.Align);
+        if (!HasOwned && (E.Retain || E.NoInit))
+          // Retain/noinit need an owned definition as their carrier; a
+          // manifest-only group has none (§2.2 retain scope).
+          return fail(Err, "malformed placement manifest entry for " +
+                               Stable);
+        continue;
+      }
+      // NOTE bind entries: field-semantic merge against the merged value.
+      if (E.StorageClass != MClass || E.Entity != MEntity)
+        return Conflict(*Seed, E);
+      if (E.Address != MAddress)
+        return Conflict(*Seed, E);
+      // Size: a bind function's 0 means "no constraint"; a bind object's
+      // sizeof must equal the merged size.
+      if (E.Entity == PE_OBJECT && E.Size != MSize)
+        return Conflict(*Seed, E);
+      // Align: take the stricter value.
+      if (E.Align != 1 && MAlign != 1 && E.Align != MAlign)
+        return Conflict(*Seed, E);
+      if (E.Align != 1)
+        MAlign = std::max(MAlign, E.Align);
+      // N7 option A: no owned<->bind bit1 comparison; the merged flags are
+      // owned-authoritative (bind records carry all-zero flags by the
+      // structural gate).
+    }
+    // Every manifest size/align declaration against a NOTE-backed group was
+    // compared field by field in the loop above (the seed itself carries the
+    // NOTE value); a manifest-only group was fully cross-checked in the
+    // scan that built its merged contract (two explicit sizes must agree).
+
+    const uint32_t MFlags =
+        (placementMergedFlag(HasOwned, MNoInit) ? PlacementFlagNoInit : 0) |
+        (placementMergedFlag(HasOwned, MRetain) ? PlacementFlagRetain : 0);
+    if (HasOwned) {
+      // B3 (review 2026-09-17): the FINAL MERGED align is the executed
+      // contract.  bind/manifest may have tightened it after stage 2 read
+      // the owned NOTE's value, so validate A % MAlign here and back-write
+      // the merged value into FixedInfo: the layout passes consume exactly
+      // what this row reports (previously the report could claim align=4
+      // while the layout only ever saw the owned align=1 and accepted A).
+      InputSection *Sec = Seed->Sec;
+      if (MAddress % MAlign != 0)
+        return AlignmentViolation(Seed->SymName.empty() ? Stable
+                                                        : Seed->SymName,
+                                  MAddress, MAlign);
+      if (Sec)
+        FixedInfo[Sec].Align = MAlign;
+      // Owned group: emit the merged contract row.  The section's shape,
+      // span and symbol constraints were validated in stage 2.
+      LinkerResult::PlacementRecord Row;
+      Row.Stable = Stable;
+      Row.Sym = Seed->SymName;
+      Row.File = Seed->FileRef;
+      Row.Section = Seed->Sec ? Seed->Sec->Name : "";
+      Row.Address = MAddress;
+      Row.Size = MSize;
+      Row.Align = MAlign;
+      Row.Flags = MFlags;
+      Row.StorageClass = MClass;
+      Row.Entity = MEntity;
+      Row.Ownership = PO_OWNED;
+      Row.BoundOnly = false;
+      Row.LayoutHash = placementLayoutHash(MClass, MEntity, PO_OWNED, MAddress,
+                                           MAlign, MFlags);
+      PlacementRows.push_back(std::move(Row));
+    } else {
+      // Bind-only / manifest-only group: enters PlacementNames (key = ELF
+      // symbol name; the rev 5 naming ruling with the manifest stable
+      // fallback) and never resolves through Globals.
+      //
+      // B3 (review 2026-09-17): a bind-only group reserves no storage, but
+      // its merged A/align contract is still binding -- the bind target's
+      // entry address must satisfy the very align the group merged to
+      // (otherwise the report would assert an alignment no acceptance ever
+      // checked).  This is the same unified check as the owned path.
+      if (MAddress % MAlign != 0)
+        return AlignmentViolation(Stable, MAddress, MAlign);
+      PlacementNameEntry P;
+      P.Address = MAddress;
+      P.Size = MSize;
+      P.StorageClass = MClass;
+      P.Entity = MEntity;
+      P.Stable = Stable;
+      P.File = Seed->FileRef;
+      std::string Key;
+      for (const GroupEntry &E : Ents)
+        if (!E.IsManifest) {
+          Key = E.SymName; // The NOTE bind carrier's ELF name wins.
+          break;
+        }
+      if (Key.empty())
+        Key = Stable; // Manifest-only fallback.
+      // B5 (review 2026-09-17): the report row must read the SUCCESSFULLY
+      // INSERTED map key, never the moved-from local.  The symtab channel
+      // iterates PlacementNames' keys, so a moved-from `Key` in Row.Sym was
+      // invisible to the green symtab tests while losing the identity in
+      // the very contract C owes D.
+      auto Inserted = PlacementNames.emplace(Key, std::move(P));
+      if (!Inserted.second)
+        return fail(Err, "conflicting placement for " + Stable +
+                             ": duplicate bind-only symbol name");
+      LinkerResult::PlacementRecord Row;
+      Row.Stable = Stable;
+      Row.Sym = Inserted.first->first;
+      Row.File = Seed->FileRef;
+      Row.Section = "";
+      Row.Address = MAddress;
+      Row.Size = MSize;
+      Row.Align = MAlign;
+      Row.Flags = 0; // N7 option A: a bind-only group merges to flags 0.
+      Row.StorageClass = MClass;
+      Row.Entity = MEntity;
+      Row.Ownership = PO_BIND;
+      Row.BoundOnly = true;
+      Row.LayoutHash = placementLayoutHash(MClass, MEntity, PO_BIND, MAddress,
+                                           MAlign, 0);
+      PlacementRows.push_back(std::move(Row));
+    }
+  }
+  Result.Placement = PlacementRows;
+  // G11-C test instrument (review B5, 2026-09-17; same discipline as the
+  // P-6 trace hook): MCS251_PLACEMENT_DUMP=<path> writes the
+  // LinkerResult.Placement rows in the design §3.4 report column order
+  // (stable | sym | file | section | class | entity | ownership | A | size |
+  // align | flags | layout_hash | bound_only), so a test can assert the
+  // C->D contract directly -- the name, the MERGED align/flags and
+  // H_report -- instead of inferring it from the final symtab (which reads
+  // the PlacementNames map keys and demonstrably hid the moved-from
+  // Row.Sym).  Unset, no file operation happens; the production report
+  // serializer belongs to G11-D.
+  if (const char *Dump = std::getenv("MCS251_PLACEMENT_DUMP")) {
+    std::error_code EC;
+    raw_fd_ostream OS(Dump, EC);
+    if (!EC)
+      for (const LinkerResult::PlacementRecord &R : PlacementRows)
+        OS << R.Stable << " | " << R.Sym << " | " << R.File << " | "
+           << R.Section << " | " << unsigned(R.StorageClass) << " | "
+           << unsigned(R.Entity) << " | " << unsigned(R.Ownership) << " | 0x"
+           << Twine::utohexstr(R.Address) << " | " << R.Size << " | "
+           << R.Align << " | " << R.Flags << " | 0x"
+           << Twine::utohexstr(R.LayoutHash) << " | "
+           << (R.BoundOnly ? 1 : 0) << "\n";
+  }
+  return true;
+}
+
+// G11 §3.3 (post-resolve): a bind-only name that meets a *defined* global
+// without placement is a contradiction -- the reference would silently
+// resolve to the unplaced definition's address instead of A.  Owned<->bind
+// groups never reach here (they hold no PlacementNames entry).
+bool Linker::validatePlacementResolution() {
+  for (const auto &P : PlacementNames) {
+    auto It = Globals.find(P.first);
+    if (It != Globals.end() && It->second->Defined)
+      return fail(Err, "conflicting placement for " + P.first +
+                           ": bind-only reference collides with a definition "
+                           "without placement");
+  }
+  return true;
+}
+
+// G11 §3.3 (the unique collision checkpoint): before collectSymbols()
+// appends the bind-only Synth rows, every output name must be disjoint
+// from (1) the defined output set and (2) the COMPLETE Synth name set --
+// the static reserved-boundary forms ∪ this link's live Synth keys.  The
+// static enumeration and the live map are checked as two channels so a
+// future Synth key cannot drift out of the check (rev 6 ruling).
+bool Linker::validatePlacementSymbolNames() {
+  if (PlacementNames.empty())
+    return true;
+  std::set<StringRef> Defined;
+  for (const auto &F : Files)
+    for (const InputSymbol &S : F->Symbols)
+      if (S.Defined && !S.Name.empty() && S.Type != ELF::STT_SECTION)
+        Defined.insert(S.Name);
+  for (const auto &P : PlacementNames) {
+    if (Defined.count(P.first) || isReservedBoundarySymbol(P.first) ||
+        Synth.count(P.first))
+      return fail(Err, "bind-only placement symbol " + P.first +
+                           " collides with a defined or reserved output "
+                           "symbol name");
+  }
+  return true;
+}
+
+int Linker::placementTargetClass(const InputSymbol *Target) const {
+  if (Target->Sec) {
+    if (Target->Sec->Region == "XSEG")
+      return PSC_XDATA;
+    if (Target->Sec->Region == "FIXED" &&
+        Target->Sec->PlacementClass != 0xff)
+      return Target->Sec->PlacementClass;
+    return -1;
+  }
+  auto It = PlacementNames.find(Target->Name);
+  if (It != PlacementNames.end())
+    return It->second.StorageClass;
+  return -1;
+}
+
+// G11 §2.2/F6: FIXED-CODE requires an explicit board-level window -- the
+// linker never presumes a chip model.  Then every owned FIXED-CODE entity
+// reserves its full section span (sh_size, jump tables included) through
+// the unified CodeUsed ledger, so fixed-by-fixed and fixed-by-dynamic
+// collisions both surface through reserveCode's existing overlap path.
+bool Linker::layoutFixedCode() {
+  std::vector<InputSection *> Fixed;
+  for (InputSection *S : AllSections)
+    if (S->Region == "FIXED" && S->PlacementClass == PSC_CODE)
+      Fixed.push_back(S);
+  if (Fixed.empty())
+    return true;
+  // B7 (review 2026-09-17): the frozen wording carries %sym -- the first
+  // fixed CODE entity names the missing-window condition (the check is a
+  // link-level property, but the diagnostic must stay actionable and match
+  // the design §8 row exactly).
+  InputSection *FirstFixed = Fixed.front();
+  if (!Config.FlashGate) {
+    auto First = FixedInfo.find(FirstFixed);
+    const std::string Sym = First != FixedInfo.end() && First->second.Sym
+                                ? First->second.Sym->Name
+                                : FirstFixed->Name;
+    return fail(Err, "fixed CODE entity " + Sym +
+                         " requires an explicit CODE window "
+                         "(--flash-base/--flash-size)");
+  }
+  const uint64_t Lo = Config.FlashBase;
+  const uint64_t Hi = Lo + uint64_t(Config.FlashSize);
+  for (InputSection *S : Fixed) {
+    auto It = FixedInfo.find(S);
+    if (It == FixedInfo.end())
+      return fail(Err, "internal: fixed section without merge info: " +
+                           S->Name);
+    const FixedPlacementInfo &Info = It->second;
+    const uint32_t A = Info.Address;
+    const uint32_t Size = static_cast<uint32_t>(S->Size);
+    if (A % Info.Align != 0)
+      return fail(Err, "fixed placement for " +
+                           (Info.Sym ? Info.Sym->Name : S->Name) +
+                           " at 0x" + Twine::utohexstr(A) +
+                           " violates alignment " + Twine(Info.Align));
+    if (Size == 0)
+      return fail(Err, "zero-size entity " +
+                           (Info.Sym ? Info.Sym->Name : S->Name) +
+                           " at 0x" + Twine::utohexstr(A) +
+                           " is not placeable");
+    if (A < Lo || A + Size > Hi)
+      return fail(Err, "fixed CODE entity " +
+                           (Info.Sym ? Info.Sym->Name : S->Name) + " at 0x" +
+                           Twine::utohexstr(A) +
+                           " is outside the CODE window");
+    if (!reserveCode(A, Size, S->Name))
+      return false;
+    S->Address = A;
+    if (S->IsLoadable)
+      for (size_t I = 0; I != S->Data.size(); ++I) {
+        uint32_t Byte = S->Address + I;
+        if (Image.count(Byte))
+          return fail(Err, "duplicate CODE byte at 0x" +
+                               Twine::utohexstr(Byte));
+        Image[Byte] = S->Data[I];
+      }
+  }
+  return true;
+}
+
+// G11 §1.3: FIXED AS0-DATA enters the 16-bit DATA ledger before DATA_ABS,
+// so a conflict names the fixed interval and every later first-fit class
+// (BSEG_BYTES, bit slots, DSEG/OSEG, the G8 seed snapshot) sees it.
+bool Linker::layoutFixedData() {
+  for (InputSection *S : AllSections) {
+    if (S->Region != "FIXED" || S->PlacementClass != PSC_AS0_DATA)
+      continue;
+    auto It = FixedInfo.find(S);
+    if (It == FixedInfo.end())
+      return fail(Err, "internal: fixed section without merge info: " +
+                           S->Name);
+    const FixedPlacementInfo &Info = It->second;
+    const uint32_t A = Info.Address;
+    const uint32_t Size = static_cast<uint32_t>(S->Size);
+    if (A % Info.Align != 0)
+      return fail(Err, "fixed placement for " +
+                           (Info.Sym ? Info.Sym->Name : S->Name) +
+                           " at 0x" + Twine::utohexstr(A) +
+                           " violates alignment " + Twine(Info.Align));
+    if (Size == 0)
+      return fail(Err, "zero-size entity " +
+                           (Info.Sym ? Info.Sym->Name : S->Name) +
+                           " at 0x" + Twine::utohexstr(A) +
+                           " is not placeable");
+    if (!reserve(A, Size, S->Name))
+      return false;
+    S->Address = A;
+  }
+  return true;
+}
+
+// G11 §1.3/F3: FIXED-XDATA enters the 24-bit XDATA ledger before the XSEG
+// cursor loop.  The G13b relaxations never apply to a fixed entity: one
+// object stays <= 65535 bytes and never straddles a 64K window; the
+// --area-start=XSEG declaration and the --xdata-size capacity gate cover
+// it exactly like a dynamic XSEG slice.
+bool Linker::layoutFixedXdata() {
+  bool Any = false;
+  for (InputSection *S : AllSections) {
+    if (S->Region != "FIXED" || S->PlacementClass != PSC_XDATA)
+      continue;
+    Any = true;
+    auto It = FixedInfo.find(S);
+    if (It == FixedInfo.end())
+      return fail(Err, "internal: fixed section without merge info: " +
+                           S->Name);
+    const FixedPlacementInfo &Info = It->second;
+    const uint32_t A = Info.Address;
+    const uint32_t Size = static_cast<uint32_t>(S->Size);
+    const std::string Sym =
+        Info.Sym ? Info.Sym->Name : S->Name;
+    if (A % Info.Align != 0)
+      return fail(Err, "fixed placement for " + Sym + " at 0x" +
+                           Twine::utohexstr(A) + " violates alignment " +
+                           Twine(Info.Align));
+    if (Size == 0)
+      return fail(Err, "zero-size entity " + Sym + " at 0x" +
+                           Twine::utohexstr(A) + " is not placeable");
+    if (Size > 0xffff)
+      return fail(Err, "fixed XDATA entity " + Sym + " (" + Twine(Size) +
+                           " bytes) exceeds the 64K window: XDATA objects "
+                           "are limited to 65535 bytes and never straddle a "
+                           "64K window boundary");
+    if (!rangeFits(A, Size))
+      return fail(Err, "XDATA address overflow in " + S->Name);
+    if (Size && ((A ^ (A + Size - 1)) & 0xff0000) != 0)
+      return fail(Err, "fixed XDATA entity " + Sym + " at 0x" +
+                           Twine::utohexstr(A) + " straddles a 64K window "
+                           "boundary");
+    Range R{A, A + Size};
+    for (const Range &U : XDataUsed)
+      if (R.Start < U.End && U.Start < R.End)
+        return fail(Err, "XDATA overlap for " + S->Name);
+    S->Address = A;
+    if (Size)
+      XDataUsed.push_back(R);
+  }
+  if (Any && !hasAreaStart("XSEG"))
+    return fail(Err, "missing --area-start=XSEG");
+  return true;
+}
+
 bool Linker::reserve(uint32_t Start, uint32_t Size, StringRef What) {
   if (!Size)
     return true;
@@ -2559,6 +3737,12 @@ bool Linker::layoutCode() {
   auto reserveCode = [&](uint32_t Start, uint32_t Size, StringRef What) {
     return this->reserveCode(Start, Size, What);
   };
+  // G11 §1.3: the FIXED-CODE reservations enter the unified CODE ledger
+  // after the clear and before the dynamic cursor loop, so both collision
+  // directions (fixed x fixed, fixed x dynamic) surface through the
+  // reserveCode overlap path.
+  if (!layoutFixedCode())
+    return false;
   struct Cursor { uint32_t V; };
   std::map<std::string, Cursor> C;
   C["HOME"].V = areaStart("HOME", 0);
@@ -2894,6 +4078,13 @@ bool Linker::layoutData() {
   for (const Range &R : Config.ReservedData)
     if (!reserve(R.Start, R.End - R.Start, "--reserve-data"))
       return false;
+
+  // G11 §1.3: FIXED AS0-DATA enters the 16-bit ledger before DATA_ABS, so
+  // a conflict names the fixed interval and every later first-fit class --
+  // BSEG_BYTES, the bit slots, DSEG/OSEG and the G8 seed snapshot below --
+  // is constructively aware of it.
+  if (!layoutFixedData())
+    return false;
 
   // Absolute DATA reservations participate before all first-fit classes.
   for (InputSection *S : AllSections)
@@ -3245,6 +4436,12 @@ bool Linker::layoutData() {
   }
 
   XDataUsed.clear();
+  // G11 §1.3/F3: FIXED-XDATA reservations enter the 24-bit ledger before
+  // the XSEG cursor loop; the fixed entity also requires the --area-start=
+  // XSEG declaration (the board's XDATA window base) exactly like a
+  // dynamic slice.  Fixed placements never advance XsegCursor.
+  if (!layoutFixedXdata())
+    return false;
   bool HasXSeg = llvm::any_of(AllSections,
                               [](const InputSection *S) { return S->Region == "XSEG"; });
   if (HasXSeg && !hasAreaStart("XSEG"))
@@ -3319,11 +4516,14 @@ bool Linker::layoutData() {
   // inside [area-start(XSEG), area-start(XSEG)+N).  Checked per section with
   // 64-bit arithmetic; the always-on 24-bit rangeFits above still governs
   // the architectural limit when the option is absent.
+  // G11 F3: a FIXED-XDATA entity is gated exactly like a dynamic slice.
   if (Config.XdataSize) {
     const uint64_t Base = areaStart("XSEG", 0);
     const uint64_t Limit = Base + uint64_t(Config.XdataSize);
     for (InputSection *S : AllSections)
-      if (S->Region == "XSEG" && S->Size) {
+      if ((S->Region == "XSEG" ||
+           (S->Region == "FIXED" && S->PlacementClass == PSC_XDATA)) &&
+          S->Size) {
         const uint64_t Lo = S->Address, Hi = Lo + S->Size;
         if (Lo < Base || Hi > Limit) {
           std::string Msg;
@@ -3712,7 +4912,14 @@ bool Linker::checkFlashGate() {
                            " is outside the flash window " + Hex(Lo) + ".." +
                            Hex(Hi) + " (--flash-base/--flash-size)");
   for (const InputSection *S : AllSections) {
-    if (!IsCodeArea(StringRef(S->Region)) || S->Size == 0)
+    // G11 F6: a FIXED entity of the CODE storage class joins the gate
+    // (functions and CODE-space const objects alike; EXECINSTR is
+    // irrelevant).  A FIXED entity without the explicit window never
+    // reaches here -- layoutFixedCode already failed the link.
+    const bool CodeArea =
+        IsCodeArea(StringRef(S->Region)) ||
+        (S->Region == "FIXED" && S->PlacementClass == PSC_CODE);
+    if (!CodeArea || S->Size == 0)
       continue;
     const uint64_t Start = S->Address;
     const uint64_t End = Start + S->Size;
@@ -3732,13 +4939,156 @@ bool Linker::errorUndefined() {
         continue;
       if (S.Bind == ELF::STB_LOCAL)
         return fail(Err, "undefined local symbol: " + S.Name);
-      if (!Globals.count(S.Name) && !Synth.count(S.Name))
+      // G11 (§3.3 insertion 3): a bind-only placement name is a legal
+      // undefined reference -- the placement table carries its address.
+      if (!Globals.count(S.Name) && !Synth.count(S.Name) &&
+          !PlacementNames.count(S.Name))
         return fail(Err, "undefined symbol: " + S.Name);
     }
   return true;
 }
 
 bool Linker::applyRelocations() {
+  // P-6(b) test hook (design §8, rev 7): the black-box wording alone cannot
+  // prove the internal gate ORDER -- the claim is that a rejected relocation
+  // never reaches the band check or the field write (the F12 low-16 write is
+  // exactly what F9 preempts).  With MCS251_P6_TRACE=<path> set, every
+  // relocated field gets a sentinel planted into Image before the pass, every
+  // write a relocation performs is counted, and a trace of the resulting
+  // bytes is dumped afterwards (success or failure).  Unset, no sentinel
+  // operation is performed at all: the link is byte-for-byte production
+  // behavior (the getenv probe itself is the only cost); it is a test
+  // instrument, never a production switch.
+  //
+  // B6 (review 2026-09-17): the sentinel occupies EXACTLY the relocation's
+  // field width (1/2/3 bytes from the R_* type), never a fixed two bytes.
+  // Field widths are validated against the section before planting and the
+  // restore walks the same width, so a width-1 field at the last byte of a
+  // section can never touch the abutting next section (the review observed
+  // 11223344 -> 5a223344: the second sentinel byte landed in the adjacent
+  // section and the old two-byte-only restore skipped it).
+  static constexpr uint8_t P6Sentinel[3] = {0xA5, 0x5A, 0x3C};
+  using P6Key = std::pair<InputSection *, uint32_t>;
+  struct P6Field {
+    uint32_t Width;
+    std::array<uint8_t, 3> Before;
+  };
+  std::map<P6Key, P6Field> P6Original;
+  std::map<P6Key, unsigned> P6Writes;
+  const char *P6Path = std::getenv("MCS251_P6_TRACE");
+  if (P6Path) {
+    // Capture every covered field's bytes BEFORE planting any sentinel, so
+    // the success-path restore is order-independent even when two fields
+    // overlap (e.g. adjacent MID8/LO8 slots).
+    std::vector<P6Key> Plant;
+    for (InputSection *S : AllSections) {
+      if (S->IsNobits || !S->IsAlloc)
+        continue;
+      for (const Relocation &R : S->Relocs) {
+        const uint32_t Width =
+            (R.Type == ELF::R_MCS251_16 || R.Type == ELF::R_MCS251_J16 ||
+             R.Type == ELF::R_MCS251_J11)
+                ? 2
+            : R.Type == ELF::R_MCS251_24                                  ? 3
+            : R.Type == ELF::R_MCS251_LO8 || R.Type == ELF::R_MCS251_MID8 ||
+                      R.Type == ELF::R_MCS251_HI8 ||
+                      R.Type == ELF::R_MCS251_PC8
+                ? 1
+                : 0;
+        // The whole field, and nothing beyond it, must already live inside
+        // the section (the same bound the write path enforces).
+        if (!Width || R.Offset + Width > S->Size ||
+            R.Offset + Width > S->Data.size())
+          continue;
+        P6Field F;
+        F.Width = Width;
+        for (uint32_t I = 0; I != Width; ++I) {
+          auto It = Image.find(S->Address + R.Offset + I);
+          if (It == Image.end())
+            break;
+          F.Before[I] = It->second;
+        }
+        P6Original[{S, R.Offset}] = F;
+        P6Writes[{S, R.Offset}] = 0;
+        Plant.push_back({S, R.Offset});
+      }
+    }
+    for (const P6Key &K : Plant) {
+      const uint32_t W = P6Original[K].Width;
+      for (uint32_t I = 0; I != W; ++I)
+        Image[K.first->Address + K.second + I] = P6Sentinel[I];
+    }
+  }
+  const bool P6OK = applyRelocationsImpl(P6Path ? &P6Writes : nullptr);
+  if (P6Path) {
+    if (P6OK)
+      // Success: re-sync Image from the section bytes over exactly the
+      // sentineled field widths (the record pass wrote them in lock-step and
+      // the sentinel never touched anything else), so an accidentally
+      // enabled trace can never corrupt a produced image.  The failure path
+      // is left as-is (no output is emitted there), which is exactly what
+      // the trace must show: an unwritten field keeps its sentinel.
+      for (const auto &E : P6Original) {
+        InputSection *S = E.first.first;
+        const uint32_t O = E.first.second;
+        for (uint32_t I = 0; I != E.second.Width; ++I)
+          if (O + I < S->Data.size())
+            Image[S->Address + O + I] = S->Data[O + I];
+      }
+    std::error_code EC;
+    raw_fd_ostream OS(P6Path, EC);
+    if (!EC) {
+      auto Hex2 = [](int V) {
+        if (V < 0)
+          return std::string("--");
+        const char *D = "0123456789abcdef";
+        std::string S = "0x";
+        S += D[(V >> 4) & 0xf];
+        S += D[V & 0xf];
+        return S;
+      };
+      // B6: the trace reports exactly the field's own bytes (width from the
+      // relocation type), so a width-1 probe cannot be misread as a 2-byte
+      // field and the reader can compare the full field byte for byte.
+      auto Bytes = [&](const InputSection *S, uint32_t O, uint32_t W,
+                       bool After) {
+        std::string Out;
+        for (uint32_t I = 0; I != W; ++I) {
+          if (I)
+            Out += ",";
+          int V = -1;
+          if (After) {
+            auto It = Image.find(S->Address + O + I);
+            if (It != Image.end())
+              V = It->second;
+          } else {
+            auto It = P6Original.find({const_cast<InputSection *>(S), O});
+            if (It != P6Original.end() && I < 3)
+              V = It->second.Before[I];
+          }
+          Out += Hex2(V);
+        }
+        return Out;
+      };
+      OS << "P6 fields=" << P6Original.size() << " result="
+         << (P6OK ? "ok" : "fail") << "\n";
+      for (const auto &E : P6Original) {
+        const InputSection *S = E.first.first;
+        const uint32_t O = E.first.second;
+        const uint32_t W = E.second.Width;
+        const unsigned Wr = P6Writes[E.first];
+        OS << "P6 REL " << S->Name << " off=0x" << Twine::utohexstr(O)
+           << " writes=" << Wr << " before=" << Bytes(S, O, W, /*After=*/false)
+           << " after=" << Bytes(S, O, W, /*After=*/true) << " width=" << W
+           << "\n";
+      }
+    }
+  }
+  return P6OK;
+}
+
+bool Linker::applyRelocationsImpl(std::map<std::pair<InputSection *, uint32_t>,
+                                          unsigned> *P6Writes) {
   std::set<std::pair<InputSection *, uint32_t>> Written;
   for (auto &F : Files)
     for (auto &S : F->Sections)
@@ -3786,8 +5136,15 @@ bool Linker::applyRelocations() {
         // full R_MCS251_24 are the sanctioned channels. This covers named
         // symbols and section-symbol folds alike (both resolve to the XSEG
         // InputSection). Fail closed; there is no escape switch.
+        // G11 F9 (classification ruling): the gate follows the target's
+        // STORAGE CLASS, not the Region name -- it therefore also covers a
+        // FIXED-XDATA owned section and a bind-only XDATA PlacementNames
+        // record (placementTargetClass is the single classifier shared by
+        // F9/F10/F11).  This check precedes the overflow band and the write
+        // below (P-6 gate-order invariant): an XDATA-class target on the
+        // 16-bit channel is rejected, never silently low-16 truncated.
         if ((R.Type == ELF::R_MCS251_16 || R.Type == ELF::R_MCS251_J16) &&
-            Target->Sec && Target->Sec->Region == "XSEG") {
+            placementTargetClass(Target) == PSC_XDATA) {
           StringRef TargetName =
               Target->Name.empty()
                   ? StringRef(Target->Sec->Name)
@@ -3837,6 +5194,8 @@ bool Linker::applyRelocations() {
         }
         uint32_t V = IS->Defined ? IS->Address
                      : Globals.count(IS->Name) ? Globals[IS->Name]->Address
+                     : PlacementNames.count(IS->Name)
+                         ? PlacementNames[IS->Name].Address
                      : Synth.count(IS->Name) ? Synth[IS->Name]
                      : 0;
         int64_t Value = static_cast<int64_t>(V) + R.Addend;
@@ -3869,10 +5228,19 @@ bool Linker::applyRelocations() {
         // dereferenceable but is a legal value); anything outside the
         // half-open-plus-one interval is a dangling or wrong-bank pointer
         // and fails the link.  Fail closed; no escape switch.
-        if (R.Type == ELF::R_MCS251_24 && Target->Sec &&
-            Target->Sec->Region == "XSEG") {
-          const uint64_t Lo = Target->Sec->Address;
-          const uint64_t Hi = Lo + Target->Sec->Size; // one-past-end allowed
+        // G11 F10 (classification ruling): the interval is the owned FIXED
+        // section's [Address, Address+sh_size) or, for a bind-only XDATA
+        // record, the PlacementNames [A, A+sizeof) (one-past-end alike).
+        if (R.Type == ELF::R_MCS251_24 && placementTargetClass(Target) == PSC_XDATA) {
+          uint64_t Lo, Hi;
+          if (Target->Sec) {
+            Lo = Target->Sec->Address;
+            Hi = Lo + Target->Sec->Size; // one-past-end allowed
+          } else {
+            const PlacementNameEntry &PNE = PlacementNames[Target->Name];
+            Lo = PNE.Address;
+            Hi = Lo + PNE.Size;
+          }
           if (Value < static_cast<int64_t>(Lo) ||
               Value > static_cast<int64_t>(Hi)) {
             StringRef TargetName =
@@ -3915,13 +5283,32 @@ bool Linker::applyRelocations() {
              (Value < 0 || Value > 0xffffff)))
           return fail(Err, "relocation overflow in " + S->Name);
         uint32_t U = static_cast<uint32_t>(Value);
+        // G11 F11: the control-target CODE gate follows the classification
+        // too -- a bind-only FUNCTION target (no section) is admitted when
+        // its PlacementNames record says Entity==function and
+        // StorageClass==CODE (A is the entry); a bind-only OBJECT stays
+        // rejected.  Owned FIXED-CODE sections carry IsCode from
+        // mergePlacement.
+        bool CodeControlTarget =
+            Target->Sec ? Target->Sec->IsCode
+                        : [&]() {
+                            auto It = PlacementNames.find(Target->Name);
+                            return It != PlacementNames.end() &&
+                                   It->second.Entity == PE_FUNCTION &&
+                                   It->second.StorageClass == PSC_CODE;
+                          }();
         if ((R.Type == ELF::R_MCS251_J16 || R.Type == ELF::R_MCS251_J11) &&
-            (!Target->Sec || !Target->Sec->IsCode))
+            !CodeControlTarget)
           return fail(Err, "control relocation target is not CODE in " + S->Name);
         if (R.Type == ELF::R_MCS251_J16 &&
             (((P + 2) & 0xffffff) & 0xff0000) != (U & 0xff0000))
           return fail(Err, "J16 bank overflow in " + S->Name);
-        auto Put = [&](uint32_t O, uint8_t B) { S->Data[O] = B; Image[S->Address + O] = B; };
+        auto Put = [&](uint32_t O, uint8_t B) {
+          S->Data[O] = B;
+          Image[S->Address + O] = B;
+          if (P6Writes)
+            ++(*P6Writes)[{S.get(), R.Offset}];
+        };
         switch (R.Type) {
         case ELF::R_MCS251_16:
         case ELF::R_MCS251_J16:
@@ -4170,8 +5557,11 @@ bool Linker::validateXInit() {
         // DSEG one.  Without this branch every migrated object's clear/copy
         // record would be rejected here -- a link that succeeded in layout
         // but could not start.
+        // G11 F5: a FIXED AS0-DATA entity is an owned initialization target
+        // as well (clang emits the sparse record with dest = A).
         if ((D->Region == "DSEG" || D->Region == "EDATA" ||
-             D->Region == "DATA_ABS" || D->Region == "BSEG_BYTES") &&
+             D->Region == "DATA_ABS" || D->Region == "BSEG_BYTES" ||
+             (D->Region == "FIXED" && D->PlacementClass == PSC_AS0_DATA)) &&
             D->Size != 0 && Destination >= D->Address &&
             rangeFits(uint64_t(Destination) - D->Address, ObjectSize,
                       D->Size)) {
@@ -4254,7 +5644,11 @@ bool Linker::validateXDATAInit() {
                              ") -- an XDATA object never straddles a bank");
       bool WithinOneSlice = false;
       for (InputSection *D : AllSections)
-        if (D->Region == "XSEG" && D->Size != 0 && Dest >= D->Address &&
+        // G11 F4: a FIXED-XDATA entity is an owned initialization target
+        // too (clang emits xdata_init records with dest = A).
+        if ((D->Region == "XSEG" ||
+             (D->Region == "FIXED" && D->PlacementClass == PSC_XDATA)) &&
+            D->Size != 0 && Dest >= D->Address &&
             DestEnd <= D->Address + D->Size) {
           WithinOneSlice = true;
           break;
@@ -4736,6 +6130,14 @@ void Linker::printInputs(raw_ostream &Out) const {
           << " value=" << format_hex(S.Value, 0, false) << " size=" << S.Size
           << " bind=" << unsigned(S.Bind) << " type=" << unsigned(S.Type) << '\n';
     }
+    for (const PlacementNoteRecord &R : F->PlacementRecords)
+      Out << "  placement stable=" << R.Stable
+          << " class=" << placementClassName(R.StorageClass)
+          << " entity=" << (R.Entity == PE_FUNCTION ? "function" : "object")
+          << " own=" << (R.Ownership == PO_BIND ? "bind" : "owned")
+          << " addr=" << format_hex(R.Address, 6, false)
+          << " size=" << R.Size << " align=" << R.Align
+          << " flags=" << R.Flags << '\n';
   }
 }
 
@@ -4916,6 +6318,16 @@ void Linker::collectSymbols(std::vector<OutputSymbol> &Out) const {
   for (const auto &P : Synth)
     Out.push_back({P.first, P.second, 0, ELF::STB_GLOBAL, ELF::STT_NOTYPE,
                    true});
+  // G11 §3.3 (rev 5 ordering + naming rulings): the bind-only placement
+  // rows are APPENDED strictly after the existing synth sequence (the E5
+  // append-only byte promise), in PlacementNames key order -- std::map's
+  // lexicographic iteration keeps same-input -> same-output replay.  The
+  // name is the ELF symbol name (declaration name; the manifest-only
+  // fallback is the stable symbol), never assumed equal to the stable.
+  // Collision safety was already proven by validatePlacementSymbolNames().
+  for (const auto &P : PlacementNames)
+    Out.push_back({P.first, P.second.Address, 0, ELF::STB_GLOBAL,
+                   ELF::STT_NOTYPE, true});
 }
 
 bool Linker::run(LinkerResult &Result) {
@@ -4956,6 +6368,13 @@ bool Linker::run(LinkerResult &Result) {
   // fails without ever touching layout, the image or an output file.
   if (!validateIdentitySet())
     return false;
+  // G11 §3.3 (rev 4 fronting ruling): mergePlacement runs between the
+  // identity set and symbol resolution -- its inputs are complete (NOTE
+  // records, FIXED sections and their symbols, the manifest) and its
+  // outputs (PlacementNames, the merged contract, the pinned storage
+  // classes) must exist before resolveSymbols' second loop reads them.
+  if (!mergePlacement(Result))
+    return false;
   if (!resolveSymbols())
     return false;
   // P-4 (freeze 2026-09-14): the signature symbol association needs the
@@ -4983,6 +6402,10 @@ bool Linker::run(LinkerResult &Result) {
   if (IrqMode && (!validateISRIdentitiesAndRegistrations() ||
                   !synthesizeIRQVectors()))
     return false;
+  // G11 §3.3: the post-resolve bind-only collision check -- a PlacementNames
+  // key that meets a defined global WITHOUT placement is a contradiction.
+  if (!validatePlacementResolution())
+    return false;
   if (!layout())
     return false;
   if (IrqMode && !validateIRQReservedRangesAndCRT())
@@ -5007,6 +6430,12 @@ bool Linker::run(LinkerResult &Result) {
                      ? areaStart("HOME", 0) : 0;
   // E5: final symbol snapshot with post-layout addresses; the flavor shell
   // decides whether to serialize it into the output ELF.
+  // G11 §3.3: the bind-only Synth append happens inside collectSymbols;
+  // its unique name-collision checkpoint runs immediately before, when
+  // layoutData has filled the live Synth map (the two-channel check needs
+  // both the static reserved forms and the live keys).
+  if (!validatePlacementSymbolNames())
+    return false;
   collectSymbols(Result.Symbols);
   Result.Image = std::move(Image);
   raw_string_ostream MapOS(Result.Map);

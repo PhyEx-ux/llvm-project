@@ -60,6 +60,11 @@ struct LinkerConfig {
   // linked ELF and the map), so emitting a final symbol table and map
   // function rows must be an explicit opt-in, never a silent default.
   bool KeepSymbols = false;
+  // G11 (design §7): the raw lines of the --placement-manifest file, read by
+  // the flavor shell during option parsing.  The core never sees the path or
+  // the file system; mergePlacement() owns the line grammar and the
+  // malformed-entry diagnostic.
+  std::vector<std::string> PlacementManifest;
 };
 
 // E5: one final-ELF symbol collected after layout.  Synth marks the
@@ -86,6 +91,19 @@ struct LinkerResult {
   // E5: final symbols with post-layout addresses, always collected so the
   // flavor shell can decide whether to serialize them.
   std::vector<OutputSymbol> Symbols;
+  // G11 (design §3.4): the merged placement contract produced by
+  // mergePlacement() -- one row per stable-symbol group, including the
+  // bind-only rows.  `LayoutHash` is the report hash recomputed over the
+  // MERGED fields (rev 7 B1); the per-input source hashes stay in the input
+  // objects for the independent verifier and are never copied here.  The
+  // report file serialization and the verifier are G11-D consumers.
+  struct PlacementRecord {
+    std::string Stable, Sym, File, Section;
+    uint32_t Address = 0, Size = 0, Align = 1, Flags = 0, LayoutHash = 0;
+    uint8_t StorageClass = 0, Entity = 0, Ownership = 0;
+    bool BoundOnly = false;
+  };
+  std::vector<PlacementRecord> Placement;
 };
 
 bool linkCore(LinkerConfig Config, LinkerResult &Result,

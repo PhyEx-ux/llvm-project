@@ -15,6 +15,17 @@
 ; attributes) asserts the span identities on the real object:
 ;   NOTE.size == sh_size >= st_size   (equality: no same-section payload).
 ;
+; Scope of the MIR choice (G11-C closeout, review G11-B-IMPL-REVIEW-R2-Alice
+; §6.1): MIR is used for a DETERMINISTIC, precise trigger of the post-layout
+; relaxation -- a simple direct far-branch `.ll` construct is pre-expanded at
+; FinalizeISel and never reaches the relaxation pass.  That is NOT a claim
+; that every IR input is unreachable: a nested-loop/diamond IR shape makes
+; MachineBlockPlacement displace the skip block after layout and DOES relax
+; (existing sample llvm/test/CodeGen/MCS251/branch-relax-displaced.ll; the
+; reviewer's v2-placed variant emits NOTE.size == sh_size == st_size == 915,
+; verified again during G11-C closeout).  This file keeps the MIR form
+; because it fixes the block geometry exactly at this backend's contract.
+;
 ; RUN: split-file %s %t
 ; RUN: llc -mtriple=mcs251 -O2 -filetype=asm -start-after=finalize-isel %t/plain.mir -o %t/plain.s
 ; RUN: FileCheck %s --check-prefix=ASM < %t/plain.s

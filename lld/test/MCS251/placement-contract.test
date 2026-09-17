@@ -1,0 +1,1037 @@
+# G11-C: the placement object contract, negative side (design
+# G11-PLACEMENT-DESIGN.md rev 7 §3.2/§3.3/§8, plus PM rulings
+# R-2026-09-16-1 [V1 EOL] and R-2026-09-17-1 [N7 option A]).
+#
+# Fixture provenance: the objects here are hand-built yaml2obj v2 objects
+# (the edata-window/xseg-split pattern: the v1 flag word plus seteflags.py
+# rewriting e_flags to the v2 word in place, with the proven attributes
+# blob).  The positive corpus -- real llc output -- lives in
+# placement-fixed-e2e.test and placement-fixed-isr.test.  Every NOTE record
+# below follows the frozen v1 layout, byte for byte:
+#   u32 record_size (= alignTo(25+stable_len,4)) | u8 ver | u8 class |
+#   u8 entity | u8 own | u32 A | u32 size | u32 align | u32 flags |
+#   u32 layout_hash | u8 len | stable | pad
+# (class 0=data 1=xdata 2=code; entity 0=object 1=function; own 0/1).
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj base.yaml -o base-v1.o
+# RUN: %python seteflags.py base-v1.o && mv base-v1.o base.o
+# RUN: yaml2obj note-dup.yaml -o notedup-v1.o
+# RUN: %python seteflags.py notedup-v1.o && mv notedup-v1.o notedup.o
+# RUN: yaml2obj retain-drop.yaml -o rdrop-v1.o
+# RUN: %python seteflags.py rdrop-v1.o && mv rdrop-v1.o rdrop.o
+# RUN: yaml2obj retain-extra.yaml -o rextra-v1.o
+# RUN: %python seteflags.py rextra-v1.o && mv rextra-v1.o rextra.o
+# RUN: yaml2obj retain-wrongsec.yaml -o rwrong-v1.o
+# RUN: %python seteflags.py rwrong-v1.o && mv rwrong-v1.o rwrong.o
+# RUN: yaml2obj fixed-split.yaml -o fsplit-v1.o
+# RUN: %python seteflags.py fsplit-v1.o && mv fsplit-v1.o fsplit.o
+# RUN: yaml2obj span-mismatch.yaml -o span-v1.o
+# RUN: %python seteflags.py span-v1.o && mv span-v1.o span.o
+# RUN: yaml2obj class-mismatch.yaml -o classm-v1.o
+# RUN: %python seteflags.py classm-v1.o && mv classm-v1.o classm.o
+# RUN: yaml2obj two-entities.yaml -o twoent-v1.o
+# RUN: %python seteflags.py twoent-v1.o && mv twoent-v1.o twoent.o
+# RUN: yaml2obj badclass.yaml -o badclass-v1.o
+# RUN: %python seteflags.py badclass-v1.o && mv badclass-v1.o badclass.o
+# RUN: yaml2obj bind-flag.yaml -o bindflag-v1.o
+# RUN: %python seteflags.py bindflag-v1.o && mv bindflag-v1.o bindflag.o
+# RUN: yaml2obj zero-size.yaml -o zero-v1.o
+# RUN: %python seteflags.py zero-v1.o && mv zero-v1.o zero.o
+# RUN: yaml2obj straddle.yaml -o straddle-v1.o
+# RUN: %python seteflags.py straddle-v1.o && mv straddle-v1.o straddle.o
+# RUN: yaml2obj own-align4.yaml -o align4-v1.o
+# RUN: %python seteflags.py align4-v1.o && mv align4-v1.o align4.o
+# RUN: yaml2obj bind-xdata.yaml -o bindx-v1.o
+# RUN: %python seteflags.py bindx-v1.o && mv bindx-v1.o bindx.o
+# RUN: yaml2obj bind-reserved.yaml -o bindres-v1.o
+# RUN: %python seteflags.py bindres-v1.o && mv bindres-v1.o bindres.o
+# RUN: yaml2obj plain-def.yaml -o plaindef-v1.o
+# RUN: %python seteflags.py plaindef-v1.o && mv plaindef-v1.o plaindef.o
+# RUN: yaml2obj own-code.yaml -o owncode-v1.o
+# RUN: %python seteflags.py owncode-v1.o && mv owncode-v1.o owncode.o
+# RUN: yaml2obj truncated-note.yaml -o trunc-v1.o
+# RUN: %python seteflags.py trunc-v1.o && mv trunc-v1.o trunc.o
+# RUN: yaml2obj badrecsize.yaml -o badrs-v1.o
+# RUN: %python seteflags.py badrs-v1.o && mv badrs-v1.o badrs.o
+# RUN: yaml2obj sect-anchor.yaml -o anchor-v1.o
+# RUN: %python seteflags.py anchor-v1.o && mv anchor-v1.o anchor.o
+
+# --- P-1: duplicate owned records: two identical files link as two inputs,
+# --- the NOTE duplicate wording fires in mergePlacement, BEFORE the generic
+# --- duplicate-definition check of resolveSymbols.
+# RUN: not mcs251-lld base.o base.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o dup.elf 2>&1 | FileCheck %s --check-prefix=DUPOWN
+# DUPOWN: placement NOTE duplicate owned record for fx in base.o and base.o
+# NDUP: placement NOTE duplicate owned record for fx in notedup.o and notedup.o
+# --- record-level duplicate with a single definition symbol (note-dup-rec).
+# RUN: not mcs251-lld notedup.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o ndup.elf 2>&1 | FileCheck %s --check-prefix=NDUP
+
+# --- F1(ii) retain double-direction: NOTE bit0=1 without the section flag,
+# --- and the section flag without NOTE bit0.
+# RUN: not mcs251-lld rdrop.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o rdrop.elf 2>&1 | FileCheck %s --check-prefix=RDROP
+# RDROP: fixed section .mcu.fixed.fx declares retain but lacks SHF_GNU_RETAIN
+# RUN: not mcs251-lld rextra.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o rextra.elf 2>&1 | FileCheck %s --check-prefix=REXTRA
+# REXTRA: fixed section .mcu.fixed.fx carries SHF_GNU_RETAIN but placement NOTE flags.bit0=0
+
+# --- F1(iii): the retain bit outside .mcu.fixed.* is one uniform message.
+# RUN: not mcs251-lld rwrong.o --area-start=CSEG=0xff0200 -o rwrong.elf 2>&1 | FileCheck %s --check-prefix=RWRONG
+# RWRONG: section .rodata carries SHF_GNU_RETAIN outside .mcu.fixed.*
+
+# --- §4.1: a FIXED section never carries the XSEG-split capability bit.
+# RUN: not mcs251-lld fsplit.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o fsplit.elf 2>&1 | FileCheck %s --check-prefix=FSPLIT
+# FSPLIT: unsupported ALLOC section flags for .mcu.fixed.fx
+
+# --- §3.2 span identity: NOTE.size must equal sh_size.
+# RUN: not mcs251-lld span.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o span.elf 2>&1 | FileCheck %s --check-prefix=SPAN
+# SPAN: section .mcu.fixed.fx disagrees with placement NOTE for _fx
+
+# --- §2.2 storage-class consistency: a CODE record on a NOBITS section.
+# RUN: not mcs251-lld classm.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o classm.elf 2>&1 | FileCheck %s --check-prefix=CLASS
+# CLASS: section .mcu.fixed.fx disagrees with placement NOTE for _fx
+
+# --- §3.2 entity counting: two STT_OBJECT definitions in one fixed section.
+# RUN: not mcs251-lld twoent.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o twoent.elf 2>&1 | FileCheck %s --check-prefix=TWOENT
+# TWOENT: section .mcu.fixed.fx disagrees with placement NOTE for fx
+
+# --- malformed NOTE: unknown storage_class encoding (reader-level).
+# RUN: not mcs251-lld badclass.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o badclass.elf 2>&1 | FileCheck %s --check-prefix=BCLASS
+# BCLASS: malformed placement NOTE in badclass.o: unknown storage_class 7
+
+# --- N7 option A: a bind record with ANY flag bit is malformed.
+# RUN: not mcs251-lld bindflag.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o bindflag.elf 2>&1 | FileCheck %s --check-prefix=BINDFLAG
+# BINDFLAG: malformed placement NOTE in bindflag.o: bind record for bx carries non-zero flags
+
+# --- truncated record table.
+# RUN: not mcs251-lld trunc.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o trunc.elf 2>&1 | FileCheck %s --check-prefix=TRUNC
+# TRUNC: malformed placement NOTE in trunc.o: truncated record at offset 20
+
+# --- non-canonical record_size (28 with a 2-byte stable is right; 36 is not).
+# RUN: not mcs251-lld badrs.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o badrs.elf 2>&1 | FileCheck %s --check-prefix=BADRS
+# BADRS: malformed placement NOTE in badrs.o: record_size 36 is not the canonical alignTo(25+stable_len,4) value 28
+
+# --- §8 layout gates: zero-size entity, 64K straddle, alignment violation.
+# RUN: not mcs251-lld zero.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o zero.elf 2>&1 | FileCheck %s --check-prefix=ZERO
+# ZERO: zero-size entity _fx at 0x20000 is not placeable
+# RUN: not mcs251-lld straddle.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o straddle.elf 2>&1 | FileCheck %s --check-prefix=STRADDLE
+# STRADDLE: fixed XDATA entity _fx at 0x1fffe straddles a 64K window boundary
+# RUN: not mcs251-lld align4.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o align4.elf 2>&1 | FileCheck %s --check-prefix=ALIGN4
+# ALIGN4: fixed placement for _fx at 0x20001 violates alignment 4
+
+# --- §3.2 entity counting, positive control: the ELF object writer emits a
+# --- local STT_SECTION symbol for any section a relocation references (the
+# --- real llc output does this for placed functions: intra-function label
+# --- refs, BRJT jump-table columns).  That is structural ELF metadata, not
+# --- an entity; the exactly-one-entity check must accept it alongside the
+# --- single STT_OBJECT/STT_FUNC definition.  Regression: real G11-B objects
+# --- (placement-function-span.ll, probe4 span-jumptable) were rejected as
+# --- "disagrees with placement NOTE" before this anchor was exempted.
+# RUN: mcs251-lld anchor.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --keep-symbols --map=anchor.map -o anchor.elf
+# RUN: grep 'mcu.fixed.fx 0x20000' anchor.map
+
+# --- §3.3 validatePlacementResolution: a bind-only name colliding with an
+# --- unplaced definition (P-5(5)).
+# RUN: not mcs251-lld bindx.o plaindef.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o bpd.elf 2>&1 | FileCheck %s --check-prefix=BPD
+# BPD: conflicting placement for _bx: bind-only reference collides with a definition without placement
+
+# --- §3.3 the unique collision checkpoint: a bind-only output name that is
+# --- a reserved boundary symbol form (checked against the static closed
+# --- enumeration AND the live Synth map).
+# RUN: not mcs251-lld bindres.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o bres.elf 2>&1 | FileCheck %s --check-prefix=BRES
+# BRES: bind-only placement symbol l_IRAM collides with a defined or reserved output symbol name
+
+# --- P-2: the fixed CODE window gates (no window / outside the window).
+# --- B7 (review 2026-09-17): the frozen §8 wording carries %sym ("fixed
+# --- CODE entity %sym requires ..."); the expectation below is synced to
+# --- the corrected product text, not a product deviation.
+# RUN: not mcs251-lld owncode.o --area-start=CSEG=0xff0200 --area-start=HOME=0 -o nowin.elf 2>&1 | FileCheck %s --check-prefix=NOWIN
+# NOWIN: fixed CODE entity _cfn requires an explicit CODE window (--flash-base/--flash-size)
+# RUN: not mcs251-lld owncode.o --area-start=CSEG=0xff0200 --area-start=HOME=0 --flash-base=0xff0000 --flash-size=0x10000 -o outwin.elf 2>&1 | FileCheck %s --check-prefix=OUTWIN
+# OUTWIN: fixed CODE entity _cfn at 0xfc4000 is outside the CODE window
+
+# --- V1 EOL (PM R-2026-09-16-1): a v1-contract object carrying the
+# --- placement NOTE fails closed; no compatibility branch exists.
+# RUN: yaml2obj v1note.yaml -o v1.o
+# RUN: not mcs251-lld v1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o v1.elf 2>&1 | FileCheck %s --check-prefix=V1NOTE
+# V1NOTE: .mcs251.placement requires a v2 object identity (the v1 memory contract is EOL)
+# --- and a v1 object with a fixed section fails the same way.
+# RUN: yaml2obj v1fixed.yaml -o v1fix.o
+# RUN: not mcs251-lld v1fix.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o v1fix.elf 2>&1 | FileCheck %s --check-prefix=V1FIX
+# V1FIX: fixed placement section requires a v2 object identity: .mcu.fixed.fx
+
+# --- P-3: archives (classic and thin) with one frozen wording.
+# RUN: llvm-ar rcs arch.a base.o
+# RUN: not mcs251-lld arch.a --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o arch.elf 2>&1 | FileCheck %s --check-prefix=ARCH
+# ARCH: archive inputs are not supported: arch.a (link placement objects directly)
+# RUN: printf '!<thin>\n' > thin.a
+# RUN: not mcs251-lld thin.a --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o thin.elf 2>&1 | FileCheck %s --check-prefix=ARCHT
+# ARCHT: archive inputs are not supported: thin.a (link placement objects directly)
+
+#--- seteflags.py
+#!/usr/bin/env python3
+"""Rewrite e_flags to the v2 word (yaml2obj only registers the v1 enum)."""
+import pathlib, sys
+OFF = 36
+for name in sys.argv[1:]:
+    p = pathlib.Path(name)
+    b = bytearray(p.read_bytes())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = bytes.fromhex("00000102")
+    p.write_bytes(bytes(b))
+
+#--- base.yaml
+# One owned FIXED-XDATA entity: stable "fx", A=0x20000, size 4, align 1.
+# Record hex: rs=28 | 01 01 00 00 | 00020000 00000004 00000001 00000000
+#             | 52A5BDF0 | 02 "fx" 00
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- note-dup.yaml
+# Single definition symbol, TWO identical owned records (P-1 note-dup-rec).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF0026678000000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- retain-drop.yaml
+# NOTE flags bit0=1 but the section lacks SHF_GNU_RETAIN.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01010000000200000000000400000001000000018D2238CB02667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- retain-extra.yaml
+# The section carries SHF_GNU_RETAIN but NOTE flags.bit0=0.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_GNU_RETAIN ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- retain-wrongsec.yaml
+# F1(iii): a non-fixed section carrying the retain bit.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_GNU_RETAIN ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _r
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .rodata
+    Value: 0
+    Size: 1
+
+#--- fixed-split.yaml
+# §4.1: a fixed section with the G13b XSEG-split capability bit.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- span-mismatch.yaml
+# NOTE.size=8, section sh_size=4.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000008000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- class-mismatch.yaml
+# storage_class=CODE (2) on a NOBITS section.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01020000000200000000000400000001000000007FDF5A9802667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- two-entities.yaml
+# Two STT_OBJECT definitions inside one fixed section: entity count != 1.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+  - Name: _fx2
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 0
+
+#--- badclass.yaml
+# storage_class byte 7: unknown encoding.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0107000000020000000000040000000100000000A4BB5BC502667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- bind-flag.yaml
+# N7 option A: a bind record carrying flags bit0.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01010001000100000000000400000001000000011C87921802627800'
+Symbols:
+  - Name: _bx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- zero-size.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000000000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 0
+
+#--- straddle.yaml
+# A=0x1FFFE size 4: crosses the 64K boundary.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000001FFFE00000004000000010000000064ED26B102667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- own-align4.yaml
+# A=0x20001 does not satisfy align 4.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 4
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01010000000200010000000400000004000000005FBC4C4502667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- bind-xdata.yaml
+# A bind-only XDATA object (carrier symbol _bx, stable "bx").
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0101000100010000000000040000000100000000E6E499C902627800'
+Symbols:
+  - Name: _bx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- bind-reserved.yaml
+# A bind-only name taking a reserved boundary form (l_IRAM).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '00000020010100010002000000000004000000010000000000D4AD0F066C5F4952414D00'
+Symbols:
+  - Name: l_IRAM
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- plain-def.yaml
+# Defines _bx in a dynamic XSEG section, with NO placement: the bind-only
+# reference in bind-xdata.o collides with it.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._bx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _bx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._bx
+    Value: 0
+    Size: 4
+
+#--- own-code.yaml
+# An owned CODE function at 0xfc4000 (41 bytes of trampolines).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.cfn
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '4141414141414141414141414141414141414141414141414141414141414141414141414141414141'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0102010000FC4000000000290000000100000000A46B191C0363666E'
+Symbols:
+  - Name: _cfn
+    Binding: STB_LOCAL
+    Type: STT_FUNC
+    Section: .mcu.fixed.cfn
+    Value: 0
+    Size: 41
+
+#--- truncated-note.yaml
+# The record table claims more bytes than the section holds.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF0'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- badrecsize.yaml
+# record_size 36 with a 2-byte stable is not the canonical 28.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '00000024010100000002000000000004000000010000000052A5BDF00266780000000000'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- v1fixed.yaml
+# A v1-note object (no attributes carrier) carrying a fixed section.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- v1note.yaml
+# A v1-note object carrying ONLY the placement NOTE (no fixed section).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .note.mcs251.abi
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000010000000100000000000000020000F3FF000000070000000000000000'
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100010002000000000004000000010000000000D4AD0F02677300'
+
+#--- sect-anchor.yaml
+# One owned FIXED-XDATA entity plus the local STT_SECTION symbol the object
+# writer emits for a referenced section.  The anchor is not an entity: the
+# link must succeed (entity count is still exactly 1).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+  - Type: STT_SECTION
+    Section: .mcu.fixed.fx

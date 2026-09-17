@@ -13,6 +13,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
 #include <optional>
@@ -467,6 +468,24 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
         if (P.first == AreaName.str())
           return fail(Err, "duplicate --area-start for " + AreaName);
       O.Core.AreaStarts.emplace_back(AreaName.str(), *Address);
+    } else if (auto V = take("--placement-manifest")) {
+      // G11 (design §7): the manifest is a plain text file of
+      // `place <stable> <A> [align=N] [size=N] [retain] [noinit] [bind]
+      // [data|xdata|code]` rows (with `#` comments).  The shell only moves
+      // bytes: the line grammar, the malformed-entry diagnostic and every
+      // merge decision belong to mergePlacement() in the core.  A missing
+      // or unreadable file is a hard error, never an empty manifest.
+      auto MB = MemoryBuffer::getFileOrSTDIN(*V);
+      if (!MB)
+        return fail(Err, "cannot read --placement-manifest " + *V);
+      StringRef Contents = MB->get()->getBuffer();
+      while (!Contents.empty()) {
+        auto [Line, Rest] = Contents.split('\n');
+        O.Core.PlacementManifest.push_back(Line.str());
+        Contents = Rest;
+      }
+      if (O.Core.PlacementManifest.empty())
+        return fail(Err, "--placement-manifest " + *V + " has no entries");
     } else if (auto V = take("--reserve-data")) {
       size_t Comma = V->find(',');
       if (Comma == StringRef::npos)

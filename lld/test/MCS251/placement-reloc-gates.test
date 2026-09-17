@@ -1,0 +1,741 @@
+# G11-C: the relocation-gate extensions F9/F10/F11, the P-6 gate-order
+# invariant (two separate tests, design §8 P-6 rev 7) and the bind-only
+# numeric chain (design §3.3 insertion points 1/2/3).
+#
+#   F9  : R_MCS251_16 / R_MCS251_J16 against ANY XDATA-classified target
+#         (dynamic XSEG, owned FIXED-XDATA, bind-only PlacementNames record)
+#         is rejected -- classification, not Region matching.
+#   F10 : a stored R_MCS251_24 pointer must resolve inside the target
+#         object [A, A+size] (one-past-end legal) -- owned FIXED section
+#         range or the bind-only record's range.
+#   F11 : a bind-only FUNCTION target passes the J16/J11 CODE gate (A is
+#         its entry); a bind-only OBJECT stays rejected.
+#   P6a : black-box -- the F9 failure leaves NO output file on a fresh path.
+#   P6b : gate order -- one relocation that would ALSO violate the overflow
+#         band (addend 0x1000000 pushes the value past 24 bits) still
+#         reports the F9 wording, proving F9 fires before the band check
+#         and the field write (F12: reject, never low-16 truncate).
+#
+# Fixture provenance: hand-built yaml2obj v2 objects (the proven attributes
+# blob + seteflags.py).  The NOTE records follow the frozen v1 layout.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj own-fx.yaml -o ownfx-v1.o
+# RUN: %python seteflags.py ownfx-v1.o && mv ownfx-v1.o ownfx.o
+# RUN: yaml2obj own-hi.yaml -o ownhi-v1.o
+# RUN: %python seteflags.py ownhi-v1.o && mv ownhi-v1.o ownhi.o
+# RUN: yaml2obj dyn-only.yaml -o dyn-v1.o
+# RUN: %python seteflags.py dyn-v1.o && mv dyn-v1.o dyn.o
+# RUN: yaml2obj rel16.yaml -o rel16-v1.o
+# RUN: %python seteflags.py rel16-v1.o && mv rel16-v1.o rel16.o
+# RUN: yaml2obj rel16-band.yaml -o rel16b-v1.o
+# RUN: %python seteflags.py rel16b-v1.o && mv rel16b-v1.o rel16b.o
+# RUN: yaml2obj ptr-oob.yaml -o ptroob-v1.o
+# RUN: %python seteflags.py ptroob-v1.o && mv ptroob-v1.o ptroob.o
+# RUN: yaml2obj ptr-onepast.yaml -o ptrop-v1.o
+# RUN: %python seteflags.py ptrop-v1.o && mv ptrop-v1.o ptrop.o
+# RUN: yaml2obj bindonly-fn.yaml -o bindfn-v1.o
+# RUN: %python seteflags.py bindfn-v1.o && mv bindfn-v1.o bindfn.o
+# RUN: yaml2obj bindonly-obj.yaml -o bindobj-v1.o
+# RUN: %python seteflags.py bindobj-v1.o && mv bindobj-v1.o bindobj.o
+# RUN: yaml2obj bind-rel16.yaml -o brel16-v1.o
+# RUN: %python seteflags.py brel16-v1.o && mv brel16-v1.o brel16.o
+# RUN: yaml2obj bind-ptr-oob.yaml -o bptr-v1.o
+# RUN: %python seteflags.py bptr-v1.o && mv bptr-v1.o bptr.o
+# RUN: yaml2obj bind-ptr-ok.yaml -o bptrok-v1.o
+# RUN: %python seteflags.py bptrok-v1.o && mv bptrok-v1.o bptrok.o
+# RUN: yaml2obj boundary-lo8.yaml -o tas-v1.o
+# RUN: %python seteflags.py tas-v1.o && mv tas-v1.o tas.o
+#
+# --- F9 on an owned FIXED-XDATA target (P-6a: fresh path, no output).
+# RUN: not mcs251-lld rel16.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o p6a.elf 2>&1 | FileCheck %s --check-prefix=F9
+# F9: XDATA symbol _fx truncated to 16 bits (use the 24-bit relocation channel) in .text
+# RUN: test ! -f p6a.elf
+#
+# --- P-6b gate order: the addend pushes the value past the 24-bit band,
+# --- yet the F9 wording (not "relocation overflow") is what fires.
+# RUN: not mcs251-lld rel16b.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o p6b.elf 2>&1 | FileCheck %s --check-prefix=F9
+#
+# --- P-6b, internal gate-order observation (design §8 P-6(b): the black-box
+# --- wording alone cannot prove the write never happened).  The
+# --- MCS251_P6_TRACE hook plants a sentinel at every relocated field, counts
+# --- the field writes, and dumps the result; it is inert when unset (B6,
+# --- review 2026-09-17: the sentinel and the restore occupy EXACTLY the
+# --- relocation's field width -- the trace carries width= -- so a width-1
+# --- field at a section end can never touch the abutting next section).
+# --- Assertion 1: the F9 failure performs ZERO writes and leaves the
+# --- sentinel intact (F12: the low-16 write is preempted, not undone).
+# RUN: not env MCS251_P6_TRACE=%t/trace-f9.txt mcs251-lld rel16.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o p6t.elf 2>&1 | FileCheck %s --check-prefix=F9
+# RUN: FileCheck %s --check-prefix=P6FAILDATA < %t/trace-f9.txt
+# P6FAILDATA: P6 fields=1 result=fail
+# P6FAILDATA: P6 REL .text off=0x1 writes=0 before=0x00,0x00 after=0xa5,0x5a width=2
+# RUN: test ! -f p6t.elf
+# --- Assertion 2: the channel is live, not vacuously zero -- the same hook
+# --- on a successful link counts the 3 R_MCS251_24 field writes.
+# RUN: env MCS251_P6_TRACE=%t/trace-ok.txt mcs251-lld bptrok.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o p6ok.elf
+# RUN: FileCheck %s --check-prefix=P6OKDATA < %t/trace-ok.txt
+# P6OKDATA: P6 fields=1 result=ok
+# P6OKDATA: P6 REL .rodata off=0x0 writes=3 before=0x00,0x00,0x00 after=0x01,0x00,0x00 width=3
+# --- Assertion 3: the hook never perturbs a successful image (byte-for-byte
+# --- identical with and without the trace).
+# RUN: mcs251-lld bptrok.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o p6plain.elf
+# RUN: cmp p6ok.elf p6plain.elf
+#
+# --- Assertion 4 (B6): a width-1 relocation field at the LAST byte of a
+# --- section abutting another section.  With the trace on, the second
+# --- section's first byte must keep its original value and the finished
+# --- image must be byte-identical to the untraced link.
+# RUN: mcs251-lld tas.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o boundary-off.elf
+# RUN: llvm-readelf -x .mcs251.load.0 boundary-off.elf | FileCheck %s --check-prefix=TRACEOFF
+# TRACEOFF: 0x00ff0200 c0d00000 11223344
+# RUN: env MCS251_P6_TRACE=%t/trace-bnd.txt mcs251-lld tas.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o boundary-on.elf
+# RUN: llvm-readelf -x .mcs251.load.0 boundary-on.elf | FileCheck %s --check-prefix=TRACEON
+# TRACEON: 0x00ff0200 c0d00000 11223344
+# RUN: FileCheck %s --check-prefix=TRACEDATA < %t/trace-bnd.txt
+# TRACEDATA: P6 REL .text off=0x3 writes=1 before=0x00 after=0x00 width=1
+# RUN: cmp boundary-on.elf boundary-off.elf
+#
+# --- F10 on an owned FIXED-XDATA target: outside [0x20000,0x20004].
+# RUN: not mcs251-lld ptroob.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o ptroob.elf 2>&1 | FileCheck %s --check-prefix=F10
+# F10: stored XDATA pointer in .rodata resolves outside the target object _fx: 0x20008 not in [0x20000,0x20004] (one-past-end is the last legal value)
+# --- one-past-end stays legal.
+# RUN: mcs251-lld ptrop.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --map=ptrop.map -o ptrop.elf
+#
+# --- 24-bit full span: the last window tail [0xfffffc,0x1000000) places.
+# RUN: mcs251-lld ownhi.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --keep-symbols --map=hi.map -o hi.elf
+# RUN: grep 'mcu.fixed.hi 0xfffffc' hi.map
+# RUN: llvm-readelf -s hi.elf | FileCheck %s --check-prefix=HISYM
+# HISYM: 00fffffc {{.*}} _hi
+#
+# --- F13: FIXED-XDATA never counts into the dynamic XSEG span.  The
+# --- dynamic-only link and the dynamic+fixed link report identical
+# --- s_XSEG/l_XSEG rows.
+# RUN: mcs251-lld dyn.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --map=dynonly.map -o dynonly.elf
+# RUN: mcs251-lld dyn.o ownfx.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --map=dynfix.map -o dynfix.elf
+# RUN: grep 's_XSEG = 0x10000' dynonly.map && grep 's_XSEG = 0x10000' dynfix.map
+# RUN: grep 'l_XSEG = 0x0004' dynonly.map && grep 'l_XSEG = 0x0004' dynfix.map
+# RUN: grep 'mcu.fixed.fx 0x20000' dynfix.map
+#
+# --- F11 positive: J16 to a bind-only function links; the field carries A
+# --- and the Synth channel exposes the row.
+# RUN: mcs251-lld bindfn.o --area-start=CSEG=0xff0200 --area-start=HOME=0 --keep-symbols --map=bindfn.map -o bindfn.elf
+# RUN: llvm-readelf -s bindfn.elf | FileCheck %s --check-prefix=BINDFN
+# BINDFN: 00ff2000 {{.*}} bind_fn
+# RUN: llvm-readelf -x .mcs251.load.0 bindfn.elf | FileCheck %s --check-prefix=J16BYTES
+# J16BYTES: 2000
+# --- F11 negative twin: J16 to a bind-only OBJECT is not CODE.
+# RUN: not mcs251-lld bindobj.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o bindobj.elf 2>&1 | FileCheck %s --check-prefix=BOBJ
+# BOBJ: control relocation target is not CODE in .text
+#
+# --- F9 on a bind-only XDATA record (the PlacementNames classification).
+# RUN: not mcs251-lld brel16.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o brel16.elf 2>&1 | FileCheck %s --check-prefix=BF9
+# BF9: XDATA symbol _bx truncated to 16 bits (use the 24-bit relocation channel) in .text
+#
+# --- F10 on a bind-only XDATA record: outside [0x10000,0x10004).
+# RUN: not mcs251-lld bptr.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o bptr.elf 2>&1 | FileCheck %s --check-prefix=BF10
+# BF10: stored XDATA pointer in .rodata resolves outside the target object _bx: 0x10008 not in [0x10000,0x10004] (one-past-end is the last legal value)
+# --- numeric chain: a stored pointer to a bind-only object carries A
+# --- (PlacementNames ordered before Synth/0 in the value chain).
+# RUN: mcs251-lld bptrok.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --keep-symbols --map=bptrok.map -o bptrok.elf
+# RUN: llvm-readelf -x .mcs251.load.0 bptrok.elf | FileCheck %s --check-prefix=BPTR
+# BPTR: 010000
+# RUN: llvm-readelf -s bptrok.elf | FileCheck %s --check-prefix=BPTRSYM
+# BPTRSYM: 00010000 {{.*}} _bx
+
+#--- seteflags.py
+#!/usr/bin/env python3
+"""Rewrite e_flags to the v2 word (yaml2obj only registers the v1 enum)."""
+import pathlib, sys
+OFF = 36
+for name in sys.argv[1:]:
+    p = pathlib.Path(name)
+    b = bytearray(p.read_bytes())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = bytes.fromhex("00000102")
+    p.write_bytes(bytes(b))
+
+#--- own-fx.yaml
+# Owned FIXED-XDATA entity: stable fx, A=0x20000, size 4.
+# record: rs=28 | 01 01 00 00 | 00020000 00000004 00000001 00000000
+#         | 52A5BDF0 | 02 6678 00
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- own-hi.yaml
+# Owned FIXED-XDATA entity at the last window tail: A=0xfffffc, size 4.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.hi
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0101000000FFFFFC000000040000000100000000D9C81FF802686900'
+Symbols:
+  - Name: _hi
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.hi
+    Value: 0
+    Size: 4
+
+#--- dyn-only.yaml
+# One dynamic XSEG slice (4 bytes); no placement at all.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._d
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _d
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._d
+    Value: 0
+    Size: 4
+
+#--- rel16.yaml
+# R_MCS251_16 against the owned FIXED-XDATA symbol.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+    ShSize: 4
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_16
+        Symbol: _fx
+        Addend: 0
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- rel16-band.yaml
+# Same, with addend 0x1000000: the value leaves the 24-bit band, so if the
+# band check ran first the message would be "relocation overflow" -- the
+# F9 wording proves the gate order (P-6b).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+    ShSize: 4
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_16
+        Symbol: _fx
+        Addend: 0x1000000
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- ptr-oob.yaml
+# R_MCS251_24 stored pointer, addend 8: outside [0x20000,0x20004].
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .rela.rodata
+    Type: SHT_RELA
+    Info: .rodata
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _fx
+        Addend: 8
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- ptr-onepast.yaml
+# R_MCS251_24 with addend 4: one-past-end is legal.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .rela.rodata
+    Type: SHT_RELA
+    Info: .rodata
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _fx
+        Addend: 4
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- bindonly-fn.yaml
+# J16 call to a bind-only function at 0xff2000.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_J16
+        Symbol: bind_fn
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000C34D43533235310001000000B8048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C84150100010000000000020000020162696E645F666E00
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '000000200102010100FF20000000000000000001000000003F706EC20762696E645F666E'
+# PM ruling (rev 2, kept): a bind function enters as a NOTYPE entry.
+Symbols:
+  - Name: bind_fn
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- bindonly-obj.yaml
+# J16 to a bind-only AS0-DATA OBJECT: XDATA would hit F9 first; the
+# F11 object rejection needs a non-XDATA class.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_J16
+        Symbol: _bx
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BF4D43533235310001000000B4048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8411010001000000000002000002015F627800
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01000001000000400000000400000001000000007A6F61A302627800'
+Symbols:
+  - Name: _bx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- bind-rel16.yaml
+# R_MCS251_16 against a bind-only XDATA record.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_16
+        Symbol: _bx
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0101000100010000000000040000000100000000E6E499C902627800'
+Symbols:
+  - Name: _bx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- bind-ptr-oob.yaml
+# Stored R_MCS251_24 pointer to a bind-only object, addend 8.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .rela.rodata
+    Type: SHT_RELA
+    Info: .rodata
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _bx
+        Addend: 8
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BF4D43533235310001000000B4048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8411010001000000000002000002015F627800
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0101000100010000000000040000000100000000E6E499C902627800'
+Symbols:
+  - Name: _bx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- bind-ptr-ok.yaml
+# Stored R_MCS251_24 pointer to a bind-only object at A=0x10000.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '00000000'
+  - Name: .rela.rodata
+    Type: SHT_RELA
+    Info: .rodata
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _bx
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000BF4D43533235310001000000B4048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8411010001000000000002000002015F627800
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0101000100010000000000040000000100000000E6E499C902627800'
+Symbols:
+  - Name: _bx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- boundary-lo8.yaml
+# B6 (review 2026-09-17): a width-1 (LO8) field at the LAST byte of .text,
+# with .rodata placed immediately after it in the same CSEG run.  The P-6
+# sentinel must occupy exactly one byte, so the trace cannot touch .rodata's
+# first byte and the traced image equals the untraced one.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '11223344'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: _fx
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4

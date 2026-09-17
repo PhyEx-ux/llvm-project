@@ -1,0 +1,154 @@
+# G11-C: the fixed-placement end-to-end positive corpus -- REAL producer
+# output (the embedded IR is verbatim clang -O0 -emit-llvm output for a
+# program using every placement shape; llc materializes the object in the
+# test, so the producer provenance is reproducible, not hand-patched).
+#
+# Covered (design rev 7 §1.3/§3.3, Alice survey "C 轮必须接住"):
+#   * map rows pin every `.mcu.fixed.*` section at its NOTE address;
+#   * the output symtab carries every entity at its pinned VMA (NOBITS
+#     entities report ABS, PROGBITS entities land in their load section);
+#   * the sparse init records keep the ordinary v1 shapes with dest = A
+#     (the F5/F4 destination whitelists accept the FIXED slices), and a
+#     noinit entity gets NO record at all;
+#   * bind-only names resolve to A (no storage) and appear as Synth rows
+#     APPENDED after the existing boundary symbols (E5 append-only);
+#   * the retain entity links (its object legitimately arrives as
+#     ELFOSABI_GNU -- see the identity note in loadFile);
+#   * the explicit CODE window gates work on the real corpus (P-2).
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf e2e.ll -o e2e.o
+# --- object-side sanity: the retain section carries SHF_GNU_RETAIN.
+# RUN: llvm-readelf -S e2e.o | FileCheck %s --check-prefix=OBJSEC
+# OBJSEC: .mcu.fixed.dv
+# OBJSEC-SAME: NOBITS
+# OBJSEC-SAME: WAR 
+#
+# RUN: mcs251-lld e2e.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 \
+# RUN:   --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 \
+# RUN:   --area-start=XSEG=0x010000 --edata-end=0x3fff \
+# RUN:   --flash-base=0xfc0000 --flash-size=0x40000 \
+# RUN:   --keep-symbols --map=e2e.map -o e2e.elf
+# RUN: FileCheck %s --check-prefix=MAP < e2e.map
+# --- the Synth map emits in std::map key order (l_XDATA_INIT < l_XINIT);
+# --- this is the pre-existing boundary-symbol channel, untouched by G11-C.
+# MAP: l_XDATA_INIT = 0x000b
+# MAP: l_XINIT = 0x0010
+# MAP: e2e.o:.mcu.fixed.fp 0xfc4000 +0xfa
+# MAP: e2e.o:.mcu.fixed.dv 0x0040 +0x4
+# MAP: e2e.o:.mcu.fixed.xv 0x20000 +0x4
+# MAP: e2e.o:.mcu.fixed.cv 0xfc0000 +0x8
+# MAP: e2e.o:.mcu.fixed.al 0x0050 +0x10
+# MAP: e2e.o:.mcu.fixed.nr 0x21000 +0x10
+#
+# RUN: llvm-readelf -s e2e.elf | FileCheck %s --check-prefix=SYMS
+# SYMS: 00fc4000 {{.*}} FUNC {{.*}} _fp
+# SYMS: 00000040 {{.*}} OBJECT {{.*}} ABS _dv
+# SYMS: 00020000 {{.*}} OBJECT {{.*}} ABS _xv
+# SYMS: 00000050 {{.*}} OBJECT {{.*}} ABS _al
+# SYMS: 00fc0000 {{.*}} OBJECT {{.*}} _cv
+# SYMS: 00021000 {{.*}} OBJECT {{.*}} ABS _nr
+# --- bind-only rows are appended AFTER every boundary symbol (rows for
+# --- s_*/l_* all precede the two placement names).  s_XINIT is the last
+# --- boundary row here (no CRT input => no __mcs251_stack_base row).
+# SYMS: 00ff8000 {{.*}} NOTYPE {{.*}} ABS s_XINIT
+# SYMS-NOT: {{^}}00010000
+# SYMS: 00fc5000 {{.*}} NOTYPE {{.*}} ABS _ghostfn
+# SYMS: 00010000 {{.*}} NOTYPE {{.*}} ABS _ghostx
+#
+# --- segments: the PROGBITS entities land at their pinned VMAs.
+# RUN: llvm-readelf -l e2e.elf | FileCheck %s --check-prefix=SEGS
+# SEGS: LOAD {{.*}}0x00fc0000 0x00fc0000 0x00008
+# SEGS: LOAD {{.*}}0x00fc4000 0x00fc4000 0x000fa
+#
+# --- the sparse init records, dest = A: the XINIT area begins with the dv
+# --- record (dest 0x0040, size 4, payload 4, 12345678) followed by the al
+# --- zero-record (dest 0x0050, size 0x10, clear only); the XDATA_INIT area
+# --- holds exactly the xv record (bank 02, window 0000, size 4, payload 4,
+# --- 00000007) -- the noinit entity nr contributes NO record.
+# RUN: llvm-readelf -x 4 e2e.elf | FileCheck %s --check-prefix=XINIT
+# XINIT: 0x00ff8000 00400004 00041234 56780050 00100000
+# RUN: llvm-readelf -x 5 e2e.elf | FileCheck %s --check-prefix=XDINIT
+# XDINIT: 0x00ff9000 02000000 04000400 000007
+#
+# --- P-2 on the real corpus: no window fails; a window that excludes the
+# --- fixed CODE entities fails with the frozen wording (before any
+# --- CODE ROM overflow consideration).  B7 (review 2026-09-17): the frozen
+# --- §8 wording carries %sym; the expectation is synced to the corrected
+# --- product text.
+# RUN: not mcs251-lld e2e.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 \
+# RUN:   --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 \
+# RUN:   --area-start=XSEG=0x010000 --edata-end=0x3fff -o nowin.elf 2>&1 | FileCheck %s --check-prefix=NOWIN
+# NOWIN: fixed CODE entity _fp requires an explicit CODE window (--flash-base/--flash-size)
+# RUN: not mcs251-lld e2e.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 \
+# RUN:   --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 \
+# RUN:   --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 \
+# RUN:   --area-start=XSEG=0x010000 --edata-end=0x3fff \
+# RUN:   --flash-base=0xff0000 --flash-size=0x10000 -o outwin.elf 2>&1 | FileCheck %s --check-prefix=OUTWIN
+# OUTWIN: fixed CODE entity _fp at 0xfc4000 is outside the CODE window
+
+#--- e2e.ll
+; ModuleID = 'e2e.c'
+source_filename = "e2e.c"
+target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
+target triple = "mcs251"
+
+@dv = dso_local global i32 305419896, align 1 #0
+@xv = dso_local addrspace(3) global i32 7, align 1 #1
+@cv = dso_local addrspace(4) constant [2 x i32] [i32 1, i32 2], align 1 #2
+@ghostx = external dso_local addrspace(3) global i32, align 1 #3
+@al = dso_local global [4 x i32] zeroinitializer, align 1 #4
+@nr = dso_local addrspace(3) global [4 x i32] zeroinitializer, align 1 #5
+@llvm.used = appending global [1 x ptr] [ptr @dv], section "llvm.metadata"
+@llvm.compiler.used = appending global [2 x ptr] [ptr addrspacecast (ptr addrspace(3) @ghostx to ptr), ptr addrspacecast (ptr addrspace(4) @ghostfn to ptr)], section "llvm.metadata"
+
+; Function Attrs: noinline nounwind optnone
+define dso_local i32 @fp(i32 noundef %0) addrspace(4) #6 align 4 {
+  %2 = alloca i32, align 1
+  store i32 %0, ptr %2, align 1
+  %3 = load i32, ptr %2, align 1
+  %4 = load i32, ptr @dv, align 1
+  %5 = add nsw i32 %3, %4
+  %6 = load i32, ptr addrspace(3) @xv, align 1
+  %7 = add nsw i32 %5, %6
+  ret i32 %7
+}
+
+declare dso_local i32 @ghostfn(i32 noundef) addrspace(4) #7 align 4
+
+; Function Attrs: noinline nounwind optnone
+define dso_local i32 @use() addrspace(4) #8 {
+  %1 = load i32, ptr addrspace(3) @ghostx, align 1
+  %2 = call addrspace(4) i32 @ghostfn(i32 noundef %1) #9
+  %3 = load i32, ptr @al, align 1
+  %4 = add nsw i32 %2, %3
+  %5 = load i32, ptr addrspace(4) @cv, align 1
+  %6 = add nsw i32 %4, %5
+  %7 = load i32, ptr addrspace(3) getelementptr inbounds nuw (i8, ptr addrspace(3) @nr, i32 4), align 1
+  %8 = add nsw i32 %6, %7
+  ret i32 %8
+}
+
+attributes #0 = { "mcs251-place"="0x40,data,object,owned,1" "mcs251-stable-symbol"="dv" }
+attributes #1 = { "mcs251-place"="0x20000,xdata,object,owned,0" "mcs251-stable-symbol"="xv" }
+attributes #2 = { "mcs251-place"="0xFC0000,code,object,owned,0" "mcs251-stable-symbol"="cv" }
+attributes #3 = { "mcs251-place"="0x10000,xdata,object,bind,0" "mcs251-stable-symbol"="ghostx" }
+attributes #4 = { "mcs251-place"="0x50,data,object,owned,0" "mcs251-stable-symbol"="al" }
+attributes #5 = { "mcs251-place"="0x21000,xdata,object,owned,2" "mcs251-stable-symbol"="nr" }
+attributes #6 = { noinline nounwind optnone "frame-pointer"="all" "mcs251-place"="0xFC4000,code,function,owned,0" "mcs251-stable-symbol"="fp" "no-builtins" "no-trapping-math"="true" "stack-protector-buffer-size"="8" }
+attributes #7 = { "frame-pointer"="all" "mcs251-place"="0xFC5000,code,function,bind,0" "mcs251-stable-symbol"="ghostfn" "no-builtins" "no-trapping-math"="true" "stack-protector-buffer-size"="8" }
+attributes #8 = { noinline nounwind optnone "frame-pointer"="all" "no-builtins" "no-trapping-math"="true" "stack-protector-buffer-size"="8" }
+attributes #9 = { nobuiltin "no-builtins" }
+
+!llvm.module.flags = !{!0, !1}
+!llvm.ident = !{!2}
+!mcs251.signatures = !{!3, !4, !5}
+
+!0 = !{i32 1, !"wchar_size", i32 2}
+!1 = !{i32 7, !"frame-pointer", i32 2}
+!2 = !{!"clang version 24.0.0git (https://github.com/PhyEx-ux/llvm-project.git 93a60c24eccf61fdb7b779f7d74bb4492399522d)"}
+!3 = !{!"_fp", i32 1, i32 0, i32 0}
+!4 = !{!"_ghostfn", i32 2, i32 0, i32 0}
+!5 = !{!"_use", i32 1, i32 0}

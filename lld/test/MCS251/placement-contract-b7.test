@@ -1,0 +1,992 @@
+# G11-C closeout (review G11-C-IMPL-REVIEW-Alice §四.3): the test matrix the
+# implementation review named as missing.  Every case here corresponds to a
+# blocking item B1-B7, the explicit hint ①, or one of the §四.3 named coverage
+# gaps (manifest matrix / direct LinkerResult.Placement check / merged-align
+# execution / whole-group P-5 priority / non-canonical SECTION + sized NOTYPE
+# / FIXED x G8 retry / FIXED x dynamic-split), and is asserted against the
+# PRODUCT output -- the frozen wording, the LinkerResult.Placement contract
+# via the MCS251_PLACEMENT_DUMP instrument, the produced ELF/map bytes.
+#
+# Fixture provenance: hand-built yaml2obj v2 objects (the edata-window /
+# xseg-split pattern: the v1 flag word plus seteflags.py rewriting e_flags
+# in place).  NOTE records follow the frozen v1 layout; the layout_hash
+# values written into each record are the independently recomputed
+# SHA-256-truncated H(F) of the record's own explicit fields (the negative
+# cases never rely on the linker's own hash, which is not consulted).
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: yaml2obj base.yaml -o base-v1.o
+# RUN: %python seteflags.py base-v1.o && mv base-v1.o base.o
+# RUN: yaml2obj bind-fx.yaml -o bfx-v1.o
+# RUN: %python seteflags.py bfx-v1.o && mv bfx-v1.o bfx.o
+# RUN: yaml2obj bind-align4.yaml -o bfa-v1.o
+# RUN: %python seteflags.py bfa-v1.o && mv bfa-v1.o bfa.o
+# RUN: yaml2obj other-same-stable.yaml -o oss-v1.o
+# RUN: %python seteflags.py oss-v1.o && mv oss-v1.o oss.o
+# RUN: yaml2obj owned-2nd-entity.yaml -o o2e-v1.o
+# RUN: %python seteflags.py o2e-v1.o && mv o2e-v1.o o2e.o
+# RUN: yaml2obj named-section-anchor.yaml -o nsa-v1.o
+# RUN: %python seteflags.py nsa-v1.o && mv nsa-v1.o nsa.o
+# RUN: yaml2obj entity-mismatch.yaml -o emm-v1.o
+# RUN: %python seteflags.py emm-v1.o && mv emm-v1.o emm.o
+# RUN: yaml2obj section-align-mismatch.yaml -o sam-v1.o
+# RUN: %python seteflags.py sam-v1.o && mv sam-v1.o sam.o
+
+# =====================================================================
+# B1: NOTE reader boundary completeness -- pad truncation and non-zero
+# padding.  The mutations are pure byte edits of a legal object, so the
+# ONLY difference from the passing base.o link is the record tail.
+# =====================================================================
+# --- B1a: the last padding byte is non-zero (structurally well-formed
+# --- ELF; the old reader accepted it because the total size still matched).
+# RUN: %python note-mutate.py pad base.o b1-pad.o
+# RUN: not mcs251-lld b1-pad.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b1a.elf 2>&1 | FileCheck %s --check-prefix=B1PAD
+# B1PAD: malformed placement NOTE in b1-pad.o: record at offset 20 has non-zero padding
+# RUN: test ! -f b1a.elf
+# --- B1b: the last padding byte is dropped and sh_size/descsz shrink with
+# --- it.  The old reader advanced past the section end, underflowed the
+# --- unsigned remaining-size and reported a schema byte read OUTSIDE the
+# --- NOTE; the fixed reader must report the truncation itself.
+# RUN: %python note-mutate.py cut base.o b1-trunc.o
+# RUN: not mcs251-lld b1-trunc.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b1b.elf 2>&1 | FileCheck %s --check-prefix=B1TRUNC
+# B1TRUNC: malformed placement NOTE in b1-trunc.o: truncated record at offset 20 (record_size 28 does not fit the remaining NOTE data)
+# B1TRUNC-NOT: unsupported schema version
+# RUN: test ! -f b1b.elf
+# --- B1c: the same object unmutated still links (positive control).
+# RUN: mcs251-lld base.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b1ok.elf && test -f b1ok.elf
+
+# =====================================================================
+# B2: manifest-only groups -- the three seed sources and the manifest
+# grammar matrix (success + malformed).
+# =====================================================================
+# --- B2a: manifest-only success: the name has no storage, the Synth row
+# --- carries the manifest address and the link succeeds.
+# RUN: printf 'place ghost 0x10000 xdata size=4 bind\n' > m-ok.txt
+# RUN: mcs251-lld base.o --placement-manifest=m-ok.txt --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --keep-symbols --map=m-ok.map -o m-ok.elf
+# RUN: llvm-readelf -s m-ok.elf | FileCheck %s --check-prefix=MOK
+# MOK: 00010000 {{.*}} NOTYPE {{.*}} ABS ghost
+# RUN: not grep 'ghost' m-ok.map
+# --- B2b: manifest-only, no class anywhere -> malformed (§7 缺字段语义).
+# RUN: printf 'place ghost 0x10000\n' > m-noclass.txt
+# RUN: not mcs251-lld base.o --placement-manifest=m-noclass.txt --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o m-b.elf 2>&1 | FileCheck %s --check-prefix=MNOCLASS
+# MNOCLASS: malformed placement manifest entry for ghost
+# --- B2c: two manifest rows for one stable with conflicting class -> the
+# --- NOTE-vs-manifest clash wording (no NOTE side exists here; the two
+# --- explicit declarations are the competing constraints).
+# RUN: printf 'place ghost 0x10000 xdata\nplace ghost 0x10000 code\n' > m-clash.txt
+# RUN: not mcs251-lld base.o --placement-manifest=m-clash.txt --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o m-c.elf 2>&1 | FileCheck %s --check-prefix=MCLASH
+# MCLASH: conflicting placement constraints (NOTE vs manifest) for ghost: 0x10000 vs 0x10000
+# --- B2d: two manifest rows with conflicting addresses -> same wording.
+# RUN: printf 'place ghost 0x10000 xdata\nplace ghost 0x11000 xdata\n' > m-addr.txt
+# RUN: not mcs251-lld base.o --placement-manifest=m-addr.txt --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o m-d.elf 2>&1 | FileCheck %s --check-prefix=MCLASHADDR
+# MCLASHADDR: conflicting placement constraints (NOTE vs manifest) for ghost: 0x10000 vs 0x11000
+# --- B2e: manifest-only [retain] -> malformed (no owned carrier).
+# RUN: printf 'place ghost 0x10000 xdata retain\n' > m-retain.txt
+# RUN: not mcs251-lld base.o --placement-manifest=m-retain.txt --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o m-e.elf 2>&1 | FileCheck %s --check-prefix=MNOCLASS
+
+# =====================================================================
+# B3: the merged alignment is EXECUTED, not just reported.
+# =====================================================================
+# --- B3a: owned A=0x20001 align=1 + bind SAME object A=0x20001 align=4: the
+# --- merged align (4) must reject the address, not merely annotate the
+# --- report.  (This is the review's merged-align4 shape: both halves pin the
+# --- SAME address, so the verdict is the alignment contract -- never an
+# --- address conflict, which would short-circuit the check under test.)
+# RUN: yaml2obj owned-at-20001.yaml -o oa2-v1.o
+# RUN: %python seteflags.py oa2-v1.o && mv oa2-v1.o oa2.o
+# RUN: not mcs251-lld oa2.o bfa.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b3a.elf 2>&1 | FileCheck %s --check-prefix=B3ALIGN
+# B3ALIGN: fixed placement for _fx at 0x20001 violates alignment 4
+# --- the aligned variant of the same pair still links (positive control):
+# --- owned A=0x20000 align=1 + bind A=0x20000 align=4 -- same address, so
+# --- the merged align 4 holds and the link succeeds.
+# RUN: yaml2obj owned-aligned.yaml -o oal-v1.o
+# RUN: %python seteflags.py oal-v1.o && mv oal-v1.o oal.o
+# RUN: yaml2obj bind-align4-aligned.yaml -o ba4-v1.o
+# RUN: %python seteflags.py ba4-v1.o && mv ba4-v1.o ba4.o
+# RUN: mcs251-lld oal.o ba4.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b3ok.elf && test -f b3ok.elf
+# --- B3b: bind-only group whose A violates its own align -> rejected
+# --- (bind-only reserving no storage must not skip the address contract).
+# RUN: not mcs251-lld bfa.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b3b.elf 2>&1 | FileCheck %s --check-prefix=B3BIND
+# B3BIND: fixed placement for fx at 0x20001 violates alignment 4
+# --- B3c: the fixed section's own sh_addralign vs the NOTE align: a
+# --- section claiming 0x40000 while the NOTE says 1 is a contradiction.
+# --- (the runner's seteflags only rewrites e_flags; the fixture itself
+# --- carries the mismatched AddressAlign.)
+# RUN: not mcs251-lld sam.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b3c.elf 2>&1 | FileCheck %s --check-prefix=B3SEC
+# B3SEC: section .mcu.fixed.fx disagrees with placement NOTE for _fx
+
+# =====================================================================
+# B4: the fixed-section symbol contract -- auxiliary shapes are bounded.
+# =====================================================================
+# --- B4a: a local NOTYPE with a SIZE (entity-shaped claim) is rejected.
+# RUN: not mcs251-lld o2e.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b4a.elf 2>&1 | FileCheck %s --check-prefix=B4SYM
+# B4SYM: section .mcu.fixed.fx disagrees with placement NOTE for second_entity
+# --- B4b: a NAMED, offset local STT_SECTION is not the canonical writer
+# --- anchor and is rejected.
+# RUN: not mcs251-lld nsa.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b4b.elf 2>&1 | FileCheck %s --check-prefix=B4SYM
+# --- B4c: NOTE entity=function over an STT_OBJECT definition is rejected.
+# RUN: not mcs251-lld emm.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b4c.elf 2>&1 | FileCheck %s --check-prefix=B4ENT
+# B4ENT: section .mcu.fixed.fx disagrees with placement NOTE for _fx
+
+# =====================================================================
+# B5: the LinkerResult.Placement contract, asserted DIRECTLY (the symtab
+# reads the PlacementNames map keys and cannot see Row.Sym).
+# =====================================================================
+# --- B5a: bind-only: the row carries the carrier ELF name (previously
+# --- emptied by the moved-from string) and H_report over the merged field.
+# RUN: env MCS251_PLACEMENT_DUMP=bind.dump mcs251-lld bfx.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b5.elf
+# RUN: FileCheck %s --check-prefix=B5BIND < bind.dump
+# B5BIND: fx | _fx | {{.*}}bfx.o |  | 1 | 0 | 1 | 0x10000 | 4 | 1 | 0 | 0xe6e499c9 | 1
+# --- B5b: owned+bind: the merged align (4) and flags appear in the report
+# --- row, bound_only=0 and the section is named.
+# RUN: env MCS251_PLACEMENT_DUMP=owned.dump mcs251-lld oal.o ba4.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b5b.elf
+# RUN: FileCheck %s --check-prefix=B5OWN < owned.dump
+# B5OWN: fx | _fx | {{.*}}oal.o | .mcu.fixed.fx | 1 | 0 | 0 | 0x20000 | 4 | 4 | 0 | 0x8c2e5127 | 0
+# --- B5c: manifest-only: the fallback row name is the stable symbol and
+# --- the report hash covers ownership=bind of the manifest contract.
+# RUN: env MCS251_PLACEMENT_DUMP=manifest.dump mcs251-lld base.o --placement-manifest=m-ok.txt --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b5c.elf
+# RUN: FileCheck %s --check-prefix=B5MAN < manifest.dump
+# B5MAN: ghost | ghost | (manifest) |  | 1 | 0 | 1 | 0x10000 | 4 | 1 | 0 | 0xe6e499c9 | 1
+
+# =====================================================================
+# B7: the P-5 verdict is taken over the whole group identity set, and
+# the frozen conflict wording is exact.
+# =====================================================================
+# --- B7a/B7b: permuted inputs must produce the same VERDICT -- an identity
+# --- collision, never the duplicate-owned diagnostic, whatever the order.
+# --- The frozen wording names the SEED (first owned entry in input order)
+# --- first and the differing entry second, so the two file names follow the
+# --- input order; only the verdict class is order-independent.  (The B7
+# --- regression was exactly that this class flipped with the permutation:
+# --- base,base,other reported duplicate-owned while base,other,base reported
+# --- conflicting placement.)
+# RUN: not mcs251-lld base.o base.o oss.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b7a.elf 2>&1 | FileCheck %s --check-prefix=B7PERM
+# RUN: not mcs251-lld oss.o base.o base.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b7b.elf 2>&1 | FileCheck %s --check-prefix=B7PERMB
+# B7PERM: conflicting placement for fx: 0x20000 ({{.*}}base.o) vs 0x20000 ({{.*}}oss.o)
+# B7PERM-NOT: duplicate owned
+# B7PERMB: conflicting placement for fx: 0x20000 ({{.*}}oss.o) vs 0x20000 ({{.*}}base.o)
+# B7PERMB-NOT: duplicate owned
+# --- B7c: all identities equal -> the duplicate-owned diagnostic (and the
+# --- wording has no stray ')').
+# RUN: not mcs251-lld base.o base.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b7c.elf 2>&1 | FileCheck %s --check-prefix=B7DUP
+# B7DUP: placement NOTE duplicate owned record for fx in {{.*}}base.o and {{.*}}base.o
+# --- B7d: duplicate owned mixed with the plain-definition collision still
+# --- reports the placement-side verdict first (validate order frozen).
+# RUN: %python -c "b=bytearray(open('base.o','rb').read()); open('base2.o','wb').write(b)"
+# RUN: not mcs251-lld base.o base2.o oss.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o b7d.elf 2>&1 | FileCheck %s --check-prefix=B7PERM
+
+# =====================================================================
+# Hint ①: the EI_OSABI=GNU conditional acceptance matrix.  The retain
+# object arrives as OSABI=GNU from the generic writer; GNU without any
+# retain section, and GNU with a non-zero ABIVERSION, must stay rejected.
+# =====================================================================
+# --- GNU + legal retain placement: accepted (the retain object's own
+# --- section justifies the mark).
+# RUN: cp base.o gnu-ok.o
+# RUN: %python -c "b=bytearray(open('gnu-ok.o','rb').read()); b[7]=3; open('gnu-ok.o','wb').write(b)"
+# RUN: not mcs251-lld gnu-ok.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o g1.elf 2>&1 | FileCheck %s --check-prefix=GNUJUST
+# GNUJUST: invalid MCS251 ELF identity
+# --- the retain-bearing object (SHF_GNU_RETAIN on the fixed section)
+# --- accepts the GNU mark.
+# RUN: yaml2obj retain-gnu.yaml -o rgnu-v1.o
+# RUN: %python seteflags.py rgnu-v1.o && mv rgnu-v1.o rgnu.o
+# RUN: %python -c "b=bytearray(open('rgnu.o','rb').read()); b[7]=3; open('rgnu.o','wb').write(b)"
+# RUN: mcs251-lld rgnu.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o g2.elf && test -f g2.elf
+# --- GNU + retain + non-zero ABIVERSION: still rejected.
+# RUN: cp rgnu.o gnu-abiv.o
+# RUN: %python -c "b=bytearray(open('gnu-abiv.o','rb').read()); b[8]=1; open('gnu-abiv.o','wb').write(b)"
+# RUN: not mcs251-lld gnu-abiv.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o g3.elf 2>&1 | FileCheck %s --check-prefix=GNUJUST
+# --- GNU + the retain bit on a NON-fixed section: still rejected (the
+# --- mark's justification must be a legal retain placement).
+# RUN: yaml2obj retain-wrongsec.yaml -o rws-v1.o
+# RUN: %python seteflags.py rws-v1.o && mv rws-v1.o rws.o
+# RUN: %python -c "b=bytearray(open('rws.o','rb').read()); b[7]=3; open('rws.o','wb').write(b)"
+# RUN: not mcs251-lld rws.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o g4.elf 2>&1 | FileCheck %s --check-prefix=GNUWS
+# GNUWS: section .rodata carries SHF_GNU_RETAIN outside .mcu.fixed.*
+
+# =====================================================================
+# FIXED x G8 / FIXED x XSEG-split combinations.  The fixed reservations
+# join the SAME ledgers the dynamic passes consume (design §1.3 insertion
+# order; §4.1 F13).  Two frozen consequences are asserted here:
+#   * a fixed XDATA pin does NOT advance the dynamic XSEG cursor, but the
+#     dynamic overlap check and the G8 retry ledger DO see the pin -- so a
+#     pin is either overlap-free beside the dynamic range or a hard
+#     failure (never a silent coexistence);
+#   * s_XSEG/l_XSEG stay dynamic-only (F13), byte-identical to the
+#     no-pin baseline.
+# =====================================================================
+# --- (1) FIXED-XDATA pin beside a dynamic XSEG slice in the same window:
+# --- the slice takes the window base (the pin does not push it) and both
+# --- ranges coexist overlap-free in the shared XDataUsed ledger.
+# RUN: yaml2obj dyn-slice.yaml -o dyn-v1.o
+# RUN: %python seteflags.py dyn-v1.o && mv dyn-v1.o dyn.o
+# RUN: mcs251-lld base.o dyn.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --map=fx-dyn.map -o fx-dyn.elf
+# RUN: grep 'mcu.fixed.fx 0x20000' fx-dyn.map
+# RUN: grep 'XSEG._d 0x10000' fx-dyn.map
+# --- (2) F13 freeze: the pin does not change s_XSEG/l_XSEG at all.
+# RUN: mcs251-lld dyn.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --map=no-pin.map -o no-pin.elf
+# RUN: grep -E '^[sl]_XSEG = ' fx-dyn.map > xseg-pin.txt
+# RUN: grep -E '^[sl]_XSEG = ' no-pin.map > xseg-nopin.txt
+# RUN: cmp xseg-pin.txt xseg-nopin.txt
+# --- (3) FIXED-XDATA pin ON the dynamic cursor position: the slice must fail
+# --- closed -- proof the fixed interval is in the dynamic overlap ledger
+# --- (without it the slice would land at 0x20000 and silently overlap).
+# RUN: not mcs251-lld base.o dyn.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x20000 -o fx-ov.elf 2>&1 | FileCheck %s --check-prefix=FXOCC
+# FXOCC: XDATA overlap for .mcs251.XSEG._d
+# RUN: test ! -f fx-ov.elf
+# --- (4) FIXED-XDATA + a 64K split XSEG section in one link: the split range
+# --- [0x10000,0x20000) ends exactly where the pin begins -- adjacent and
+# --- overlap-free (shared ledger, no silent straddle over the pin).
+# RUN: yaml2obj split-after-pin.yaml -o sap-v1.o
+# RUN: %python seteflags.py sap-v1.o && mv sap-v1.o sap.o
+# RUN: mcs251-lld base.o sap.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --area-start=XDATA_INIT=0xff9000 --map=split.map -o split.elf
+# RUN: grep 'mcu.fixed.fx 0x20000' split.map
+# RUN: grep 'XSEG._big 0x10000' split.map
+# RUN: grep 's_XSEG = 0x10000' split.map
+# RUN: grep 'l_XSEG = 0x10000' split.map
+# --- (5) ... and when the split section's contiguous range CONTAINS the pin,
+# --- the shared ledger must reject it (no silent straddle).
+# RUN: not mcs251-lld base.o sap.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x1fff0 --area-start=XDATA_INIT=0xff9000 -o split-ov.elf 2>&1 | FileCheck %s --check-prefix=FXOCCBIG
+# FXOCCBIG: XDATA overlap for .mcs251.XSEG._big
+# RUN: test ! -f split-ov.elf
+# --- (6) FIXED-AS0 pin and the G8 seed: layoutFixedData() runs before the
+# --- seed snapshot, so the failure-fallback re-layout restores the pin.
+# --- (6a) positive: the movable 256B DSEG slice cannot fit the low window,
+# --- migrates to EDATA, and must land AFTER the pin (0x140), never on it.
+# RUN: yaml2obj fixed-g8-pin.yaml -o fgp-v1.o
+# RUN: %python seteflags.py fgp-v1.o && mv fgp-v1.o fgp.o
+# RUN: yaml2obj g8-movable.yaml -o g8m-v1.o
+# RUN: %python seteflags.py g8m-v1.o && mv g8m-v1.o g8m.o
+# RUN: mcs251-lld fgp.o g8m.o --area-start=CSEG=0xff0200 --edata-end=0x3fff --map=g8.map -o g8.elf
+# RUN: grep 'mcu.fixed.pin 0x0100' g8.map
+# RUN: grep 'mcs251.dseg 0x0140' g8.map
+# RUN: grep 's_EDATA = 0x0140' g8.map
+# RUN: grep 'l_EDATA = 0x0100' g8.map
+# --- (6b) negative: pick --edata-end so the slice WOULD fit without the pin
+# --- (positive control below) but cannot beside the restored pin -- the retry
+# --- must fail closed instead of placing two objects at 0x0100.
+# RUN: mcs251-lld g8m.o --area-start=CSEG=0xff0200 --edata-end=0x200 --map=g8ctl.map -o g8ctl.elf
+# RUN: grep 'mcs251.dseg 0x0100' g8ctl.map
+# RUN: not mcs251-lld fgp.o g8m.o --area-start=CSEG=0xff0200 --edata-end=0x200 -o g8neg.elf 2>&1 | FileCheck %s --check-prefix=G8EDATA
+# G8EDATA: cannot allocate .mcs251.dseg in the EDATA window [0x100,0x200]
+# RUN: test ! -f g8neg.elf
+
+#--- seteflags.py
+#!/usr/bin/env python3
+"""Rewrite e_flags to the v2 word (yaml2obj only registers the v1 enum)."""
+import pathlib, sys
+OFF = 36
+for name in sys.argv[1:]:
+    p = pathlib.Path(name)
+    b = bytearray(p.read_bytes())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = bytes.fromhex("00000102")
+    p.write_bytes(bytes(b))
+
+#--- note-mutate.py
+#!/usr/bin/env python3
+"""B1 mutations of a legal v2 object, computed from the ELF structure (no
+hardcoded offsets).
+
+  pad <src> <dst>  -- set the last NOTE storage byte to 0x42 (non-zero pad)
+  cut <src> <dst>  -- shrink sh_size and descsz by one so the record's last
+                      storage byte exits the section (the exact
+                      truncated-padding shape the review used; the physical
+                      byte stays in the file as inter-section padding, so no
+                      other offset moves)
+"""
+import pathlib, struct, sys
+mode, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]
+b = bytearray(pathlib.Path(src).read_bytes())
+Shoff, = struct.unpack_from('>I', b, 32)
+Shentsize, Shnum, Shstrndx = struct.unpack_from('>HHH', b, 46)
+def sec_at(i):
+    return struct.unpack_from('>IIIIIIIIII', b, Shoff + i * Shentsize)
+strtab = sec_at(Shstrndx)
+def name(off):
+    e = b.index(b'\0', strtab[4] + off)
+    return b[strtab[4] + off:e].decode()
+idx = None
+for i in range(Shnum):
+    if name(sec_at(i)[0]) == '.mcs251.placement':
+        idx = i
+        break
+assert idx is not None
+ShOff, ShSize = sec_at(idx)[4], sec_at(idx)[5]
+if mode == 'pad':
+    b[ShOff + ShSize - 1] = 0x42
+elif mode == 'cut':
+    struct.pack_into('>I', b, Shoff + idx * Shentsize + 20, ShSize - 1)
+    struct.pack_into('>I', b, ShOff + 4, ShSize - 1 - 20)
+else:
+    raise SystemExit('mode?')
+pathlib.Path(dst).write_bytes(bytes(b))
+
+#--- base.yaml
+# One owned FIXED-XDATA entity (stable "fx", A=0x20000, size 4, align 1).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- owned-at-20001.yaml
+# B3a fixture (review merged-align4, owned half): one owned FIXED-XDATA entity
+# "fx" at A=0x20001 (NOT 4-aligned), size 4, align 1.  Byte-identical to
+# base.yaml except the address field, so the merged align with the align-4
+# bind is what rejects it -- not an address conflict.  Record hex:
+# rs=28 | 01 01 00 00 | 00020001 00000004 00000001 00000000
+#       | 8CE60C04 | 02 "fx" 00   (H(F) recomputed: sc1 ent0 own0 A20001 al1 f0)
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01010000000200010000000400000001000000008CE60C0402667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- bind-fx.yaml
+# A bind-only XDATA object for stable "fx": carrier _fx, A=0x10000, size 4.
+# Record: rs=28 | 01 01 00 01 | 00010000 00000004 00000001 00000000
+#         | E6E499C9 | 02 "fx" 00
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0101000100010000000000040000000100000000E6E499C902667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- bind-align4.yaml
+# A bind-only XDATA object pinning fx at A=0x20001 (NOT 4-aligned) with
+# align=4: the bind-only group must reject its own contract.
+# Record: rs=28 | 01 01 00 01 | 00020001 00000004 00000004 00000000
+#         | F1BC9E38 | 02 "fx" 00   (H(F) recomputed: sc1 ent0 own1 A20001 al4 f0)
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0101000100020001000000040000000400000000F1BC9E3802667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- bind-align4-aligned.yaml
+# The B3 positive control's bind half: bind-only fx at A=0x20000 with align=4
+# -- the SAME address the owned half pins, so the merged align 4 is satisfied
+# and the link must succeed.  Record hex:
+# rs=28 | 01 01 00 01 | 00020000 00000004 00000004 00000000
+#       | AB5115D0 | 02 "fx" 00   (H(F) recomputed: sc1 ent0 own1 A20000 al4 f0)
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0101000100020000000000040000000400000000AB5115D002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- owned-aligned.yaml
+# The B3 positive control: owned fx at A=0x20000 size 4 align 1 (matching
+# base.yaml) -- paired with the align-4 bind, the merged align 4 holds.
+# (Identical to base.yaml; kept separate so the pairing intent is explicit.)
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- other-same-stable.yaml
+# The same NOTE as base.yaml but a different ELF main symbol (_other): the
+# group holds two owned records with DIFFERENT identities.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _other
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- owned-2nd-entity.yaml
+# B4a: a sized local STT_NOTYPE symbol ("second_entity") inside the fixed
+# section -- entity-shaped, never writer metadata.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+  - Name: second_entity
+    Binding: STB_LOCAL
+    Type: STT_NOTYPE
+    Section: .mcu.fixed.fx
+    Value: 1
+    Size: 2
+
+#--- named-section-anchor.yaml
+# B4b: a local STT_SECTION with a NAME and offset 1 -- not the canonical
+# writer anchor (empty name, offset 0) the exemption is scoped to.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+  - Name: second_entity
+    Binding: STB_LOCAL
+    Type: STT_SECTION
+    Section: .mcu.fixed.fx
+    Value: 1
+    Size: 0
+
+#--- entity-mismatch.yaml
+# B4c: NOTE entity=function over an STT_OBJECT definition (record byte 6
+# is 1, the object is STT_OBJECT) -- contradicting polymorphic contracts.
+# Record: rs=28 | 01 01 01 00 | 00020000 00000004 00000001 00000000
+#         | 67A79D12 | 02 "fx" 00   (H(F) recomputed: sc1 ent1 own0 A20000 al1 f0)
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010101000002000000000004000000010000000067A79D1202667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- section-align-mismatch.yaml
+# B3c: sh_addralign=0x40000 while the NOTE says align=1.  The generic ALLOC
+# alignment rule does not apply to .mcu.fixed.*, so this contradiction is
+# exactly what the new stage-2 cross-check owns.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 0x40000
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- retain-gnu.yaml
+# Hint ①: the legal retain placement the GNU OSABI mark must be justified
+# by -- NOTE flags.bit0=1 AND SHF_GNU_RETAIN on the fixed section.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.fx
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_GNU_RETAIN ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01010000000200000000000400000001000000018D2238CB02667800'
+Symbols:
+  - Name: _fx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fx
+    Value: 0
+    Size: 4
+
+#--- retain-wrongsec.yaml
+# Hint ①: SHF_GNU_RETAIN on a non-fixed section (with the GNU OSABI mark):
+# the mark has no legal retain placement to justify it.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_GNU_RETAIN ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C010100000002000000000004000000010000000052A5BDF002667800'
+Symbols:
+  - Name: _r
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .rodata
+    Value: 0
+    Size: 1
+
+#--- dyn-slice.yaml
+# One dynamic XSEG slice at the window base.  Fixed placement does NOT
+# advance the dynamic cursor: paired with the FIXED-XDATA pin at 0x20000
+# (outside this [0x10000,0x10004) range) both coexist in the shared
+# ledger; paired with a window base of 0x20000 the same slice collides
+# with the pin and must be rejected.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._d
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _d
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._d
+    Value: 0
+    Size: 4
+
+#--- split-after-pin.yaml
+# A 65536-byte split XSEG section placed at the window base: with
+# --area-start=XSEG=0x010000 its contiguous range [0x10000,0x20000) ends
+# exactly where the FIXED-XDATA pin begins -- adjacent and overlap-free.
+# Moved onto the pin (window base 0x1fff0) the shared ledger rejects it.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.XSEG._big
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 65536
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG._big
+    Value: 0
+    Size: 65536
+
+#--- fixed-g8-pin.yaml
+# A FIXED-AS0 (storage_class=data) owned entity "pin" at A=0x0100 size 0x40:
+# it lands in the low DSEG window's ledger via layoutFixedData(), i.e. BEFORE
+# the G8 seed snapshot, and occupies [0x100,0x140) of the EDATA window too.
+# Record: rs=28 | 01 00 00 00 | 00000100 00000040 00000001 00000000
+#         | 3506FC61 | 03 "pin" 00  (H(F): ver1 sc0 ent0 own0 A100 al1 f0)
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.pin
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 64
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01000000000001000000004000000001000000003506FC610370696E'
+Symbols:
+  - Name: _pin
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.pin
+    Value: 0
+    Size: 64
+
+#--- g8-movable.yaml
+# A 256-byte EDATA-movable DSEG slice: it cannot fit the default low window
+# [0x0000,0x0080), so the failure-fallback re-layout migrates it into the
+# EDATA window -- the pass whose ledger must still hold the FIXED-AS0 pin.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 256
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: _mv
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.dseg
+    Value: 0
+    Size: 256
