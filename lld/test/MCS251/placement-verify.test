@@ -1,0 +1,1583 @@
+# G11-D (contract §3, PM ruling R-2026-09-17-3 R2/R3): the independent
+# `mcs251-placement-verify` executable, exercised on a REAL B+C product.
+#
+# Every negative here starts from a set that VERIFIED, mutates exactly one
+# carrier (final ELF / report / input object / manifest / link map), and then
+# runs the VERIFIER directly -- never the linker, which would refuse the
+# mutation first and hide the verifier's own detection power (contract §5).
+# Each case asserts the exit code AND the target diagnostic, so a generic
+# input rejection cannot pass for a detection.
+#
+# Capability is present in this tree, so a compile/link/parse/locate/verify
+# failure is a FAIL, never a SKIP.  Only spec-defined non-applicabilities are
+# exempt (NOBITS has no CODE bytes; a bind function's size is unchecked).
+#
+# G11-C2 (PM rulings R-2026-09-17-4 / R-2026-09-18-1): the linker now CONSUMES
+# the `.mcs251.placement.names` association carrier the frozen emitter writes,
+# so the carrier-backed bind positive and the V17 bind-relocation positive are
+# reachable with a REAL B+C product (llc -> lld -> verifier) and are asserted
+# below.  The pre-C2 "registered cross-slice blocker" is closed; only the
+# deliberate legacy-object boundary (a bind object WITHOUT a carrier must be
+# refused) remains, and it is driven by a synthetic carrier-less object so the
+# real emitter can no longer produce it.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf p.ll -o p.o
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf bind.ll -o bind.o
+
+# =====================================================================
+# rule V0 - the tool exists and is a real independent process.  A suite that "goes
+# green" because the verifier is missing is exactly what the contract forbids,
+# so this is a positive assertion, not a `not`.
+# =====================================================================
+# RUN: mcs251-placement-verify --version | FileCheck %s --check-prefix=VER
+# VER: mcs251-placement-verify
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --nonsense 2>&1 | FileCheck %s --check-prefix=BADOPT
+# BADOPT: unknown option --nonsense
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=p.elf 2>&1 | FileCheck %s --check-prefix=REQ
+# REQ: --elf and --report are required
+
+# =====================================================================
+# V-positive: the real product verifies; --verify-placement drives it as a
+# child process, success is silent, and the report+verify grid publishes one
+# report byte stream.
+# =====================================================================
+# RUN: mcs251-lld p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=p.placement --verify-placement --map=p.map -o p.elf 2>v.err
+# RUN: test ! -s v.err
+# RUN: bash v.sh
+# --- V1: an output without a symbol table fails closed with the frozen text,
+# --- and the Driver adds no `mcs251-lld: error:` prefix to the verifier body.
+# RUN: mcs251-lld p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 -o nosym.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=nosym.elf 2>&1 | FileCheck %s --check-prefix=NOSYM
+# NOSYM: VERIFY FAIL: input ELF has no symbol table (relink with --verify-placement or --placement-report)
+# NOSYM-NOT: mcs251-lld: error:
+
+# =====================================================================
+# C2-positive (a) - the REAL carrier-backed bind chain: llc emits a bind-only
+# object whose `.mcs251.placement.names` carrier associates the record with the
+# undefined external `_ghostx`; the linker consumes it (the stable name is
+# `ghostx`, NOT the ELF name), publishes a bind-only report row, and the
+# linker's own --verify-placement pass accepts it.  The row's ELF name is the
+# ASSOCIATED name, proving the carrier -- not a stable==declaration-name
+# assumption -- drove the mapping.  V17 then re-checks the bind relocation (a
+# 24-bit address split over LO8/MID8/HI8 relocations) from the original object.
+# =====================================================================
+# RUN: mcs251-lld bind.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=bind.placement --verify-placement --map=bind.map -o bind.elf 2>bind.err
+# RUN: test ! -s bind.err
+# RUN: FileCheck --input-file=bind.placement %s --check-prefix=BINDROW
+# BINDROW: ghostx | _ghostx | {{.*}}bind.o |  | 0 | 0 | 1 | 0x00000080 | 4 | 1 | 0 | {{.*}} | 1
+# RUN: mcs251-placement-verify --elf=bind.elf --report=bind.placement --object=bind.o --link-map=bind.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# --- V17 negative on the SAME real object: only the final relocated byte
+# --- (LO8 of the 24-bit address) changes, so the encoding must be re-derived.
+# RUN: %python %S/Inputs/audit-mutate.py elf-poke bind.elf mut.elf 0xff0202 000081
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=bind.placement --object=bind.o --link-map=bind.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=V17BC
+# V17BC: VERIFY FAIL: relocation to ghostx at 0x{{[0-9a-f]+}} does not encode the expected placement address
+
+# =====================================================================
+# rule V2 - original NOTE structure.  Each mutation is a pure byte edit of p.o, so
+# the only difference from the verified set is the damaged record table.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py note-namesz p.o mut.o 0x8
+# RUN: %python %S/Inputs/expect-rc.py 1 env OBJ=mut.o bash v.sh 2>&1 | FileCheck %s --check-prefix=V2N
+# V2N: VERIFY FAIL: malformed placement NOTE in mut.o: namesz 8 != 7
+# RUN: %python %S/Inputs/audit-mutate.py note-pad p.o mut.o dv
+# RUN: %python %S/Inputs/expect-rc.py 1 env OBJ=mut.o bash v.sh 2>&1 | FileCheck %s --check-prefix=V2P
+# V2P: VERIFY FAIL: malformed placement NOTE in mut.o: record {{[0-9]+}} at offset {{[0-9]+}}: non-zero padding
+# RUN: %python %S/Inputs/audit-mutate.py note-truncate p.o mut.o
+# RUN: %python %S/Inputs/expect-rc.py 1 env OBJ=mut.o bash v.sh 2>&1 | FileCheck %s --check-prefix=V2T
+# V2T: VERIFY FAIL: malformed placement NOTE in mut.o: record {{[0-9]+}} at offset {{[0-9]+}}: record_size does not fit the remaining NOTE data
+
+# =====================================================================
+# rule V3 - a LEGACY bind object (bind record, no association carrier) must be
+# refused outright -- the stable is never used to guess the ELF name.  The C2
+# emitter always writes the carrier, so this deliberate boundary is driven by a
+# synthetic carrier-less object (bind-id-nocarrier.yaml) rather than the real
+# llc product; the verifier's V3 path is shared with the linker's own rule.
+# =====================================================================
+# RUN: yaml2obj bind-id-nocarrier.yaml -o bind-legacy-v1.o && %python seteflags.py bind-legacy-v1.o && mv bind-legacy-v1.o bind-legacy.o
+# RUN: %python %S/Inputs/expect-rc.py 1 env OBJ=bind-legacy.o bash v.sh 2>&1 | FileCheck %s --check-prefix=V3B
+# V3B: VERIFY FAIL: missing placement name association for {{.*}} in bind-legacy.o (recompile placement object)
+
+# =====================================================================
+# rule V4 - each original record's own H_source, recomputed from its own fields.
+# The corrupted record keeps its neighbour rows intact, so only V4 can fire.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py note-flip-hash p.o mut.o cl
+# RUN: %python %S/Inputs/expect-rc.py 1 env OBJ=mut.o bash v.sh 2>&1 | FileCheck %s --check-prefix=V4
+# V4: VERIFY FAIL: layout hash mismatch for cl: record {{[0-9]+}} in mut.o stores {{.*}} but its own recorded fields hash to
+
+# =====================================================================
+# rule V5 - the manifest is re-read and its explicit values are checked; the SAME
+# path the link consumed is edited, so the failure is the field mismatch and
+# not a "source path appeared/disappeared" artifact.
+# =====================================================================
+# RUN: printf 'place ghost 0x10000 xdata size=4 bind\n' > m.txt
+# RUN: mcs251-lld p.o --placement-manifest=m.txt --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=m.placement --verify-placement --map=m.map -o m.elf
+# RUN: env ELF=m.elf REPORT=m.placement MAP=m.map bash v.sh --placement-manifest=m.txt
+# RUN: printf 'place ghost 0x10000 xdata size=8 bind\n' > m.txt
+# RUN: %python %S/Inputs/expect-rc.py 1 env ELF=m.elf REPORT=m.placement MAP=m.map bash v.sh --placement-manifest=m.txt 2>&1 | FileCheck %s --check-prefix=V5S
+# V5S: VERIFY FAIL: placement report field size mismatch for ghost
+# RUN: printf 'place ghost 0x10000 xdata size=4 bind noinit\n' > m.txt
+# RUN: %python %S/Inputs/expect-rc.py 1 env ELF=m.elf REPORT=m.placement MAP=m.map bash v.sh --placement-manifest=m.txt 2>&1 | FileCheck %s --check-prefix=V5B
+# V5B: VERIFY FAIL: malformed placement manifest entry for ghost
+# RUN: printf 'place ghost 0x10000 xdata size=4 bind\n' > m.txt
+
+# =====================================================================
+# rule V6 - the independent semantic merge and its precedence.  Every mutation is
+# applied to ALL carriers consistently so the failure lands on the merge rule,
+# never on an incidental hash or span disagreement.
+# =====================================================================
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --object=p.o --object=p.o 2>&1 | FileCheck %s --check-prefix=V6D
+# V6D: VERIFY FAIL: placement NOTE duplicate owned record for cl in p.o and
+# --- two non-1 align values that disagree: the owned NOTE says 2, a manifest
+# --- row says 4.  The NOTE hash and the report row are updated together.
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut.placement dv align 2
+# RUN: printf 'place dv 0x40 data size=4 align=4\n' > a.txt
+# RUN: %python %S/Inputs/expect-rc.py 1 env MUT=%S/Inputs/audit-mutate.py bash vm.sh note-align dv 0x2 -- --report=mut.placement --placement-manifest=a.txt 2>&1 | FileCheck %s --check-prefix=V6A
+# V6A: VERIFY FAIL: conflicting placement for dv: manifest align disagrees ({{.*}}a.txt:1)
+# --- a non-bind policy marker cannot manufacture a policy the owned NOTE
+# --- does not carry.
+# RUN: printf 'place dv 0x40 data size=4 retain\n' > r.txt
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --placement-manifest=r.txt 2>&1 | FileCheck %s --check-prefix=V6R
+# V6R: VERIFY FAIL: conflicting placement for dv: manifest [retain] contradicts the owned NOTE ({{.*}}r.txt:1)
+
+# =====================================================================
+# rule V7 - strict report syntax and explicit field cross-check.  The layout_hash is
+# RECOMPUTED for the edited row, so a hash failure cannot be mistaken for the
+# field check and the report cannot act as its own oracle.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut.placement dv class 1
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V7C
+# V7C: VERIFY FAIL: placement report field class mismatch for dv
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut.placement dv entity 1
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V7E
+# V7E: VERIFY FAIL: placement report field entity mismatch for dv
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut.placement dv ownership 1
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V7O
+# V7O: VERIFY FAIL: placement report field ownership mismatch for dv
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut.placement dv align 2
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V7A
+# V7A: VERIFY FAIL: placement report field align mismatch for dv
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut.placement dv flags 2
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V7F
+# V7F: VERIFY FAIL: placement report field flags mismatch for dv
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut.placement dv size 8
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V7S
+# V7S: VERIFY FAIL: placement report field size mismatch for dv
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut.placement dv bound_only 1
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V7B
+# V7B: VERIFY FAIL: placement report field bound_only mismatch for dv
+# RUN: %python %S/Inputs/audit-mutate.py report-reverse p.placement mut.placement
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V7R
+# V7R: VERIFY FAIL: malformed placement report at line 2: rows are not in (stable, file, sym, section) byte order
+
+# =====================================================================
+# rule V8 - bidirectional enumeration, driven by the original records and manifest
+# rows -- never by the report.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py report-drop p.placement mut.placement nv
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V8M
+# V8M: VERIFY FAIL: no placement report row for placement record nv
+# RUN: %python %S/Inputs/audit-mutate.py report-add p.placement mut.placement p
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V8E
+# V8E: VERIFY FAIL: placement report row _zz has no NOTE/manifest source
+
+# =====================================================================
+# rule V9 - the report's own H_report.  Flipping one bit of the stored value must
+# fail even though every explicit field is intact.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py report-flip-hash p.placement mut.placement dv
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V9
+# V9: VERIFY FAIL: layout hash mismatch for _dv: report line {{[0-9]+}} stores
+
+# =====================================================================
+# rule V10 - the output entity, its address and the synthetic bind-only shape.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue p.elf mut.elf _dv 0x44
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=V10A
+# V10A: VERIFY FAIL dv: address 0x44 != expected 0x40
+# RUN: %python %S/Inputs/audit-mutate.py elf-rename p.elf mut.elf _xv
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=V10E
+# V10E: VERIFY FAIL: no output entity for placement record xv
+
+# =====================================================================
+# rule V11 - sizes and main-symbol shape.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py elf-size p.elf mut.elf _xv 0x8
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=V11
+# V11: VERIFY FAIL xv: size 8 != recorded 4
+
+# =====================================================================
+# rule V12 - the merged alignment is executed, and the class's address space holds.
+# The NOTE address, its record hash, the report row and the output st_value
+# are all moved together, so the verdict can only come from the range rules.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut.placement entryf address 0xfc4001
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue p.elf mut.elf _entryf 0xfc4001
+# RUN: %python %S/Inputs/audit-mutate.py map-section p.map mut2.map p.o:.mcu.fixed.entryf 0xfc4001
+# RUN: %python %S/Inputs/expect-rc.py 1 env MUT=%S/Inputs/audit-mutate.py bash vm.sh note-addr entryf 0xfc4001 -- --report=mut.placement --elf=mut.elf --link-map=mut2.map 2>&1 | FileCheck %s --check-prefix=V12A
+# V12A: VERIFY FAIL: entryf at 0xfc4001 violates alignment 4
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut2.placement dv address 0xffff
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue p.elf mut2.elf _dv 0xffff
+# RUN: %python %S/Inputs/audit-mutate.py map-section p.map v12b.map p.o:.mcu.fixed.dv 0xffff
+# RUN: %python %S/Inputs/expect-rc.py 1 env MUT=%S/Inputs/audit-mutate.py bash vm.sh note-addr dv 0xffff -- --report=mut2.placement --elf=mut2.elf --link-map=v12b.map 2>&1 | FileCheck %s --check-prefix=V12B
+# V12B: VERIFY FAIL: dv [0xffff,0x10003) outside AS0-DATA address space
+
+# =====================================================================
+# rule V13 - the window is the INDEPENDENT board-level number, never the map's
+# "already placed here".  Nothing but the window changes here.
+# =====================================================================
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=p.elf --report=p.placement --object=p.o --link-map=p.map --flash-base=0xfc0000 --flash-size=0x3000 --area-start=XSEG=0x010000 2>&1 | FileCheck %s --check-prefix=V13
+# V13: VERIFY FAIL: entryf [0xfc4000,0xfc4001) outside CODE window
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=p.elf --report=p.placement --object=p.o --link-map=p.map --flash-base=0xfc0000 --flash-size=0x40000 --xdata-size=0x1000 --area-start=XSEG=0x010000 2>&1 | FileCheck %s --check-prefix=V13X
+# V13X: VERIFY FAIL: xv [0x20000,0x20004) outside XDATA capacity window
+
+# =====================================================================
+# rule V14 - overlap accounting counts each entity once per storage space.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py report-field p.placement mut.placement nv address 0x40
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue p.elf mut.elf _nv 0x40
+# RUN: %python %S/Inputs/audit-mutate.py map-section p.map v14.map p.o:.mcu.fixed.nv 0x40
+# RUN: %python %S/Inputs/expect-rc.py 1 env MUT=%S/Inputs/audit-mutate.py bash vm.sh note-addr nv 0x40 -- --report=mut.placement --elf=mut.elf --link-map=v14.map 2>&1 | FileCheck %s --check-prefix=V14
+# V14: VERIFY FAIL: dv overlaps nv
+
+# =====================================================================
+# rule V15 - retain, in both directions, and the report marker.
+# =====================================================================
+# RUN: %python %S/Inputs/expect-rc.py 1 env MUT=%S/Inputs/audit-mutate.py bash vm.sh sec-flags .mcu.fixed.rv 0x3 -- 2>&1 | FileCheck %s --check-prefix=V15A
+# V15A: VERIFY FAIL: retain flag mismatch for rv in p.o
+# RUN: %python %S/Inputs/expect-rc.py 1 env MUT=%S/Inputs/audit-mutate.py bash vm.sh sec-flags .text 0x200006 -- 2>&1 | FileCheck %s --check-prefix=V15B
+# V15B: VERIFY FAIL: retain flag mismatch for .text in p.o: SHF_GNU_RETAIN outside .mcu.fixed.*
+# --- the frozen V15 diagnostic must stay reachable even when an earlier check
+# --- has its own verdict for the same artifact (it used to be swallowed by
+# --- V8's missing-row return).
+# RUN: %python %S/Inputs/audit-mutate.py report-drop p.placement mut.placement rv
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=V15C
+# V15C: VERIFY FAIL: retained entity rv absent from placement report/symtab
+# V15C: VERIFY FAIL: no placement report row for placement record rv
+# RUN: %python %S/Inputs/audit-mutate.py elf-rename p.elf mut.elf _rv _gone
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=V15D
+# V15D: VERIFY FAIL: retained entity rv absent from placement report/symtab
+
+# =====================================================================
+# rule V16 - noinit initialization coverage.  The table location comes from the
+# FINAL ELF's s_/l_ symbols, cross-checked against the map's boundary rows; a
+# missing, zeroed or malformed boundary row is a FAIL (contract section 4 / R3),
+# never "this image has no audited initialization path".
+# =====================================================================
+# --- locating evidence that DISAGREES with the final ELF: a shortened table
+# --- (old behavior: rc=0, the whole noinit check silently dropped).
+# RUN: %python %S/Inputs/audit-mutate.py map-bound p.map mut.map l_XINIT 0x0
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --link-map=mut.map 2>&1 | FileCheck %s --check-prefix=V16B
+# V16B: VERIFY FAIL: malformed link map mut.map: the XINIT boundary disagrees with the final ELF
+# --- a boundary row that is not even a number is malformed evidence, not a row
+# --- to drop.
+# RUN: sed 's/^l_XINIT = .*/l_XINIT = garbage/' p.map > mut.map
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --link-map=mut.map 2>&1 | FileCheck %s --check-prefix=V16M
+# V16M: VERIFY FAIL: malformed link map mut.map: bad boundary value in l_XINIT = garbage
+# --- an initialization record whose destination was moved onto the noinit
+# --- entity: the record is decoded from the FINAL image.
+# RUN: %python %S/Inputs/audit-mutate.py elf-poke p.elf mut.elf 0xff8000 0060
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=V16C
+# V16C: VERIFY FAIL: noinit entity nv is covered by XINIT initialization
+# --- a truncated final table is malformed evidence.
+# RUN: %python %S/Inputs/audit-mutate.py elf-poke p.elf mut.elf 0xff8002 0000
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=V16R
+# V16R: VERIFY FAIL: malformed XINIT initialization record at 0xff8000: bad object/payload length
+# --- R2-5 (B4): a boundary key that appears TWICE with CONFLICTING values
+# --- does not uniquely locate the table; the first match must not silently
+# --- decide where the initialization tables live.  Pre-fix behavior: rc=0.
+# RUN: cp p.map mut.map && echo 'l_XINIT = 0x0000' >> mut.map
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --link-map=mut.map 2>&1 | FileCheck %s --check-prefix=R25
+# R25: VERIFY FAIL: malformed link map mut.map: the boundary row l_XINIT appears with conflicting values
+
+# =====================================================================
+# rule V18 - every owned CODE span byte must exist in the final load image, and a
+# non-relocated byte must equal the input byte.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py elf-codebyte p.elf mut.elf 0xfc0000
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=V18
+# V18: VERIFY FAIL: CODE image mismatch for cl at 0xfc0000
+
+# =====================================================================
+# rule V17 - bind-only relocation encoding.  The positive uses a manifest-only
+# bind entity (`ghost`, an XDATA object) referenced by an R_MCS251_24 in `.text`;
+# the real carrier-backed bind positive lives in C2-positive (a) above, so this
+# manifest-only channel additionally covers the grammar without a NOTE carrier.
+# =====================================================================
+# RUN: yaml2obj pointer.yaml -o pnt-v1.o && %python seteflags.py pnt-v1.o && mv pnt-v1.o pnt.o
+# RUN: mcs251-lld pnt.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-manifest=pnt.txt --placement-report=pnt.placement --verify-placement --map=pnt.map -o pnt.elf
+# RUN: mcs251-placement-verify --elf=pnt.elf --report=pnt.placement --object=pnt.o --placement-manifest=pnt.txt --link-map=pnt.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# --- only the final relocated BYTES change: the encoding must be re-derived.
+# RUN: %python %S/Inputs/audit-mutate.py elf-codebyte pnt.elf mut.elf 0xff0200
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=pnt.placement --object=pnt.o --placement-manifest=pnt.txt --link-map=pnt.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=V17B
+# V17B: VERIFY FAIL: relocation to ghost at 0xff0200 does not encode the expected placement address
+# --- an UNKNOWN relocation type must FAIL, never skip (it used to be able to
+# --- mask a tampered final byte).  The object is mutated IN PLACE: its path is
+# --- part of the map's locating evidence.
+# RUN: cp pnt.o .pnt.pristine
+# RUN: %python %S/Inputs/audit-mutate.py rela-type pnt.o pnt.o .text 0 0xff
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest mut.elf mut.elf 0 pnt.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=pnt.placement --object=pnt.o --placement-manifest=pnt.txt --link-map=pnt.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=V17U
+# V17U: VERIFY FAIL: unknown relocation type 255 for ghost at 0xff0200 in pnt.o
+# --- a relocation site outside the relocated input section is malformed.
+# RUN: cp .pnt.pristine pnt.o
+# RUN: %python %S/Inputs/audit-mutate.py rela-offset pnt.o pnt.o .text 0 0x100
+# RUN: cp pnt.elf v17s.elf
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest pnt.elf v17s.elf 0 pnt.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v17s.elf --report=pnt.placement --object=pnt.o --placement-manifest=pnt.txt --link-map=pnt.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=V17S
+# V17S: VERIFY FAIL: relocation to ghost at {{.*}} lies outside the relocated input section .text in pnt.o
+# RUN: cp .pnt.pristine pnt.o
+# --- B10/R2: BOTH 16-bit channels are executable negatives from the
+# --- verified R24 mother (the final encoding follows the channel width).
+# --- The R_16 case predates the round; R_J16 is the registered
+# --- old-0 -> new-1 pair of the first fix round.  Never source-only.
+# RUN: %python %S/Inputs/audit-mutate.py rela-type pnt.o pnt.o .text 0 0x1
+# RUN: %python %S/Inputs/audit-mutate.py elf-poke pnt.elf mut.elf 0xff0200 0000
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest mut.elf mut.elf 0 pnt.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=pnt.placement --object=pnt.o --placement-manifest=pnt.txt --link-map=pnt.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=V17C16
+# V17C16: VERIFY FAIL: XDATA symbol ghost uses a 16-bit relocation channel
+# RUN: cp .pnt.pristine pnt.o
+# RUN: %python %S/Inputs/audit-mutate.py rela-type pnt.o pnt.o .text 0 0x7
+# RUN: %python %S/Inputs/audit-mutate.py elf-poke pnt.elf mut.elf 0xff0200 0000
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest mut.elf mut.elf 0 pnt.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=pnt.placement --object=pnt.o --placement-manifest=pnt.txt --link-map=pnt.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=V17CJ16
+# V17CJ16: VERIFY FAIL: XDATA symbol ghost uses a 16-bit relocation channel
+# RUN: cp .pnt.pristine pnt.o
+# --- B10/R2: the stored-pointer span rule, as an executable isolation
+# --- negative from the same mother: addend 5 (one past a size-4 object's
+# --- one-past-end) with the final encoding moved to the byte-correct
+# --- `01 00 05`.  Never source-only.
+# RUN: %python %S/Inputs/audit-mutate.py rela-addend pnt.o pnt.o .text 0 0x5
+# RUN: %python %S/Inputs/audit-mutate.py elf-poke pnt.elf mut.elf 0xff0200 010005
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest mut.elf mut.elf 0 pnt.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=pnt.placement --object=pnt.o --placement-manifest=pnt.txt --link-map=pnt.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=V17P5
+# V17P5: VERIFY FAIL: stored XDATA pointer resolves outside target object ghost
+# RUN: cp .pnt.pristine pnt.o
+
+# =====================================================================
+# rule V18-reloc / V17 - an owned CODE object carrying a relocation.  The
+# unknown type must not be able to mask the byte it nominally rewrites.
+# =====================================================================
+# RUN: yaml2obj code-reloc.yaml -o cr-v1.o && %python seteflags.py cr-v1.o && mv cr-v1.o code-reloc.o
+# RUN: mcs251-lld code-reloc.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-manifest=pnt.txt --placement-report=cr.placement --verify-placement --map=cr.map -o cr.elf
+# RUN: cp code-reloc.o .cr.pristine
+# RUN: %python %S/Inputs/audit-mutate.py rela-type code-reloc.o code-reloc.o .mcu.fixed.fn 0 0xff
+# RUN: %python %S/Inputs/audit-mutate.py elf-codebyte cr.elf mut.elf 0xfc1000
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest mut.elf mut.elf 0 code-reloc.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=cr.placement --object=code-reloc.o --placement-manifest=pnt.txt --link-map=cr.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=V18U
+# V18U: VERIFY FAIL: unknown relocation type 255 for ghost at 0xfc1000 in code-reloc.o
+# RUN: cp .cr.pristine code-reloc.o
+# --- R2-4 (B5/V18): a J16 field encodes only the low 16 bits, so correct
+# --- low bytes are not proof: the TARGET must live in the field's own 64K
+# --- bank.  The owned CODE source sits at 0xfc1000, the CODE target at
+# --- 0xff0200 -- cross-bank with a byte-correct low half.  Pre-fix
+# --- behavior: rc=0 (old AND R1-fixed verifier both accepted it).
+# RUN: yaml2obj j16.yaml -o j16-v1.o && %python seteflags.py j16-v1.o && mv j16-v1.o j16.o
+# RUN: mcs251-lld j16.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=j16.placement --verify-placement --map=j16.map -o j16.elf
+# RUN: %python %S/Inputs/audit-mutate.py rela-type j16.o j16.o .mcu.fixed.fn 0 0x7
+# RUN: %python %S/Inputs/audit-mutate.py elf-poke j16.elf mut.elf 0xfc1000 0200
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest mut.elf mut.elf 0 j16.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=j16.placement --object=j16.o --link-map=j16.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R24
+# R24: VERIFY FAIL: CODE image mismatch for fn at 0xfc1000: the J16 target leaves the field's bank
+# --- R3-3 (B5/V18 residue): the SAME-BANK J16 to a NON-bind XDATA target.
+# The bank condition alone says nothing about the target's STORAGE SPACE:
+# the producer's F9 gate refuses this input ("XDATA symbol ghost truncated
+# to 16 bits"), so V18 must resolve the target's space independently and
+# apply the same channel rule.  `ghost` here lives in a dynamically
+# allocated `.mcs251.XSEG` at 0xfc0200 (same bank as fn at 0xfc1000); the
+# R24 mother links fine, the channel is rewritten to J16 and the final
+# encoding to the byte-correct `02 00` (third byte = input original).
+# Pre-fix behavior: rc=0 (verifier) while the linker refuses.
+# RUN: yaml2obj xdata-j16.yaml -o xj-v1.o && %python seteflags.py xj-v1.o && mv xj-v1.o xj.o
+# RUN: mcs251-lld xj.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0xfc0200 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=xj.placement --verify-placement --map=xj.map -o xj.elf
+# RUN: %python %S/Inputs/audit-mutate.py rela-type xj.o xj.o .mcu.fixed.fn 0 0x7
+# RUN: %python %S/Inputs/audit-mutate.py elf-poke xj.elf mut.elf 0xfc1000 020000
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest mut.elf mut.elf 0 xj.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=xj.placement --object=xj.o --link-map=xj.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0xfc0200 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R33
+# R33: VERIFY FAIL: CODE image mismatch for fn at 0xfc1000: the relocation targets XDATA symbol ghost through a 16-bit channel
+# --- the retained positive: a same-bank J16 to a real CODE target links
+# --- and verifies (the channel rule fires on the SPACE, never on the bank).
+# RUN: yaml2obj samej16.yaml -o sj-v1.o && %python seteflags.py sj-v1.o && mv sj-v1.o samej16.o
+# RUN: mcs251-lld samej16.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xfc0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=sj.placement --verify-placement --map=sj.map -o sj.elf
+# RUN: mcs251-placement-verify --elf=sj.elf --report=sj.placement --object=samej16.o --link-map=sj.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=CSEG=0xfc0200 --area-start=XSEG=0x010000 --edata-end=0x3fff
+
+# =====================================================================
+# rule B7 - the ELF/entity structure itself is evidence: a program header table
+# that cannot be read, a misaligned NOTE carrier, or an owned output symbol that
+# is no longer defined are all FAILs.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py elf-phnum p.elf mut.elf 0xffff
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=B7P
+# B7P: VERIFY FAIL: malformed input ELF mut.elf: program header table out of bounds
+# RUN: %python %S/Inputs/audit-mutate.py sec-align p.o mut.o .mcs251.placement 1
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --object=mut.o 2>&1 | FileCheck %s --check-prefix=B7A
+# B7A: VERIFY FAIL: malformed placement NOTE in mut.o: carrier is not a flags=0 align=4 SHT_NOTE
+# RUN: %python %S/Inputs/audit-mutate.py elf-undefined p.elf mut.elf _dv
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=B7U
+# B7U: VERIFY FAIL: invalid output symbol for placement record dv: not defined
+# --- the frozen address/size wording: `VERIFY FAIL %sym: ...`, no colon after FAIL.
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue p.elf mut.elf _dv 0x44
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=FZA
+# FZA: VERIFY FAIL dv: address 0x44 != expected 0x40
+# RUN: %python %S/Inputs/audit-mutate.py elf-size p.elf mut.elf _dv 0x8
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --elf=mut.elf 2>&1 | FileCheck %s --check-prefix=FZS
+# FZS: VERIFY FAIL dv: size 8 != recorded 4
+
+# =====================================================================
+# rule B2 - report strict parsing.  The overflow cases leave the stored hash
+# untouched on purpose: the failure must come from the RANGE check, not from a
+# stale hash.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py report-raw p.placement mut.placement dv size 4294967300
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=B2S
+# B2S: VERIFY FAIL: malformed placement report at line {{[0-9]+}}: bad size column
+# RUN: %python %S/Inputs/audit-mutate.py report-raw p.placement mut.placement dv class 4294967296
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=B2C
+# B2C: VERIFY FAIL: malformed placement report at line {{[0-9]+}}: bad class column
+# --- the section column is cross-checked against the independently rebuilt
+# --- source section, not accepted at face value.
+# RUN: %python %S/Inputs/audit-mutate.py report-raw p.placement mut.placement dv section .wrong
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=B2X
+# B2X: VERIFY FAIL: placement report field section mismatch for dv
+# --- a second row for the same (file, sym, stable) triple is a duplicate even
+# --- when its section column differs, and even when its hash is recomputed.
+# RUN: %python %S/Inputs/audit-mutate.py report-dup p.placement mut.placement dv section .wrong
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=B2D
+# B2D: VERIFY FAIL: duplicate placement report row for _dv
+# RUN: %python %S/Inputs/audit-mutate.py report-dup p.placement mut.placement dv class 1
+# RUN: %python %S/Inputs/expect-rc.py 1 bash v.sh --report=mut.placement 2>&1 | FileCheck %s --check-prefix=B2E
+# B2E: VERIFY FAIL: duplicate placement report row for _dv
+
+# =====================================================================
+# rule B3 - V14 counts fixed x DYNAMIC storage too.  The link is a real product
+# (p.o + a dynamic XSEG slice object); the fixed XDATA entity `xv` is then moved
+# CONSISTENTLY (NOTE + record hash + report + output st_value + map row) onto
+# the dynamic slice's bytes, which must overlap it.
+# =====================================================================
+# RUN: yaml2obj dynamic.yaml -o dyn-v1.o && %python seteflags.py dyn-v1.o && mv dyn-v1.o dyn.o
+# RUN: mcs251-lld p.o dyn.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=dyn.placement --verify-placement --map=dyn.map -o dyn.elf
+# RUN: mcs251-placement-verify --elf=dyn.elf --report=dyn.placement --object=p.o --object=dyn.o --link-map=dyn.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# RUN: cp p.o .p.o.pristine
+# RUN: %python %S/Inputs/audit-mutate.py note-addr p.o p.o xv 0x10000
+# RUN: %python %S/Inputs/audit-mutate.py report-field dyn.placement mut.placement xv address 0x10000
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue dyn.elf mut.elf _xv 0x10000
+# RUN: %python %S/Inputs/audit-mutate.py map-section dyn.map mut.map p.o:.mcu.fixed.xv 0x10000
+# RUN: %python %S/Inputs/audit-mutate.py carrier-addr mut.elf mut.elf 0 p.o .mcu.fixed.xv 0x10000
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=mut.placement --object=p.o --object=dyn.o --link-map=mut.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=B3
+# B3: VERIFY FAIL: xv overlaps .mcs251.XSEG
+# RUN: cp .p.o.pristine p.o
+
+# =====================================================================
+# rule R2-1 (B3) - the map row is only a CANDIDATE for a dynamic section's
+# position; the FINAL ELF's own symbol table must confirm it.  Moving ONLY
+# the map's dynamic XSEG row (the ELF keeps `dyn` at 0x10000) used to pass:
+# the ledger then believed the slice lived at 0x30000 and every overlap
+# against it was invisible.  Pre-fix behavior: rc=0.
+# =====================================================================
+# RUN: %python %S/Inputs/audit-mutate.py map-section dyn.map mut.map dyn.o:.mcs251.XSEG 0x30000
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=dyn.elf --report=dyn.placement --object=p.o --object=dyn.o --link-map=mut.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R21
+# R21: VERIFY FAIL: malformed link map mut.map: the section .mcs251.XSEG of dyn.o is placed at 0x30000 but the positioning carrier places it at 0x10000
+
+# =====================================================================
+# rule R3-1 (R2-1 residue) - the named-symbol cross-check is only ADDITIONAL
+# evidence.  A dynamic section with NO named FUNC/OBJECT symbol (anonymous,
+# NOTYPE-only, or with the final symbol's name gone) used to leave its map
+# row as the ONLY position evidence: moving the row moved the ledger.  The
+# final ELF keeps no input section names, so the independent anchor is the
+# REGION: the final ELF's s_XSEG/l_XSEG boundary symbols cross-checked
+# against the map's own boundary rows, plus the CLI windows.  Pre-fix
+# behavior for all three: rc=0.
+# =====================================================================
+# RUN: sed '/^Symbols:/,$d' dynamic.yaml > anon-nosyms.yaml
+# RUN: printf 'Symbols:\n  - Name: textonly\n    Binding: STB_GLOBAL\n    Type: STT_OBJECT\n    Section: .text\n    Size: 3\n' >> anon-nosyms.yaml
+# RUN: mv anon-nosyms.yaml anon.yaml
+# RUN: yaml2obj anon.yaml -o anon-v1.o && %python seteflags.py anon-v1.o && mv anon-v1.o anon.o
+# RUN: mcs251-lld p.o anon.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=anon.placement --verify-placement --map=anon.map -o anon.elf
+# RUN: sed 's/STT_OBJECT/STT_NOTYPE/' dynamic.yaml > notype.yaml
+# RUN: yaml2obj notype.yaml -o notype-v1.o && %python seteflags.py notype-v1.o && mv notype-v1.o notype.o
+# RUN: mcs251-lld p.o notype.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=notype.placement --verify-placement --map=notype.map -o notype.elf
+# --- anonymous and NOTYPE-only slices move their map row OUT of the region
+# --- the final ELF's own boundary symbols describe.
+# RUN: %python %S/Inputs/audit-mutate.py map-section anon.map mut.map anon.o:.mcs251.XSEG 0x30000
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=anon.elf --report=anon.placement --object=p.o --object=anon.o --link-map=mut.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R31A
+# R31A: VERIFY FAIL: malformed link map mut.map: the section .mcs251.XSEG of anon.o is placed at 0x30000 but the positioning carrier places it at 0x10000
+# RUN: %python %S/Inputs/audit-mutate.py map-section notype.map mut.map notype.o:.mcs251.XSEG 0x30000
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=notype.elf --report=notype.placement --object=p.o --object=notype.o --link-map=mut.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R31N
+# R31N: VERIFY FAIL: malformed link map mut.map: the section .mcs251.XSEG of notype.o is placed at 0x30000 but the positioning carrier places it at 0x10000
+# --- the input still owns a named OBJECT, but the FINAL symbol's name is
+# --- gone (elf-rename keeps value/size/shndx): the row must not become
+# --- map-decided again.
+# RUN: %python %S/Inputs/audit-mutate.py elf-rename dyn.elf mut.elf dyn
+# RUN: %python %S/Inputs/audit-mutate.py map-section dyn.map mut.map dyn.o:.mcs251.XSEG 0x30000
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=dyn.placement --object=p.o --object=dyn.o --link-map=mut.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R31D
+# R31D: VERIFY FAIL: malformed link map mut.map: the section .mcs251.XSEG of dyn.o is placed at 0x30000 but the positioning carrier places it at 0x10000
+
+# =====================================================================
+# rule R3-2 (R2-2 residue) - the section-name vocabulary's MATCHING
+# BOUNDARIES are frozen with classifySection: `.mcs251.dseg` only as the
+# exact name (the prefixed family is `.mcs251.DSEG.`), likewise
+# edata/EDATA., xinit/xinit., xdata_init/xdata_init., HOME/HOME., VECS/VECS.,
+# BOOT/BOOT.; no lowercase iseg/sseg; no `.mcs251.BITINIT` ALLOC section.
+# The producer refuses all ten spellings below ("unsupported ALLOC
+# section"); the verifier must refuse the fabricated map row too, not
+# trust it.  Pre-fix behavior: rc=0 for every one.
+# =====================================================================
+# RUN: sed -e 's/\.mcs251\.XSEG/.mcs251.dseg.test/' -e 's/^dyn\.o:/v1.o:/' dynamic.yaml > v1.yaml
+# RUN: yaml2obj v1.yaml -o v1.o && %python seteflags.py v1.o
+# RUN: sed -e 's/^dyn\.o:/v1.o:/' -e 's/\.mcs251\.XSEG /.mcs251.dseg.test /' dyn.map > v1.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest dyn.elf v1f.elf 1 v1.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v1f.elf --report=dyn.placement --object=p.o --object=v1.o --link-map=v1.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R32A
+# R32A: VERIFY FAIL: the section .mcs251.dseg.test of v1.o cannot be classified into a storage space
+# RUN: sed -e 's/\.mcs251\.XSEG/.mcs251.edata.test/' -e 's/^dyn\.o:/v2.o:/' dynamic.yaml > v2.yaml
+# RUN: yaml2obj v2.yaml -o v2.o && %python seteflags.py v2.o
+# RUN: sed -e 's/^dyn\.o:/v2.o:/' -e 's/\.mcs251\.XSEG /.mcs251.edata.test /' dyn.map > v2.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest dyn.elf v2f.elf 1 v2.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v2f.elf --report=dyn.placement --object=p.o --object=v2.o --link-map=v2.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R32B
+# R32B: VERIFY FAIL: the section .mcs251.edata.test of v2.o cannot be classified into a storage space
+# RUN: sed -e 's/\.mcs251\.XSEG/.mcs251.iseg.test/' -e 's/^dyn\.o:/v3.o:/' dynamic.yaml > v3.yaml
+# RUN: yaml2obj v3.yaml -o v3.o && %python seteflags.py v3.o
+# RUN: sed -e 's/^dyn\.o:/v3.o:/' -e 's/\.mcs251\.XSEG /.mcs251.iseg.test /' dyn.map > v3.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest dyn.elf v3f.elf 1 v3.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v3f.elf --report=dyn.placement --object=p.o --object=v3.o --link-map=v3.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R32C
+# R32C: VERIFY FAIL: the section .mcs251.iseg.test of v3.o cannot be classified into a storage space
+# RUN: sed -e 's/\.mcs251\.XSEG/.mcs251.sseg.test/' -e 's/^dyn\.o:/v4.o:/' dynamic.yaml > v4.yaml
+# RUN: yaml2obj v4.yaml -o v4.o && %python seteflags.py v4.o
+# RUN: sed -e 's/^dyn\.o:/v4.o:/' -e 's/\.mcs251\.XSEG /.mcs251.sseg.test /' dyn.map > v4.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest dyn.elf v4f.elf 1 v4.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v4f.elf --report=dyn.placement --object=p.o --object=v4.o --link-map=v4.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R32D
+# R32D: VERIFY FAIL: the section .mcs251.sseg.test of v4.o cannot be classified into a storage space
+# RUN: sed -e 's/\.mcs251\.XSEG/.mcs251.HOMEx/' -e 's/^dyn\.o:/v5.o:/' dynamic.yaml > v5.yaml
+# RUN: yaml2obj v5.yaml -o v5.o && %python seteflags.py v5.o
+# RUN: sed -e 's/^dyn\.o:/v5.o:/' -e 's/\.mcs251\.XSEG /.mcs251.HOMEx /' dyn.map > v5.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest dyn.elf v5f.elf 1 v5.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v5f.elf --report=dyn.placement --object=p.o --object=v5.o --link-map=v5.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R32E
+# R32E: VERIFY FAIL: the section .mcs251.HOMEx of v5.o cannot be classified into a storage space
+# RUN: sed -e 's/\.mcs251\.XSEG/.mcs251.VECSx/' -e 's/^dyn\.o:/v6.o:/' dynamic.yaml > v6.yaml
+# RUN: yaml2obj v6.yaml -o v6.o && %python seteflags.py v6.o
+# RUN: sed -e 's/^dyn\.o:/v6.o:/' -e 's/\.mcs251\.XSEG /.mcs251.VECSx /' dyn.map > v6.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest dyn.elf v6f.elf 1 v6.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v6f.elf --report=dyn.placement --object=p.o --object=v6.o --link-map=v6.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R32F
+# R32F: VERIFY FAIL: the section .mcs251.VECSx of v6.o cannot be classified into a storage space
+# RUN: sed -e 's/\.mcs251\.XSEG/.mcs251.BOOTx/' -e 's/^dyn\.o:/v7.o:/' dynamic.yaml > v7.yaml
+# RUN: yaml2obj v7.yaml -o v7.o && %python seteflags.py v7.o
+# RUN: sed -e 's/^dyn\.o:/v7.o:/' -e 's/\.mcs251\.XSEG /.mcs251.BOOTx /' dyn.map > v7.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest dyn.elf v7f.elf 1 v7.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v7f.elf --report=dyn.placement --object=p.o --object=v7.o --link-map=v7.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R32G
+# R32G: VERIFY FAIL: the section .mcs251.BOOTx of v7.o cannot be classified into a storage space
+# RUN: sed -e 's/\.mcs251\.XSEG/.mcs251.xinitx/' -e 's/^dyn\.o:/v8.o:/' dynamic.yaml > v8.yaml
+# RUN: yaml2obj v8.yaml -o v8.o && %python seteflags.py v8.o
+# RUN: sed -e 's/^dyn\.o:/v8.o:/' -e 's/\.mcs251\.XSEG /.mcs251.xinitx /' dyn.map > v8.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest dyn.elf v8f.elf 1 v8.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v8f.elf --report=dyn.placement --object=p.o --object=v8.o --link-map=v8.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R32H
+# R32H: VERIFY FAIL: the section .mcs251.xinitx of v8.o cannot be classified into a storage space
+# RUN: sed -e 's/\.mcs251\.XSEG/.mcs251.xdata_initx/' -e 's/^dyn\.o:/v9.o:/' dynamic.yaml > v9.yaml
+# RUN: yaml2obj v9.yaml -o v9.o && %python seteflags.py v9.o
+# RUN: sed -e 's/^dyn\.o:/v9.o:/' -e 's/\.mcs251\.XSEG /.mcs251.xdata_initx /' dyn.map > v9.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest dyn.elf v9f.elf 1 v9.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v9f.elf --report=dyn.placement --object=p.o --object=v9.o --link-map=v9.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R32I
+# R32I: VERIFY FAIL: the section .mcs251.xdata_initx of v9.o cannot be classified into a storage space
+# RUN: sed -e 's/\.mcs251\.XSEG/.mcs251.BITINIT/' -e 's/^dyn\.o:/v10.o:/' dynamic.yaml > v10.yaml
+# RUN: yaml2obj v10.yaml -o v10.o && %python seteflags.py v10.o
+# RUN: sed -e 's/^dyn\.o:/v10.o:/' -e 's/\.mcs251\.XSEG /.mcs251.BITINIT /' dyn.map > v10.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest dyn.elf v10f.elf 1 v10.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=v10f.elf --report=dyn.placement --object=p.o --object=v10.o --link-map=v10.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R32J
+# R32J: VERIFY FAIL: the section .mcs251.BITINIT of v10.o cannot be classified into a storage space
+
+# =====================================================================
+# rule R2-2 (B3) - `.mcs251.OSEG.*` is writable NOBITS AS0 OVERLAY storage,
+# never CODE.  The positive links a real OSEG slice next to p.o; the fixed
+# AS0 object `dv` is then moved CONSISTENTLY (NOTE + hash + report +
+# st_value + map row) onto the slice's bytes.  The old dynamic-class table
+# called OSEG CODE, so the AS0 entity never collided with it (pre-fix rc=0).
+# =====================================================================
+# RUN: yaml2obj oseg.yaml -o oseg-v1.o && %python seteflags.py oseg-v1.o && mv oseg-v1.o oseg.o
+# RUN: mcs251-lld p.o oseg.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=oseg.placement --verify-placement --map=oseg.map -o oseg.elf
+# RUN: mcs251-placement-verify --elf=oseg.elf --report=oseg.placement --object=p.o --object=oseg.o --link-map=oseg.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# RUN: %python %S/Inputs/audit-mutate.py note-addr p.o p.o dv 0x8
+# RUN: %python %S/Inputs/audit-mutate.py report-field oseg.placement mut.placement dv address 0x8
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue oseg.elf mut.elf _dv 0x8
+# RUN: %python %S/Inputs/audit-mutate.py map-section oseg.map mut.map p.o:.mcu.fixed.dv 0x8
+# RUN: %python %S/Inputs/audit-mutate.py carrier-addr mut.elf mut.elf 0 p.o .mcu.fixed.dv 0x8
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=mut.elf --report=mut.placement --object=p.o --object=oseg.o --link-map=mut.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R22
+# R22: VERIFY FAIL: dv overlaps .mcs251.OSEG.test
+# RUN: cp .p.o.pristine p.o
+
+# =====================================================================
+# rule B4-related - the empty contract is a real case in every CLI cell: a
+# zero-byte report must never crash the verifier, and verify-only must clean up
+# its private report.  (The link half lives in placement-report.test.)
+# =====================================================================
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf plain.ll -o empty.o
+# RUN: mcs251-lld empty.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=empty.placement --verify-placement --map=empty.map -o empty.elf
+# RUN: mcs251-lld empty.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --map=empty2.map -o empty2.elf
+# RUN: test ! -f empty2.elf.placement
+# RUN: mcs251-placement-verify --elf=empty.elf --report=empty.placement --object=empty.o --link-map=empty.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+
+# =====================================================================
+# rule B6 - two file-scoped (STB_LOCAL) entities with the SAME bare ELF name but
+# different stables and addresses are a LEGAL combination: the name is
+# file-scoped, and only the address disambiguates the output symbol.
+# =====================================================================
+# RUN: yaml2obj scoped-a.yaml -o scoped-a-v1.o && %python seteflags.py scoped-a-v1.o && mv scoped-a-v1.o scoped-a.o
+# RUN: yaml2obj scoped-b.yaml -o scoped-b-v1.o && %python seteflags.py scoped-b-v1.o && mv scoped-b-v1.o scoped-b.o
+# RUN: mcs251-lld scoped-a.o scoped-b.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=scoped.placement --map=scoped.map -o scoped.elf
+# --- R8 §13.1 item 8: the owned B6 positive now carries an explicit rc=0 check.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=scoped.elf --report=scoped.placement --object=scoped-a.o --object=scoped-b.o --link-map=scoped.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# --- R8 §13.2 item 12 resident negative: both entities' carrier records and
+# --- map rows are moved onto each other's address while the final symbol table
+# --- is untouched, so each record no longer agrees with its entity.  (This
+# --- construction previously existed only in an out-of-tree history script.)
+# RUN: cp scoped.elf sw.elf && cp scoped.map sw.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-addr sw.elf sw.elf 0 scoped-a.o .mcu.fixed.aa 0x30000
+# RUN: %python %S/Inputs/audit-mutate.py carrier-addr sw.elf sw.elf 1 scoped-b.o .mcu.fixed.bb 0x20000
+# RUN: %python %S/Inputs/audit-mutate.py map-section sw.map sw.map scoped-a.o:.mcu.fixed.aa 0x30000
+# RUN: %python %S/Inputs/audit-mutate.py map-section sw.map sw.map scoped-b.o:.mcu.fixed.bb 0x20000
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=sw.elf --report=scoped.placement --object=scoped-a.o --object=scoped-b.o --link-map=sw.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=B6SWAP
+# B6SWAP: the positioning record for .mcu.fixed.aa of scoped-a.o disagrees with the placement entity aa
+
+# =====================================================================
+# rule R2-3 (B6) - the owned/bind ELF-name agreement is ORDER INDEPENDENT.
+# `own2.o` owns stable `aa` whose ELF entity is `_aa` (STB_GLOBAL).  The link
+# now CONSUMES the association carrier (post-C2 an object without one is
+# refused), so `bind-id-assoc.o` -- carrier associating `_aa` -- is the link
+# input.  When the association names a DIFFERENT entity (`diff`) with
+# identical layout fields, the group's records name two ELF entities -- in
+# EITHER input order.  The old loop skipped the owned record's name, so the
+# bind-first order passed (pre-fix rc=0) while the owned-first order failed.
+# =====================================================================
+# RUN: yaml2obj own2.yaml -o own2-v1.o && %python seteflags.py own2-v1.o && mv own2-v1.o own2.o
+# RUN: yaml2obj bind-id-assoc.yaml -o bind-id.o && %python seteflags.py bind-id.o
+# RUN: mcs251-lld own2.o bind-id.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=id.placement --map=id.map -o id.elf
+# --- the associating positive: the carrier names the SAME entity `_aa`.
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest id.elf id.elf 1 bind-id.o
+# RUN: mcs251-placement-verify --elf=id.elf --report=id.placement --object=own2.o --object=bind-id.o --link-map=id.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# --- the mismatch: the carrier names `diff`; the report's bind-source row
+# --- follows it so the failure can only come from the NAME agreement.
+# RUN: yaml2obj bind-id-diff.yaml -o bind-id.o && %python seteflags.py bind-id.o
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest id.elf id.elf 1 bind-id.o
+# RUN: sed 's/^\(aa | \)_aa\(.*bind-id\.o\)/\1diff\2/' id.placement > id-mut.placement
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=id.elf --report=id-mut.placement --object=bind-id.o --object=own2.o --link-map=id.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R23B
+# R23B: VERIFY FAIL: conflicting placement for aa: the group's records name different ELF entities
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=id.elf --report=id-mut.placement --object=own2.o --object=bind-id.o --link-map=id.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=R23O
+# R23O: VERIFY FAIL: conflicting placement for aa: the group's records name different ELF entities
+
+# =====================================================================
+# rule V3/B2 - the `.mcs251.placement.names` association carrier is parsed
+# independently and its STRUCTURE fails closed.  The carrier-backed bind
+# POSITIVE is now a real B+C product (C2-positive (a) above); these cases keep
+# the verifier's own structural decoder executable on synthetic variants,
+# including the ones the real writer cannot produce.
+# =====================================================================
+# RUN: yaml2obj names-note.yaml -o names-v1.o && %python seteflags.py names-v1.o && mv names-v1.o names.o
+# --- the carrier STRUCTURE itself parses cleanly (no names-NOTE diagnostic).
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=p.elf --report=p.placement --object=p.o --object=names.o --link-map=p.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=NSOK
+# NSOK-NOT: malformed placement names NOTE
+# RUN: %python %S/Inputs/audit-mutate.py sec-type names.o mut.o .mcs251.placement.names 1
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=p.elf --report=p.placement --object=p.o --object=mut.o --link-map=p.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=NSSEC
+# NSSEC: VERIFY FAIL: malformed placement names NOTE in mut.o: carrier is not a flags=0 align=4 SHT_NOTE
+# RUN: %python %S/Inputs/audit-mutate.py names-poke names.o mut.o 20 00000002
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=p.elf --report=p.placement --object=p.o --object=mut.o --link-map=p.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=NSHEX
+# NSHEX: VERIFY FAIL: malformed placement names NOTE in mut.o: association_version != 1
+# RUN: %python %S/Inputs/audit-mutate.py names-poke names.o mut.o 32 00000000
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=p.elf --report=p.placement --object=p.o --object=mut.o --link-map=p.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=NSZ
+# NSZ: VERIFY FAIL: malformed placement names NOTE in mut.o: entry 0 has an empty name
+# RUN: %python %S/Inputs/audit-mutate.py names-poke names.o mut.o 32 000000ff
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=p.elf --report=p.placement --object=p.o --object=mut.o --link-map=p.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=NTRUNC
+# NTRUNC: VERIFY FAIL: malformed placement names NOTE in mut.o: entry 0 name out of bounds
+# RUN: yaml2obj names-dup.yaml -o names-dup-v1.o && %python seteflags.py names-dup-v1.o && mv names-dup-v1.o names-dup.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=p.elf --report=p.placement --object=p.o --object=names-dup.o --link-map=p.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff 2>&1 | FileCheck %s --check-prefix=NDUP
+# NDUP: VERIFY FAIL: malformed placement names NOTE in names-dup.o: duplicate placement record index
+
+# =====================================================================
+# rule B8 - the Driver's own path/rollback behavior: a report that resolves to
+# the OUTPUT path is rejected even through a `./` alias, and a failed report
+# publication must not leave a brand-new ELF behind.
+# =====================================================================
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=./alias.elf -o alias.elf 2>&1 | FileCheck %s --check-prefix=B8C
+# B8C: placement report path conflicts with another input or output
+# RUN: test ! -f alias.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=missing/dir/out.placement -o fresh.elf 2>&1 | FileCheck %s --check-prefix=B8R
+# B8R: cannot open temporary placement report
+# RUN: test ! -f fresh.elf
+
+# =====================================================================
+# rule R2-6 (B8) - the `./` input spelling is one object with `r.o`: the
+# report's provenance uses the same lexical normalization the Driver hands
+# the verifier.  Pre-fix behavior: rc=1 (no placement report row for cl).
+# =====================================================================
+# RUN: mcs251-lld ./p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=dot.placement --verify-placement --map=dot.map -o dot.elf
+# RUN: mcs251-placement-verify --elf=dot.elf --report=dot.placement --object=./p.o --link-map=dot.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# RUN: FileCheck --input-file=dot.placement %s --check-prefix=R26
+# R26-NOT: /./
+
+# =====================================================================
+# rule R2-7 (B8) - the publication preflight is side-effect free on files
+# this run did not create, the temp paths are part of the conflict matrix,
+# and a report target that is an existing DIRECTORY is refused BEFORE the
+# ELF is replaced.  Pre-fix behavior: (1) the probe truncated+deleted the
+# pre-existing map temp; (2) `-o product.tmp --placement-report=product`
+# returned 0 and the ELF silently vanished under the report rename;
+# (3) the old ELF at the output path was replaced before the report's
+# rename failed.
+# =====================================================================
+# --- (1) a failing run must not destroy a pre-existing <target>.tmp.
+# RUN: mkdir -p target-dir && printf 'PRESERVE ME\n' > prot.map.tmp
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --map=prot.map -o target-dir 2>&1 | FileCheck %s --check-prefix=R27D
+# R27D: cannot replace output
+# RUN: test -f prot.map.tmp
+# RUN: printf 'PRESERVE ME\n' | cmp - prot.map.tmp
+# --- (2) an artifact whose final path is another artifact's TEMP path.
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement -o product.tmp --placement-report=product 2>&1 | FileCheck %s --check-prefix=R27T
+# R27T: placement report path conflicts with another input or output
+# RUN: test ! -f product.tmp
+# --- (3) a report target that is an existing directory: the old ELF at
+# --- the output path must survive byte-for-byte.
+# RUN: mkdir -p report-dir && printf 'OLD ELF CONTENT\n' > keep.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --placement-report=report-dir -o keep.elf 2>&1 | FileCheck %s --check-prefix=R27R
+# R27R: cannot replace placement report
+# RUN: printf 'OLD ELF CONTENT\n' | cmp - keep.elf
+# --- (4) R3-4: the REAL staging path is pre-flighted, and the ELF lands
+# --- LAST.  The unique-name writability probe only proved the parent
+# --- directory could hold a new file; a DIRECTORY parked at `<map>.tmp` or
+# --- `<report>.tmp` was discovered only inside the publication write, after
+# --- the already-published ELF had replaced the old product (pre-fix: old
+# --- ELF's content destroyed while the run still returned 1).
+# RUN: mkdir -p mt && printf 'OLD ELF\n' > mt/old.elf && mkdir -p mt/map.tmp
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --placement-report=mt/report --map=mt/map -o mt/old.elf 2>&1 | FileCheck %s --check-prefix=R34M
+# R34M: cannot open temporary map {{.*}}mt/map.tmp
+# RUN: printf 'OLD ELF\n' | cmp - mt/old.elf
+# RUN: not ls mt/*.probe.*
+# RUN: mkdir -p rt && printf 'OLD ELF\n' > rt/old.elf && mkdir -p rt/report.tmp
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --placement-report=rt/report -o rt/old.elf 2>&1 | FileCheck %s --check-prefix=R34R
+# R34R: cannot open temporary placement report {{.*}}rt/report.tmp
+# RUN: printf 'OLD ELF\n' | cmp - rt/old.elf
+# RUN: not ls rt/*.probe.*
+# --- the ELF did not pre-exist: the failed run leaves no new ELF behind.
+# RUN: mkdir -p mt2 && mkdir -p mt2/map.tmp
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld p.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --placement-report=mt2/report --map=mt2/map -o mt2/new.elf 2>&1 | FileCheck %s --check-prefix=R34M2
+# R34M2: cannot open temporary map {{.*}}mt2/map.tmp
+# RUN: test ! -f mt2/new.elf
+# --- (5) R3-5: a publication STAGING path that IS an input file.  The
+# --- report's temp used to be written through the input `source.tmp` and
+# --- renamed over `source`, silently consuming the input (pre-fix: rc=0,
+# --- input gone).
+# RUN: cp p.o source.tmp
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld source.tmp --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --placement-report=source -o r35.elf 2>&1 | FileCheck %s --check-prefix=R35
+# R35: placement report path conflicts with another input or output
+# RUN: cmp p.o source.tmp
+# RUN: test ! -f source
+# RUN: test ! -f r35.elf
+# --- the ELF's own staging path gets the same treatment.
+# RUN: cp p.o e.tmp
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld e.tmp --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement -o e 2>&1 | FileCheck %s --check-prefix=R35E
+# R35E: placement audit publication paths conflict: an output temporary path collides with an input file
+# RUN: cmp p.o e.tmp
+# RUN: test ! -f e
+
+#--- v.sh
+#!/bin/sh
+# The standard independent-verifier invocation: complete object list, the link
+# map and the board-level window numbers are passed explicitly; nothing is
+# taken from the map's own "already placed here" claim.
+exec mcs251-placement-verify \
+  --elf="${ELF:-p.elf}" --report="${REPORT:-p.placement}" \
+  --object="${OBJ:-p.o}" --link-map="${MAP:-p.map}" \
+  --flash-base=0xfc0000 --flash-size=0x40000 \
+  --area-start=XSEG=0x010000 --edata-end=0x3fff "$@"
+
+#--- vm.sh
+#!/bin/sh
+# Mutate p.o IN PLACE and verify: the object's path is part of the report's
+# `file` column, so a case that must land on a MERGE/SPAN/WINDOW rule cannot
+# simply rename its input.  Usage:vm.sh <cmd> <args...> -- <verify-args...>
+# G11-D2: the mutation also updates the final ELF's positioning carrier
+# (the object fingerprint, and for note-addr the fixed section's record), so
+# the case still reaches the layer it was written for instead of stopping at
+# the carrier's ordered-digest check (design section 11.2 fixture rule).
+set -e
+cmd="$1"
+shift
+marg1="$1"
+marg2="$2"
+args=""
+while [ "$1" != "--" ]; do
+  args="$args $1"
+  shift
+done
+shift
+elf="${ELF:-p.elf}"
+for a in "$@"; do
+  case "$a" in
+    --elf=*) elf="${a#--elf=}" ;;
+  esac
+done
+cp p.o .p.pristine
+cp "$elf" .vm.elf.pristine
+python3 "$MUT" "$cmd" p.o p.o $args
+if [ "$cmd" = note-addr ]; then
+  python3 "$MUT" carrier-addr "$elf" "$elf" 0 p.o ".mcu.fixed.$marg1" "$marg2"
+else
+  python3 "$MUT" carrier-digest "$elf" "$elf" 0 p.o
+fi
+set +e
+mcs251-placement-verify --elf="${ELF:-p.elf}" --report="${REPORT:-p.placement}" \
+  --object=p.o --link-map="${MAP:-p.map}" --flash-base=0xfc0000 \
+  --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff "$@"
+rc=$?
+cp .p.pristine p.o
+cp .vm.elf.pristine "$elf"
+exit $rc
+
+#--- names.ll
+; One owned entity whose object therefore carries the emitter's
+; `.mcs251.placement.names` association NOTE (two records: the owned entity and
+; the section anchor that is itself placed).
+source_filename = "names.c"
+target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
+target triple = "mcs251"
+
+@a = dso_local global i32 1, align 1 #0
+
+define dso_local void @use_a() addrspace(4) #1 {
+  %1 = load i32, ptr @a, align 1
+  ret void
+}
+
+attributes #0 = { "mcs251-place"="0x40,data,object,owned,0" "mcs251-stable-symbol"="a" }
+attributes #1 = { noinline nounwind optnone "no-builtins" }
+
+!llvm.module.flags = !{!0}
+!mcs251.signatures = !{!1}
+
+!0 = !{i32 1, !"wchar_size", i32 2}
+!1 = !{!"_use_a", i32 1, i32 0}
+
+#--- p.ll
+; Verbatim `clang --target=mcs251 -O0 -S -emit-llvm` output for a program
+; using every placement shape (AS0 object, CODE const object, CODE function,
+; retain, noinit, XDATA object).  llc materializes it in the test, so the
+; positive is a real B+C product with reproducible provenance.
+source_filename = "p.c"
+target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
+target triple = "mcs251"
+
+@dv = dso_local global i32 7, align 1 #0
+@cl = dso_local addrspace(4) constant i32 42, align 1 #1
+@rv = dso_local global i32 3, align 1 #2
+@xv = dso_local addrspace(3) global i32 11, align 1 #3
+@nv = dso_local global i32 0, align 1 #4
+@llvm.used = appending global [1 x ptr] [ptr @rv], section "llvm.metadata"
+
+define dso_local void @entryf() addrspace(4) #5 align 4 {
+  ret void
+}
+
+define dso_local i32 @use() addrspace(4) #6 {
+  %1 = load i32, ptr @dv, align 1
+  %2 = load i32, ptr @rv, align 1
+  %3 = add nsw i32 %1, %2
+  %4 = load i32, ptr @nv, align 1
+  %5 = add nsw i32 %3, %4
+  %6 = load i32, ptr addrspace(3) @xv, align 1
+  %7 = add nsw i32 %5, %6
+  ret i32 %7
+}
+
+attributes #0 = { "mcs251-place"="0x40,data,object,owned,0" "mcs251-stable-symbol"="dv" }
+attributes #1 = { "mcs251-place"="0xFC0000,code,object,owned,0" "mcs251-stable-symbol"="cl" }
+attributes #2 = { "mcs251-place"="0x50,data,object,owned,1" "mcs251-stable-symbol"="rv" }
+attributes #3 = { "mcs251-place"="0x20000,xdata,object,owned,0" "mcs251-stable-symbol"="xv" }
+attributes #4 = { "mcs251-place"="0x60,data,object,owned,2" "mcs251-stable-symbol"="nv" }
+attributes #5 = { noinline nounwind optnone "mcs251-place"="0xFC4000,code,function,owned,0" "mcs251-stable-symbol"="entryf" "no-builtins" }
+attributes #6 = { noinline nounwind optnone "no-builtins" }
+
+!llvm.module.flags = !{!0, !1}
+!mcs251.signatures = !{!2, !3}
+
+!0 = !{i32 1, !"wchar_size", i32 2}
+!1 = !{i32 7, !"frame-pointer", i32 2}
+!2 = !{!"_entryf", i32 1, i32 0}
+!3 = !{!"_use", i32 1, i32 0}
+
+#--- bind.ll
+; A bind-only object that the frozen HEAD emitter turns into a REAL
+; carrier-backed product: the record is associated through the emitted
+; `.mcs251.placement.names` entry with the undefined external `_ghostx`
+; (the ELF name, NOT the stable `ghostx`), which is exactly the mapping the
+; C2 consumer must use.  The address sits in the AS0-DATA space so the
+; product also satisfies the verifier's V12 range rule.
+source_filename = "bind.c"
+target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
+target triple = "mcs251"
+
+@ghostx = external global i32, align 1 #0
+
+define dso_local i32 @use_bind() addrspace(4) #1 {
+  %1 = load i32, ptr @ghostx, align 1
+  ret i32 %1
+}
+
+attributes #0 = { "mcs251-place"="0x80,data,object,bind,0" "mcs251-stable-symbol"="ghostx" }
+attributes #1 = { noinline nounwind optnone "no-builtins" }
+
+!llvm.module.flags = !{!0}
+!mcs251.signatures = !{!1}
+
+!0 = !{i32 1, !"wchar_size", i32 2}
+!1 = !{!"_use_bind", i32 1, i32 0}
+
+#--- seteflags.py
+
+# Rewrite e_flags to the v2 word (yaml2obj only registers the v1 enum).
+import sys
+OFF = 36
+for name in sys.argv[1:]:
+    b = bytearray(open(name, 'rb').read())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = bytes.fromhex("00000102")
+    open(name, 'wb').write(bytes(b))
+
+#--- pnt.txt
+place ghost 0x10000 xdata size=4 bind
+
+#--- pointer.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_24
+        Symbol: ghost
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: ghost
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+
+#--- code-reloc.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcu.fixed.fn
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .mcu.fixed.fn
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_24
+        Symbol: ghost
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c0102000000fc10000000000300000001000000004ca5579302666e00'
+Symbols:
+  - Name: fn
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fn
+    Size: 3
+  - Name: ghost
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+
+#--- scoped-a.yaml
+# G11-D B6 positive: a file-scoped (STB_LOCAL) entity named `same` under stable
+# `aa` at 0x20000.  Its partner scoped-b.yaml declares the SAME bare ELF name
+# under a different stable and address; the combination is legal.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c010100000002000000000004000000010000000052a5bdf002616100'
+Symbols:
+  - Name: same
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+
+#--- scoped-b.yaml
+# G11-D B6 positive partner: the same bare ELF name `same`, stable `bb`, at
+# 0x30000.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.bb
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01010000000300000000000400000001000000006204C30602626200'
+Symbols:
+  - Name: same
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.bb
+    Value: 0
+    Size: 4
+
+#--- dynamic.yaml
+# A dynamically allocated XSEG slice: no placement record, placed by the
+# allocator.  V14 must still account its bytes.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: dyn
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 4
+
+#--- names-note.yaml
+# A synthetic `.mcs251.placement.names` carrier (design section 4.2 layout):
+# SHT_NOTE, flags 0, align 4, name MCS251, type 2, desc =
+#   u32 association_version=1, u32 entry_count=1,
+#   u32 record_index=0, u32 name_len=2, "aa", pad to 4.
+# The object carries ONE real placement record, so the carrier structure parses
+# cleanly; it exists so the association-carrier STRUCTURE checks are executable
+# even though the emitter increment for the carrier is a later slice and
+# today's lld refuses such an input (registered cross-slice blocker).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0100000000020000000000040000000100000000A744B62D02616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000001000000000000000261610000'
+Symbols:
+  - Name: aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+
+#--- names-dup.yaml
+# Two association entries naming the SAME placement record index: the reader
+# must reject the duplicate rather than keeping the last one.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0100000000020000000000040000000100000000A744B62D02616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000200000000000000026161000000000000000000027A7A0000'
+Symbols:
+  - Name: aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+
+#--- plain.ll
+
+; A v1 object with NO placement at all: the empty contract.
+target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
+target triple = "mcs251"
+
+define dso_local void @plain() addrspace(4) #0 {
+  ret void
+}
+
+attributes #0 = { noinline nounwind optnone "no-builtins" }
+
+!llvm.module.flags = !{!0}
+!mcs251.signatures = !{!1}
+
+!0 = !{i32 1, !"wchar_size", i32 2}
+!1 = !{!"_plain", i32 1, i32 0}
+
+#--- oseg.yaml
+# G11-D R2-2: a writable NOBITS AS0 OVERLAY slice (`.mcs251.OSEG.*`), the
+# producer's overlay storage per LinkerCore's classifySection.  The dynamic
+# ledger must class it AS0-DATA so a fixed AS0 entity placed over it collides.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.OSEG.test
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:
+  - Name: osegobj
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.OSEG.test
+    Size: 4
+
+#--- j16.yaml
+# G11-D R2-4: the owned CODE source (`.mcu.fixed.fn` @0xfc1000) relocates a
+# NORMAL CODE target: `ghost`, defined in this object's own dynamically
+# allocated `.text` (CSEG), so the final target address is 0xff0200.  An
+# R_MCS251_24 mother first; the test then rewrites the channel to J16 and
+# the final encoding to the byte-correct low half `02 00` -- cross-bank.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcu.fixed.fn
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .mcu.fixed.fn
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_24
+        Symbol: ghost
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c0102000000fc10000000000300000001000000004ca5579302666e00'
+Symbols:
+  - Name: fn
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fn
+    Size: 3
+  - Name: ghost
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .text
+    Size: 1
+
+#--- xdata-j16.yaml
+# G11-D R3-3: j16.yaml with the target section turned into a dynamically
+# allocated `.mcs251.XSEG` (writable NOBITS, XDATA).  Linked with
+# --area-start=XSEG=0xfc0200 the target sits in the SAME 64K bank as fn
+# (0xfc1000): the J16 bank condition is satisfied and only the storage-space
+# channel rule can catch the 16-bit relocation the producer refuses.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .mcu.fixed.fn
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .mcu.fixed.fn
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_24
+        Symbol: ghost
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c0102000000fc10000000000300000001000000004ca5579302666e00'
+Symbols:
+  - Name: fn
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fn
+    Size: 3
+  - Name: ghost
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 1
+
+#--- samej16.yaml
+# G11-D R3-3 positive: j16.yaml with the channel already J16 and the CSEG
+# area pinned at 0xfc0200, so the CODE target (0xfc0200) shares fn's bank
+# (0xfc1000).  The link and the verification must both succeed: a legal
+# same-bank control transfer, kept as the channel rule's counterpart.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcu.fixed.fn
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .mcu.fixed.fn
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0
+        Type: R_MCS251_J16
+        Symbol: ghost
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c0102000000fc10000000000300000001000000004ca5579302666e00'
+Symbols:
+  - Name: fn
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.fn
+    Size: 3
+  - Name: ghost
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .text
+    Size: 1
+
+#--- own2.yaml
+# G11-D R2-3: stable `aa` owned by an EXTERNAL entity symbol `_aa`
+# (STB_GLOBAL), at 0x20000.  Same record bytes as scoped-a.yaml.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c010100000002000000000004000000010000000052a5bdf002616100'
+Symbols:
+  - Name: _aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+
+#--- bind-id-nocarrier.yaml
+# G11-D R2-3: the LEGACY bind object the link consumes (no `.names`
+# carrier; the linker associates it through the undefined global `_aa`).
+# One bind NOTE record for stable `aa`, XDATA object at 0x20000 size 4.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c010100010002000000000004000000010000000000d4ad0f02616100'
+Symbols:
+  - Name: _aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+
+#--- bind-id-assoc.yaml
+# G11-D R2-3: the carrier-backed version of the SAME object (record 0 is
+# associated with `_aa`): the verifier's associating POSITIVE.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c010100010002000000000004000000010000000000d4ad0f02616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000100000000000000035f616100'
+Symbols:
+  - Name: _aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+
+#--- bind-id-diff.yaml
+# G11-D R2-3: the MISMATCH carrier -- record 0 is associated with `diff`
+# while the owned record of the group names `_aa`.  The layout fields are
+# identical, so only the NAME agreement rule can catch it.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c010100010002000000000004000000010000000000d4ad0f02616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000001000000000000000464696666'
+Symbols:
+  - Name: diff
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT

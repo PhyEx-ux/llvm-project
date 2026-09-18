@@ -1,0 +1,317 @@
+# G11-D folded boundary hardening (2026-09-17).  The three non-blocking
+# suggestions handed over by the G11-C re-review, kept in a D-owned file so the
+# G11-C validated `placement-contract-b7.test` stays byte-identical:
+#
+#   * B1 -- the canonical NOTE padding rule at the 2- and 3-byte residues
+#     (the original fixture exercises only the 1-byte residue; the rule is
+#     alignTo(25 + stable_len, 4), so the padding varies with the NAME length);
+#   * B5 -- an unknown NOTE flags bit on a REAL producer object (the fixture
+#     matrix reached flags only through hand-built records);
+#   * B3 -- a manifest constraint that TIGHTENS the merged align, proven to be
+#     EXECUTED by the layout rather than merely echoed into the report;
+#   * B6 -- the P-6 trace sentinel at a width-2 and width-3 relocation field
+#     ending at the last byte of a section that abuts another section.
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf pad2.ll -o pad2.o
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf pad3.ll -o pad3.o
+# RUN: yaml2obj boundary16.yaml -o b16-v1.o && %python seteflags.py b16-v1.o && mv b16-v1.o b16.o
+# RUN: yaml2obj boundary24.yaml -o b24-v1.o && %python seteflags.py b24-v1.o && mv b24-v1.o b24.o
+
+# =====================================================================
+# B1: the padding residue is a function of the stable length.  The two objects
+# are real llc output differing ONLY in that length.
+# =====================================================================
+# RUN: %python boundary-mutate.py padwidth pad2.o | FileCheck %s --check-prefix=PADW2
+# PADW2: 1 28 2
+# RUN: %python boundary-mutate.py padwidth pad3.o | FileCheck %s --check-prefix=PADW3
+# PADW3: 4 32 3
+# RUN: mcs251-lld pad2.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o pad2ok.elf
+# RUN: mcs251-lld pad3.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o pad3ok.elf
+# RUN: %python boundary-mutate.py pad pad2.o pad2-pad.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld pad2-pad.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o p2p.elf 2>&1 | FileCheck %s --check-prefix=PAD2BAD
+# PAD2BAD: malformed placement NOTE in pad2-pad.o: record at offset 20 has non-zero padding
+# RUN: %python boundary-mutate.py pad pad3.o pad3-pad.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld pad3-pad.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o p3p.elf 2>&1 | FileCheck %s --check-prefix=PAD3BAD
+# PAD3BAD: malformed placement NOTE in pad3-pad.o: record at offset 20 has non-zero padding
+# RUN: %python boundary-mutate.py cut pad2.o pad2-cut.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld pad2-cut.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o p2c.elf 2>&1 | FileCheck %s --check-prefix=PAD2CUT
+# PAD2CUT: malformed placement NOTE in pad2-cut.o: truncated record at offset 20
+# RUN: %python boundary-mutate.py cut pad3.o pad3-cut.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld pad3-cut.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o p3c.elf 2>&1 | FileCheck %s --check-prefix=PAD3CUT
+# PAD3CUT: malformed placement NOTE in pad3-cut.o: truncated record at offset 20
+
+# =====================================================================
+# B5: an unknown flags bit is refused on a real object even though the stored
+# H_source was recomputed over the damaged field, so the verdict cannot come
+# from the hash check.
+# =====================================================================
+# RUN: %python boundary-mutate.py flags pad2.o pad2-fl.o 0x4
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld pad2-fl.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o p2f.elf 2>&1 | FileCheck %s --check-prefix=FLAGBAD
+# FLAGBAD: malformed placement NOTE in pad2-fl.o: unknown flags 0x4
+
+# =====================================================================
+# B3: a manifest align that tightens the merged contract to a value the pinned
+# address does NOT satisfy must fail in the LAYOUT.  `f` sits at 0x40, which
+# satisfies align 64 but not align 128.
+# =====================================================================
+# RUN: printf 'place f 0x40 data size=4 align=128\n' > m-tighten.txt
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld pad2.o --placement-manifest=m-tighten.txt --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o mt.elf 2>&1 | FileCheck %s --check-prefix=TIGHTEN
+# TIGHTEN: fixed placement for _f at 0x40 violates alignment 128
+# RUN: test ! -f mt.elf
+# RUN: printf 'place f 0x40 data size=4 align=64\n' > m-okalign.txt
+# RUN: mcs251-lld pad2.o --placement-manifest=m-okalign.txt --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o mok.elf
+# RUN: test -f mok.elf
+
+# =====================================================================
+# B6: the trace sentinel occupies EXACTLY the relocation's field width.  A
+# width-2 (R_MCS251_16) and a width-3 (R_MCS251_24) field each end at the last
+# byte of .text, with .rodata placed immediately after it in the same CSEG run:
+# the sentinel must not reach .rodata's first byte, and the traced image must
+# be byte-identical to the untraced one.
+# =====================================================================
+# RUN: mcs251-lld b16.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o b16-off.elf
+# RUN: llvm-readelf -x .mcs251.load.0 b16-off.elf | FileCheck %s --check-prefix=HEX16OFF
+# HEX16OFF: 0x00ff0200 00401122 3344
+# RUN: env MCS251_P6_TRACE=%t/t16.txt mcs251-lld b16.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o b16-on.elf
+# RUN: llvm-readelf -x .mcs251.load.0 b16-on.elf | FileCheck %s --check-prefix=HEX16OFF
+# RUN: FileCheck %s --check-prefix=T16 < %t/t16.txt
+# T16: P6 REL .text off=0x0 writes=2 before=0x00,0x00 after=0x00,0x40 width=2
+# RUN: cmp b16-on.elf b16-off.elf
+# RUN: mcs251-lld b24.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o b24-off.elf
+# RUN: llvm-readelf -x .mcs251.load.0 b24-off.elf | FileCheck %s --check-prefix=HEX24OFF
+# HEX24OFF: 0x00ff0200 00004011 223344
+# RUN: env MCS251_P6_TRACE=%t/t24.txt mcs251-lld b24.o --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff -o b24-on.elf
+# RUN: llvm-readelf -x .mcs251.load.0 b24-on.elf | FileCheck %s --check-prefix=HEX24OFF
+# RUN: FileCheck %s --check-prefix=T24 < %t/t24.txt
+# T24: P6 REL .text off=0x0 writes=3 before=0x00,0x00,0x00 after=0x00,0x00,0x40 width=3
+# RUN: cmp b24-on.elf b24-off.elf
+
+# =====================================================================
+# Fixtures
+# =====================================================================
+#--- seteflags.py
+# Rewrite e_flags to the v2 word (yaml2obj only registers the v1 enum).
+import sys
+OFF = 36
+for name in sys.argv[1:]:
+    b = bytearray(open(name, 'rb').read())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = bytes.fromhex("00000102")
+    open(name, 'wb').write(bytes(b))
+
+#--- boundary-mutate.py
+#!/usr/bin/env python3
+"""Byte mutations computed from the ELF structure (no hardcoded offsets):
+
+  pad <src> <dst>        set the last NOTE storage byte to 0x42
+  cut <src> <dst>        shrink sh_size/descsz by one (record tail exits)
+  flags <src> <dst> <h>  write the first record's flags field, H_source fixed up
+  padwidth <src>         print "<stable_len> <record_size> <padding>"
+"""
+import hashlib
+import struct
+import sys
+
+mode, src = sys.argv[1], sys.argv[2]
+dst = sys.argv[3] if len(sys.argv) > 3 else None
+b = bytearray(open(src, 'rb').read())
+Shoff, = struct.unpack_from('>I', b, 32)
+Shentsize, Shnum, Shstrndx = struct.unpack_from('>HHH', b, 46)
+
+
+def sec_at(i):
+    return struct.unpack_from('>IIIIIIIIII', b, Shoff + i * Shentsize)
+
+
+strtab = sec_at(Shstrndx)
+
+
+def name(off):
+    e = b.index(b'\0', strtab[4] + off)
+    return b[strtab[4] + off:e].decode()
+
+
+idx = None
+for i in range(Shnum):
+    if name(sec_at(i)[0]) == '.mcs251.placement':
+        idx = i
+        break
+assert idx is not None
+ShOff, ShSize = sec_at(idx)[4], sec_at(idx)[5]
+if mode == 'pad':
+    b[ShOff + ShSize - 1] = 0x42
+elif mode == 'cut':
+    struct.pack_into('>I', b, Shoff + idx * Shentsize + 20, ShSize - 1)
+    struct.pack_into('>I', b, ShOff + 4, ShSize - 1 - 20)
+elif mode == 'flags':
+    Off = ShOff + 20
+    struct.pack_into('>I', b, Off + 20, int(sys.argv[4], 0))
+    cls, ent, own = b[Off + 5], b[Off + 6], b[Off + 7]
+    addr, align, flags = struct.unpack_from('>III', b, Off + 8)
+    h = hashlib.sha256(bytes([1, cls, ent, own]) +
+                       struct.pack('>III', addr, align, flags)).digest()[28:32]
+    b[Off + 24:Off + 28] = h
+elif mode == 'padwidth':
+    Off = ShOff + 20
+    RecSize, = struct.unpack_from('>I', b, Off)
+    SLen = b[Off + 28]
+    print('%d %d %d' % (SLen, RecSize, RecSize - (25 + SLen)))
+    raise SystemExit(0)
+else:
+    raise SystemExit('mode?')
+open(dst, 'wb').write(bytes(b))
+
+#--- pad2.ll
+; Real producer IR with a ONE-character stable symbol: record_size is
+; alignTo(25+1,4) = 28, so the record carries TWO padding bytes.
+source_filename = "pad2.c"
+target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
+target triple = "mcs251"
+
+@f = dso_local global i32 1, align 1 #0
+
+define dso_local void @use_f() addrspace(4) #1 {
+  %1 = load i32, ptr @f, align 1
+  ret void
+}
+
+attributes #0 = { "mcs251-place"="0x40,data,object,owned,0" "mcs251-stable-symbol"="f" }
+attributes #1 = { noinline nounwind optnone "no-builtins" }
+
+!llvm.module.flags = !{!0}
+!mcs251.signatures = !{!1}
+
+!0 = !{i32 1, !"wchar_size", i32 2}
+!1 = !{!"_use_f", i32 1, i32 0}
+
+#--- pad3.ll
+; Real producer IR with a FOUR-character stable symbol: record_size is
+; alignTo(25+4,4) = 32, so the record carries THREE padding bytes.
+source_filename = "pad3.c"
+target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
+target triple = "mcs251"
+
+@abcd = dso_local global i32 1, align 1 #0
+
+define dso_local void @use_abcd() addrspace(4) #1 {
+  %1 = load i32, ptr @abcd, align 1
+  ret void
+}
+
+attributes #0 = { "mcs251-place"="0x40,data,object,owned,0" "mcs251-stable-symbol"="abcd" }
+attributes #1 = { noinline nounwind optnone "no-builtins" }
+
+!llvm.module.flags = !{!0}
+!mcs251.signatures = !{!1}
+
+!0 = !{i32 1, !"wchar_size", i32 2}
+!1 = !{!"_use_abcd", i32 1, i32 0}
+
+#--- boundary16.yaml
+# A width-2 (R_MCS251_16) relocation field covering the WHOLE of .text (2
+# bytes), with .rodata immediately after it in the same CSEG run.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '11223344'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_16
+        Symbol: _dv
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcu.fixed.dv
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01000000000000400000000400000001000000004ADAFB6102647600'
+Symbols:
+  - Name: _dv
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.dv
+    Value: 0
+    Size: 4
+
+#--- boundary24.yaml
+# A width-3 (R_MCS251_24) relocation field covering the WHOLE of .text (3
+# bytes), with .rodata immediately after it in the same CSEG run.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .rodata
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '11223344'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Info: .text
+    AddressAlign: 1
+    Relocations:
+      - Offset: 0x0
+        Type: R_MCS251_24
+        Symbol: _dv
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcu.fixed.dv
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01000000000000400000000400000001000000004ADAFB6102647600'
+Symbols:
+  - Name: _dv
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.dv
+    Value: 0
+    Size: 4

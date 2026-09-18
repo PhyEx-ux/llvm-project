@@ -507,6 +507,13 @@ Sections:
       - Name: MCS251
         Type: 1
         Desc: '000000200102010100FF20000000000000000001000000003F706EC20762696E645F666E'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000001000000000000000762696e645f666e00'
 # PM ruling (rev 2, kept): a bind function enters as a NOTYPE entry.
 Symbols:
   - Name: bind_fn
@@ -549,6 +556,13 @@ Sections:
       - Name: MCS251
         Type: 1
         Desc: '0000001C01000001000000400000000400000001000000007A6F61A302627800'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000100000000000000035f627800'
 Symbols:
   - Name: _bx
     Binding: STB_GLOBAL
@@ -589,6 +603,13 @@ Sections:
       - Name: MCS251
         Type: 1
         Desc: '0000001C0101000100010000000000040000000100000000E6E499C902627800'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000100000000000000035f627800'
 Symbols:
   - Name: _bx
     Binding: STB_GLOBAL
@@ -634,6 +655,13 @@ Sections:
       - Name: MCS251
         Type: 1
         Desc: '0000001C0101000100010000000000040000000100000000E6E499C902627800'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000100000000000000035f627800'
 Symbols:
   - Name: _bx
     Binding: STB_GLOBAL
@@ -679,6 +707,13 @@ Sections:
       - Name: MCS251
         Type: 1
         Desc: '0000001C0101000100010000000000040000000100000000E6E499C902627800'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000100000000000000035f627800'
 Symbols:
   - Name: _bx
     Binding: STB_GLOBAL

@@ -1,0 +1,377 @@
+# G11-D2 (design section 9.5 / 11.5): the audit publication transaction,
+# resident end-to-end on the real file system.  Fixed-point operation
+# failures (rename/unlink/write at an exact ordinal) are injected through
+# fsfail.so, a TEST-ONLY LD_PRELOAD shim compiled by this test; no
+# production environment switch exists.  Every restore assertion is a BYTE
+# comparison against the old content, never a mere path check.
+#
+# The shim needs a host C compiler (cc); it fails loudly if none exists.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: cc -shared -fPIC -o fsfail.so fsfail.c -ldl
+# RUN: yaml2obj obj.yaml -o t.o && %python v2.py t.o && mv t.o m.o
+
+# W: the window set every link uses.
+# SUCCESS: all three artifacts publish; a second run in another directory
+# produces byte-identical artifacts (deterministic carrier), and no temp,
+# backup or probe residue is left behind.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=ok.placement --map=ok.map -o ok.elf
+# RUN: mkdir -p d2 && cp m.o d2/m.o && cd d2 && %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=ok.placement --map=ok.map -o ok.elf && cd ..
+# RUN: cmp ok.elf d2/ok.elf && cmp ok.map d2/ok.map && cmp ok.placement d2/ok.placement
+# RUN: ls | not grep -E '\.tmp$|\.pubbk\.|\.probe\.' 
+
+# STG-FILE: a pre-existing ordinary report.tmp survives byte-exactly and the
+# run fails before anything is published.
+# RUN: mkdir -p s1 && cd s1 && printf 'PRE-EXISTING-TMP' > out.report.tmp && printf 'OLD-ELF-EEEE' > out.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=OPENTMP
+# RUN: printf 'PRE-EXISTING-TMP' > a.ref && printf 'OLD-ELF-EEEE' > b.ref && cmp out.report.tmp a.ref && cmp out.elf b.ref && cd ..
+# OPENTMP: cannot open temporary placement report
+
+# STG-DIR: a directory parked at the staging path is refused up front and
+# its content survives.
+# RUN: mkdir -p s2/out.report.tmp/keep && cd s2 && echo keep > out.report.tmp/keep/x.orig && cp out.report.tmp/keep/x.orig out.report.tmp/keep/x && printf 'OLD-ELF-EEEE' > out.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=OPENTMP2
+# RUN: cmp out.report.tmp/keep/x out.report.tmp/keep/x.orig && cd ..
+# OPENTMP2: cannot open temporary placement report
+
+# REN-MAP: the map publish rename fails -> every final keeps its OLD bytes.
+# RUN: mkdir -p r1 && cd r1 && printf 'OLD-MAP-MMMM' > out.map && printf 'OLD-REP-RRRR' > out.report && printf 'OLD-ELF-EEEE' > out.elf
+# RUN: env FSFAIL='rename:out.map:2' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=RMAP
+# RUN: printf 'OLD-MAP-MMMM' > a.ref && printf 'OLD-REP-RRRR' > b.ref && printf 'OLD-ELF-EEEE' > c.ref && cmp out.map a.ref && cmp out.report b.ref && cmp out.elf c.ref && ls | not grep -E '\.tmp$|\.pubbk\.' && cd ..
+# RMAP: cannot replace map
+
+# REN-REP: the report publish rename fails -> the already published map is
+# RESTORED to its old bytes (the R4-3 contract).
+# RUN: mkdir -p r2 && cd r2 && printf 'OLD-MAP-MMMM' > out.map && printf 'OLD-REP-RRRR' > out.report && printf 'OLD-ELF-EEEE' > out.elf
+# RUN: env FSFAIL='rename:out.report:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=RREP
+# RUN: printf 'OLD-MAP-MMMM' > a.ref && printf 'OLD-REP-RRRR' > b.ref && printf 'OLD-ELF-EEEE' > c.ref && cmp out.map a.ref && cmp out.report b.ref && cmp out.elf c.ref && cd ..
+# RREP: cannot replace placement report
+
+# REN-ELF: the ELF publish rename fails -> map AND report are restored.
+# RUN: mkdir -p r3 && cd r3 && printf 'OLD-MAP-MMMM' > out.map && printf 'OLD-REP-RRRR' > out.report && printf 'OLD-ELF-EEEE' > out.elf
+# RUN: env FSFAIL='rename:out.elf:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=RELF
+# RUN: printf 'OLD-MAP-MMMM' > a.ref && printf 'OLD-REP-RRRR' > b.ref && printf 'OLD-ELF-EEEE' > c.ref && cmp out.map a.ref && cmp out.report b.ref && cmp out.elf c.ref && cd ..
+# RELF: cannot replace output
+
+# REN-NONE: nothing pre-existed and the ELF publish fails -> NO artifact at
+# all is left behind.
+# RUN: mkdir -p r4 && cd r4
+# RUN: env FSFAIL='rename:out.elf:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf
+# RUN: not test -e out.map && not test -e out.report && not test -e out.elf && ls | not grep -E '\.tmp$|\.pubbk\.' && cd ..
+
+# RESTORE-FAIL: the map restore rename itself fails -> rc 1, the unrestored
+# target and the retained backup are named, and the new map stays.
+# RUN: mkdir -p e1 && cd e1 && printf 'OLD-MAP-MMMM' > out.map && printf 'OLD-REP-RRRR' > out.report
+# RUN: env FSFAIL='rename:out.report:1,rename:out.map:3' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=EREST
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=ref.placement --map=ref.map -o ref.elf && ls .out.map.pubbk.* && cmp out.map ref.map && cd ..
+# EREST: could not be fully restored
+# EREST: out.map (backup:
+
+# COMMIT-CLEANUP: the post-commit backup cleanup fails -> the run still
+# SUCCEEDS with a warning and the backup is retained.
+# RUN: mkdir -p f1 && cd f1 && printf 'OLD-ELF-EEEE' > out.elf
+# RUN: env FSFAIL='remove:.pubbk.:2' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=WBU
+# RUN: cmp out.elf ../ok.elf && ls .out.elf.pubbk.* && cd ..
+# WBU: warning: cannot remove the publication backup
+
+# SYMLINK: a symlink at the map final is restored AS A LINK (the link
+# target keeps its old bytes).
+# RUN: mkdir -p i1 && cd i1 && printf 'OLD-MAP-MMMM' > map.target && ln -s map.target out.map && printf 'OLD-REP-RRRR' > out.report
+# RUN: env FSFAIL='rename:out.report:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf
+# RUN: printf 'OLD-MAP-MMMM' > a.ref && readlink out.map > link.got && echo map.target > link.want && test -L out.map && cmp link.got link.want && cmp map.target a.ref && cd ..
+# SYMLINK-DANGLING: the same for a DANGLING link (design 9.2: the link
+# itself is saved and restored, target content notwithstanding).
+# RUN: mkdir -p i2 && cd i2 && ln -s gone.target out.map
+# RUN: env FSFAIL='rename:out.report:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf
+# RUN: test -L out.map && readlink out.map | FileCheck %s --check-prefix=DLNK && cd ..
+# DLNK: gone.target
+
+# SYMLINK-BK (R5-6): the backup creates a PERSISTENT copy of the old link
+# before publishing, so a symlink() failure during backup is a clean
+# pre-publication failure: every final keeps its old state and the link at the
+# map path still points at its target.
+# RUN: mkdir -p i3 && cd i3 && printf 'OLD-MAP-MMMM' > map.target && ln -s map.target out.map && printf 'OLD-REP-RRRR' > out.report
+# RUN: env FSFAIL='symlink:' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=WBKSYM
+# RUN: test -L out.map && readlink out.map | FileCheck %s --check-prefix=DLNK2 && printf 'OLD-REP-RRRR' > r.ref && cmp out.report r.ref && ls | not grep -E '\.tmp$|\.pubbk\.' && cd ..
+# DLNK2: map.target
+# WBKSYM: cannot back up map
+# SYMLINK-RESTORE-FAIL (R5-6): when the restore rename itself fails, the
+# persistent backup is RETAINED and its path is reported (it is a symlink
+# carrying the old target), so the user can recover the old state.
+# RUN: mkdir -p i4 && cd i4 && printf 'OLD-MAP-MMMM' > map.target && ln -s map.target out.map && printf 'OLD-REP-RRRR' > out.report
+# RUN: env FSFAIL='rename:out.report:1,rename:.pubbk.:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=ERESTSYM
+# RUN: test -L .out.map.pubbk.* && readlink .out.map.pubbk.* | FileCheck %s --check-prefix=DLNK3 && cd ..
+# DLNK3: map.target
+# ERESTSYM: could not be fully restored
+# ERESTSYM: out.map (backup:
+
+# PRIV-CLOSE (R5-7): a CLOSE failure on a private audit file (the real
+# descriptor is closed first, then EIO is reported, so no fd-lifetime
+# artifact can be responsible) is a CONTROLLED error: rc=1, the private
+# workspace is cleaned and every old final keeps its bytes.
+# RUN: mkdir -p g1 && cd g1 && printf 'OLD-ELF-EEEE' > out.elf && printf 'OLD-REP-RRRR' > out.report && printf 'OLD-MAP-MMMM' > out.map
+# RUN: env TMPDIR=. FSFAIL='close:out.elf:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=WCLOSE
+# RUN: printf 'OLD-ELF-EEEE' > a.ref && printf 'OLD-REP-RRRR' > b.ref && printf 'OLD-MAP-MMMM' > c.ref && cmp out.elf a.ref && cmp out.report b.ref && cmp out.map c.ref && ls | not grep -E 'mcs251-placement-audit|\.tmp$|\.pubbk\.' && cd ..
+# WCLOSE: cannot write temporary output
+# RUN: mkdir -p g2 && cd g2 && printf 'OLD-ELF-EEEE' > out.elf && printf 'OLD-REP-RRRR' > out.report && printf 'OLD-MAP-MMMM' > out.map
+# RUN: env TMPDIR=. FSFAIL='close:out.placement.tmp:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=WCLOSE2
+# RUN: printf 'OLD-ELF-EEEE' > a.ref && cmp out.elf a.ref && ls | not grep -E 'mcs251-placement-audit|\.tmp$|\.pubbk\.' && cd ..
+# WCLOSE2: cannot write temporary placement report
+# RUN: mkdir -p g3 && cd g3 && printf 'OLD-ELF-EEEE' > out.elf && printf 'OLD-REP-RRRR' > out.report && printf 'OLD-MAP-MMMM' > out.map
+# RUN: env TMPDIR=. FSFAIL='close:out.map.tmp:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=WCLOSE3
+# RUN: printf 'OLD-ELF-EEEE' > a.ref && cmp out.elf a.ref && ls | not grep -E 'mcs251-placement-audit|\.tmp$|\.pubbk\.' && cd ..
+# WCLOSE3: cannot write temporary map
+
+# PROBE-RM (R5-8): a cleanup failure of THIS run's own pre-flight probe file
+# is reported by name, never silently accepted as "no residue".
+# RUN: mkdir -p g4 && cd g4 && printf 'OLD-ELF-EEEE' > out.elf
+# RUN: env FSFAIL='remove:.probe.:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=WPROBE
+# RUN: printf 'OLD-ELF-EEEE' > a.ref && cmp out.elf a.ref && ls out.elf.probe.* && cd ..
+# WPROBE: cannot remove the output probe file
+
+# STG-WRITE: a write failure on the ELF staging file (design 9.5 final
+# staging) -- nothing has been published yet, every final keeps its old
+# bytes and no temp/backup residue survives.
+# RUN: mkdir -p j1 && cd j1 && printf 'OLD-MAP-MMMM' > out.map && printf 'OLD-REP-RRRR' > out.report && printf 'OLD-ELF-EEEE' > out.elf
+# RUN: env FSFAIL='write:out.elf.tmp' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=WSTG
+# RUN: printf 'OLD-MAP-MMMM' > a.ref && printf 'OLD-REP-RRRR' > b.ref && printf 'OLD-ELF-EEEE' > c.ref && cmp out.map a.ref && cmp out.report b.ref && cmp out.elf c.ref && ls | not grep -E '\.tmp$|\.pubbk\.|\.probe\.' && cd ..
+# WSTG: cannot write temporary output out.elf.tmp
+
+# BK-LINKFAIL: hard-link backup unavailable -> the byte-copy fallback
+# completes BEFORE publication and the run SUCCEEDS cleanly.
+# RUN: mkdir -p k1 && cd k1 && printf 'OLD-ELF-EEEE' > out.elf
+# RUN: env FSFAIL='link:.pubbk' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf
+# RUN: cmp out.elf ../ok.elf && ls | not grep -E '\.tmp$|\.pubbk\.|\.probe\.' && cd ..
+# BK-OPENFAIL: even the unique backup NAME cannot be created -> failure
+# BEFORE the first replacement; the old bytes survive untouched.
+# RUN: mkdir -p k2 && cd k2 && printf 'OLD-ELF-EEEE' > out.elf
+# RUN: env FSFAIL='open:.pubbk' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=WBKO
+# RUN: printf 'OLD-ELF-EEEE' > a.ref && cmp out.elf a.ref && ls | not grep -E '\.tmp$|\.pubbk\.|\.probe\.' && cd ..
+# WBKO: cannot back up output out.elf
+
+# MIXED: only the map pre-exists; the report publish fails -> the map is
+# restored and the never-existing artifacts stay absent.
+# RUN: mkdir -p l1 && cd l1 && printf 'OLD-MAP-MMMM' > out.map
+# RUN: env FSFAIL='rename:out.report:1' LD_PRELOAD=../fsfail.so %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 ../m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=out.report --map=out.map -o out.elf | FileCheck %s --check-prefix=RMIX
+# RUN: printf 'OLD-MAP-MMMM' > a.ref && cmp out.map a.ref && not test -e out.report && not test -e out.elf && ls | not grep -E '\.tmp$|\.pubbk\.' && cd ..
+# RMIX: cannot replace placement report
+
+# CONFLICT keep-items (R3-4/R3-5 through the transaction path).
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 m.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=product --map=x.map -o product.tmp | FileCheck %s --check-prefix=CONF
+# RUN: cp m.o source.tmp && %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 source.tmp --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=source --map=y.map -o z.elf | FileCheck %s --check-prefix=CONF
+# RUN: cmp source.tmp m.o
+# CONF: conflicts with another input or output
+
+#--- fsfail.c
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#define MAXTRK 128
+#define MAXSPEC 16
+struct spec { const char *op; const char *sub; int n; int used; };
+static struct spec specs[MAXSPEC];
+static int nspec;
+static int trk_fd[MAXTRK];
+static char trk_path[MAXTRK][4096];
+static int ntrk;
+
+__attribute__((constructor)) static void init(void) {
+  const char *env = getenv("FSFAIL");
+  if (!env || !*env)
+    return;
+  char *buf = strdup(env);
+  for (char *tok = strtok(buf, ","); tok && nspec < MAXSPEC;
+       tok = strtok(NULL, ",")) {
+    char *c1 = strchr(tok, ':');
+    if (!c1)
+      continue;
+    *c1 = 0;
+    char *sub = c1 + 1;
+    int n = 1;
+    char *c2 = strchr(sub, ':');
+    if (c2) {
+      *c2 = 0;
+      n = atoi(c2 + 1);
+    }
+    specs[nspec].op = strdup(tok);
+    specs[nspec].sub = strdup(sub);
+    specs[nspec].n = n < 1 ? 1 : n;
+    specs[nspec].used = 0;
+    nspec++;
+  }
+}
+
+static int injected_errno(void) {
+  const char *e = getenv("FSFAIL_ERRNO");
+  return e && *e ? atoi(e) : 5;
+}
+static const char *op_family(const char *op) {
+  if (strcmp(op, "unlink") == 0)
+    return "remove";
+  return op;
+}
+static int fail_call2(const char *op, const char *a, const char *b) {
+  if (!nspec)
+    return 0;
+  const char *fam = op_family(op);
+  for (int i = 0; i < nspec; i++) {
+    if (strcmp(op_family(specs[i].op), fam) != 0)
+      continue;
+    int hit = (a && strstr(a, specs[i].sub)) || (b && strstr(b, specs[i].sub));
+    if (!hit)
+      continue;
+    specs[i].used++;
+    if (specs[i].used == specs[i].n)
+      return 1;
+  }
+  return 0;
+}
+static int want_track(const char *path) {
+  for (int i = 0; i < nspec; i++)
+    if ((strcmp(specs[i].op, "write") == 0 || strcmp(specs[i].op, "close") == 0)
+        && path && strstr(path, specs[i].sub))
+      return 1;
+  return 0;
+}
+static void track(int fd, const char *path) {
+  if (fd < 0 || !want_track(path) || ntrk >= MAXTRK)
+    return;
+  trk_fd[ntrk] = fd;
+  snprintf(trk_path[ntrk], sizeof(trk_path[ntrk]), "%s", path);
+  ntrk++;
+}
+static const char *lookup(int fd) {
+  for (int i = 0; i < ntrk; i++)
+    if (trk_fd[i] == fd)
+      return trk_path[i];
+  return NULL;
+}
+int open(const char *path, int flags, ...) {
+  static int (*real)(const char *, int, ...);
+  if (!real)
+    real = dlsym(RTLD_NEXT, "open");
+  mode_t mode = 0;
+  if (flags & O_CREAT) {
+    va_list ap;
+    va_start(ap, flags);
+    mode = (mode_t)va_arg(ap, int);
+    va_end(ap);
+  }
+  if (fail_call2("open", path, NULL)) {
+    errno = injected_errno();
+    return -1;
+  }
+  int fd = real(path, flags, mode);
+  track(fd, path);
+  return fd;
+}
+ssize_t write(int fd, const void *buf, size_t n) {
+  static ssize_t (*real)(int, const void *, size_t);
+  if (!real)
+    real = dlsym(RTLD_NEXT, "write");
+  const char *p = lookup(fd);
+  if (p && fail_call2("write", p, NULL)) {
+    errno = injected_errno();
+    return -1;
+  }
+  return real(fd, buf, n);
+}
+int close(int fd) {
+  static int (*real)(int);
+  if (!real)
+    real = dlsym(RTLD_NEXT, "close");
+  const char *p = lookup(fd);
+  if (p && fail_call2("close", p, NULL)) {
+    // R5-7: close the REAL descriptor first, then report EIO, so the test
+    // proves the error path itself (an unclosed fd cannot be the cause).
+    real(fd);
+    errno = injected_errno();
+    return -1;
+  }
+  return real(fd);
+}
+int symlink(const char *target, const char *linkpath) {
+  static int (*real)(const char *, const char *);
+  if (!real)
+    real = dlsym(RTLD_NEXT, "symlink");
+  if (fail_call2("symlink", target, linkpath)) {
+    errno = injected_errno();
+    return -1;
+  }
+  return real(target, linkpath);
+}
+int rename(const char *old, const char *new) {
+  static int (*real)(const char *, const char *);
+  if (!real)
+    real = dlsym(RTLD_NEXT, "rename");
+  if (fail_call2("rename", old, new)) {
+    errno = injected_errno();
+    return -1;
+  }
+  return real(old, new);
+}
+int link(const char *old, const char *new) {
+  static int (*real)(const char *, const char *);
+  if (!real)
+    real = dlsym(RTLD_NEXT, "link");
+  if (fail_call2("link", old, new)) {
+    errno = injected_errno();
+    return -1;
+  }
+  return real(old, new);
+}
+int unlink(const char *path) {
+  static int (*real)(const char *);
+  if (!real)
+    real = dlsym(RTLD_NEXT, "unlink");
+  if (fail_call2("unlink", path, NULL)) {
+    errno = injected_errno();
+    return -1;
+  }
+  return real(path);
+}
+int remove(const char *path) {
+  static int (*real)(const char *);
+  if (!real)
+    real = dlsym(RTLD_NEXT, "remove");
+  if (fail_call2("remove", path, NULL)) {
+    errno = injected_errno();
+    return -1;
+  }
+  return real(path);
+}
+
+#--- v2.py
+import sys
+for name in sys.argv[1:]:
+    b = bytearray(open(name, 'rb').read())
+    b[36:40] = bytes.fromhex('00000102')
+    open(name, 'wb').write(bytes(b))
+
+#--- obj.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+Symbols:  []

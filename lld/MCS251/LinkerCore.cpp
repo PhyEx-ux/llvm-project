@@ -8,6 +8,7 @@
 
 #include "LinkerCore.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/BinaryFormat/MCS251Attributes.h"
@@ -18,8 +19,10 @@
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -137,8 +140,31 @@ static constexpr StringRef BitInitWalkerName = "__mcs251_bit_init";
 // decision (rev 7 B1); the linker judges only by explicit fields.
 static constexpr StringRef PlacementNoteSectionName = ".mcs251.placement";
 static constexpr StringRef FixedSectionPrefix = ".mcu.fixed.";
+// G11-D2 (design §3.1): the versioned positioning carrier.  It is a
+// FINAL-OUTPUT-ONLY section: an input object carrying this exact name is
+// rejected (no post-copy, no "accept and ignore" metadata entry, and no
+// `.mcs251.*` wildcard is introduced by it -- C2 keeps its own scope).
+static constexpr StringRef PositionsNoteSectionName =
+    ".mcs251.placement.positions";
+// G11-C2 (design rev 8 §8.3, PM rulings R-2026-09-17-4 / R-2026-09-18-1): the
+// record->symbol association carrier.  `.mcs251.placement` v1 carries no ELF
+// name (asm-labels and target mangling break any "stable == declaration name"
+// assumption), so the mapping travels in a SEPARATE dedicated NOTE:
+//   namesz=7 ("MCS251\0" incl. the NUL, name field padded to 8 storage bytes),
+//   type=2 (placement-name association, NOT "schema version 2"),
+//   desc = u32 association_version (=1), u32 entry_count, then entry_count
+//   entries of { u32 placement_record_index, u32 elf_name_len,
+//                u8 elf_name[elf_name_len], zero pad to a 4-byte multiple }.
+// All multi-byte fields are big-endian.  SHT_NOTE, flags=0, align=4; the
+// section never enters the output image.  It is accepted by its EXACT name
+// only (no `.mcs251.*` wildcard) and parsed structurally in loadFile(); every
+// semantic association is mergePlacement()'s job.
+static constexpr StringRef PlacementNamesNoteSectionName =
+    ".mcs251.placement.names";
 static constexpr uint32_t PlacementNoteNameSize = 7;
 static constexpr uint32_t PlacementNoteType = 1;
+static constexpr uint32_t PlacementNamesNoteType = 2;
+static constexpr uint32_t PlacementNamesVersion = 1;
 static constexpr uint8_t PlacementSchemaVersion = 1;
 // storage_class encoding (frozen §3.2 record v1).
 enum PlacementStorageClass : uint8_t {
@@ -177,6 +203,10 @@ static StringRef placementClassName(uint8_t C) {
 // entity symbols, cross-object grouping -- is mergePlacement's job.
 struct PlacementNoteRecord {
   uint32_t Offset = 0; // Record base inside the NOTE section.
+  // G11-D provenance (contract §4.2): physical record index within this
+  // object's `.mcs251.placement` stream, numbered from 0 in stream order.
+  // It locates an original record; it is never an entity identity.
+  uint32_t Index = 0;
   uint8_t StorageClass = 0;
   uint8_t Entity = 0;
   uint8_t Ownership = 0;
@@ -186,6 +216,14 @@ struct PlacementNoteRecord {
   uint32_t Flags = 0;
   uint32_t LayoutHash = 0; // Carried for the LinkerResult report row only.
   std::string Stable;
+  // G11-C2: the `.mcs251.placement.names` association for THIS record, pinned
+  // by physical record index during the carrier decode.  `HasAssoc` is false
+  // only for an object that carries no association carrier at all (the legacy
+  // boundary): an owned record may then recover its name from the dedicated
+  // fixed section's unique principal symbol, while a bind record must be
+  // refused (design rev 8 §8.3, no guessing).
+  bool HasAssoc = false;
+  std::string AssocName;
 };
 
 // H(F) (design §3.2 rev 7 B1): SHA-256 of the BE-packed
@@ -335,6 +373,11 @@ struct InputFile {
   // records are structural-only until mergePlacement() runs.
   InputSection *PlacementSection = nullptr;
   std::vector<PlacementNoteRecord> PlacementRecords;
+  // G11-C2: at most one `.mcs251.placement.names` association carrier per
+  // object.  Presence makes every record association authoritative; absence
+  // keeps the legacy boundary (owned recovers its principal symbol, bind is
+  // refused).
+  InputSection *PlacementNamesSection = nullptr;
   // P-4 (freeze 2026-09-14): the decoded Tag 28 signature table.  Present for
   // every v2 object (the codec rejects a v2 identity without it), so
   // HasSignatures distinguishes the pre-P4 object the freeze makes a hard
@@ -892,6 +935,17 @@ static bool validateMetaSection(const InputSection &S, raw_ostream &Err) {
   if (N == PlacementNoteSectionName)
     return S.Type == ELF::SHT_NOTE && S.Flags == 0 && S.Align == 4 ||
            fail(Err, "malformed " + PlacementNoteSectionName);
+  // G11-C2 (design rev 8 §8.3): the record->symbol association carrier.  Same
+  // frozen envelope shape as the placement NOTE (SHT_NOTE, no flags, align 4),
+  // exact name only -- the whitelist still has no `.mcs251.*` wildcard, and
+  // the D2 output-only `.positions` name stays rejected by its own earlier
+  // rule.  Whether the carrier is allowed on this object (v2 identity, at most
+  // one, sh_entsize/link/info 0) is decided by the claim path in loadFile();
+  // the structure and every association belong to the decode below and to
+  // mergePlacement().
+  if (N == PlacementNamesNoteSectionName)
+    return S.Type == ELF::SHT_NOTE && S.Flags == 0 && S.Align == 4 ||
+           fail(Err, "malformed " + PlacementNamesNoteSectionName);
   if (N == ".symtab")
     return S.Type == ELF::SHT_SYMTAB && S.Flags == 0 ||
            fail(Err, "malformed .symtab");
@@ -1219,6 +1273,14 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
     S->Align = std::max<uint32_t>(1, H.sh_addralign);
     if (H.sh_addr != 0)
       return fail(Err, Path + ": ET_REL section has non-zero sh_addr: " + S->Name);
+    // G11-D2 (design §3.1): the positioning carrier is output-only.  Reject
+    // the exact name before any classification so neither the ALLOC nor the
+    // non-ALLOC path can accept it under a generic message; the dedicated
+    // diagnostic names the output-only contract.
+    if (S->Name == PositionsNoteSectionName)
+      return fail(Err, Path + ": " + PositionsNoteSectionName +
+                           " is a final-output-only section and cannot appear "
+                           "in an input object");
     if (!classifySection(*S, Err) || !validateMetaSection(*S, Err))
       return false;
     if (S->Name == MCS251ISR::MetaSectionName) {
@@ -1281,6 +1343,53 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
         return fail(Err, Path + ": at most one " +
                              PlacementNoteSectionName + " per object");
       F.PlacementSection = S.get();
+    }
+    if (S->Name == PlacementNamesNoteSectionName) {
+      // G11-C2: one association carrier per object, mirroring the placement
+      // NOTE's own object-level rules.  The carrier only has meaning next to
+      // a v1 placement table, and the v1 contract is EOL (PM ruling
+      // R-2026-09-16-1), so it requires the same v2 identity as the table it
+      // associates.  The structural decode runs after the record table is
+      // parsed (so record indices can be range-checked).
+      if (F.EFlags != ABI_FLAGS_V2)
+        return fail(Err, Path + ": " + PlacementNamesNoteSectionName +
+                             " requires a v2 object identity (the v1 memory "
+                             "contract is EOL)");
+      // G11-C2 MAJOR-1 fix: the claim path validates the *complete* frozen
+      // carrier shape itself, unconditionally.  validateMetaSection() gives
+      // the generic index-0 SHT_NULL header an early pass (the ELF null
+      // section has no shape of its own to freeze), so a mutated object whose
+      // section 0 both is SHT_NULL and carries the carrier name would reach
+      // this branch without ever meeting the type/flags/align checks there.
+      // Requiring the SHT_NOTE envelope and the raw sh_addralign word keeps
+      // the carrier rules decoupled from that generic early return, exactly
+      // like the A4W4-R1 precedent for `.mcs251.attributes`.
+      //
+      // Section index 0 is the ELF null section header and must stay SHT_NULL
+      // (all-zero); a carrier parked there is a malformed ELF, not an
+      // alternative spelling, so it is refused outright.  This also means the
+      // four SHT_NULL shapes are rejected before any envelope decoding.
+      if (S->Index == 0)
+        return fail(Err, Path + ": " + PlacementNamesNoteSectionName +
+                             " must not occupy the ELF null section index 0");
+      if (S->Type != ELF::SHT_NOTE || S->Flags != 0)
+        return fail(Err, Path + ": malformed " +
+                             PlacementNamesNoteSectionName);
+      // sh_addralign is checked on the *raw* header word: the usable field
+      // S->Align is normalized to at least 1, so it cannot stand in for the
+      // frozen raw value.  (A raw 0 does not become 4 through normalization --
+      // max(1,0) is 1; the earlier gap was that this comparison was not
+      // executed on the claim path at all.)
+      if (H.sh_addralign != 4)
+        return fail(Err, Path + ": " + PlacementNamesNoteSectionName +
+                             " must have sh_addralign 4");
+      if (H.sh_entsize != 0 || H.sh_link != 0 || H.sh_info != 0)
+        return fail(Err, Path + ": malformed " +
+                             PlacementNamesNoteSectionName);
+      if (F.PlacementNamesSection)
+        return fail(Err, Path + ": at most one " +
+                             PlacementNamesNoteSectionName + " per object");
+      F.PlacementNamesSection = S.get();
     }
     if (S->Name == MCS251Attributes::SectionName) {
       // A4W4-R1 fix: the claim path validates the *complete* frozen carrier
@@ -1584,6 +1693,7 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
       const uint32_t RecSize = read32BE(B, Off);
       PlacementNoteRecord R;
       R.Offset = Off;
+      R.Index = static_cast<uint32_t>(F.PlacementRecords.size());
       const uint8_t *P4 = B.data() + Off + 4;
       const uint8_t Ver = P4[0];
       R.StorageClass = P4[1];
@@ -1656,6 +1766,102 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
       F.PlacementRecords.push_back(std::move(R));
       Off += 4 + RecSize;
     }
+  }
+
+  // G11-C2 (design rev 8 §8.3): decode the `.mcs251.placement.names`
+  // association carrier and pin each entry onto its physical v1 record.  The
+  // carrier is accepted by its exact name only; every structural violation is
+  // a link error naming the object and the offending entry, never a skip:
+  // envelope (namesz 7, name "MCS251\0", zero name padding), type==2,
+  // association_version==1, descsz covering exactly the entry table, entry
+  // bounds, non-empty NUL-free names, canonical zero padding, record indices
+  // in range and unique, and exactly one entry per v1 record.  The caller
+  // (mergePlacement) then binds each name to the record's real symbol.
+  if (F.PlacementNamesSection) {
+    const InputSection &P = *F.PlacementNamesSection;
+    const ArrayRef<uint8_t> B(P.Data);
+    auto Bad = [&](const Twine &Reason) {
+      return fail(Err, "malformed placement names NOTE in " + Path + ": " +
+                           Reason.str());
+    };
+    // The carrier only describes a v1 table, so a carrier without one has
+    // nothing to associate and is rejected rather than silently ignored.
+    if (!F.PlacementSection)
+      return Bad("the object carries no " + PlacementNoteSectionName.str() +
+                 " to associate");
+    if (B.size() < 20) // 12-byte header + the 8-byte name storage.
+      return Bad("truncated note header");
+    if (read32BE(B, 0) != PlacementNoteNameSize ||
+        memcmp(B.data() + 12, "MCS251\0", 7) != 0)
+      return Bad("note name is not MCS251\\0 with namesz 7");
+    if (B[19] != 0)
+      return Bad("note name padding is not zero");
+    if (read32BE(B, 8) != PlacementNamesNoteType)
+      return Bad("unknown association note type " +
+                 Twine(read32BE(B, 8)) + " (expected 2)");
+    const uint32_t DescSz = read32BE(B, 4);
+    // The name occupies 8 storage bytes (7 + one pad), so the entry table
+    // starts at 20 and descsz covers exactly the rest of the section.
+    if (DescSz != B.size() - 20)
+      return Bad("descsz does not cover the association table");
+    if (DescSz < 8)
+      return Bad("truncated association header");
+    if (read32BE(B, 20) != PlacementNamesVersion)
+      return Bad("unsupported association_version " +
+                 Twine(read32BE(B, 20)));
+    const uint32_t Count = read32BE(B, 24);
+    size_t Off = 28;
+    std::vector<bool> Seen(F.PlacementRecords.size(), false);
+    for (uint32_t I = 0; I != Count; ++I) {
+      // Every read is bounds-checked against the section before use, and the
+      // cursor advances by an amount that was proved to fit, so no unsigned
+      // subtraction can underflow.
+      if (B.size() - Off < 8)
+        return Bad("truncated association entry " + Twine(I));
+      const uint32_t RecIdx = read32BE(B, Off);
+      const uint32_t NameLen = read32BE(B, Off + 4);
+      Off += 8;
+      if (uint64_t(Off) + NameLen > B.size())
+        return Bad("association entry " + Twine(I) +
+                   " name out of bounds");
+      if (NameLen == 0)
+        return Bad("association entry " + Twine(I) + " has an empty name");
+      StringRef Name(reinterpret_cast<const char *>(B.data() + Off), NameLen);
+      if (Name.contains('\0'))
+        return Bad("association entry " + Twine(I) + " name contains a NUL");
+      if (RecIdx >= F.PlacementRecords.size())
+        return Bad("association entry " + Twine(I) +
+                   " placement_record_index " + Twine(RecIdx) +
+                   " is out of range (" +
+                   Twine(F.PlacementRecords.size()) + " v1 records)");
+      if (Seen[RecIdx])
+        return Bad("duplicate association for placement record index " +
+                   Twine(RecIdx));
+      Seen[RecIdx] = true;
+      Off += NameLen;
+      // Canonical padding: alignTo(8 + len, 4) -- the two u32 fields are
+      // already a 4-byte multiple, so this is alignTo(len,4) measured from
+      // the entry base.  Zero bytes are required.
+      const uint32_t Pad = (4u - (NameLen & 3u)) & 3u;
+      if (B.size() - Off < Pad)
+        return Bad("association entry " + Twine(I) +
+                   " padding out of bounds");
+      for (uint32_t K = 0; K != Pad; ++K)
+        if (B[Off + K] != 0)
+          return Bad("association entry " + Twine(I) +
+                     " padding is not zero");
+      Off += Pad;
+      F.PlacementRecords[RecIdx].HasAssoc = true;
+      F.PlacementRecords[RecIdx].AssocName = Name.str();
+    }
+    if (Off != B.size())
+      return Bad("trailing bytes after the association table");
+    // Exactly one entry per v1 record (the writer emits one per record; a
+    // missing entry is as malformed as a duplicate).
+    for (uint32_t I = 0; I != F.PlacementRecords.size(); ++I)
+      if (!Seen[I])
+        return Bad("missing association for placement record index " +
+                   Twine(I));
   }
 
   unsigned MetaRelaCount = 0;
@@ -1997,6 +2203,12 @@ private:
   void buildMap(raw_ostream &Out) const;
   void collectSymbols(std::vector<OutputSymbol> &Out) const;
   void printInputs(raw_ostream &Out) const;
+  // G11-D2 (design §6.2): read-only positioning snapshot, taken after every
+  // layout, G8 retry, G13b synthesis and layout validation succeeded and
+  // before the result image is moved out.  Never mutates addresses, layout
+  // cursors, Synth or the allocation ledgers.  Returns false only for an
+  // internal ordering bug (a fixed section that never got its class pinned).
+  bool collectPositions(LinkerResult &Result);
   InputSymbol *findSymbol(InputFile &F, uint32_t Index);
   bool errorUndefined();
 
@@ -2398,6 +2610,16 @@ Linker::functionReferencedNames(const InputFile &F) {
           R.Type == ELF::R_MCS251_J11)
         Names.insert(IS.Name);
     }
+  // G11-C2 (design rev 8 §8.3): a bind placement record with entity=function
+  // is an EXPLICIT function declaration even when no code relocation
+  // references it -- the association carrier names the undefined external
+  // directly, and §8.3 states the carrier must exist "even without an
+  // ordinary code reference".  Without this, the link-wide NOTYPE function
+  // boundary would classify such a bind target as data and refuse the very
+  // object the carrier was introduced for.
+  for (const PlacementNoteRecord &R : F.PlacementRecords)
+    if (R.Ownership == PO_BIND && R.Entity == PE_FUNCTION && R.HasAssoc)
+      Names.insert(R.AssocName);
   return Names;
 }
 
@@ -2767,10 +2989,11 @@ bool Linker::synthesizeIRQVectors() {
 // every input it needs (per-file NOTE records, FIXED sections and their
 // symbols, the manifest lines) already exists, and PlacementNames must be
 // complete before resolveSymbols' second loop reads it.  The N4 carrier
-// (.mcs251.placement.names) is deliberately NOT consumed here: it belongs
-// to a later producer slice, so bind records are associated with their ELF
-// symbol through the same file's undefined global symbol matching the
-// stable name (external entities keep stable == declaration name today).
+// (.mcs251.placement.names) was decoded structurally in loadFile() and is
+// consumed here: each record's association is bound to its real symbol (owned
+// -> the fixed section's unique principal symbol; bind -> an undefined
+// external of the same object), and a bind record WITHOUT a carrier is
+// refused rather than guessed (design rev 8 §8.2/§8.3).
 //===----------------------------------------------------------------------===//
 
 // One manifest row (design §7): `place <stable> <A> [align=N] [size=N]
@@ -2786,7 +3009,27 @@ struct ManifestPlacement {
   bool Retain = false, NoInit = false, Bind = false;
   bool HasClass = false;
   uint8_t StorageClass = 0;
+  // G11-D provenance (contract §4.2): the real manifest path and 1-based
+  // physical line number this row was parsed from.
+  std::string OriginPath;
+  uint32_t OriginLine = 0;
 };
+
+// G11-D: provenance paths are lexically absolutized under the link working
+// directory, never resolved through symlinks (contract §2 来源行粒度).
+// G11-D review R2-6 (B8): `.`/`..` components are also removed lexically, so
+// the report's `file` column uses the SAME normalization the Driver hands the
+// verifier (`lexicalAbsolute` in Driver.cpp).  Without this, an input spelled
+// `./r.o` produced provenance `/cwd/./r.o` while the verifier was told
+// `/cwd/r.o`, and the source row could never be matched -- `./r.o` was
+// rejected where `r.o` linked and verified cleanly.
+static std::string lexicalAbsolutePath(StringRef P) {
+  SmallString<256> Buf(P);
+  if (sys::fs::make_absolute(Buf))
+    return P.str();
+  sys::path::remove_dots(Buf, /*remove_dot_dot=*/true);
+  return Buf.str().str();
+}
 
 static bool parseManifestLine(StringRef Line, ManifestPlacement &Out,
                               raw_ostream &Err) {
@@ -2851,12 +3094,15 @@ static bool placementDisagrees(raw_ostream &Err, StringRef SectionName,
 bool Linker::mergePlacement(LinkerResult &Result) {
   // ---- Stage 1: manifest rows ---------------------------------------- //
   std::vector<ManifestPlacement> Manifest;
-  for (StringRef Line : Config.PlacementManifest) {
+  for (const LinkerConfig::ManifestEntry &ME : Config.PlacementManifest) {
     ManifestPlacement M;
-    if (!parseManifestLine(Line, M, Err))
+    if (!parseManifestLine(ME.Text, M, Err))
       return false;
-    if (!M.Stable.empty())
+    if (!M.Stable.empty()) {
+      M.OriginPath = ME.Path;
+      M.OriginLine = ME.Line;
       Manifest.push_back(std::move(M));
+    }
   }
 
   // ---- Stage 2: per-file owned section <-> record association --------- //
@@ -2881,18 +3127,37 @@ bool Linker::mergePlacement(LinkerResult &Result) {
     std::string Stable;
     std::string SymName; // ELF symbol name (the PlacementNames key).
     InputSection *Sec = nullptr; // Owned entries only.
+    // G11-D provenance: this entry's own source description (contract §4.2).
+    // `SourcePath` is the lexically absolute input object / manifest path;
+    // `FileRef` above stays the raw (diagnostic) spelling so existing
+    // diagnostics keep their bytes.  `IsManifest` selects Index = physical
+    // manifest line number; otherwise Index = the record's position in the
+    // file's NOTE stream (from 0).
+    std::string SourcePath;
+    uint32_t SourceIndex = 0;
+    // The physical input section this NOTE record's entity lives in; for a
+    // bind record this is empty unless the same file also owns the entity.
+    std::string SourceSection;
   };
   std::map<std::string, std::vector<GroupEntry>> Groups;
+  // G11-C2 reverse uniqueness (design rev 8 §8.2): the stable group that
+  // claimed each external (bind) ELF name.  Two DIFFERENT stable groups
+  // claiming one external ELF name is a conflict at symbol-map fill time --
+  // never a silent map overwrite or de-duplication.
+  std::map<std::string, std::string> ExternalNameOwner;
 
   for (auto &F : Files) {
-    // Bind records: associate the ELF symbol carrier (rev 5 ruling: the key
-    // is the ELF symbol name; for external entities the stable symbol IS
-    // the declaration name, and a missing carrier is a producer contract
-    // violation -- fail closed rather than guess a key).
+    // Bind records: the ELF name comes from the association carrier ONLY
+    // (G11-C2 / design rev 8 §8.3).  The pre-C2 "discover the undefined
+    // symbol whose name happens to be stable or "_"+stable" recovery is
+    // exactly the identity assumption the carrier replaces, so an object
+    // without one is refused rather than guessed.
     for (const PlacementNoteRecord &R : F->PlacementRecords) {
       GroupEntry E;
       E.File = F.get();
       E.FileRef = F->Path;
+      E.SourcePath = lexicalAbsolutePath(F->Path);
+      E.SourceIndex = R.Index;
       E.StorageClass = R.StorageClass;
       E.Entity = R.Entity;
       E.Ownership = R.Ownership;
@@ -2904,31 +3169,41 @@ bool Linker::mergePlacement(LinkerResult &Result) {
       E.HasSize = true;
       E.Stable = R.Stable;
       if (R.Ownership == PO_BIND) {
-        // Discover the ELF symbol carrier: the bind TU's undefined global
-        // symbol for the declaration.  The MCS251 C ABI assembles user
-        // names with a leading underscore while the stable symbol keeps
-        // the declaration name, so the key is DISCOVERED from the symbol
-        // table (stable and "_"+stable are the two legal carrier shapes),
-        // never assumed equal to the stable (rev 5 naming ruling).
-        std::string CarrierName;
-        unsigned CarrierHits = 0;
+        if (!R.HasAssoc)
+          // Legacy bind objects carry no association and must not be
+          // guessed; the object has to be regenerated (design §8.3).
+          return fail(Err, "missing placement name association for " +
+                               R.Stable + " in " + F->Path +
+                               " (recompile placement object)");
+        // The associated name must be an UNDEFINED EXTERNAL symbol of THIS
+        // object: bind reserves no storage, and the undefined global is how
+        // the reference reaches the output symbol table.  Exactly one match
+        // is required; the association may never be paired positionally.
+        const InputSymbol *Carrier = nullptr;
+        unsigned Hits = 0;
         for (const InputSymbol &S : F->Symbols)
           if (!S.Defined && S.Bind == ELF::STB_GLOBAL &&
-              (S.Name == R.Stable || S.Name == "_" + R.Stable)) {
-            if (CarrierName.empty() || CarrierName == S.Name) {
-              CarrierName = S.Name;
-              ++CarrierHits;
-            } else
-              return fail(Err, "malformed placement NOTE in " + F->Path +
-                                   ": bind record for " + R.Stable +
-                                   " has ambiguous symbol carriers " +
-                                   CarrierName + " and " + S.Name);
+              S.Name == R.AssocName) {
+            Carrier = &S;
+            ++Hits;
           }
-        if (CarrierHits == 0)
+        (void)Carrier;
+        if (Hits != 1)
           return fail(Err, "malformed placement NOTE in " + F->Path +
-                               ": bind record for " + R.Stable +
-                               " has no matching undefined symbol");
-        E.SymName = CarrierName;
+                               ": bind record " + Twine(R.Index) +
+                               " (stable '" + R.Stable +
+                               "') associates ELF symbol '" + R.AssocName +
+                               "' which is not an undefined external symbol "
+                               "of this input");
+        E.SymName = R.AssocName;
+        // Reverse uniqueness: register the claim; a different stable already
+        // owning this name is a conflict (the same stable repeating is not).
+        auto Ins = ExternalNameOwner.emplace(R.AssocName, R.Stable);
+        if (!Ins.second && Ins.first->second != R.Stable)
+          return fail(Err, "conflicting placement for " + R.Stable +
+                               ": external ELF symbol " + R.AssocName +
+                               " is already claimed by stable " +
+                               Ins.first->second);
       }
       Groups[R.Stable].push_back(std::move(E));
     }
@@ -2987,6 +3262,19 @@ bool Linker::mergePlacement(LinkerResult &Result) {
         }
       if (Entities != 1 || !Main)
         return placementDisagrees(Err, S->Name, Stable);
+      // G11-C2 (design rev 8 §8.2): when the association carrier is present
+      // it is authoritative, never a hint -- every owned record naming this
+      // section must associate the section's unique principal symbol's
+      // actual ELF name.  Without a carrier the legacy boundary stands: the
+      // principal symbol itself is the association (§8.3 old-object rule).
+      for (const PlacementNoteRecord &R : F->PlacementRecords)
+        if (R.Stable == Stable && R.Ownership == PO_OWNED && R.HasAssoc &&
+            R.AssocName != Main->Name)
+          return fail(Err, "placement name association mismatch for " +
+                               R.Stable + " in " + F->Path +
+                               ": associated ELF symbol '" + R.AssocName +
+                               "' is not the principal symbol '" +
+                               Main->Name + "' of section " + S->Name);
       // B4(iii): the NOTE entity must correspond to the main symbol's ELF
       // type -- a NOTE "function" over an STT_OBJECT (or the reverse) is a
       // producer contract violation, never a silently accepted alias.
@@ -3049,6 +3337,7 @@ bool Linker::mergePlacement(LinkerResult &Result) {
         if (E.File == F.get() && E.Ownership == PO_OWNED && !E.IsManifest) {
           E.Sec = S;
           E.SymName = Main->Name;
+          E.SourceSection = S->Name;
         }
     }
     // An owned record whose derived section does not exist in this file.
@@ -3086,6 +3375,8 @@ bool Linker::mergePlacement(LinkerResult &Result) {
     E.Flags = (M.Retain ? PlacementFlagRetain : 0) |
               (M.NoInit ? PlacementFlagNoInit : 0);
     E.IsManifest = true;
+    E.SourcePath = M.OriginPath;
+    E.SourceIndex = M.OriginLine;
     Groups[M.Stable].push_back(std::move(E));
   }
 
@@ -3128,6 +3419,17 @@ bool Linker::mergePlacement(LinkerResult &Result) {
           Owned[0]->Entity != Owned[I]->Entity ||
           Owned[0]->SymName != Owned[I]->SymName)
         return Conflict(*Owned[0], *Owned[I]);
+    // G11-C2 (design rev 8 §8.2): within one stable group the external
+    // owned/bind records must name ONE ELF symbol.  With the association
+    // carrier the names are explicit, so a mismatch is a conflicting
+    // placement -- never an alias, and never silently split across rows.
+    if (!Owned.empty())
+      for (const GroupEntry &E : Ents)
+        if (!E.IsManifest && !E.SymName.empty() &&
+            E.SymName != Owned[0]->SymName)
+          return fail(Err, "conflicting placement for " + Stable +
+                               ": the group's records name different ELF "
+                               "entities");
     if (Owned.size() > 1)
       return fail(Err, "placement NOTE duplicate owned record for " + Stable +
                        " in " + Owned[0]->FileRef + " and " +
@@ -3249,6 +3551,31 @@ bool Linker::mergePlacement(LinkerResult &Result) {
     const uint32_t MFlags =
         (placementMergedFlag(HasOwned, MNoInit) ? PlacementFlagNoInit : 0) |
         (placementMergedFlag(HasOwned, MRetain) ? PlacementFlagRetain : 0);
+    // G11-D provenance (contract §4.2): describe EVERY original source that
+    // produced this merged row.  The report writer collapses equal
+    // (path, ELF name, stable) triples; the verifier re-derives the set from
+    // the objects and cross-checks.  A manifest source borrows the group's
+    // NOTE-associated ELF name (manifest-only groups fall back to stable).
+    auto GroupElfName = [&]() -> std::string {
+      for (const GroupEntry &E : Ents)
+        if (!E.IsManifest && !E.SymName.empty())
+          return E.SymName;
+      return Stable;
+    };
+    auto BuildSources = [&](LinkerResult::PlacementRecord &Row) {
+      const std::string GName = GroupElfName();
+      for (const GroupEntry &E : Ents) {
+        LinkerResult::PlacementRecord::Source S;
+        S.Path = E.SourcePath;
+        S.ElfName = E.IsManifest ? GName : E.SymName;
+        S.Section = E.SourceSection;
+        S.Kind = E.IsManifest
+                     ? LinkerResult::PlacementRecord::Source::Manifest
+                     : LinkerResult::PlacementRecord::Source::Note;
+        S.Index = E.SourceIndex;
+        Row.Sources.push_back(std::move(S));
+      }
+    };
     if (HasOwned) {
       // B3 (review 2026-09-17): the FINAL MERGED align is the executed
       // contract.  bind/manifest may have tightened it after stage 2 read
@@ -3280,6 +3607,7 @@ bool Linker::mergePlacement(LinkerResult &Result) {
       Row.BoundOnly = false;
       Row.LayoutHash = placementLayoutHash(MClass, MEntity, PO_OWNED, MAddress,
                                            MAlign, MFlags);
+      BuildSources(Row);
       PlacementRows.push_back(std::move(Row));
     } else {
       // Bind-only / manifest-only group: enters PlacementNames (key = ELF
@@ -3332,6 +3660,7 @@ bool Linker::mergePlacement(LinkerResult &Result) {
       Row.BoundOnly = true;
       Row.LayoutHash = placementLayoutHash(MClass, MEntity, PO_BIND, MAddress,
                                            MAlign, 0);
+      BuildSources(Row);
       PlacementRows.push_back(std::move(Row));
     }
   }
@@ -3346,11 +3675,18 @@ bool Linker::mergePlacement(LinkerResult &Result) {
   // the PlacementNames map keys and demonstrably hid the moved-from
   // Row.Sym).  Unset, no file operation happens; the production report
   // serializer belongs to G11-D.
+  //
+  // G11-D (C re-review suggestion 2, 2026-09-17): the instrument walks
+  // `Result.Placement` -- the delivered interface -- not the internal
+  // PlacementRows vector.  The two are currently equal, so the bytes are
+  // unchanged, but the promise "the instrument checks the C->D interface"
+  // now holds by construction instead of by coincidence.  The dupe
+  // environment read happens only when the variable is set.
   if (const char *Dump = std::getenv("MCS251_PLACEMENT_DUMP")) {
     std::error_code EC;
     raw_fd_ostream OS(Dump, EC);
     if (!EC)
-      for (const LinkerResult::PlacementRecord &R : PlacementRows)
+      for (const LinkerResult::PlacementRecord &R : Result.Placement)
         OS << R.Stable << " | " << R.Sym << " | " << R.File << " | "
            << R.Section << " | " << unsigned(R.StorageClass) << " | "
            << unsigned(R.Entity) << " | " << unsigned(R.Ownership) << " | 0x"
@@ -4957,8 +5293,7 @@ bool Linker::applyRelocations() {
   // write a relocation performs is counted, and a trace of the resulting
   // bytes is dumped afterwards (success or failure).  Unset, no sentinel
   // operation is performed at all: the link is byte-for-byte production
-  // behavior (the getenv probe itself is the only cost); it is a test
-  // instrument, never a production switch.
+  // behavior; it is a test instrument, never a production switch.
   //
   // B6 (review 2026-09-17): the sentinel occupies EXACTLY the relocation's
   // field width (1/2/3 bytes from the R_* type), never a fixed two bytes.
@@ -6330,6 +6665,82 @@ void Linker::collectSymbols(std::vector<OutputSymbol> &Out) const {
                    ELF::STT_NOTYPE, true});
 }
 
+// G11-D2 (design §3/§5/§6.2): the read-only positioning snapshot.  Facts the
+// collection honours:
+//   * object identity is the Config.Inputs ordinal; the fingerprint is
+//     SHA-256 over the ALREADY READ buffer, never a re-open of the path;
+//   * every legal ALLOC input section participates -- NOBITS, fixed, legal
+//     zero-length and every overlay group member each keep their own record;
+//   * the DATA_EMPTY_PENDING -> "IGNORE" `.data` exemption has no record;
+//   * synthesized sections (no original shndx) never get a fabricated
+//     (object_id, shndx) identity;
+//   * a G8-migrated section keeps storage_space=0 and reports its FINAL
+//     (EDATA) address, because Region was rewritten before this point;
+//   * an SHF_MCS251_XSEG_SPLIT section is one record whose slices follow the
+//     frozen canonical algorithm (design §3.7): length = min(remaining,
+//     0xffff, window tail), so one layout has exactly one byte encoding.
+bool Linker::collectPositions(LinkerResult &Result) {
+  for (const auto &F : Files) {
+    SHA256 Hash;
+    Hash.update(F->Buffer->getBuffer());
+    Result.PositionObjects.push_back(Hash.final());
+  }
+  for (size_t ObjId = 0; ObjId != Files.size(); ++ObjId) {
+    for (const auto &SP : Files[ObjId]->Sections) {
+      const InputSection &S = *SP;
+      if (!S.IsAlloc || S.Region == "IGNORE")
+        continue;
+      LinkerResult::PositionSection P;
+      P.ObjectId = static_cast<uint32_t>(ObjId);
+      P.InputShndx = S.Index;
+      P.InputSize = static_cast<uint32_t>(S.Size);
+      const StringRef R = S.Region;
+      if (R == "CSEG" || R == "HOME" || R == "VECS" || R == "BOOT" ||
+          R == "XINIT" || R == "XDATA_INIT")
+        P.StorageSpace = PSC_CODE;
+      else if (R == "XSEG")
+        P.StorageSpace = PSC_XDATA;
+      else if (R == "FIXED") {
+        // mergePlacement() pins every fixed section's class or fails the
+        // link; reaching here unset is an ordering bug, never an input
+        // property, and must not be serialized as a storage_space value.
+        if (S.PlacementClass > PSC_CODE)
+          return fail(Err, "internal: fixed section without a placement "
+                           "storage class: " + S.Name);
+        P.StorageSpace = S.PlacementClass;
+      } else // DSEG/EDATA/ISEG/SSEG/OSEG/REG/BSEG_BYTES/BIT_BANK/DATA_ABS
+        P.StorageSpace = PSC_AS0_DATA;
+      if (S.XsegSplit && S.Size) {
+        uint64_t Offset = 0, Current = S.Address, Remaining = S.Size;
+        while (Remaining) {
+          const uint64_t WindowEnd = (Current & 0xff0000ULL) + 0x10000;
+          const uint64_t Len =
+              std::min(std::min(Remaining, uint64_t(0xffff)),
+                       WindowEnd - Current);
+          P.Slices.push_back({static_cast<uint32_t>(Offset),
+                              static_cast<uint32_t>(Current),
+                              static_cast<uint32_t>(Len)});
+          Offset += Len;
+          Current += Len;
+          Remaining -= Len;
+        }
+      } else {
+        P.Slices.push_back({0, S.Address, P.InputSize});
+      }
+      Result.PositionSections.push_back(std::move(P));
+    }
+  }
+  // The records must be strictly ascending by (object_id, input_shndx)
+  // (design §3.6).  Files/Sections iterate in that order already; the sort
+  // makes the invariant structural instead of incidental.
+  llvm::sort(Result.PositionSections, [](const LinkerResult::PositionSection &A,
+                                         const LinkerResult::PositionSection &B) {
+    return std::tie(A.ObjectId, A.InputShndx) <
+           std::tie(B.ObjectId, B.InputShndx);
+  });
+  return true;
+}
+
 bool Linker::run(LinkerResult &Result) {
   for (StringRef P : Config.Inputs) {
     auto F = std::make_unique<InputFile>();
@@ -6437,6 +6848,12 @@ bool Linker::run(LinkerResult &Result) {
   if (!validatePlacementSymbolNames())
     return false;
   collectSymbols(Result.Symbols);
+  // G11-D2 (design §6.2): the positioning snapshot is taken in the result
+  // snapshot stage, before Result.Image is moved out: every address is final
+  // (G8 migration and G13b synthesis already happened) and the collection
+  // itself cannot disturb the image, the map or the symbols.
+  if (Config.CollectPositions && !collectPositions(Result))
+    return false;
   Result.Image = std::move(Image);
   raw_string_ostream MapOS(Result.Map);
   buildMap(MapOS);

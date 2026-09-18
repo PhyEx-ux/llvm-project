@@ -1,0 +1,1237 @@
+# G11-D2 (design section 11.1/11.2): the versioned positioning carrier.
+# Positives freeze the byte-level schema with the INDEPENDENT checker
+# Inputs/placement-positions.py (it re-implements the frozen section-3 layout
+# and never calls the producer's serializer; expected values are literals of
+# this test).  Negatives are fixed-point byte mutations made by
+# Inputs/audit-mutate.py pos-* modes, each asserted with the EXACT exit
+# status 1 and the target diagnostic.
+#
+# Class 9 note: HOME/VECS/BOOT sections that are themselves SHT_NOBITS are
+# refused by the input validator ("invalid HOME section"), so the frozen
+# class is covered by a zero-length pinned VECS input member plus the
+# preserved inter-area holes of the same link.
+#
+# Every link below uses explicit board-level window numbers so the verifier's
+# windows are independent of the map.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: %python attr.py && mkdir -p other-dir
+# RUN: yaml2obj split.yaml -o t.o && %python v2flags.py t.o && mv t.o split.o
+# RUN: yaml2obj emptyiseg.yaml -o t.o && %python v2flags.py t.o && mv t.o emptyiseg.o
+# RUN: yaml2obj datapt.yaml -o t.o && %python v2flags.py t.o && mv t.o datapt.o
+# RUN: yaml2obj datapt-sym.yaml -o t.o && %python v2flags.py t.o && mv t.o datapt-sym.o
+# RUN: yaml2obj g8.yaml -o t.o && %python v2flags.py t.o && mv t.o g8.o
+# RUN: yaml2obj vecs0.yaml -o t.o && %python v2flags.py t.o && mv t.o vecs0.o
+# RUN: yaml2obj noalloc.yaml -o t.o && %python v2flags.py t.o && mv t.o noalloc.o
+# RUN: yaml2obj samename.yaml -o t.o && %python v2flags.py t.o && mv t.o samename.o
+# RUN: yaml2obj ovl.yaml -o t.o && %python v2flags.py t.o && mv t.o ovl.o
+# RUN: yaml2obj dsegn.yaml -o t.o && %python v2flags.py t.o && mv t.o dsegn.o
+# RUN: yaml2obj twox.yaml -o t.o && %python v2flags.py t.o && mv t.o twox.o
+# RUN: yaml2obj fixed.yaml -o t.o && %python v2flags.py t.o && mv t.o fixed.o
+# RUN: yaml2obj xinitin.yaml -o t.o && %python v2flags.py t.o && mv t.o xinitin.o
+# RUN: yaml2obj dabs.yaml -o t.o && %python v2flags.py t.o && mv t.o dabs.o
+
+# =====================================================================
+# M: the structure mother -- two objects, four records including the
+# canonical XSEG split and a zero-length ISEG.
+# =====================================================================
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 split.o emptyiseg.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=m.placement --map=m.map -o m.elf
+# RUN: %python %S/Inputs/placement-positions.py check m.elf --object split.o emptyiseg.o --expect rec 0 1 2 0x1 slice 0 0xff0200 0x1 rec 0 2 1 0x10000 slice 0 0x010000 0xffff slice 0xffff 0x01ffff 0x1 rec 1 1 2 0x1 slice 0 0xff0201 0x1 rec 1 2 0 0x0 slice 0 0x0 0x0 | FileCheck %s --check-prefix=MREC
+# MREC: pos: objects=2 records=4
+# MREC: pos: rec object=0 shndx=2 space=1 size=0x10000 slices=0,0x10000,0xffff 65535,0x1ffff,0x1
+# MREC: pos: rec object=1 shndx=2 space=0 size=0x0 slices=0,0x0,0x0
+# --- the canonical split record's frozen 48-byte body (design 11.1):
+# RUN: llvm-readelf -x .mcs251.placement.positions m.elf | FileCheck %s --check-prefix=MHEX
+# MHEX-NOT: foobar
+# MHEX: 0x00000000 00000007 000000ec 00000003 4d435332
+# MHEX-NEXT: 0x00000010 35310000 00000001 00000002 00000004
+# MHEX: 0x00000080 00ff0200 00000001 00000030 00000000
+# MHEX-NEXT: 0x00000090 00000002 01000000 00010000 00000002
+# MHEX-NEXT: 0x000000a0 00000000 00010000 0000ffff 0000ffff
+# MHEX-NEXT: 0x000000b0 0001ffff 00000001
+
+# Determinism + the three audit-mode cells produce ONE carrier.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 split.o emptyiseg.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --verify-placement --map=m2.map -o other-dir/m2.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 split.o emptyiseg.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=m3.placement --verify-placement --map=m3.map -o m3.elf
+# RUN: %python %S/Inputs/placement-positions.py same-carrier m.elf other-dir/m2.elf | FileCheck %s --check-prefix=SAME
+# RUN: %python %S/Inputs/placement-positions.py same-carrier m.elf m3.elf
+# SAME: same-carrier: {{[0-9]+}} bytes identical
+
+# =====================================================================
+# The twelve frozen positive classes (design 11.1).
+# =====================================================================
+# Class C1 -- plain single-slice CODE + DSEG NOBITS + an owned fixed entity.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 dsegn.o fixed.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=c1.placement --map=c1.map -o c1.elf
+# RUN: %python %S/Inputs/placement-positions.py check c1.elf --object dsegn.o fixed.o --expect rec 0 1 2 0x1 slice 0 0xff0200 0x1 rec 0 2 0 0x8 slice 0 0x0 0x8 rec 1 1 2 0x1 slice 0 0xff0201 0x1 rec 1 2 0 0x4 slice 0 0x40 0x4 | FileCheck %s --check-prefix=C1
+# C1: pos: objects=2 records=4
+# C1: pos: rec object=1 shndx=2 space=0 size=0x4 slices=0,0x40,0x4
+# Class C2 -- two anonymous unmarked XSEG inputs, same region, different shndx.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 twox.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=c2.placement --map=c2.map -o c2.elf
+# RUN: %python %S/Inputs/placement-positions.py check c2.elf --object twox.o --expect rec 0 1 2 0x1 slice 0 0xff0200 0x1 rec 0 2 1 0x4 slice 0 0x010000 0x4 rec 0 3 1 0x4 slice 0 0x010004 0x4 | FileCheck %s --check-prefix=C2
+# C2: pos: rec object=0 shndx=2 space=1 size=0x4 slices=0,0x10000,0x4
+# C2: pos: rec object=0 shndx=3 space=1 size=0x4 slices=0,0x10004,0x4
+# Class C3 -- the canonical G13b split itself is frozen by MHEX above (0xffff + 1).
+# Class C4 -- two same-name input sections merged into ONE PT_LOAD (duplicate
+# object occurrence also covers C11).
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 samename.o samename.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=c4.placement --map=c4.map -o c4.elf
+# RUN: llvm-readelf -l c4.elf | FileCheck %s --check-prefix=C4L
+# C4L: LOAD {{0x[0-9a-f]+}} 0x00ff0200 0x00ff0200 0x00004
+# C4L-NOT: LOAD
+# RUN: %python %S/Inputs/placement-positions.py check c4.elf --object samename.o samename.o --expect rec 0 1 2 0x2 slice 0 0xff0200 0x2 rec 1 1 2 0x2 slice 0 0xff0202 0x2 | FileCheck %s --check-prefix=C4
+# C4: pos: objects=2 records=2
+# C4: pos: digest[0]={{[0-9a-f]+}}
+# C4: pos: digest[1]={{[0-9a-f]+}}
+# Class C5 -- overlay members share the group base with different lengths.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ovl.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=c5.placement --map=c5.map -o c5.elf
+# RUN: %python %S/Inputs/placement-positions.py check c5.elf --object ovl.o --expect rec 0 2 0 0x8 slice 0 0x0 0x8 rec 0 3 0 0x4 slice 0 0x0 0x4 | FileCheck %s --check-prefix=C5
+# C5: pos: rec object=0 shndx=2 space=0 size=0x8 slices=0,0x0,0x8
+# C5: pos: rec object=0 shndx=3 space=0 size=0x4 slices=0,0x0,0x4
+# Classes C6 and C9 -- the empty ISEG record is MREC's (1,2); a zero-length pinned VECS
+# input member keeps the HOME..VECS..BOOT holes.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 vecs0.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=c6.placement --map=c6.map -o c6.elf
+# RUN: %python %S/Inputs/placement-positions.py check c6.elf --object vecs0.o --expect rec 0 1 2 0x1 slice 0 0xff0200 0x1 rec 0 2 2 0x0 slice 0 0xff0003 0x0 | FileCheck %s --check-prefix=C6
+# C6: pos: rec object=0 shndx=2 space=2 size=0x0 slices=0,0xff0003,0x0
+# Class C7 -- the sole ALLOC exemption (empty ALLOC|WRITE PROGBITS .data with no
+# symbol has NO record; every other section is still covered.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 datapt.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=c7.placement --map=c7.map -o c7.elf
+# RUN: %python %S/Inputs/placement-positions.py check c7.elf --object datapt.o --expect no-record 0 3 rec 0 1 2 0x1 slice 0 0xff0200 0x1 | FileCheck %s --check-prefix=C7
+# C7: pos: objects=1 records=1
+# Class C8 -- the G8-migrated dseg carries its POST-migration address in the EDATA
+# window and stays storage space 0.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 g8.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=c8.placement --map=c8.map -o c8.elf
+# RUN: %python %S/Inputs/placement-positions.py check c8.elf --object g8.o --expect rec 0 2 0 0x100 slice 0 0x100 0x100 | FileCheck %s --check-prefix=C8
+# C8: pos: rec object=0 shndx=2 space=0 size=0x100 slices=0,0x100,0x100
+# Class C10 -- an object with no ALLOC section still occupies the fingerprint table.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 emptyiseg.o noalloc.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=c10.placement --map=c10.map -o c10.elf
+# RUN: %python %S/Inputs/placement-positions.py check c10.elf --object emptyiseg.o noalloc.o --expect rec 0 1 2 0x1 slice 0 0xff0200 0x1 rec 0 2 0 0x0 slice 0 0x0 0x0 | FileCheck %s --check-prefix=C10
+# C10: pos: objects=2 records=2
+# C10: pos: digest[1]={{[0-9a-f]+}}
+# Class C12 -- the three audit cells share one carrier (SAME above).
+
+# =====================================================================
+# The structural negative set (design 11.2).  Mother = m.elf; every
+# variant is a fixed-point byte mutation; rc must be EXACTLY 1.
+# =====================================================================
+# V: the helper runs the verifier on a mutated ELF with the mother's own
+# report/map/objects.
+# RUN: true
+
+# --- carrier: missing (a plain, non-audit ELF has none).
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 split.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --keep-symbols --map=plain.map -o plain.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=plain.elf --report=m.placement --link-map=m.map --object=split.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NMISS
+# NMISS: carries no .mcs251.placement.positions positioning carrier
+
+# --- carrier: duplicate section / header shape / offset / reuse / bounds.
+# RUN: %python %S/Inputs/audit-mutate.py pos-dup-sec m.elf n1.elf && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n1.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NDUP
+# NDUP: the section appears 2 times
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n2.elf type 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n2.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSHAPE
+# NSHAPE: is not a non-ALLOC flags=0 link=0 info=0 raw-align=4 entsize=0 SHT_NOTE
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n3.elf flags 2 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n3.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSHAPE2
+# NSHAPE2: is not a non-ALLOC flags=0 link=0 info=0 raw-align=4 entsize=0 SHT_NOTE
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n4.elf align 0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n4.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSHAPE3
+# NSHAPE3: raw-align=4 entsize=0 SHT_NOTE
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n5.elf addr 0x100 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n5.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSHAPE4
+# NSHAPE4: is not a non-ALLOC flags=0 link=0 info=0 raw-align=4 entsize=0 SHT_NOTE
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n6.elf offset 0x31 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n6.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NOFF
+# NOFF: is not at a 4-byte file offset
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n7.elf offset 0x30 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n7.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NREUSE1
+# NREUSE1: reuses the ELF header's file bytes
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n8.elf size 0x7fffffff && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n8.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NBOUND
+# NBOUND: out of file bounds
+
+# --- envelope.
+# RUN: %python %S/Inputs/audit-mutate.py pos-note m.elf n9.elf namesz 8 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n9.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NNAMESZ
+# NNAMESZ: namesz 8 != 7
+# RUN: %python %S/Inputs/audit-mutate.py pos-name m.elf n10.elf 0 0x4e && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n10.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NNAME
+# NNAME: the note name is not MCS251
+# RUN: %python %S/Inputs/audit-mutate.py pos-name m.elf n11.elf 7 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n11.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NNAMESZ2
+# NNAMESZ2: the note name is not MCS251
+# RUN: %python %S/Inputs/audit-mutate.py pos-note m.elf n12.elf type 4 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n12.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NNTYPE
+# NNTYPE: note type 4 != 3
+# RUN: %python %S/Inputs/audit-mutate.py pos-note m.elf n13.elf descsz 0x50 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n13.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NDESC
+# NDESC: descsz does not cover the section
+# RUN: %python %S/Inputs/audit-mutate.py pos-move m.elf n14.elf 00 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n14.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NTAIL
+# NTAIL: descsz does not cover the section
+
+# --- descriptor header.
+# RUN: %python %S/Inputs/audit-mutate.py pos-note m.elf n15.elf version 0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n15.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NVER
+# NVER: position_version 0 != 1
+# RUN: %python %S/Inputs/audit-mutate.py pos-note m.elf n16.elf version 2 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n16.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NVER2
+# NVER2: position_version 2 != 1
+# RUN: %python %S/Inputs/audit-mutate.py pos-note m.elf n17.elf reserved 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n17.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRES
+# NRES: the descriptor reserved field is not zero
+# RUN: %python %S/Inputs/audit-mutate.py pos-note m.elf n18.elf objects 0x10000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n18.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NOBJT
+# NOBJT: the object fingerprint table is truncated
+# RUN: %python %S/Inputs/audit-mutate.py pos-note m.elf n19.elf records 3 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n19.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NUNC
+# NUNC: unconsumed bytes after the record table
+# RUN: %python %S/Inputs/audit-mutate.py pos-note m.elf n20.elf records 5 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n20.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRECT
+# NRECT: record 4 is truncated
+
+# --- object association.
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=m.map --object=split.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NOBJS
+# NOBJS: lists 2 objects but 1 --object inputs were given
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=m.map --object=emptyiseg.o --object=split.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NORDR
+# NORDR: does not match its recorded fingerprint
+# RUN: %python %S/Inputs/audit-mutate.py pos-digest m.elf n21.elf 0 0 0xff && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n21.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NDIG
+# NDIG: object 0 ({{.*}}split.o) does not match its recorded fingerprint
+
+# --- main record structure.
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n22.elf field 0 size 99 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n22.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRSZ
+# NRSZ: record 0: record_size does not equal 24 + 12*slice_count
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n23.elf field 0 res8 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n23.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRES8
+# NRES8: record 0: a reserved field is not zero
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n24.elf field 0 object 5 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n24.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NOID
+# NOID: record 0: object_id is out of range
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n25.elf field 0 shndx 0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n25.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSHN0
+# NSHN0: record 0: input_shndx is zero
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n26.elf field 1 shndx 3 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n26.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSHN3
+# NSHN3: section 3 is not an ALLOC section
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n27.elf field 3 shndx 99 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n27.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSHN99
+# NSHN99: has no section index 99
+
+# --- key order / duplication.
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n28.elf field 0 object 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n28.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NORD
+# NORD: record 1: the records are not strictly ascending
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n29.elf dup 0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n29.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NDUPK
+# NDUPK: record 1: the records are not strictly ascending
+
+# --- coverage: a dropped record leaves the section unverified.
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n30.elf drop 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n30.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NDROP
+# NDROP: .mcs251.XSEG of {{.*}}split.o has no positioning record
+
+# --- lengths and slice canon.
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n31.elf field 1 input 0x10001 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n31.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSUM
+# NSUM: record 1: the slice lengths do not sum to input_size
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice m.elf n32.elf 1 1 addr 0x1f000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n32.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NCONT
+# NCONT: record 1: a slice's final address is not contiguous
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice m.elf n33.elf 1 1 offset 0xfffe && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n33.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NGAP
+# NGAP: record 1: a slice does not continue the input coverage
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice m.elf n34.elf 0 0 offset 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n34.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NFIRST
+# NFIRST: record 0: the first slice does not start at input offset 0
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n35.elf field 1 slices 0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n35.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSLC0
+# NSLC0: record 1: slice_count is not a legal count
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice-op m.elf n36.elf 0 dup 0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n36.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NMULTI
+# NMULTI: record 0: a slice does not continue the input coverage
+
+# --- storage space.
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n37.elf field 0 space8 3 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n37.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSP3
+# NSP3: record 0: unknown storage_space 3
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n38.elf field 1 space8 0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n38.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSP0
+# NSP0: claims storage space 0 but the section classifies as 1
+
+# --- position: outside the storage space; no PT_LOAD coverage.
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice m.elf n39.elf 0 0 addr 0x2000000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n39.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSPACE
+# NSPACE: outside its storage space
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice m.elf n40.elf 0 0 addr 0xff0300 && %python %S/Inputs/audit-mutate.py map-section m.map n40.map split.o:.text 0xff0300 && %python %S/Inputs/audit-mutate.py elf-stvalue n40.elf n40.elf l_CSEG 0x200 && %python %S/Inputs/audit-mutate.py map-bound n40.map n40.map l_CSEG 0x200 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n40.elf --report=m.placement --link-map=n40.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NLOAD
+# NLOAD: no PT_LOAD file coverage at 0xff0300
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice m.elf n41.elf 0 0 addr 0xff0201 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n41.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NMAP
+# NMAP: is placed at 0xff0200 but the positioning carrier places it at 0xff0201
+
+# --- exemption misuse: the producer refuses to LINK an empty .data that
+# carries a symbol (its own keep-item); the verifier's independent
+# exemption conditions are reached by re-pointing the link's object at a
+# variant input whose fingerprint the carrier records (design 11.2's
+# fixture-tool note).
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 datapt-sym.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=c7s.placement --map=c7s.map -o c7s.elf | FileCheck %s --check-prefix=NPROD
+# NPROD: empty PROGBITS .data with defined symbol is not supported
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest c7.elf c7x.elf 0 datapt-sym.o && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=c7x.elf --report=c7.placement --link-map=c7.map --object=datapt-sym.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NEXEM
+# NEXEM: carries a defined symbol; the .data exemption does not apply
+
+# =====================================================================
+# Coverage completions for the design-11.2 matrix (second audit): the
+# remaining per-field shape/envelope/space/mirror variants, each still a
+# fixed-point mutation with the EXACT exit code 1.  The "a legal key
+# replaced by another legal key" cell is covered by the union of NDUPK
+# (duplicate key), NORD (reorder), NSHN3 (re-targeted key) and NDROP (the
+# orphaned section): a complete mother leaves no unused legal key, so every
+# replacement lands in one of those four verdicts.
+# =====================================================================
+# --- carrier shape: link / info / entsize.
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n42.elf link 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n42.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSHAPE5
+# NSHAPE5: is not a non-ALLOC flags=0 link=0 info=0 raw-align=4 entsize=0 SHT_NOTE
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n43.elf info 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n43.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSHAPE6
+# NSHAPE6: is not a non-ALLOC flags=0 link=0 info=0 raw-align=4 entsize=0 SHT_NOTE
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n44.elf entsize 4 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n44.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSHAPE7
+# NSHAPE7: is not a non-ALLOC flags=0 link=0 info=0 raw-align=4 entsize=0 SHT_NOTE
+# --- envelope: the name's own NUL, a LONG descsz, a second NOTE.
+# RUN: %python %S/Inputs/audit-mutate.py pos-name m.elf n45.elf 6 0x41 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n45.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NNUL
+# NNUL: the note name is not MCS251
+# RUN: %python %S/Inputs/audit-mutate.py pos-note m.elf n46.elf descsz 0x100 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n46.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NDESCL
+# NDESCL: descsz does not cover the section
+# RUN: %python %S/Inputs/audit-mutate.py pos-move m.elf n47.elf 0000000700000000000000034d4353323531000000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n47.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NNOTE2
+# NNOTE2: descsz does not cover the section
+# --- descriptor: a slice count whose 12x product leaves the u32 range.
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n48.elf field 0 slices 0x20000000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n48.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSLCOV
+# NSLCOV: record 0: slice_count is not a legal count
+# --- object association: MORE --object inputs than the carrier lists.
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NOBJS2
+# NOBJS2: lists 2 objects but 3 --object inputs were given
+# --- main record: the 16-bit reserved half-word.
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n50.elf field 0 res16 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n50.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRES16
+# NRES16: record 0: a reserved field is not zero
+# --- coverage: the fixed record, the zero-length record, the exempt extra.
+# RUN: %python %S/Inputs/audit-mutate.py pos-record c1.elf n51.elf drop 3 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n51.elf --report=c1.placement --link-map=c1.map --object=dsegn.o --object=fixed.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NDROPF
+# NDROPF: the section .mcu.fixed.dv of fixed.o has no positioning record
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n52.elf drop 3 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n52.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NDROPZ
+# NDROPZ: the section .mcs251.ISEG of emptyiseg.o has no positioning record
+# RUN: %python %S/Inputs/audit-mutate.py pos-record c7.elf n53.elf append 0 && %python %S/Inputs/audit-mutate.py pos-record n53.elf n53.elf field 1 shndx 2 && %python %S/Inputs/audit-mutate.py pos-record n53.elf n53.elf field 1 input 0 && %python %S/Inputs/audit-mutate.py pos-slice n53.elf n53.elf 1 0 length 0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n53.elf --report=c7.placement --link-map=c7.map --object=datapt.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NEXTRA
+# NEXTRA: the exempt empty .data section .data of datapt.o must not carry a record
+# --- lengths: a self-consistent record lying about the input size.
+# RUN: %python %S/Inputs/audit-mutate.py pos-record m.elf n54.elf field 0 input 2 && %python %S/Inputs/audit-mutate.py pos-slice n54.elf n54.elf 0 0 length 2 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n54.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NINP
+# NINP: records 2 bytes but the input section is 1 bytes
+# --- slice canon: a re-tiling of the same range; a plain section re-sliced.
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice m.elf n55.elf 1 0 length 0x8000 && %python %S/Inputs/audit-mutate.py pos-slice n55.elf n55.elf 1 1 offset 0x8000 && %python %S/Inputs/audit-mutate.py pos-slice n55.elf n55.elf 1 1 addr 0x018000 && %python %S/Inputs/audit-mutate.py pos-slice n55.elf n55.elf 1 1 length 0x8000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n55.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NTILE
+# NTILE: does not carry the canonical XSEG-split tiling
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice-op m.elf n56.elf 0 dup 0 && %python %S/Inputs/audit-mutate.py pos-slice n56.elf n56.elf 0 1 offset 1 && %python %S/Inputs/audit-mutate.py pos-slice n56.elf n56.elf 0 1 addr 0xff0201 && %python %S/Inputs/audit-mutate.py pos-slice n56.elf n56.elf 0 1 length 0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n56.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NPLAIN
+# NPLAIN: is split into 2 slices but the section carries no XSEG-split mark
+# --- storage space: DSEG->XDATA, OSEG->CODE, XINIT->DATA, fixed-vs-NOTE.
+# RUN: %python %S/Inputs/audit-mutate.py pos-record c1.elf n57.elf field 1 space8 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n57.elf --report=c1.placement --link-map=c1.map --object=dsegn.o --object=fixed.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSPD
+# NSPD: the positioning record for .mcs251.DSEG.n of dsegn.o claims storage space 1 but the section classifies as 0
+# RUN: %python %S/Inputs/audit-mutate.py pos-record c5.elf n58.elf field 1 space8 2 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n58.elf --report=c5.placement --link-map=c5.map --object=ovl.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSPO
+# NSPO: the positioning record for .mcs251.OSEG.a of ovl.o claims storage space 2 but the section classifies as 0
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 xinitin.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=cx.placement --map=cx.map -o cx.elf
+# RUN: %python %S/Inputs/placement-positions.py check cx.elf --object xinitin.o --expect rec 0 1 2 0x1 slice 0 0xff0200 0x1 rec 0 2 0 0x4 slice 0 0x0 0x4 rec 0 3 2 0xa slice 0 0xff8000 0xa | FileCheck %s --check-prefix=CXI
+# CXI: pos: rec object=0 shndx=3 space=2 size=0xa slices=0,0xff8000,0xa
+# RUN: %python %S/Inputs/audit-mutate.py pos-record cx.elf n59.elf field 2 space8 0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n59.elf --report=cx.placement --link-map=cx.map --object=xinitin.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSPX
+# NSPX: the positioning record for .mcs251.xinit of xinitin.o claims storage space 0 but the section classifies as 2
+# RUN: %python %S/Inputs/audit-mutate.py pos-record c1.elf n60.elf field 3 space8 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n60.elf --report=c1.placement --link-map=c1.map --object=dsegn.o --object=fixed.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSPF
+# NSPF: the positioning record for .mcu.fixed.dv of fixed.o claims storage space 1 but the section classifies as 0
+# --- family window: the migrated dseg outside BOTH legal windows.
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice c8.elf n61.elf 1 0 addr 0x8000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n61.elf --report=c8.placement --link-map=c8.map --object=g8.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NWIN
+# NWIN: outside its allocation window (the DSEG low window)
+# --- position: region membership, symbol, per-section pin.
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice m.elf n62.elf 1 0 addr 0x010001 && %python %S/Inputs/audit-mutate.py pos-slice n62.elf n62.elf 1 0 length 0xffff && %python %S/Inputs/audit-mutate.py pos-slice n62.elf n62.elf 1 1 offset 0xffff && %python %S/Inputs/audit-mutate.py pos-slice n62.elf n62.elf 1 1 addr 0x020000 && %python %S/Inputs/audit-mutate.py pos-slice n62.elf n62.elf 1 1 length 1 && %python %S/Inputs/audit-mutate.py map-section m.map n62.map split.o:.mcs251.XSEG 0x010001 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n62.elf --report=m.placement --link-map=n62.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NREG
+# NREG: outside the final ELF's XSEG region
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice m.elf n63.elf 1 0 addr 0x010001 && %python %S/Inputs/audit-mutate.py pos-slice n63.elf n63.elf 1 0 length 0xffff && %python %S/Inputs/audit-mutate.py pos-slice n63.elf n63.elf 1 1 offset 0xffff && %python %S/Inputs/audit-mutate.py pos-slice n63.elf n63.elf 1 1 addr 0x020000 && %python %S/Inputs/audit-mutate.py pos-slice n63.elf n63.elf 1 1 length 1 && %python %S/Inputs/audit-mutate.py map-section m.map n63.map split.o:.mcs251.XSEG 0x010001 && %python %S/Inputs/audit-mutate.py elf-stvalue n63.elf n63.elf s_XSEG 0x010001 && %python %S/Inputs/audit-mutate.py map-bound n63.map n63.map s_XSEG 0x010001 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n63.elf --report=m.placement --link-map=n63.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSYM
+# NSYM: no final ELF symbol big sits at 0x10001
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 dabs.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --area-start=.mcs251.DATA.d=0x40 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=cd.placement --map=cd.map -o cd.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=cd.elf --report=cd.placement --link-map=cd.map --object=dabs.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --area-start=.mcs251.DATA.d=0x40 --edata-end=0x3fff
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice cd.elf n64.elf 1 0 addr 0x44 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n64.elf --report=cd.placement --link-map=cd.map --object=dabs.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --area-start=.mcs251.DATA.d=0x40 --edata-end=0x3fff | FileCheck %s --check-prefix=NPIN
+# NPIN: is placed at 0x44 but the pinned --area-start value is 0x40
+# --- mirror: memsz, duplicate PT_LOAD coverage, carrier in load bytes.
+# RUN: %python %S/Inputs/audit-mutate.py elf-phdr m.elf n65.elf 0 memsz 1 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n65.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NMEM
+# NMEM: a PT_LOAD has p_filesz larger than p_memsz
+# RUN: %python %S/Inputs/audit-mutate.py elf-phdr m.elf n66.elf 1 vaddr 0xff0200 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n66.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NDUPP
+# NDUPP: two PT_LOAD segments cover the same addresses
+# RUN: %python %S/Inputs/audit-mutate.py pos-sec m.elf n67.elf offset 0x74 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n67.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NREUSE2
+# NREUSE2: the section reuses the file bytes of .mcs251.load.0
+
+# =====================================================================
+# R5 fix round (design §7.4/§7.5 + review R5-1..R5-9).  Every negative is
+# asserted with the EXACT exit code 1 and the target diagnostic; every legal
+# control is asserted 0 on the same artifact family.
+# =====================================================================
+# --- R5-1: the frozen split regeneration can legally yield ONE slice.
+# --- Control A: a 4-byte marked XSEG at 0x010000 canonicalises to one slice.
+# RUN: yaml2obj split4.yaml -o t.o && %python v2flags.py t.o && mv t.o split4.o
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 split4.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=s4.placement --map=s4.map -o s4.elf
+# RUN: %python %S/Inputs/placement-positions.py check s4.elf --object split4.o --expect rec 0 1 2 0x1 slice 0 0xff0200 0x1 rec 0 2 1 0x4 slice 0 0x010000 0x4 | FileCheck %s --check-prefix=SPLONE
+# SPLONE: pos: rec object=0 shndx=2 space=1 size=0x4 slices=0,0x10000,0x4
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=s4.elf --report=s4.placement --link-map=s4.map --object=split4.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# --- the same record re-tiled to 2 bytes is still non-canonical (rc 1).
+# RUN: %python %S/Inputs/audit-mutate.py pos-slice s4.elf n68.elf 1 0 length 2 && %python %S/Inputs/audit-mutate.py pos-slice-op n68.elf n68.elf 1 dup 0 && %python %S/Inputs/audit-mutate.py pos-slice n68.elf n68.elf 1 1 offset 2 && %python %S/Inputs/audit-mutate.py pos-slice n68.elf n68.elf 1 1 addr 0x010002 && %python %S/Inputs/audit-mutate.py pos-slice n68.elf n68.elf 1 1 length 2 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n68.elf --report=s4.placement --link-map=s4.map --object=split4.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=SPLBAD
+# SPLBAD: does not carry the canonical XSEG-split tiling
+# --- Control B: exactly 0xffff bytes canonicalise to one slice too.
+# RUN: yaml2obj splitexact.yaml -o t.o && %python v2flags.py t.o && mv t.o splitexact.o
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 splitexact.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=se.placement --map=se.map -o se.elf
+# RUN: %python %S/Inputs/placement-positions.py check se.elf --object splitexact.o --expect rec 0 1 2 0x1 slice 0 0xff0200 0x1 rec 0 2 1 0xffff slice 0 0x010000 0xffff | FileCheck %s --check-prefix=SPLEX
+# SPLEX: pos: rec object=0 shndx=2 space=1 size=0xffff slices=0,0x10000,0xffff
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=se.elf --report=se.placement --link-map=se.map --object=splitexact.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# --- Control C: the multi-window tiling (0xffff + 1) is the M mother's
+# --- frozen record, and the mother itself verifies.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+
+# --- R5-3: the raw 32-bit sh_type decides ALLOC classification and the
+# --- empty-.data exemption; the producer rejects the same object.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 datapt.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=d2.placement --map=d2.map -o d2.elf
+# RUN: %python %S/Inputs/audit-mutate.py sec-type datapt.o raw.o .data 0x10001
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 -o raw.elf 2>&1 | FileCheck %s --check-prefix=RAWPROD
+# RAWPROD: DSEG sections must be writable NOBITS: .data
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest d2.elf n69.elf 0 raw.o && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n69.elf --report=d2.placement --link-map=d2.map --object=raw.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=RAWDATA
+# RAWDATA: the section .data of raw.o cannot be classified into a storage space
+# RUN: %python %S/Inputs/audit-mutate.py sec-type datapt.o raw.o .text 0x10001 && %python %S/Inputs/audit-mutate.py carrier-digest d2.elf n70.elf 0 raw.o && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n70.elf --report=d2.placement --link-map=d2.map --object=raw.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=RAWTEXT
+# RAWTEXT: the section .text of raw.o cannot be classified into a storage space
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld -flavor mcs251 raw.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 -o raw.elf 2>&1 | FileCheck %s --check-prefix=RAWTEXTP
+# RAWTEXTP: invalid flags or type for .text
+# --- Control: the unmutated empty .data exemption still verifies.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=d2.elf --report=d2.placement --link-map=d2.map --object=datapt.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+
+# --- R5-4: a zero-length record still honours an EXPLICIT per-section pin.
+# RUN: yaml2obj dabs0.yaml -o t.o && %python v2flags.py t.o && mv t.o dabs0.o
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 dabs0.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --area-start=.mcs251.DATA.d=0x30 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=z.placement --map=z.map -o z.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=z.elf --report=z.placement --link-map=z.map --object=dabs0.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --area-start=.mcs251.DATA.d=0x30 --edata-end=0x3fff
+# RUN: %python %S/Inputs/audit-mutate.py carrier-addr z.elf z-move.elf 0 dabs0.o .mcs251.DATA.d 0x40 && %python %S/Inputs/audit-mutate.py map-section z.map z-move.map dabs0.o:.mcs251.DATA.d 0x40 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=z-move.elf --report=z.placement --link-map=z-move.map --object=dabs0.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --area-start=.mcs251.DATA.d=0x30 --edata-end=0x3fff | FileCheck %s --check-prefix=ZPIN
+# ZPIN: is placed at 0x40 but the pinned --area-start value is 0x30
+
+# --- R5-9: the final ELF never establishes a PT_NOTE over the carrier.
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-carrier-ptnote m.elf n71.elf && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n71.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NPTNOTE
+# NPTNOTE: unexpected PT_NOTE in the final ELF
+
+# --- PT_LOAD memory span: the widened end p_vaddr+p_memsz must stay in space.
+# RUN: %python %S/Inputs/audit-mutate.py elf-phdr m.elf n72.elf 0 memsz 0xffffffff && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n72.elf --report=m.placement --link-map=m.map --object=split.o --object=emptyiseg.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NMEMEND
+# NMEMEND: (vaddr + memsz, widened) leaves its address space
+
+# --- R5-2: same-name file-scoped definitions must have a unique source.  Two
+# --- objects each define a dynamic local `dyn`; the merged table carries two
+# --- output locals, so no per-input source is established (R5 fail-closed).
+# RUN: yaml2obj localdyn.yaml -o ldy-v1.o && %python v2flags.py ldy-v1.o && mv ldy-v1.o ldy.o
+# RUN: yaml2obj localdyn2.yaml -o ldy2-v1.o && %python v2flags.py ldy2-v1.o && mv ldy2-v1.o ldy2.o
+# RUN: yaml2obj localdyn3.yaml -o ldy3-v1.o && %python v2flags.py ldy3-v1.o && mv ldy3-v1.o ldy3.o
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ldy.o ldy2.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=ldy.placement --map=ldy.map -o ldy.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=ldy.elf --report=ldy.placement --link-map=ldy.map --object=ldy.o --object=ldy2.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NLOCAL
+# NLOCAL: file-scoped symbol dyn is not uniquely identifiable in the final symbol table
+# --- an exact duplicate output local row: two symbols share the value.
+# RUN: %python %S/Inputs/audit-mutate.py elf-dup-sym ldy.elf ldy-dup.elf dyn && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=ldy-dup.elf --report=ldy.placement --link-map=ldy.map --object=ldy.o --object=ldy2.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NDUPL
+# NDUPL: share the expected value
+# --- the swapped locations with the symbol table held fixed: the same-name
+# --- borrow is refused instead of using the other object's symbol.
+# RUN: %python %S/Inputs/audit-mutate.py carrier-addr ldy.elf ldy-sw.elf 0 ldy.o .mcs251.XSEG 0x010004 && %python %S/Inputs/audit-mutate.py carrier-addr ldy-sw.elf ldy-sw.elf 1 ldy2.o .mcs251.XSEG 0x010000 && %python %S/Inputs/audit-mutate.py map-section ldy.map ldy-sw.map ldy.o:.mcs251.XSEG 0x010004 && %python %S/Inputs/audit-mutate.py map-section ldy-sw.map ldy-sw.map ldy2.o:.mcs251.XSEG 0x010000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=ldy-sw.elf --report=ldy.placement --link-map=ldy-sw.map --object=ldy.o --object=ldy2.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSWAP
+# NSWAP: is not uniquely identifiable in the final symbol table
+# --- Control: DISTINCT dynamic local names still verify (no over-rejection).
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ldy.o ldy3.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=ld3.placement --map=ld3.map -o ld3.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=ld3.elf --report=ld3.placement --link-map=ld3.map --object=ldy.o --object=ldy3.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+
+# =====================================================================
+# R6 fix round (review R6-1/R6-2).  R6-1: a same-name file-scoped set is
+# only un-disambiguable when the retained output fields (TYPE, SIZE) and an
+# applicable independent address anchor (per-section pin / owned entity) all
+# fail to single out one source.  The positives below are legal inputs that
+# must verify; the negatives keep the R5-2 fail-closed core (identical
+# definitions keep rc1, and a swap that contradicts the retained shape is
+# refused too -- a naive "drop the same-name rejection" fix would accept it).
+# R6-2: a PT_LOAD's storage space comes from the classified input sections it
+# loads, never from the numeric p_vaddr; CODE may legally span 0x10000.
+# =====================================================================
+# RUN: yaml2obj localdyn-size8.yaml -o t.o && %python v2flags.py t.o && mv t.o ldy8.o
+# RUN: yaml2obj localdyn-notype.yaml -o t.o && %python v2flags.py t.o && mv t.o ldyn.o
+# RUN: yaml2obj localdyn-func.yaml -o t.o && %python v2flags.py t.o && mv t.o ldyf.o
+# RUN: yaml2obj localdyn-pina.yaml -o t.o && %python v2flags.py t.o && mv t.o ldpa.o
+# RUN: yaml2obj localdyn-pinb.yaml -o t.o && %python v2flags.py t.o && mv t.o ldpb.o
+# RUN: yaml2obj lowcode.yaml -o t.o && %python v2flags.py t.o && mv t.o lowcode.o
+
+# --- R6-1 (1/4): two OBJECT locals `dyn` with st_size 4 and 8.  The retained
+# --- size singles out each source, so both inputs verify.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ldy.o ldy8.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=r6s.placement --map=r6s.map -o r6s.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=r6s.elf --report=r6s.placement --link-map=r6s.map --object=ldy.o --object=ldy8.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# RUN: llvm-readelf -s r6s.elf | FileCheck %s --check-prefix=R6SIZE
+# R6SIZE: 00010000 4 OBJECT LOCAL DEFAULT ABS dyn
+# R6SIZE: 00010004 8 OBJECT LOCAL DEFAULT ABS dyn
+
+# --- R6-1 (2/4): OBJECT and NOTYPE locals with the same name.  The retained
+# --- type singles out each source.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ldy.o ldyn.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=r6t.placement --map=r6t.map -o r6t.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=r6t.elf --report=r6t.placement --link-map=r6t.map --object=ldy.o --object=ldyn.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# RUN: llvm-readelf -s r6t.elf | FileCheck %s --check-prefix=R6TYPE
+# R6TYPE: 00010000 4 OBJECT LOCAL DEFAULT ABS dyn
+# R6TYPE: 00010004 4 NOTYPE LOCAL DEFAULT ABS dyn
+
+# --- R6-1 (3/4): an OBJECT `dyn` in XSEG and a FUNC `dyn` in .text: the
+# --- retained type (and their separate address spaces) single out each source.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ldy.o ldyf.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=r6c.placement --map=r6c.map -o r6c.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=r6c.elf --report=r6c.placement --link-map=r6c.map --object=ldy.o --object=ldyf.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# RUN: llvm-readelf -s r6c.elf | FileCheck %s --check-prefix=R6SEC
+# R6SEC: 00010000 4 OBJECT LOCAL DEFAULT ABS dyn
+# R6SEC: 00ff0203 4 FUNC LOCAL DEFAULT 1 dyn
+
+# --- R6-1 (4/4): identical OBJECT locals in two DIFFERENT XSEG sections, each
+# --- explicitly pinned to its own address.  The independent pin is the source
+# --- witness, so this legal input verifies.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ldpa.o ldpb.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --area-start=.mcs251.XSEG.a=0x10020 --area-start=.mcs251.XSEG.b=0x10040 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=r6p.placement --map=r6p.map -o r6p.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=r6p.elf --report=r6p.placement --link-map=r6p.map --object=ldpa.o --object=ldpb.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --area-start=.mcs251.XSEG.a=0x10020 --area-start=.mcs251.XSEG.b=0x10040 --edata-end=0x3fff
+# RUN: llvm-readelf -s r6p.elf | FileCheck %s --check-prefix=R6PIN
+# R6PIN: 00010020 4 OBJECT LOCAL DEFAULT ABS dyn
+# R6PIN: 00010040 4 OBJECT LOCAL DEFAULT ABS dyn
+
+# --- R6-1 guard: swapping the two locations while the output table keeps the
+# --- distinct shapes.  The input's shape no longer matches the symbol at its
+# --- recorded value, so the source is not established (rc1).  A fix that
+# --- merely dropped the same-name rejection would wrongly accept this.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 ldy.o ldyn.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=r6t.placement --map=r6t.map -o r6t.elf
+# RUN: %python %S/Inputs/audit-mutate.py carrier-addr r6t.elf n74.elf 0 ldy.o .mcs251.XSEG 0x010004 && %python %S/Inputs/audit-mutate.py carrier-addr n74.elf n74.elf 1 ldyn.o .mcs251.XSEG 0x010000 && %python %S/Inputs/audit-mutate.py map-section r6t.map n74.map ldy.o:.mcs251.XSEG 0x010004 && %python %S/Inputs/audit-mutate.py map-section n74.map n74.map ldyn.o:.mcs251.XSEG 0x010000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n74.elf --report=r6t.placement --link-map=n74.map --object=ldy.o --object=ldyn.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NSWAP
+
+# --- R6-2: a legal low-address CODE image crossing 64K.  CSEG at 0xfffe makes
+# --- .text span [0xfffe,0x10002); it is CODE ([0,0x1000000)), not AS0-DATA.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 lowcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 --placement-report=lc.placement --map=lc.map -o lc.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=lc.elf --report=lc.placement --link-map=lc.map --object=lowcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000
+# RUN: llvm-readelf -l lc.elf | FileCheck %s --check-prefix=R6LOW
+# R6LOW: LOAD {{0x[0-9a-f]+}} 0x0000fffe 0x0000fffe 0x00004 0x00004
+# --- the producer's own integrated --verify-placement must accept the same
+# --- image (the R6 finding was a producer/verifier disagreement).
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 lowcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 --verify-placement -o lc-int.elf
+# --- boundary controls: the same memory end on either side of 0x10000.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 lowcode.o --area-start=CSEG=0xfffc --flash-base=0 --flash-size=0x20000 --placement-report=lf.placement --map=lf.map -o lf.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=lf.elf --report=lf.placement --link-map=lf.map --object=lowcode.o --area-start=CSEG=0xfffc --flash-base=0 --flash-size=0x20000
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 lowcode.o --area-start=CSEG=0x10000 --flash-base=0 --flash-size=0x20000 --placement-report=lg.placement --map=lg.map -o lg.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=lg.elf --report=lg.placement --link-map=lg.map --object=lowcode.o --area-start=CSEG=0x10000 --flash-base=0 --flash-size=0x20000
+
+# --- n73 (matrix §11 diagnostic migration): the segment is moved to 0 and
+# --- widened, but the ORIGINAL CODE record at 0xff0200 still demands file
+# --- coverage.  The rejection is now produced by the CODE byte-coverage rule
+# --- (B-COVER), NOT by any "real AS0 segment overflow" attribution: NOBITS
+# --- never constrains the segment's space, so the same rc=1 rests on correct
+# --- evidence.  NMEMEND stays owned by n72's genuine 24-bit overflow above.
+# RUN: %python %S/Inputs/audit-mutate.py elf-phdr c1.elf n73.elf 0 vaddr 0x0 && %python %S/Inputs/audit-mutate.py elf-phdr n73.elf n73.elf 0 memsz 0x10001 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n73.elf --report=c1.placement --link-map=c1.map --object=dsegn.o --object=fixed.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=N73COVER
+# N73COVER: its PROGBITS range has no PT_LOAD file coverage at 0xff0200
+
+#--- attr.py
+# Fill the ATTRHEX placeholder in every fixture with the frozen ABI blob.
+import glob
+ATTR = '41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000'
+for f in glob.glob('*.yaml'):
+    t = open(f).read()
+    if 'ATTRHEX' in t:
+        open(f, 'w').write(t.replace('ATTRHEX', ATTR))
+
+#--- v2flags.py
+# yaml2obj only registers the v1 enum; rewrite e_flags to the v2 ABI word.
+import sys
+for name in sys.argv[1:]:
+    try:
+        b = bytearray(open(name, 'rb').read())
+    except FileNotFoundError:
+        continue
+    assert len(b) >= 40, name
+    b[36:40] = bytes.fromhex('00000102')
+    open(name, 'wb').write(bytes(b))
+
+#--- split.yaml
+# One CODE byte + a G13b split XSEG of exactly 0x10000 bytes at 0x010000:
+# the canonical tiling is 0xffff + 1 across the 64K boundary.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 0x10000
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: big
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 0x10000
+
+#--- emptyiseg.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.ISEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- datapt.yaml
+# The sole ALLOC exemption: .data is PROGBITS, flags exactly ALLOC|WRITE,
+# size 0, no symbol.  It must have NO positioning record.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .data
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- datapt-sym.yaml
+# The exemption MISUSED: same empty .data but with a defined symbol on it.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .data
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: ondata
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .data
+    Size: 0
+
+#--- g8.yaml
+# A 256-byte EDATA-movable dseg: it cannot fit the 0x80 low window, so G8
+# migrates it into the EDATA window [0x100,0x1000).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.dseg
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_EDATA_MOVABLE ]
+    AddressAlign: 1
+    Size: 256
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- vecs0.yaml
+# A zero-length pinned VECS input member: recorded at the pinned address
+# with a zero-length cursor slice; the HOME/VECS/BOOT holes stay.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.VECS
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- noalloc.yaml
+# No ALLOC section at all: the object still occupies a fingerprint slot.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- samename.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- ovl.yaml
+# Overlay group members of different lengths sharing one address.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.OSEG.a
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.OSEG.b
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- dsegn.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.DSEG.n
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- twox.yaml
+# Two anonymous unmarked XSEG slices in one object.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.XSEG.b
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- fixed.yaml
+# An owned fixed DATA entity `dv` at 0x40 (record hash 4ADAFB61).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcu.fixed.dv
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01000000000000400000000400000001000000004ADAFB6102647600'
+Symbols:
+  - Name: _dv
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.dv
+    Value: 0
+    Size: 4
+
+#--- xinitin.yaml
+# A legal INPUT .mcs251.xinit (PROGBITS, flags exactly ALLOC, one init
+# record: dest 0x40, 4 payload bytes for the DSEG slot).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.DSEG.slot
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.xinit
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC ]
+    AddressAlign: 1
+    Content: '004000040004AABBCCDD'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- dabs.yaml
+# A DATA_ABS member pinned by its own exact section name.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.DATA.d
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- split4.yaml
+# R5-1 control: a 4-byte XSEG that carries the split capability.  The frozen
+# regeneration algorithm (design §3.7) yields exactly ONE slice, so this shape
+# is a legal result, not a non-canonical re-tiling.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- splitexact.yaml
+# R5-1 control: exactly 0xffff bytes also canonicalise to ONE slice.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_XSEG_SPLIT ]
+    AddressAlign: 1
+    Size: 0xffff
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- dabs0.yaml
+# R5-4: a true zero-length DATA_ABS member.  It owns no storage and needs no
+# PT_LOAD byte, but an explicit --area-start pin is still a placement
+# constraint that must hold exactly.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.DATA.d
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- localdyn.yaml
+# R5-2: a dynamic (non-owned) XSEG section with a file-scoped `dyn`.  Two
+# objects of this shape merge into one output with two locals of that name,
+# which no output-symbol association protocol can tell apart.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: dyn
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 4
+
+#--- localdyn2.yaml
+# R5-2 partner: the same bare ELF name `dyn` in a different object.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: dyn
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 4
+
+#--- localdyn3.yaml
+# R5-2 control: a DISTINCT file-scoped name in the same dynamic shape.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: dynx
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 4
+
+#--- localdyn-size8.yaml
+# R6-1: the same bare ELF name `dyn` as localdyn.yaml but st_size 8, so the
+# retained size distinguishes the two sources.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: dyn
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 8
+
+#--- localdyn-notype.yaml
+# R6-1: the same bare ELF name `dyn` as localdyn.yaml but STT_NOTYPE, so the
+# retained type distinguishes the two sources.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: dyn
+    Binding: STB_LOCAL
+    Type: STT_NOTYPE
+    Section: .mcs251.XSEG
+    Size: 4
+
+#--- localdyn-func.yaml
+# R6-1: a FUNC `dyn` in .text, against localdyn.yaml's OBJECT `dyn` in XSEG.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: dyn
+    Binding: STB_LOCAL
+    Type: STT_FUNC
+    Section: .text
+    Size: 4
+
+#--- localdyn-pina.yaml
+# R6-1: an OBJECT `dyn` in XSEG.a, pinned per section.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.XSEG.a
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: dyn
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.a
+    Size: 4
+
+#--- localdyn-pinb.yaml
+# R6-1: an OBJECT `dyn` in XSEG.b, pinned per section to a different address.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '000000'
+  - Name: .mcs251.XSEG.b
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: dyn
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.b
+    Size: 4
+
+#--- lowcode.yaml
+# R6-2: a plain 4-byte CODE section, linked at CSEG=0xfffe so its span
+# [0xfffe,0x10002) crosses 0x10000.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []

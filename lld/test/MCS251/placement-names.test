@@ -1,0 +1,757 @@
+# G11-C2 (pm rulings R-2026-09-17-4 / R-2026-09-18-1, design rev 8 §8.2/§8.3):
+# the `.mcs251.placement.names` association carrier CONSUMED by the linker.
+#
+# The positive is the REAL frozen nine-record fixture compiled by the current
+# llc, so the carrier comes from the producer (not a synthetic oracle): owned
+# associations must equal the fixed section's unique principal symbol's actual
+# ELF name (asm-label `dotted.stable` -> `_asm.dotted`, never derivable from the
+# stable), and every bind association must be an undefined external of the same
+# object (`_bb`, `_bf`) -- even though no code references them.
+#
+# Every structural and semantic rejection is fail-closed with the object name
+# and the offending entry, and is exercised by a single-field mutation of a
+# verifying mother (expect-rc.py asserts the exact exit code; FileCheck asserts
+# the target diagnostic so a generic input rejection cannot pass for a
+# detection).
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: mkdir nine && split-file %S/../../../llvm/test/CodeGen/MCS251/placement-names-note.ll nine
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf nine/main.ll -o nine.o
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld nine.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xfc0000 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=nine.placement --verify-placement --map=nine.map -o nine.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=nine.elf --report=nine.placement --object=nine.o --link-map=nine.map --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# --- the association drove every name in the report row (including the
+# --- asm-label name and the two bind-only rows), and the carrier itself does
+# --- NOT enter the output image.
+# RUN: FileCheck --input-file=nine.placement %s --check-prefix=ROW
+# ROW-DAG: dotted.stable | _asm.dotted | {{.*}}nine.o | .mcu.fixed.dotted.stable |
+# ROW-DAG: fn.stable | _ownedfn | {{.*}}nine.o | .mcu.fixed.fn.stable |
+# ROW-DAG: bb.stable | _bb | {{.*}}nine.o |  | 0 | 0 | 1 |
+# ROW-DAG: bf.stable | _bf | {{.*}}nine.o |  | 2 | 1 | 1 |
+# RUN: llvm-readobj --sections nine.elf | FileCheck %s --check-prefix=NONAMES
+# --- the association carrier itself does NOT enter the output image (the D2
+# --- positioning carrier is present because this is an audit link).
+# NONAMES-NOT: .mcs251.placement.names
+
+# =====================================================================
+# The verifying mother: ONE owned entity `aa` whose carrier associates `aa`.
+# Every structural negative below is a fixed-point mutation of this object.
+# =====================================================================
+# RUN: yaml2obj base-owned.yaml -o base-v1.o && %python seteflags.py base-v1.o && mv base-v1.o base.o
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld base.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o base.elf
+
+# --- envelope: namesz, name padding.
+# RUN: %python %S/Inputs/audit-mutate.py names-poke base.o mut.o 0 00000008
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NNAMESZ
+# NNAMESZ: malformed placement names NOTE in mut.o: note name is not MCS251\0 with namesz 7
+# RUN: %python %S/Inputs/audit-mutate.py names-poke base.o mut.o 19 41
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NPAD
+# NPAD: malformed placement names NOTE in mut.o: note name padding is not zero
+# --- a truncated header (sh_size < the 20-byte envelope).
+# RUN: %python %S/Inputs/audit-mutate.py names-size base.o mut.o -25
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NTRUNC
+# NTRUNC: malformed placement names NOTE in mut.o: truncated note header
+# --- note type must be exactly 2.
+# RUN: %python %S/Inputs/audit-mutate.py names-poke base.o mut.o 8 00000003
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NTYPE
+# NTYPE: malformed placement names NOTE in mut.o: unknown association note type 3 (expected 2)
+# --- descsz must cover exactly the entry table.
+# RUN: %python %S/Inputs/audit-mutate.py names-poke base.o mut.o 4 00000015
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NDESC
+# NDESC: malformed placement names NOTE in mut.o: descsz does not cover the association table
+# --- association_version.
+# RUN: %python %S/Inputs/audit-mutate.py names-poke base.o mut.o 20 00000002
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NVER
+# NVER: malformed placement names NOTE in mut.o: unsupported association_version 2
+# --- record index range.
+# RUN: %python %S/Inputs/audit-mutate.py names-poke base.o mut.o 28 00000005
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NIDX
+# NIDX: malformed placement names NOTE in mut.o: association entry 0 placement_record_index 5 is out of range (1 v1 records)
+# --- entry name: empty, out of bounds, embedded NUL.
+# RUN: %python %S/Inputs/audit-mutate.py names-poke base.o mut.o 32 00000000
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NEMPTY
+# NEMPTY: malformed placement names NOTE in mut.o: association entry 0 has an empty name
+# RUN: %python %S/Inputs/audit-mutate.py names-poke base.o mut.o 32 000000ff
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NOOB
+# NOOB: malformed placement names NOTE in mut.o: association entry 0 name out of bounds
+# RUN: %python %S/Inputs/audit-mutate.py names-poke base.o mut.o 37 00
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NNUL
+# NNUL: malformed placement names NOTE in mut.o: association entry 0 name contains a NUL
+# --- canonical zero padding after the name.
+# RUN: %python %S/Inputs/audit-mutate.py names-poke base.o mut.o 39 41
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NENTPAD
+# NENTPAD: malformed placement names NOTE in mut.o: association entry 0 padding is not zero
+# --- trailing bytes after the entry table.
+# RUN: %python %S/Inputs/audit-mutate.py names-size base.o mut.o 1
+# RUN: %python %S/Inputs/audit-mutate.py names-poke mut.o mut2.o 4 00000015
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut2.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NTRAIL
+# NTRAIL: malformed placement names NOTE in mut2.o: trailing bytes after the association table
+# --- the frozen shape (SHT_NOTE, flags 0, align 4).
+# RUN: %python %S/Inputs/audit-mutate.py sec-type base.o mut.o .mcs251.placement.names 1
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld mut.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o mut.elf 2>&1 | FileCheck %s --check-prefix=NSHAPE
+# NSHAPE: malformed .mcs251.placement.names
+# --- G11-C2 MAJOR-1 (review): section header index 0 is the ELF null header
+# --- and must stay SHT_NULL with the all-zero shape.  Parking the EXACT
+# --- carrier -- same name, same data range -- there used to bypass the whole
+# --- section schema and accept flags/align violations on a plain link.  All
+# --- five shapes must be refused by the PLAIN link (rc exactly 1), with the
+# --- index-0 rule, never by the optional audit.
+# RUN: %python %S/Inputs/audit-mutate.py names-null-carrier base.o null-flags.o 0 0 4
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld null-flags.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o nf.elf 2>&1 | FileCheck %s --check-prefix=NNULL
+# RUN: %python %S/Inputs/audit-mutate.py names-null-carrier base.o null-align0.o 0 0 0
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld null-align0.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o na0.elf
+# RUN: %python %S/Inputs/audit-mutate.py names-null-carrier base.o null-flags1.o 0 1 4
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld null-flags1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o nf1.elf
+# RUN: %python %S/Inputs/audit-mutate.py names-null-carrier base.o null-align8.o 0 0 8
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld null-align8.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o na8.elf
+# RUN: %python %S/Inputs/audit-mutate.py names-null-carrier base.o null-type7.o 7 0 4
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld null-type7.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o nt7.elf
+# NNULL: .mcs251.placement.names must not occupy the ELF null section index 0
+# --- Control: the object whose carrier stays on its original (non-zero) index
+# --- links and audits successfully on the SAME link line, so the five
+# --- negatives above isolate the index-0 rule rather than the fixture.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld base.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 --placement-report=ok.placement --map=ok.map -o ok.elf
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest ok.elf ok.elf 0 base.o
+# RUN: test -s ok.placement && grep -c "aa | aa" ok.placement | FileCheck %s --check-prefix=OKROW
+# OKROW: 1
+
+# --- a duplicate association for one record index.
+# RUN: yaml2obj dup-index.yaml -o dup-v1.o && %python seteflags.py dup-v1.o && mv dup-v1.o dup.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld dup.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o dup.elf 2>&1 | FileCheck %s --check-prefix=NDUP
+# NDUP: malformed placement names NOTE in dup.o: duplicate association for placement record index 0
+# --- a missing association (entry_count 0).
+# RUN: yaml2obj miss-index.yaml -o miss-v1.o && %python seteflags.py miss-v1.o && mv miss-v1.o miss.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld miss.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o miss.elf 2>&1 | FileCheck %s --check-prefix=NMISS
+# NMISS: malformed placement names NOTE in miss.o: missing association for placement record index 0
+# --- a carrier with no v1 table to associate.
+# RUN: yaml2obj orphan.yaml -o orph-v1.o && %python seteflags.py orph-v1.o && mv orph-v1.o orph.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld orph.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o orph.elf 2>&1 | FileCheck %s --check-prefix=NORPH
+# NORPH: malformed placement names NOTE in orph.o: the object carries no .mcs251.placement to associate
+# --- at most one carrier per object.
+# RUN: yaml2obj two-carriers.yaml -o two-v1.o && %python seteflags.py two-v1.o && mv two-v1.o two.o
+# RUN: %python %S/Inputs/audit-mutate.py sec-alias two.o two.o .mcs251.placement.names .mcs251.placement.names.dup
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld two.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o two.elf 2>&1 | FileCheck %s --check-prefix=NTWO
+# NTWO: at most one .mcs251.placement.names per object
+# --- the carrier requires the v2 object identity (v1 EOL); the orphan shape
+# --- keeps the names claim path reachable without a placement NOTE.
+# RUN: yaml2obj orphan.yaml -o orphv1.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld orphv1.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o orphv1.elf 2>&1 | FileCheck %s --check-prefix=Nv1
+# Nv1: .mcs251.placement.names requires a v2 object identity (the v1 memory contract is EOL)
+
+# =====================================================================
+# Semantic binding (design §8.2): the association is authoritative.
+# =====================================================================
+# --- an OWNED association that is not the section's principal symbol: the
+# --- carrier names `_aa` while the fixed section's entity is `aa`.
+# RUN: yaml2obj own-mismatch.yaml -o om-v1.o && %python seteflags.py om-v1.o && mv om-v1.o om.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld om.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o om.elf 2>&1 | FileCheck %s --check-prefix=SOWN
+# SOWN: placement name association mismatch for aa in om.o: associated ELF symbol '_aa' is not the principal symbol 'aa' of section .mcu.fixed.aa
+# --- a BIND association that is not an undefined external of this object.
+# RUN: yaml2obj bind-foreign.yaml -o bf-v1.o && %python seteflags.py bf-v1.o && mv bf-v1.o bf.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld bf.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o bf.elf 2>&1 | FileCheck %s --check-prefix=SBIND
+# SBIND: malformed placement NOTE in bf.o: bind record 0 (stable 'bx') associates ELF symbol 'bx' which is not an undefined external symbol of this input
+# --- the legacy boundary: a bind record with NO carrier is refused, never
+# --- guessed from a same-named undefined symbol.
+# RUN: yaml2obj legacy-bind.yaml -o lb-v1.o && %python seteflags.py lb-v1.o && mv lb-v1.o lb.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld lb.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o lb.elf 2>&1 | FileCheck %s --check-prefix=SLEGACY
+# SLEGACY: missing placement name association for bx in lb.o (recompile placement object)
+# --- reverse uniqueness: two different stables claiming the same external ELF
+# --- name (B2 review handoff).
+# RUN: yaml2obj reverse.yaml -o rv-v1.o && %python seteflags.py rv-v1.o && mv rv-v1.o rv.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld rv.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o rv.elf 2>&1 | FileCheck %s --check-prefix=SREV
+# SREV: conflicting placement for by: external ELF symbol _x is already claimed by stable bx
+# --- within one stable group, owned and bind records must name one ELF entity.
+# RUN: yaml2obj group-conflict.yaml -o gc-v1.o && %python seteflags.py gc-v1.o && mv gc-v1.o gc.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld gc.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o gc.elf 2>&1 | FileCheck %s --check-prefix=SGROUP
+# SGROUP: conflicting placement for aa: the group's records name different ELF entities
+# --- the owned principal-symbol count remains exactly one (zero and multiple
+# --- are both a disagreement, not a carrier matter).
+# RUN: yaml2obj zero-sym.yaml -o zs-v1.o && %python seteflags.py zs-v1.o && mv zs-v1.o zs.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld zs.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o zs.elf 2>&1 | FileCheck %s --check-prefix=SSYM
+# SSYM: section .mcu.fixed.aa disagrees with placement NOTE for aa
+# RUN: yaml2obj two-sym.yaml -o ts-v1.o && %python seteflags.py ts-v1.o && mv ts-v1.o ts.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld ts.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o ts.elf 2>&1 | FileCheck %s --check-prefix=SSYM2
+# SSYM2: section .mcu.fixed.aa disagrees with placement NOTE for aa
+
+# =====================================================================
+# §13 regression: the D2 output-only positioning carrier stays rejected as an
+# input, and the names acceptance introduced no `.mcs251.*` wildcard.
+# =====================================================================
+# RUN: yaml2obj positions-input.yaml -o pi-v1.o && %python seteflags.py pi-v1.o && mv pi-v1.o pi.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld pi.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o pi.elf 2>&1 | FileCheck %s --check-prefix=NPOS
+# NPOS: .mcs251.placement.positions is a final-output-only section and cannot appear in an input object
+# RUN: yaml2obj wildcard.yaml -o wc-v1.o && %python seteflags.py wc-v1.o && mv wc-v1.o wc.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld wc.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o wc.elf 2>&1 | FileCheck %s --check-prefix=NREAD
+# NREAD: unsupported non-ALLOC metadata section .mcs251.placement.reader
+
+#--- seteflags.py
+# Rewrite e_flags to the v2 word (yaml2obj only registers the v1 enum).
+import sys
+OFF = 36
+for name in sys.argv[1:]:
+    b = bytearray(open(name, 'rb').read())
+    assert len(b) >= OFF + 4, name
+    b[OFF:OFF + 4] = bytes.fromhex("00000102")
+    open(name, 'wb').write(bytes(b))
+
+#--- attrs.txt
+41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+
+#--- base-owned.yaml
+# One owned entity `aa` (AS0-DATA, A=2, size 4) with its carrier associating
+# the principal symbol `aa`.  Records: v1 owned aa + association entry 0 -> "aa".
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c01000000000000400000000400000001000000000000000002616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000001000000000000000261610000'
+Symbols:
+  - Name: aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+
+#--- dup-index.yaml
+# Two association entries for the SAME v1 record index.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c01000000000000400000000400000001000000000000000002616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000002000000000000000261610000000000000000000261610000'
+Symbols:
+  - Name: aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+
+#--- miss-index.yaml
+# entry_count = 0 while one v1 record exists: the missing association is a
+# malformed carrier, not a "legacy" object.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c01000000000000400000000400000001000000000000000002616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000000'
+Symbols:
+  - Name: aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+
+#--- orphan.yaml
+# A carrier with no `.mcs251.placement` table: nothing to associate.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000001000000000000000261610000'
+Symbols:
+  - Name: _d
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- two-carriers.yaml
+# Two `.mcs251.placement.names` sections in one object.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c01000000000000400000000400000001000000000000000002616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000001000000000000000261610000'
+  - Name: .mcs251.placement.names.dup
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000001000000000000000261610000'
+Symbols:
+  - Name: aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+
+#--- own-mismatch.yaml
+# The owned carrier names `_aa` while the fixed section's principal symbol is `aa`.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c01000000000000400000000400000001000000000000000002616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000100000000000000035f616100'
+Symbols:
+  - Name: aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+
+#--- bind-foreign.yaml
+# A bind record whose association names `bx`, which is NOT an undefined
+# external of this object (no such symbol exists).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0101000100010000000000040000000100000000E6E499C902627800'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000001000000000000000262780000'
+Symbols:
+  - Name: _bx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- legacy-bind.yaml
+# A bind record with NO carrier: refused, never guessed.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0101000100010000000000040000000100000000E6E499C902627800'
+Symbols:
+  - Name: _bx
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- reverse.yaml
+# Two bind records of DIFFERENT stables both associating `_x`.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c0101000100010000000000040000000100000000e6e499c9026278000000001c01010001000100000000000400000001000000000000000002627900'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000200000000000000025f78000000000001000000025f780000'
+Symbols:
+  - Name: _x
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- group-conflict.yaml
+# One stable `aa` with an owned record (principal `aa`) and a bind record
+# associating `_diff`: the group names two ELF entities.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c010100000001000000000004000000010000000000000000026161000000001c01010001000100000000000400000001000000000000000002616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000200000000000000026161000000000001000000055f64696666000000'
+Symbols:
+  - Name: aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+  - Name: _diff
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- zero-sym.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c01000000000000400000000400000001000000000000000002616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000001000000000000000261610000'
+Symbols:
+  - Name: _d
+    Binding: STB_GLOBAL
+    Type: STT_NOTYPE
+
+#--- two-sym.yaml
+# A fixed section claiming two entity symbols.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: 'C0D00000'
+  - Name: .mcu.fixed.aa
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001c01000000000000400000000400000001000000000000000002616100'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000001000000000000000261610000'
+Symbols:
+  - Name: aa
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+  - Name: aa2
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.aa
+    Value: 0
+    Size: 4
+
+#--- positions-input.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement.positions
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 3
+        Desc: '0000000100000000'
+
+#--- wildcard.yaml
+# A `.mcs251.*` name outside the exact whitelist stays rejected.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+  - Name: .mcs251.placement.reader
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '0000000100000000'

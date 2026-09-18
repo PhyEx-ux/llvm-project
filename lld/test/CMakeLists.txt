@@ -40,6 +40,13 @@ configure_lit_site_cfg(
 )
 
 set(LLD_TEST_DEPS lld LLDUnitTests)
+# G11-D (PM ruling R-2026-09-17-6): the placement audit tests drive the
+# independent `mcs251-placement-verify` executable.  It must be a dependency of
+# `check-lld`, otherwise a clean build's green depends on someone having built
+# that target by hand.
+if (TARGET mcs251-placement-verify)
+  list(APPEND LLD_TEST_DEPS mcs251-placement-verify)
+endif()
 if (NOT LLD_BUILT_STANDALONE)
   list(APPEND LLD_TEST_DEPS
     FileCheck

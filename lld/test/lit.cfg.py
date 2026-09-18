@@ -39,6 +39,10 @@ llvm_config.use_lld()
 config.substitutions.append(("%llvm_src_root", config.llvm_src_root))
 
 tool_patterns = [
+    # G11-D (PM ruling R-2026-09-17-6): the independent placement verifier is
+    # built next to this lld; the substitution keeps `%mcs251-placement-verify`
+    # pinned to the freshly built binary instead of whatever PATH finds.
+    "mcs251-placement-verify",
     "llc",
     "llvm-as",
     "llvm-cgdata",

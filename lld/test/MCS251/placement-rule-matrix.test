@@ -1,0 +1,1057 @@
+# G11-D2 rule matrix (G11-D2-RULE-MATRIX-Alice.md) resident tests.
+#
+# Rule A: the retained symbol SHAPE (type, binding, specified size) is filtered
+# FIRST (H), then the value (W), then an independent anchor (K).  A shared
+# numeric address alone is never a reason to reject; `size == 0` is
+# "unspecified"; pin/owned only disambiguate and never waive the shape check.
+# Rule B: the final PT_LOAD expresses the CODE load image, not a unified
+# numeric ledger of the three spaces: NOBITS never constrains it, the upper
+# bound is always CODE's 0x01000000, filesz=0 is an EMPTY interval, and a
+# non-CODE PROGBITS record is B-CLASS.
+#
+# Every negative asserts the EXACT exit status 1 (Inputs/expect-rc.py) and the
+# target diagnostic family.  Positives additionally freeze producer agreement
+# where the finding was a producer/verifier disagreement.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: %python attr.py
+# RUN: yaml2obj mxobj.yaml -o t.o && %python v2flags.py t.o && mv t.o mxobj.o
+# RUN: yaml2obj mxfunc.yaml -o t.o && %python v2flags.py t.o && mv t.o mxfunc.o
+# RUN: yaml2obj mxnot.yaml -o t.o && %python v2flags.py t.o && mv t.o mxnot.o
+# RUN: yaml2obj mxtwin.yaml -o t.o && %python v2flags.py t.o && mv t.o mxtwin.o
+# RUN: yaml2obj mxn4.yaml -o t.o && %python v2flags.py t.o && mv t.o mxn4.o
+# RUN: yaml2obj mxn8.yaml -o t.o && %python v2flags.py t.o && mv t.o mxn8.o
+# RUN: yaml2obj mxl.yaml -o t.o && %python v2flags.py t.o && mv t.o mxl.o
+# RUN: yaml2obj mxg.yaml -o t.o && %python v2flags.py t.o && mv t.o mxg.o
+# RUN: yaml2obj mzp.yaml -o t.o && %python v2flags.py t.o && mv t.o mzp.o
+# RUN: yaml2obj mzp2.yaml -o t.o && %python v2flags.py t.o && mv t.o mzp2.o
+# RUN: yaml2obj moff.yaml -o t.o && %python v2flags.py t.o && mv t.o moff.o
+# RUN: yaml2obj mxxd.yaml -o t.o && %python v2flags.py t.o && mv t.o mxxd.o
+# RUN: yaml2obj mxcode.yaml -o t.o && %python v2flags.py t.o && mv t.o mxcode.o
+# RUN: yaml2obj mxdata.yaml -o t.o && %python v2flags.py t.o && mv t.o mxdata.o
+# RUN: yaml2obj mxz.yaml -o t.o && %python v2flags.py t.o && mv t.o mxz.o
+# RUN: yaml2obj mxdseg.yaml -o t.o && %python v2flags.py t.o && mv t.o mxdseg.o
+# RUN: yaml2obj mxfix.yaml -o t.o && %python v2flags.py t.o && mv t.o mxfix.o
+
+# =====================================================================
+# A positives (§13.1).  All explicit expect-rc.py 0.
+# =====================================================================
+# A-1 (R7-1): a same-numeric-address OBJECT local in XSEG and FUNC local in
+# .text are distinguishable by their retained type; the numeric coincidence
+# must NOT reject them.  Independent verifier and integrated --verify-placement.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxobj.o mxfunc.o --area-start=CSEG=0x11ffe --area-start=XSEG=0x12000 --flash-base=0 --flash-size=0x20000 --placement-report=r71.placement --map=r71.map -o r71.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=r71.elf --report=r71.placement --link-map=r71.map --object=mxobj.o --object=mxfunc.o --area-start=CSEG=0x11ffe --area-start=XSEG=0x12000 --flash-base=0 --flash-size=0x20000
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxobj.o mxfunc.o --area-start=CSEG=0x11ffe --area-start=XSEG=0x12000 --flash-base=0 --flash-size=0x20000 --verify-placement -o r71-int.elf
+# RUN: llvm-readelf -s r71.elf | FileCheck %s --check-prefix=AR71
+# AR71: 00012000 {{[0-9]+}} OBJECT LOCAL {{.*}} mx
+# AR71: 00012000 {{[0-9]+}} FUNC LOCAL {{.*}} mx
+
+# A-2 (A30/A21): two positive-size NOTYPE locals in XSEG, sizes 4 and 8; the
+# retained size singles out each source.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxn4.o mxn8.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=n48.placement --map=n48.map -o n48.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=n48.elf --report=n48.placement --link-map=n48.map --object=mxn4.o --object=mxn8.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000
+
+# A-3 (A34): a LOCAL and a GLOBAL `mx` of the same name and shape are told
+# apart by the retained binding.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxl.o mxg.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=lg.placement --map=lg.map -o lgx.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=lgx.elf --report=lg.placement --link-map=lg.map --object=mxl.o --object=mxg.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000
+
+# A-4 (A28): OBJECT sizes 0 and 3 in different XSEG sections, each pinned to
+# its own address: the anchor disambiguates, and zero size is not used to
+# decide the source.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mzp.o mzp2.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --area-start=.mcs251.XSEG.a=0x12020 --area-start=.mcs251.XSEG.b=0x12050 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=p03.placement --map=p03.map -o p03.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=p03.elf --report=p03.placement --link-map=p03.map --object=mzp.o --object=mzp2.o --area-start=XSEG=0x010000 --area-start=.mcs251.XSEG.a=0x12020 --area-start=.mcs251.XSEG.b=0x12050 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000
+
+# A-5 (A pos 7): a symbol at a non-zero in-section offset, pinned per section,
+# so K = pin + offset (0x12020 + 3).
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 moff.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --area-start=.mcs251.XSEG.off=0x12020 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=offp.placement --map=offp.map -o offp.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=offp.elf --report=offp.placement --link-map=offp.map --object=moff.o --area-start=XSEG=0x010000 --area-start=.mcs251.XSEG.off=0x12020 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000
+# RUN: llvm-readelf -s offp.elf | FileCheck %s --check-prefix=OFFP
+# OFFP: 00012023 {{[0-9]+}} OBJECT LOCAL {{.*}} mx
+
+# A-3b (A29): a single definition whose st_size is zero on both sides; the
+# D2 "unspecified size" policy does not reject it (size is not a discriminator).
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxz.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=z.placement --map=z.map -o z.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=z.elf --report=z.placement --link-map=z.map --object=mxz.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000
+# RUN: llvm-readelf -s z.elf | FileCheck %s --check-prefix=AZERO
+# AZERO: 00010000 0 OBJECT LOCAL {{.*}} mz
+
+# A-6 (§2.2/§4): an XDATA NOBITS symbol whose value happens to fall inside the
+# CODE load slice still gets a NON-ABS output section index; the verifier must
+# not read that as CODE.  Non-ABS != CODE.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000 --placement-report=xd.placement --map=xd.map -o xd.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=xd.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000
+# RUN: llvm-readelf -s xd.elf | FileCheck %s --check-prefix=XDNOABS
+# XDNOABS: 00010000 {{[0-9]+}} OBJECT LOCAL DEFAULT {{[1-9]}} mx
+
+# =====================================================================
+# A negatives (§13.2).  Exact rc=1 plus the target diagnostic.
+# =====================================================================
+# A-N1 (A31/A38, R7-2A): the two output rows' types are swapped while the
+# object, records, map and per-section pins are unchanged.  The pin cannot
+# waive the shape cross-check.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxobj.o mxnot.o --area-start=CSEG=0x11ffe --area-start=XSEG=0x12000 --area-start=.mcs251.XSEG.left=0x12020 --area-start=.mcs251.XSEG.right=0x12050 --flash-base=0 --flash-size=0x20000 --placement-report=ps.placement --map=ps.map -o ps.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=ps.elf --report=ps.placement --link-map=ps.map --object=mxobj.o --object=mxnot.o --area-start=CSEG=0x11ffe --area-start=XSEG=0x12000 --area-start=.mcs251.XSEG.left=0x12020 --area-start=.mcs251.XSEG.right=0x12050 --flash-base=0 --flash-size=0x20000
+# RUN: cp ps.elf clash.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-syminfo clash.elf clash.elf mx 0 0
+# RUN: %python %S/Inputs/audit-mutate.py elf-syminfo clash.elf clash.elf mx 1 1
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=clash.elf --report=ps.placement --link-map=ps.map --object=mxobj.o --object=mxnot.o --area-start=CSEG=0x11ffe --area-start=XSEG=0x12000 --area-start=.mcs251.XSEG.left=0x12020 --area-start=.mcs251.XSEG.right=0x12050 --flash-base=0 --flash-size=0x20000 | FileCheck %s --check-prefix=CONFLICT
+# CONFLICT: is not uniquely identifiable in the final symbol table
+
+# A-N2 (A32, R7-2A): the pinned OBJECT's output st_size 3 -> 2; a known
+# positive-size contradiction, not waivable by the pin.
+# RUN: cp ps.elf sclash.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-size sclash.elf sclash.elf mx 2
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=sclash.elf --report=ps.placement --link-map=ps.map --object=mxobj.o --object=mxnot.o --area-start=CSEG=0x11ffe --area-start=XSEG=0x12000 --area-start=.mcs251.XSEG.left=0x12020 --area-start=.mcs251.XSEG.right=0x12050 --flash-base=0 --flash-size=0x20000 | FileCheck %s --check-prefix=SHAPE
+# SHAPE: has no compatible final ELF definition (type, binding or specified size disagrees)
+
+# A-N3 (R7-2B): the positioning records, the map and the pins are all moved
+# consistently, but the output symbol table is NOT swapped.  At its recorded
+# address the input's shape no longer matches.
+# RUN: cp ps.elf rsw.elf && cp ps.map rsw.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-addr rsw.elf rsw.elf 0 mxobj.o .mcs251.XSEG.left 0x12050
+# RUN: %python %S/Inputs/audit-mutate.py carrier-addr rsw.elf rsw.elf 1 mxnot.o .mcs251.XSEG.right 0x12020
+# RUN: %python %S/Inputs/audit-mutate.py map-section rsw.map rsw.map mxobj.o:.mcs251.XSEG.left 0x12050
+# RUN: %python %S/Inputs/audit-mutate.py map-section rsw.map rsw.map mxnot.o:.mcs251.XSEG.right 0x12020
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=rsw.elf --report=ps.placement --link-map=rsw.map --object=mxobj.o --object=mxnot.o --area-start=CSEG=0x11ffe --area-start=XSEG=0x12000 --area-start=.mcs251.XSEG.left=0x12050 --area-start=.mcs251.XSEG.right=0x12020 --flash-base=0 --flash-size=0x20000 | FileCheck %s --check-prefix=CONFLICT
+
+# A-N4 (A31/A33): a UNIQUE definition whose retained type changes.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxobj.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=uq.placement --map=uq.map -o uq.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=uq.elf --report=uq.placement --link-map=uq.map --object=mxobj.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000
+# RUN: cp uq.elf uqt.elf && %python %S/Inputs/audit-mutate.py elf-syminfo uqt.elf uqt.elf mx 0 2
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=uqt.elf --report=uq.placement --link-map=uq.map --object=mxobj.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 | FileCheck %s --check-prefix=SHAPE
+# A unique definition whose retained binding changes (LOCAL -> GLOBAL|OBJECT).
+# RUN: cp uq.elf uqb.elf && %python %S/Inputs/audit-mutate.py elf-syminfo uqb.elf uqb.elf mx 0 0x11
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=uqb.elf --report=uq.placement --link-map=uq.map --object=mxobj.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 | FileCheck %s --check-prefix=SHAPE
+# A unique definition whose retained positive size changes 3 -> 2.
+# RUN: cp uq.elf uqs.elf && %python %S/Inputs/audit-mutate.py elf-size uqs.elf uqs.elf mx 2
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=uqs.elf --report=uq.placement --link-map=uq.map --object=mxobj.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 | FileCheck %s --check-prefix=SHAPE
+# A-N5 (A33): the retained name/value stay but the row becomes UNDEF.
+# RUN: cp uq.elf uqu.elf && %python %S/Inputs/audit-mutate.py elf-undefined uqu.elf uqu.elf mx
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=uqu.elf --report=uq.placement --link-map=uq.map --object=mxobj.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 | FileCheck %s --check-prefix=SHAPE
+
+# A-N6 (A-DUP-OTHER): an exact duplicate output definition pair at a value no
+# input definition expects.  The rows are never deduplicated.
+# RUN: cp uq.elf dupl.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-dup-sym dupl.elf dupl.elf mx
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue dupl.elf dupl.elf mx 0x13000
+# RUN: %python %S/Inputs/audit-mutate.py elf-dup-sym dupl.elf dupl.elf mx
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=dupl.elf --report=uq.placement --link-map=uq.map --object=mxobj.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 | FileCheck %s --check-prefix=DUPOTHER
+# DUPOTHER: the final symbol table contains duplicate definitions of mx at 0x13000, so the source of the input definition is not established
+
+# A-N7 (A40/A-REUSE): two input definitions end up selecting the SAME output
+# row.  Both records are moved to one base and one row is retyped so the rows
+# are not an exact duplicate; each definition separately sees one compatible
+# row, but it is the same row.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxobj.o mxtwin.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=tw.placement --map=tw.map -o tw.elf
+# RUN: cp tw.elf reu.elf && cp tw.map reu.map
+# RUN: %python %S/Inputs/audit-mutate.py carrier-addr reu.elf reu.elf 1 mxtwin.o .mcs251.XSEG.right 0x10000
+# RUN: %python %S/Inputs/audit-mutate.py map-section reu.map reu.map mxtwin.o:.mcs251.XSEG.right 0x10000
+# RUN: %python %S/Inputs/audit-mutate.py elf-syminfo reu.elf reu.elf mx 1 0
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=reu.elf --report=tw.placement --link-map=reu.map --object=mxobj.o --object=mxtwin.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 | FileCheck %s --check-prefix=REUSE
+# REUSE: is selected for more than one input definition, so their sources are not separately established
+
+# A-N6 (§13.2 item 6 / A25): the SAME two different-XSEG-section, same-shape
+# OBJECTs with NO per-section pin.  The output keeps no input section identity,
+# so the source is not established (this mother is otherwise only used as the
+# base for the variants above).
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=tw.elf --report=tw.placement --link-map=tw.map --object=mxobj.o --object=mxtwin.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=CONFLICT
+
+# A-N8 (A35, R8 §13.2 item 15): two same-name, same-shape, same-VALUE rows
+# whose ONLY difference is that one row is ABS and the other is a real output
+# section index; with no independent anchor the section attribution does not
+# establish the source.  (The previous construction left BOTH rows ABS with
+# DIFFERENT values, so it did not exercise the condition its comment claimed.)
+# RUN: cp uq.elf abs.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-dup-sym abs.elf abs.elf mx
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx abs.elf abs.elf mx 1 1
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=abs.elf --report=uq.placement --link-map=uq.map --object=mxobj.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=CONFLICT
+# RUN: llvm-readelf -s abs.elf | FileCheck %s --check-prefix=ABSMIX
+# ABSMIX: 00010000 {{[0-9]+}} OBJECT LOCAL {{.*}} ABS mx
+# ABSMIX: 00010000 {{[0-9]+}} OBJECT LOCAL {{.*}} {{[1-9]}} mx
+
+# =====================================================================
+# B positives (§13.3).
+# =====================================================================
+# B-1 (B05/B13, R7-3): a legal CODE span crossing 64K numerically overlaps a
+# legal AS0 NOBITS record.  NOBITS takes no part in the PT_LOAD space; the
+# CODE bound stays 24-bit.  Independent verifier and integrated build.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxcode.o mxdata.o --area-start=CSEG=0xfffe --area-start=.mcs251.DATA.r7=0xfffc --flash-base=0 --flash-size=0x20000 --placement-report=mix.placement --map=mix.map -o mix.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=mix.elf --report=mix.placement --link-map=mix.map --object=mxcode.o --object=mxdata.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 --area-start=.mcs251.DATA.r7=0xfffc
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxcode.o mxdata.o --area-start=CSEG=0xfffe --area-start=.mcs251.DATA.r7=0xfffc --flash-base=0 --flash-size=0x20000 --verify-placement -o mix-int.elf
+
+# B-2 (B13 control): the same input with the AS0 record numerically disjoint
+# still verifies.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxcode.o mxdata.o --area-start=CSEG=0xfffe --area-start=.mcs251.DATA.r7=0xfff0 --flash-base=0 --flash-size=0x20000 --placement-report=mixd.placement --map=mixd.map -o mixd.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=mixd.elf --report=mixd.placement --link-map=mixd.map --object=mxcode.o --object=mxdata.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 --area-start=.mcs251.DATA.r7=0xfff0
+
+# B-3 (B16/B20/B21): a zero-filesz segment inside/at other ranges is an EMPTY
+# interval: [0x20000,0x20004) memsz-only, and a zero-filesz point at 0.
+# RUN: cp mix.elf zseg.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr zseg.elf zseg.elf 1 0 0x20000 0 4
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=zseg.elf --report=mix.placement --link-map=mix.map --object=mxcode.o --object=mxdata.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 --area-start=.mcs251.DATA.r7=0xfffc
+# RUN: cp mix.elf zoff.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr zoff.elf zoff.elf 1 0 0 0 0
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=zoff.elf --report=mix.placement --link-map=mix.map --object=mxcode.o --object=mxdata.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 --area-start=.mcs251.DATA.r7=0xfffc
+
+# B-4 (B18): an empty segment exactly at the CODE exclusive end is legal.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 --placement-report=cg.placement --map=cg.map -o cg.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=cg.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000
+# RUN: cp cg.elf zend.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr zend.elf zend.elf 1 0 0x1000000 0 0
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=zend.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000
+
+# B-5 (B22): a non-empty segment whose widened memory end is exactly the CODE
+# exclusive end 0x01000000.
+# RUN: cp cg.elf bendok.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-phdr bendok.elf bendok.elf 0 memsz 0xff0002
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=bendok.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000
+
+# =====================================================================
+# B negatives (§13.4).
+# =====================================================================
+# B-N1 (B17): a zero-filesz segment whose memsz leaves the 24-bit space.
+# RUN: cp mix.elf zbig.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr zbig.elf zbig.elf 1 0 0xffffff 0 2
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=zbig.elf --report=mix.placement --link-map=mix.map --object=mxcode.o --object=mxdata.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 --area-start=.mcs251.DATA.r7=0xfffc | FileCheck %s --check-prefix=BEND
+# BEND: (vaddr + memsz, widened) leaves its address space
+# B-N2 (B19): an empty segment whose start is already past the exclusive end.
+# RUN: cp cg.elf zstart.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr zstart.elf zstart.elf 1 0 0x1000001 0 0
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=zstart.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 | FileCheck %s --check-prefix=BEND
+# B-N3 (B23, R8 §13.4 item 4): a non-empty segment whose WIDENED MEMORY END is
+# exactly 0x01000001.  Start 0xfffe + memsz 0xff0003 == 0x1000001.  (The
+# previous value -- memsz 0x1000001 from start 0xfffe -- actually ended at
+# 0x100ffff, so the required exact end was never constructed.)
+# RUN: cp cg.elf bend.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-phdr bend.elf bend.elf 0 memsz 0xff0003
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=bend.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=BN3END
+# BN3END: a PT_LOAD memory range [0xfffe,0x1000001) (vaddr + memsz, widened) leaves its address space
+# B-N4 (B09/B10): the CODE input's file coverage has a hole (filesz 4 -> 2),
+# so the tail is backed only by memsz.
+# RUN: cp cg.elf hole.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-phdr hole.elf hole.elf 0 filesz 2
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=hole.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 | FileCheck %s --check-prefix=BCOVER
+# BCOVER: its PROGBITS range has no PT_LOAD file coverage at 0x10000
+# B-N5 (B27/B-MAPPING): the output load section and the PT_LOAD disagree on
+# the address of a shared file offset.
+# RUN: cp cg.elf bmap.elf
+# RUN: %python %S/Inputs/audit-mutate.py sec-addr bmap.elf bmap.elf .mcs251.load.0 0x20000
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=bmap.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 | FileCheck %s --check-prefix=BMAP
+# BMAP: the file-backed section .mcs251.load.0 and a PT_LOAD disagree on the address of file offset
+
+# B-N6 (B14/B-CLASS): an owned fixed entity whose section carries PROGBITS
+# contents but whose verified storage space is AS0 (class 0).  The section
+# shape (PROGBITS with EXECINSTR, so the independent classifier admits it and
+# the record space resolves to the entity's class) reaches the explicit
+# B-CLASS guard: a non-CODE PROGBITS record cannot borrow the CODE file bytes.
+# The object fingerprint in the carrier is updated so the earlier digest check
+# does not mask the guard.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxdseg.o mxfix.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=bc.placement --map=bc.map -o bc.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=bc.elf --report=bc.placement --link-map=bc.map --object=mxdseg.o --object=mxfix.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# RUN: %python %S/Inputs/audit-mutate.py sec-type mxfix.o mxfix.o .mcu.fixed.dv 1
+# RUN: %python %S/Inputs/audit-mutate.py sec-flags mxfix.o mxfix.o .mcu.fixed.dv 6
+# RUN: %python %S/Inputs/audit-mutate.py carrier-digest bc.elf bc2.elf 1 mxfix.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=bc2.elf --report=bc.placement --link-map=bc.map --object=mxdseg.o --object=mxfix.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=BCLASS
+# BCLASS: has PROGBITS contents in storage space 0, but the final ELF load image represents CODE
+
+# =====================================================================
+# R8 §13.1 item 3 (A29): a unique dynamic definition with a zero size on
+# exactly one side.  Both directions of the "unspecified side" policy.
+# =====================================================================
+# Input st_size 0, output st_size 3: the unspecified input side never rejects.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mzp.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=ap3a.placement --map=ap3a.map -o ap3a.elf
+# RUN: cp ap3a.elf ap3ao.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-size ap3ao.elf ap3ao.elf mx 3
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=ap3ao.elf --report=ap3a.placement --link-map=ap3a.map --object=mzp.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000
+# Input st_size 3, output st_size 0: the unspecified output side never rejects.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mzp2.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=ap3b.placement --map=ap3b.map -o ap3b.elf
+# RUN: cp ap3b.elf ap3bo.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-size ap3bo.elf ap3bo.elf mx 0
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=ap3bo.elf --report=ap3b.placement --link-map=ap3b.map --object=mzp2.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000
+
+# =====================================================================
+# R8-1 / matrix §5.2: an invalid final output section index is a
+# definition-shape error, never a candidate.  Contrasts: the untouched row
+# (a real output section index), SHN_ABS, SHN_UNDEF, and the nonexistent
+# ordinary index 0x1234, without and with a consistent per-section pin.  ABS
+# and ordinary section definitions stay accepted.
+# =====================================================================
+# RUN: llvm-readelf -s xd.elf | FileCheck %s --check-prefix=SHNDXOK
+# SHNDXOK: 00010000 {{[0-9]+}} OBJECT LOCAL {{.*}} {{[1-9]}} mx
+# RUN: cp xd.elf shbad.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shbad.elf shbad.elf mx 0 4660
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shbad.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+# SHNBAD: has no compatible final ELF definition (type, binding or specified size disagrees)
+# RUN: cp xd.elf shabs.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shabs.elf shabs.elf mx 0 65521
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=shabs.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000
+# RUN: cp xd.elf shundef.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shundef.elf shundef.elf mx 0 0
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shundef.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --area-start=.mcs251.XSEG=0x10000 --flash-base=0 --flash-size=0x20000 --placement-report=shp.placement --map=shp.map -o shp.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=shp.elf --report=shp.placement --link-map=shp.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --area-start=.mcs251.XSEG=0x10000 --flash-base=0 --flash-size=0x20000
+# RUN: cp shp.elf shpbad.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shpbad.elf shpbad.elf mx 0 4660
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shpbad.elf --report=shp.placement --link-map=shp.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --area-start=.mcs251.XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+
+# =====================================================================
+# R9-1 (matrix §5.2): an ordinary final section definition must satisfy BOTH
+# the ordinary index domain (1..SHN_LORESERVE-1) and the actual section header
+# extent.  Enlarging the final section table with real, non-ALLOC, zero-size
+# NOBITS headers must NOT re-interpret a reserved st_shndx as an ordinary
+# section definition.  The final table is grown only through e_shnum; the
+# input object, map, report, carrier and every other symbol field stay
+# unchanged.  Contrasts: the 0xff00 boundary, SHN_COMMON=0xfff2, the
+# reserved value 0xfffe (its number is below the 0xffff header count, yet it
+# stays reserved), SHN_XINDEX=0xffff, a legal ordinary
+# index 0xfeff inside the grown table, SHN_ABS=0xfff1 (stays a definition),
+# and the untouched six-header 0x1234/ABS cases above; without and with a
+# consistent per-section pin.
+# =====================================================================
+# 0xff00 with 0xff00 headers: the index equals the table extent and is at the
+# reserved floor; rejected.
+# RUN: %python %S/Inputs/audit-mutate.py elf-secnum xd.elf shn0.elf 65280
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shn0.elf shn0.elf mx 0 65280
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shn0.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+# 0xff00 with 0xff01 headers: the table now extends past the reserved value,
+# but 0xff00 is reserved, not an ordinary index; rejected.
+# RUN: %python %S/Inputs/audit-mutate.py elf-secnum xd.elf shn1.elf 65281
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shn1.elf shn1.elf mx 0 65280
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shn1.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shn1.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --area-start=.mcs251.XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+# 0xfeff with the same 0xff01 headers: a legal ordinary index inside the
+# grown table; accepted.
+# RUN: %python %S/Inputs/audit-mutate.py elf-secnum xd.elf shn2.elf 65281
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shn2.elf shn2.elf mx 0 65279
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=shn2.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000
+# SHN_COMMON=0xfff2 with 0xfff3 headers: llvm-readelf shows COM, so the row is
+# NOT a definition in ordinary section 65522; rejected.
+# RUN: %python %S/Inputs/audit-mutate.py elf-secnum xd.elf shnc.elf 65523
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shnc.elf shnc.elf mx 0 65522
+# RUN: llvm-readelf -s shnc.elf | FileCheck %s --check-prefix=SHNCOM
+# SHNCOM: COM mx
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shnc.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shnc.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --area-start=.mcs251.XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+# SHN_ABS=0xfff1 with the same 0xfff3 headers: ABS stays a legal definition.
+# RUN: %python %S/Inputs/audit-mutate.py elf-secnum xd.elf shna.elf 65523
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shna.elf shna.elf mx 0 65521
+# RUN: llvm-readelf -s shna.elf | FileCheck %s --check-prefix=SHNABS
+# SHNABS: ABS mx
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=shna.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000
+# The reserved value 0xfffe with 0xffff headers: the number is below the
+# header count but inside the reserved range; rejected.
+# RUN: %python %S/Inputs/audit-mutate.py elf-secnum xd.elf shnr.elf 65535
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shnr.elf shnr.elf mx 0 65534
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shnr.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shnr.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --area-start=.mcs251.XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+# SHN_XINDEX=0xffff with 0xffff headers: equal to the extent, still reserved;
+# rejected.
+# RUN: %python %S/Inputs/audit-mutate.py elf-secnum xd.elf shnx.elf 65535
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx shnx.elf shnx.elf mx 0 65535
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=shnx.elf --report=xd.placement --link-map=xd.map --object=mxxd.o --area-start=CSEG=0x10000 --area-start=XSEG=0x10000 --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=SHNBAD
+
+# =====================================================================
+# R8 §13.2 items 8, 9, 10, 14, 16.
+# =====================================================================
+# A-N8b (§13.2 item 8 / A27): OBJECT sizes 0 and 3 in two XSEG sections with
+# NO independent anchor.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mzp.o mzp2.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=s03.placement --map=s03.map -o s03.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=s03.elf --report=s03.placement --link-map=s03.map --object=mzp.o --object=mzp2.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=CONFLICT
+# A-N9b (§13.2 item 9 / A01): exact duplicate output rows for a PINNED
+# applicable definition; the duplicate is never deduplicated.
+# RUN: cp p03.elf p03d.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-dup-sym p03d.elf p03d.elf mx
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=p03d.elf --report=p03.placement --link-map=p03.map --object=mzp.o --object=mzp2.o --area-start=XSEG=0x010000 --area-start=.mcs251.XSEG.a=0x12020 --area-start=.mcs251.XSEG.b=0x12050 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=ADUP
+# ADUP: 2 final ELF symbols mx share the expected value 0x12020
+# A-N10b (§13.2 item 10 / A39): a NON-exact same-shape same-value candidate
+# pair (rows differ only in st_shndx) WITH a consistent independent pin: the
+# anchor supplies the same numeric address and still cannot select one row.
+# RUN: cp uq.elf nx.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-dup-sym nx.elf nx.elf mx
+# RUN: %python %S/Inputs/audit-mutate.py elf-symshndx nx.elf nx.elf mx 1 1
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=nx.elf --report=uq.placement --link-map=uq.map --object=mxobj.o --area-start=XSEG=0x010000 --area-start=.mcs251.XSEG.left=0x10000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=CONFLICT
+# A-N14b (§13.2 item 14): the non-zero in-section offset positive (A-5) with
+# the output address moved by -1 and +1; both are exact rc=1 A-VALUE.
+# RUN: cp offp.elf offm1.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue offm1.elf offm1.elf mx 0x12022
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=offm1.elf --report=offp.placement --link-map=offp.map --object=moff.o --area-start=XSEG=0x010000 --area-start=.mcs251.XSEG.off=0x12020 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=AVALUE
+# AVALUE: is placed at 0x12020 but no final ELF symbol mx sits at 0x12023
+# RUN: cp offp.elf offp1.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue offp1.elf offp1.elf mx 0x12024
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=offp1.elf --report=offp.placement --link-map=offp.map --object=moff.o --area-start=XSEG=0x010000 --area-start=.mcs251.XSEG.off=0x12020 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=AVALUE
+# A-N16b (§13.2 item 16 / A02): the applicable named definition is completely
+# absent from the final symbol table; the position is uncorroborated.
+# RUN: cp uq.elf uqmiss.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-symrename uqmiss.elf uqmiss.elf mx mxz
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=uqmiss.elf --report=uq.placement --link-map=uq.map --object=mxobj.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=AMISSING
+# AMISSING: is absent from the final symbol table, so the section's position is uncorroborated
+
+# =====================================================================
+# R8 §13.2 item 13 / item 9 owned version: an owned fixed section may carry
+# an ADMISSIBLE auxiliary label (LOCAL NOTYPE, size 0, 0 < value < size).
+# The entity association is NOT an exemption from the rule-A shape
+# cross-check.  Both the producer and the verifier's V11 admit exactly this
+# aux shape, so a positive-size auxiliary input cannot exist: the auxiliary
+# size is always the "unspecified" 0 on the input side, and its output size
+# is accepted by the zero-size policy.  The type cross-check, the owned main
+# type (V10) and the owned main size (V11) are all exercised.
+# =====================================================================
+# RUN: yaml2obj mxax.yaml -o t.o && %python v2flags.py t.o && mv t.o mxax.o
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 mxdseg.o mxax.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=ax.placement --map=ax.map -o ax.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=ax.elf --report=ax.placement --link-map=ax.map --object=mxdseg.o --object=mxax.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000
+# Auxiliary retained type changed (NOTYPE -> OBJECT): A-SHAPE.
+# RUN: cp ax.elf axt.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-syminfo axt.elf axt.elf ax_aux 0 1
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=axt.elf --report=ax.placement --link-map=ax.map --object=mxdseg.o --object=mxax.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=AXAUX
+# AXAUX: the input symbol ax_aux of mxax.o (section .mcu.fixed.ax) has no compatible final ELF definition (type, binding or specified size disagrees)
+# Auxiliary output size made non-zero while the input side is 0 (unspecified):
+# accepted by the zero-size policy.
+# RUN: cp ax.elf axs.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-size axs.elf axs.elf ax_aux 2
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=axs.elf --report=ax.placement --link-map=ax.map --object=mxdseg.o --object=mxax.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000
+# Owned principal output type changed (OBJECT -> FUNC): V10 owns the verdict.
+# RUN: cp ax.elf axm.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-syminfo axm.elf axm.elf _ax 0 0x12
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=axm.elf --report=ax.placement --link-map=ax.map --object=mxdseg.o --object=mxax.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=AXMAIN
+# AXMAIN: invalid output symbol for placement record ax: the entity type disagrees with the placement record
+# Owned principal output size changed (4 -> 0): V11 exact-size policy.
+# RUN: cp ax.elf axsz.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-size axsz.elf axsz.elf _ax 0
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=axsz.elf --report=ax.placement --link-map=ax.map --object=mxdseg.o --object=mxax.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=AXSIZE
+# AXSIZE: ax: size 0 != recorded 4
+# Exact duplicate of the applicable OWNED auxiliary row (item 9 owned version).
+# RUN: cp ax.elf axd.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-dup-sym axd.elf axd.elf ax_aux
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=axd.elf --report=ax.placement --link-map=ax.map --object=mxdseg.o --object=mxax.o --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 2>&1 | FileCheck %s --check-prefix=ADUPO
+# ADUPO: 2 final ELF symbols ax_aux share the expected value 0x49
+
+# =====================================================================
+# R8 §13.3 items 4, 5, 6, 7, 8 (B positives).
+# =====================================================================
+# B-R8-4 (§13.3 item 4 / B08): one CODE input covered by two ADJACENT PT_LOAD
+# segments (filesz 2 + 2), no overlap and no hole.
+# RUN: cp cg.elf bsplit.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-phdr bsplit.elf bsplit.elf 0 filesz 2
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr bsplit.elf bsplit.elf 1 0x56 0x10000 2 2
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=bsplit.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000
+# B-R8-5 (§13.3 item 5 / B15): a legal non-empty synthetic PT_LOAD with NO
+# input positioning record over it; no record is required for a segment.
+# RUN: cp cg.elf bsynth.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr bsynth.elf bsynth.elf 1 0 0x20000 4 4
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=bsynth.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000
+# B-R8-6 (§13.3 item 6 / B16): the no-record zero-filesz span [0,0x10001).
+# RUN: cp mix.elf zlo.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr zlo.elf zlo.elf 1 0 0 0 0x10001
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=zlo.elf --report=mix.placement --link-map=mix.map --object=mxcode.o --object=mxdata.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 --area-start=.mcs251.DATA.r7=0xfffc
+# B-R8-7 (§13.3 item 7 / B20): a zero-filesz point whose vaddr lies INSIDE
+# another non-empty Fva (the existing B-3 zseg used 0x20000, outside
+# [0xfffe,0x10002)).
+# RUN: cp cg.elf zfva.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr zfva.elf zfva.elf 1 0 0x10000 0 4
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=zfva.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000
+# B-R8-8 (§13.3 item 8 / B21): a zero-filesz segment whose p_offset lies
+# INSIDE the positioning carrier's file range (empty interval, B-CARRIER does
+# not apply; the existing zoff used offset 0, outside the carrier).
+# RUN: cp mix.elf zcar.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr-carrier zcar.elf zcar.elf 1 1 0x20000 4
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=zcar.elf --report=mix.placement --link-map=mix.map --object=mxcode.o --object=mxdata.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 --area-start=.mcs251.DATA.r7=0xfffc
+
+# =====================================================================
+# R8 §13.4 items 5, 7 (B negatives).  Item 4 is fixed in B-N3 above.
+# =====================================================================
+# B-R8-5 (§13.4 item 5 / B26): a LOW-ADDRESS mother (vaddr 0) with
+# memsz=0xffffffff; the widened end prints the true u64 value.
+# RUN: cp cg.elf lowbig.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr lowbig.elf lowbig.elf 1 0 0 0 0xffffffff
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=lowbig.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=LOWBIG
+# LOWBIG: a PT_LOAD memory range [0x0,0xffffffff) (vaddr + memsz, widened) leaves its address space
+# B-R8-7 (§13.4 item 7 / B10): a ONE-BYTE file-coverage gap BETWEEN two
+# adjacent PT_LOAD segments; not the same construction as shortening one
+# segment's tail.
+# RUN: cp cg.elf gap.elf
+# RUN: %python %S/Inputs/audit-mutate.py elf-phdr gap.elf gap.elf 0 filesz 2
+# RUN: %python %S/Inputs/audit-mutate.py elf-add-phdr gap.elf gap.elf 1 0x57 0x10001 1 1
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=gap.elf --report=cg.placement --link-map=cg.map --object=mxcode.o --area-start=CSEG=0xfffe --flash-base=0 --flash-size=0x20000 2>&1 | FileCheck %s --check-prefix=BCOVER
+
+#--- attr.py
+# Fill the ATTRHEX placeholder in every fixture with the frozen ABI blob.
+import glob
+ATTR = '41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000'
+for f in glob.glob('*.yaml'):
+    t = open(f).read()
+    if 'ATTRHEX' in t:
+        open(f, 'w').write(t.replace('ATTRHEX', ATTR))
+
+#--- v2flags.py
+# yaml2obj only registers the v1 enum; rewrite e_flags to the v2 ABI word.
+import sys
+for name in sys.argv[1:]:
+    try:
+        b = bytearray(open(name, 'rb').read())
+    except FileNotFoundError:
+        continue
+    assert len(b) >= 40, name
+    b[36:40] = bytes.fromhex('00000102')
+    open(name, 'wb').write(bytes(b))
+
+#--- mxobj.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG.left
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.left
+    Size: 3
+
+#--- mxfunc.yaml
+# A .text FUNC `mx`; with CSEG=0x11ffe this lands at the same numeric address
+# as mxobj's XSEG OBJECT (R7-1).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_FUNC
+    Section: .text
+    Size: 3
+
+#--- mxnot.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG.right
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_NOTYPE
+    Section: .mcs251.XSEG.right
+    Size: 3
+
+#--- mxtwin.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG.right
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.right
+    Size: 3
+
+#--- mxn4.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_NOTYPE
+    Section: .mcs251.XSEG
+    Size: 4
+
+#--- mxn8.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_NOTYPE
+    Section: .mcs251.XSEG
+    Size: 8
+
+#--- mxl.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 4
+
+#--- mxg.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 4
+
+#--- mzp.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG.a
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.a
+    Size: 0
+
+#--- mzp2.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG.b
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.b
+    Size: 3
+
+#--- moff.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG.off
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG.off
+    Size: 4
+    Value: 3
+
+#--- mxxd.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+    Content: '00000000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mx
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 4
+
+#--- mxcode.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Size: 4
+    Content: '00000000'
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mxc
+    Binding: STB_LOCAL
+    Type: STT_FUNC
+    Section: .text
+    Size: 4
+
+#--- mxdata.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.DATA.r7
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mxd
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.DATA.r7
+    Size: 4
+
+#--- mxdseg.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.DSEG.n
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- mxfix.yaml
+# An owned fixed DATA entity `dv` at 0x40 (record hash 4ADAFB61).  The B-CLASS
+# negative turns its section into PROGBITS + EXECINSTR so the independent
+# classifier admits it while its verified space stays AS0.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcu.fixed.dv
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01000000000000400000000400000001000000004ADAFB6102647600'
+Symbols:
+  - Name: _dv
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.dv
+    Value: 0
+    Size: 4
+
+#--- mxz.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '0000'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:
+  - Name: mz
+    Binding: STB_LOCAL
+    Type: STT_OBJECT
+    Section: .mcs251.XSEG
+    Size: 0
+
+#--- mxax.yaml
+# R8 §13.2 item 13: an owned fixed DATA entity `ax` at 0x48 whose section
+# carries its principal OBJECT `_ax` plus an ADMISSIBLE auxiliary local label
+# `ax_aux` (LOCAL NOTYPE, size 0, 0 < value < size).  Producer mergePlacement
+# and verifier V11 admit exactly this auxiliary shape; the rule-A shape
+# cross-check still applies to it (A-SHAPE on a retained type change).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcu.fixed.ax
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C01000000000000480000000400000001000000003347B32F02617800'
+Symbols:
+  - Name: _ax
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.ax
+    Value: 0
+    Size: 4
+  - Name: ax_aux
+    Binding: STB_LOCAL
+    Type: STT_NOTYPE
+    Section: .mcu.fixed.ax
+    Value: 1
+    Size: 0

@@ -1,0 +1,350 @@
+# G11-D2 (design section 10 / 11.6): the R4-4 independent region-range
+# checks.  Positives freeze the exact last-legal-byte ranges of every space;
+# negatives are synchronized ELF+map (+carrier) boundary mutations asserted
+# with the exact exit code 1 and the widened-end diagnostic.
+#
+# Coverage note: the bit-byte and register-bank REGION rows come from the
+# regbit.o fixture below (real s_BSEG_BYTES / s_REG_BANK_2 rows); their
+# last-legal-byte positives additionally appear as DATA-space fixed
+# entities at [0x2f,0x30) and [0x18,0x20) in fx.o.  The four frozen
+# XINIT/XDATA_INIT locating diagnostics remain resident verbatim in
+# placement-verify.test (V16 family, untouched); two of them are
+# re-asserted here.
+
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: %python attr.py
+# RUN: yaml2obj fx.yaml -o t.o && %python v2.py t.o && mv t.o fx.o
+# RUN: yaml2obj rbase.yaml -o t.o && %python v2.py t.o && mv t.o rbase.o
+# RUN: yaml2obj regbit.yaml -o t.o && %python v2.py t.o && mv t.o regbit.o
+# RUN: yaml2obj hole.yaml -o t.o && %python v2.py t.o && mv t.o hole.o
+
+# M: the legal mother.  fx.o carries five owned fixed entities: CODE at
+# 0xfffff0..0x1000000 (the last legal CODE byte), XDATA at the SAME numeric
+# address (CODE/XDATA equality), DATA at 0xfff0..0x10000 (the last legal
+# DATA byte), plus the bit range [0x2f,0x30) and the register-bank-3 range
+# [0x18,0x20) as DATA-space arithmetic witnesses.  rbase.o adds a used
+# DSEG, two DISPERSED ISEG members (4+4), an EDATA member, an SSEG input of
+# 1 byte (the reserved span l_SSEG is 0x50 -- larger than the input) and a
+# dynamic XSEG.  XINIT/XDATA_INIT are empty tables (length 0) with legal
+# cursors.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 rbase.o fx.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=m.placement --map=m.map -o m.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=m.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# RUN: %python %S/Inputs/placement-positions.py check m.elf --object rbase.o fx.o --expect rec 1 2 2 0x10 slice 0 0xfffff0 0x10 rec 1 3 1 0x10 slice 0 0xfffff0 0x10 rec 1 4 0 0x10 slice 0 0xfff0 0x10 rec 1 5 0 0x8 slice 0 0x18 0x8 rec 1 6 0 0x1 slice 0 0x2f 0x1 | FileCheck %s --check-prefix=LASTBYTE
+# LASTBYTE: pos: rec object=1 shndx=2 space=2 size=0x10 slices=0,0xfffff0,0x10
+# LASTBYTE: pos: rec object=1 shndx=3 space=1 size=0x10 slices=0,0xfffff0,0x10
+# LASTBYTE: pos: rec object=1 shndx=4 space=0 size=0x10 slices=0,0xfff0,0x10
+# LASTBYTE: pos: rec object=1 shndx=5 space=0 size=0x8 slices=0,0x18,0x8
+# LASTBYTE: pos: rec object=1 shndx=6 space=0 size=0x1 slices=0,0x2f,0x1
+# RUN: grep -E "^l_SSEG|^s_SSEG" m.map | FileCheck %s --check-prefix=SSEGROW
+# SSEGROW: l_SSEG = 0x0050
+# SSEGROW: s_SSEG = 0x0030
+
+# POS-DUP: an ELF/map boundary repeated with the SAME value stays legal.
+# RUN: cp m.map dup.map && echo "s_XSEG = 0x010000" >> dup.map && %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=dup.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+
+# NEG-R44: the R4-4 original -- s_XSEG=0xfffffff0, l_XSEG=0x30 synchronized
+# in the ELF and the map, the dynamic record moved onto the same base: the
+# widened end leaves the XDATA space (the old verifier returned 0).
+# RUN: cp m.elf n1.elf && %python %S/Inputs/audit-mutate.py elf-stvalue n1.elf n1.elf s_XSEG 0xfffffff0 && %python %S/Inputs/audit-mutate.py elf-stvalue n1.elf n1.elf l_XSEG 0x30 && %python %S/Inputs/audit-mutate.py map-bound m.map n1.map s_XSEG 0xfffffff0 && %python %S/Inputs/audit-mutate.py map-bound n1.map n1.map l_XSEG 0x30 && %python %S/Inputs/audit-mutate.py carrier-addr n1.elf n1.elf 0 rbase.o .mcs251.XSEG 0xfffffff0 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n1.elf --report=m.placement --link-map=n1.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NR44
+# NR44: outside its storage space
+
+# NEG-24BIT: 32-bit representable but beyond the 24-bit XDATA space.
+# RUN: cp m.elf n2.elf && %python %S/Inputs/audit-mutate.py elf-stvalue n2.elf n2.elf s_XSEG 0x1000000 && %python %S/Inputs/audit-mutate.py map-bound m.map n2.map s_XSEG 0x1000000 && %python %S/Inputs/audit-mutate.py carrier-addr n2.elf n2.elf 0 rbase.o .mcs251.XSEG 0x1000000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n2.elf --report=m.placement --link-map=n2.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NR24
+# NR24: outside its storage space
+
+# NEG-DATA16: the DSEG byte count exceeds the 16-bit low window.
+# RUN: cp m.elf n3.elf && %python %S/Inputs/audit-mutate.py elf-stvalue n3.elf n3.elf l_DSEG 0x81 && %python %S/Inputs/audit-mutate.py map-bound m.map n3.map l_DSEG 0x81 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n3.elf --report=m.placement --link-map=n3.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRD
+# NRD: l_DSEG is 0x81 but the low window holds at most 0x80 bytes
+
+# NEG-ISEG-TOTAL: every slice stays in its window but the total disagrees.
+# RUN: cp m.elf n4.elf && %python %S/Inputs/audit-mutate.py elf-stvalue n4.elf n4.elf l_ISEG 0x9 && %python %S/Inputs/audit-mutate.py map-bound m.map n4.map l_ISEG 0x9 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n4.elf --report=m.placement --link-map=n4.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRI
+# NRI: the ISEG boundary is s={{0x[0-9a-f]+}} l=0x9 but the located members make it s={{0x[0-9a-f]+}} l=0x8
+
+# NEG-CODE-SPAN: a PRESENT CODE boundary that no dynamic row references
+# still gets its own widened-end check (l_CSEG extended past the space).
+# RUN: cp m.elf n5.elf && %python %S/Inputs/audit-mutate.py elf-stvalue n5.elf n5.elf l_CSEG 0x10000 && %python %S/Inputs/audit-mutate.py map-bound m.map n5.map l_CSEG 0x10000 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n5.elf --report=m.placement --link-map=n5.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRC
+# NRC: the CSEG boundary spans [0xff0200,0x1000200) (start + length, widened), which leaves the CODE address space
+
+# NEG-ONESIDED: a boundary pair appearing with only ONE side is refused with
+# its own evidence diagnostic on each carrier, while the wholly missing pair
+# keeps the frozen "absent" family (design section 10.4).
+# RUN: sed '/^l_XSEG = /d' m.map > n6.map && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=n6.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRO
+# NRO: VERIFY FAIL: malformed link map n6.map: the XSEG boundary row l_XSEG appears without its s_/l_ pair
+# RUN: sed '/^s_XSEG = /d' m.map > n6c.map && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=n6c.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRO2
+# NRO2: VERIFY FAIL: malformed link map n6c.map: the XSEG boundary row s_XSEG appears without its s_/l_ pair
+# RUN: %python %S/Inputs/audit-mutate.py elf-rename m.elf n6e.elf l_XSEG && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n6e.elf --report=m.placement --link-map=m.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NROE
+# NROE: VERIFY FAIL: malformed input ELF n6e.elf: the XSEG boundary symbol l_XSEG appears without its s_/l_ pair
+# RUN: sed '/^l_XSEG = /d; /^s_XSEG = /d' m.map > n6b.map && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=n6b.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NROA
+# NROA: VERIFY FAIL: malformed link map n6b.map: the XSEG boundary rows (s_/l_) are absent
+
+# The frozen XINIT locating diagnostics stay byte-identical (two of the
+# four re-asserted; all four remain resident in placement-verify.test).
+# RUN: %python %S/Inputs/audit-mutate.py map-bound m.map n7.map l_XINIT 0x4 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=n7.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NXB
+# NXB: the XINIT boundary disagrees with the final ELF
+# RUN: sed 's/^l_XINIT = .*/l_XINIT = garbage/' m.map > n8.map && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=m.elf --report=m.placement --link-map=n8.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NXM
+# NXM: bad boundary value in l_XINIT = garbage
+
+# NEG-EDTA-TOTAL: every EDATA member is in-window but the total disagrees.
+# RUN: cp m.elf n9.elf && %python %S/Inputs/audit-mutate.py elf-stvalue n9.elf n9.elf l_EDATA 0x5 && %python %S/Inputs/audit-mutate.py map-bound m.map n9.map l_EDATA 0x5 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n9.elf --report=m.placement --link-map=n9.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRE
+# NRE: the EDATA boundary is s={{0x[0-9a-f]+}} l=0x5 but the located members make it s={{0x[0-9a-f]+}} l=0x4
+
+# NEG-EMPTYCUR: a zero-length span whose CURSOR itself starts beyond the
+# space (BOOT has no member row; both carriers mutated in agreement).
+# RUN: cp m.elf n10.elf && %python %S/Inputs/audit-mutate.py elf-stvalue n10.elf n10.elf s_BOOT 0x1000001 && %python %S/Inputs/audit-mutate.py map-bound m.map n10.map s_BOOT 0x1000001 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n10.elf --report=m.placement --link-map=n10.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRC2
+# NRC2: the BOOT boundary spans [0x1000001,0x1000001) (start + length, widened), which leaves the CODE address space
+
+# NEG-INITLEN: the initialization table start plus length leaves the space;
+# the diagnostic must print the WIDENED true end (0x100000020), never the
+# wrapped u32 (design 10.4).
+# RUN: cp m.elf n11.elf && %python %S/Inputs/audit-mutate.py elf-stvalue n11.elf n11.elf s_XINIT 0xfffffff0 && %python %S/Inputs/audit-mutate.py elf-stvalue n11.elf n11.elf l_XINIT 0x30 && %python %S/Inputs/audit-mutate.py map-bound m.map n11.map s_XINIT 0xfffffff0 && %python %S/Inputs/audit-mutate.py map-bound n11.map n11.map l_XINIT 0x30 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=n11.elf --report=m.placement --link-map=n11.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NXL
+# NXL: the XINIT boundary spans [0xfffffff0,0x100000020) (start + length, widened), which leaves the CODE address space
+
+# NEG-OSEGNONE (R5-5): the link has NO OSEG member, so the producer emits no
+# OSEG pair; an ELF/map pair renamed from the HOME rows and widened out of the
+# DSEG low window must still be refused -- a boundary's own range is a
+# property of the published pair, not of the members (§14.7).
+# RUN: cp m.elf o1.elf && cp m.map o1.map
+# RUN: %python %S/Inputs/audit-mutate.py elf-symrename o1.elf o1.elf s_HOME s_OSEG && %python %S/Inputs/audit-mutate.py elf-symrename o1.elf o1.elf l_HOME l_OSEG && %python %S/Inputs/audit-mutate.py map-bound-rename o1.map o1.map s_HOME s_OSEG && %python %S/Inputs/audit-mutate.py map-bound-rename o1.map o1.map l_HOME l_OSEG
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue o1.elf o1.elf s_OSEG 0xfffffff0 && %python %S/Inputs/audit-mutate.py map-bound o1.map o1.map s_OSEG 0xfffffff0 && %python %S/Inputs/audit-mutate.py elf-stvalue o1.elf o1.elf l_OSEG 0x30 && %python %S/Inputs/audit-mutate.py map-bound o1.map o1.map l_OSEG 0x30
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=o1.elf --report=m.placement --link-map=o1.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NOSE
+# NOSE: the OSEG boundary spans [0xfffffff0,0x100000020) (start + length, widened), which leaves the DSEG low window
+# Control: the same pair inside the DSEG low window with no member verifies
+# (the self-range is legal; there is no member to contradict it).
+# RUN: cp m.elf o2.elf && cp m.map o2.map
+# RUN: %python %S/Inputs/audit-mutate.py elf-symrename o2.elf o2.elf s_HOME s_OSEG && %python %S/Inputs/audit-mutate.py elf-symrename o2.elf o2.elf l_HOME l_OSEG && %python %S/Inputs/audit-mutate.py map-bound-rename o2.map o2.map s_HOME s_OSEG && %python %S/Inputs/audit-mutate.py map-bound-rename o2.map o2.map l_HOME l_OSEG
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue o2.elf o2.elf s_OSEG 0x0 && %python %S/Inputs/audit-mutate.py map-bound o2.map o2.map s_OSEG 0x0 && %python %S/Inputs/audit-mutate.py elf-stvalue o2.elf o2.elf l_OSEG 0x8 && %python %S/Inputs/audit-mutate.py map-bound o2.map o2.map l_OSEG 0x8
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=o2.elf --report=m.placement --link-map=o2.map --object=rbase.o --object=fx.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+
+# BIT/REG rows: real s_/l_ rows from a plain register-bank + BSEG_BYTES
+# object, then their own R4-4 verdicts.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 regbit.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=rb.placement --map=rb.map -o rb.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=rb.elf --report=rb.placement --link-map=rb.map --object=regbit.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# RUN: grep -E "^s_REG_BANK_2|^l_REG_BANK_2|^s_BSEG_BYTES" rb.map | FileCheck %s --check-prefix=RBIT
+# RBIT-DAG: s_REG_BANK_2 = 0x0010
+# RBIT-DAG: l_REG_BANK_2 = 0x0008
+# RBIT-DAG: s_BSEG_BYTES = 0x0020
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue rb.elf rb1.elf s_REG_BANK_2 0x11 && %python %S/Inputs/audit-mutate.py map-bound rb.map rb1.map s_REG_BANK_2 0x11 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=rb1.elf --report=rb.placement --link-map=rb1.map --object=regbit.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRB1
+# NRB1: s_REG_BANK_2 is 0x11 but the bank starts at 0x10
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue rb.elf rb2.elf l_REG_BANK_2 9 && %python %S/Inputs/audit-mutate.py map-bound rb.map rb2.map l_REG_BANK_2 9 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=rb2.elf --report=rb.placement --link-map=rb2.map --object=regbit.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRB2
+# NRB2: l_REG_BANK_2 is 0x9 but a register bank holds at most 8 bytes
+# RUN: %python %S/Inputs/audit-mutate.py elf-stvalue rb.elf rb3.elf s_BSEG_BYTES 0x30 && %python %S/Inputs/audit-mutate.py map-bound rb.map rb3.map s_BSEG_BYTES 0x30 && %python %S/Inputs/expect-rc.py 1 mcs251-placement-verify --elf=rb3.elf --report=rb.placement --link-map=rb3.map --object=regbit.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff | FileCheck %s --check-prefix=NRB3
+# NRB3: the BSEG_BYTES boundary spans [0x30,0x38) (start + length, widened), which leaves the bit byte window [0x20,0x30)
+
+# POS-HOLE: an XSEG span with a bank-jump HOLE stays legal (design 10.3):
+# members [0x10000,0x18001) and [0x20000,0x28000), hole [0x18001,0x20000).
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld -flavor mcs251 hole.o --area-start=HOME=0xff0000 --area-start=VECS=0xff0003 --area-start=BOOT=0xff0100 --area-start=CSEG=0xff0200 --area-start=XINIT=0xff8000 --area-start=XDATA_INIT=0xff9000 --area-start=XSEG=0x010000 --edata-end=0x3fff --flash-base=0xfc0000 --flash-size=0x40000 --placement-report=ho.placement --map=ho.map -o ho.elf
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-placement-verify --elf=ho.elf --report=ho.placement --link-map=ho.map --object=hole.o --flash-base=0xfc0000 --flash-size=0x40000 --area-start=XSEG=0x010000 --edata-end=0x3fff
+# RUN: grep -E "^s_XSEG|^l_XSEG" ho.map | FileCheck %s --check-prefix=HOLE
+# HOLE: l_XSEG = 0x18000
+# HOLE: s_XSEG = 0x10000
+
+#--- attr.py
+import glob
+ATTR = '41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000'
+for f in glob.glob('*.yaml'):
+    t = open(f).read()
+    if 'ATTRHEX' in t:
+        open(f, 'w').write(t.replace('ATTRHEX', ATTR))
+
+#--- v2.py
+import sys
+for name in sys.argv[1:]:
+    b = bytearray(open(name, 'rb').read())
+    b[36:40] = bytes.fromhex('00000102')
+    open(name, 'wb').write(bytes(b))
+
+#--- fx.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcu.fixed.xv
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00000000000000000000000000000000'
+  - Name: .mcu.fixed.xd
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 16
+  - Name: .mcu.fixed.xb
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 16
+  - Name: .mcu.fixed.xr
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcu.fixed.xz
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+  - Name: .mcs251.placement
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 1
+        Desc: '0000001C0102000000FFFFF00000001000000001000000005B970F37027876000000001C0101000000FFFFF0000000100000000100000000DBD3B74C027864000000001C010000000000FFF00000001000000001000000002CB9CB7A027862000000001C0100000000000018000000080000000100000000B949AD64027872000000001C010000000000002F0000000100000001000000005A719CDD02787A00'
+Symbols:
+  - Name: _xv
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.xv
+    Value: 0
+    Size: 16
+  - Name: _xd
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.xd
+    Value: 0
+    Size: 16
+  - Name: _xb
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.xb
+    Value: 0
+    Size: 16
+  - Name: _xr
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.xr
+    Value: 0
+    Size: 8
+  - Name: _xz
+    Binding: STB_GLOBAL
+    Type: STT_OBJECT
+    Section: .mcu.fixed.xz
+    Value: 0
+    Size: 1
+
+#--- rbase.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.DSEG.n
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.ISEG.i
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.ISEG.j
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.EDATA.e
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.SSEG
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 1
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- regbit.yaml
+# Real register-bank and BSEG_BYTES REGION rows from plain input sections.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.REG_BANK_2
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.BSEG_BYTES
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 8
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+
+#--- hole.yaml
+# Two unmarked XSEG members that cannot share one 64K window: the second
+# is bumped to the next bank, leaving a hole inside the region span.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '00'
+  - Name: .mcs251.XSEG.a
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0x8001
+  - Name: .mcs251.XSEG.b
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 0x8000
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: ATTRHEX
+Symbols:  []
+

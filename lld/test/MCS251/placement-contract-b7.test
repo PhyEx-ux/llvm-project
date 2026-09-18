@@ -433,6 +433,13 @@ Sections:
       - Name: MCS251
         Type: 1
         Desc: '0000001C0101000100010000000000040000000100000000E6E499C902667800'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000100000000000000035f667800'
 Symbols:
   - Name: _fx
     Binding: STB_GLOBAL
@@ -467,6 +474,13 @@ Sections:
       - Name: MCS251
         Type: 1
         Desc: '0000001C0101000100020001000000040000000400000000F1BC9E3802667800'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000100000000000000035f667800'
 Symbols:
   - Name: _fx
     Binding: STB_GLOBAL
@@ -502,6 +516,13 @@ Sections:
       - Name: MCS251
         Type: 1
         Desc: '0000001C0101000100020000000000040000000400000000AB5115D002667800'
+  - Name: .mcs251.placement.names
+    Type: SHT_NOTE
+    AddressAlign: 4
+    Notes:
+      - Name: MCS251
+        Type: 2
+        Desc: '000000010000000100000000000000035f667800'
 Symbols:
   - Name: _fx
     Binding: STB_GLOBAL
