@@ -18,6 +18,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -505,7 +506,7 @@ bool probeDestination(StringRef Path, StringRef Kind, raw_ostream &Err) {
   // checked.  A silent failure here used to leave a `.probe.*` file behind
   // while the link reported success; the diagnostic names the leftover path
   // instead of claiming there is no residue.
-  if (std::error_code EC = sys::fs::closeFile(FD)) {
+  if (std::error_code EC = sys::Process::SafelyCloseFileDescriptor(FD)) {
     std::error_code Rm = sys::fs::remove(ProbePath);
     std::string Msg =
         ("cannot close the " + Kind + " probe file " + ProbePath.str() +
@@ -669,7 +670,7 @@ bool backupPublication(Publication &P, raw_ostream &Err) {
     if (std::error_code EC = sys::fs::createUniqueFile(Model, LFD, LinkCopy))
       return fail(Err, "cannot back up " + P.Kind + " " + P.Final + ": " +
                            EC.message());
-    if (std::error_code EC = sys::fs::closeFile(LFD)) {
+    if (std::error_code EC = sys::Process::SafelyCloseFileDescriptor(LFD)) {
       sys::fs::remove(LinkCopy);
       return fail(Err, "cannot back up " + P.Kind + " " + P.Final + ": " +
                            EC.message());
@@ -700,7 +701,7 @@ bool backupPublication(Publication &P, raw_ostream &Err) {
   if (std::error_code EC = sys::fs::createUniqueFile(Model, FD, Probe))
     return fail(Err, "cannot back up " + P.Kind + " " + P.Final + ": " +
                          EC.message());
-  sys::fs::closeFile(FD);
+  sys::Process::SafelyCloseFileDescriptor(FD);
   sys::fs::remove(Probe);
   // Preferred: the same-directory hard link keeps the old inode.
   if (!sys::fs::create_hard_link(P.Final, Probe)) {
@@ -717,7 +718,7 @@ bool backupPublication(Publication &P, raw_ostream &Err) {
   {
     auto MB = MemoryBuffer::getFile(P.Final);
     if (!MB) {
-      sys::fs::closeFile(CFD);
+      sys::Process::SafelyCloseFileDescriptor(CFD);
       sys::fs::remove(Copy);
       return fail(Err, "cannot back up " + P.Kind + " " + P.Final);
     }
