@@ -9,7 +9,7 @@
 ; ESC3: LLVM ERROR: MCS251: global 'node': a pointer initializer requires ELF object output
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/rc6-4-volatile-load.ll -o - | FileCheck %s --check-prefix=ESC4
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/rc6-5-mixed-store.ll -o - | FileCheck %s --check-prefix=ESC5
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/rc6-6-dce-global-escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESC6
+; RUN: not llc -mtriple=mcs251 -O0 %t/rc6-6-dce-global-escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESC6
 ; ESC6: LLVM ERROR: MCS251 contract violation: i64 integer arithmetic is not yet implemented; wide-integer runtime is not connected
 ;
 ; P12-6 (Alice review round 4): cases 3 and 6 give their non-optnone twin its
@@ -23,7 +23,7 @@
 ; ESC3P: @node = global ptr @node
 ; ESC3P: define i32 @self_referential_global_prepped() addrspace(4)
 ; ESC3P: name: {{ *}}self_referential_global_prepped
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/rc6-6-dce-global-escape-prepped.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESC6P
+; RUN: not llc -mtriple=mcs251 -O0 %t/rc6-6-dce-global-escape-prepped.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESC6P
 ; ESC6P: LLVM ERROR: MCS251 contract violation: i64 integer arithmetic is not yet implemented; wide-integer runtime is not connected
 
 ; The six historical miscompiles of the old contract verifier's

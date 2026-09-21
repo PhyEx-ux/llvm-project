@@ -1,15 +1,20 @@
-; RUN: not --crash llc -mtriple=mcs251 -O0 < %s 2>&1 | FileCheck %s
-; RUN: not --crash llc -mtriple=mcs251 -O2 < %s 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -O0 < %s 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -O2 < %s 2>&1 | FileCheck %s
 ;
 ; BRJT S1 (design §4 G5 / risk R3, measured 2026-09-15): with ISD::BRIND set
-; to Expand, llc reading an `indirectbr` (computed goto) IR still fails loudly
-; at instruction selection with the classic "Cannot select: brind" diagnostic.
-; The Expand action is a qualification bit (it closes areJTsAllowed); the
-; legalizer leaves the chain-only BRIND node untouched, so the observable
-; behaviour is the same CannotYetSelect fatal as before S1 -- an acknowledged
-; missing feature (MCS251 has no indirect jump on register pattern; the clang
-; front end rejects computed goto earlier via the A4 identity gate), NOT a
-; miscompile. Recorded verbatim as the R3 close-out evidence.
+; to Expand, llc reading an `indirectbr` (computed goto) IR failed loudly at
+; instruction selection with the classic "Cannot select: brind" diagnostic --
+; an acknowledged missing feature (MCS251 has no indirect jump on register
+; pattern), NOT a miscompile.
+;
+; WP4 (D1) update: computed goto is now rejected by the STRUCTURAL contract
+; check before any legalization or instruction selection can see it, with the
+; actionable message and a deliberate clean exit (status 1) instead of the
+; generic CannotYetSelect abort. The module-level intent of this test is
+; unchanged (an `indirectbr` module is refused fail-closed); the -O0/-O2 pair
+; pins that the refusal is optimization-independent, because the structural
+; phase runs before either pipeline and rejects the `blockaddress` initializer
+; even where an optimizer could devirtualize the branch away.
 
 target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
 target triple = "mcs251"
@@ -41,5 +46,4 @@ done:
   ret i32 %u
 }
 
-; CHECK: LLVM ERROR: Cannot select
-; CHECK: brind
+; CHECK: LLVM ERROR: MCS251 contract violation: computed goto is not supported: an address-of-label constant ('blockaddress') appears in a static initializer; use a switch statement

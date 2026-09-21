@@ -675,6 +675,15 @@ ExprResult Sema::DefaultLvalueConversion(Expr *E) {
   if (T->canDecayToPointerType())
     return E;
 
+  // WP4 A4: reading an object whose type contains an _Atomic subobject (a
+  // direct atomic member, a whole-struct copy, an array element) performs a
+  // NON-atomic access to that subobject -- but only when the conversion is
+  // actually evaluated. The decision belongs to CheckMCS251AtomicUse at the
+  // end of the full expression, which skips an operand of sizeof/_Alignof/
+  // typeof, an unselected _Generic association, the unconsumed
+  // __builtin_choose_expr arm and the untaken arm of a constant-condition
+  // conditional. Judging here would refuse `sizeof(*p)`.
+
   // We don't want to throw lvalue-to-rvalue casts on top of
   // expressions of certain types in C++.
   // In HLSL LvaluetoRvalue conversion is allowed on records.
@@ -7332,6 +7341,16 @@ ExprResult Sema::BuildResolvedCallExpr(Expr *Fn, NamedDecl *NDecl,
                                                 Fn->getSourceRange()))
     return ExprError();
 
+  // WP4 A7 (EC1): a call through a function pointer with two or more
+  // arguments has no ABI (the static continuation slots are named after the
+  // callee symbol). Structural and pre-optimization by construction: the
+  // verdict is fixed at the source level, so whether a later optimizer
+  // devirtualizes this call site cannot change whether it is accepted.
+  // Zero/one-argument indirect calls and all direct calls are unaffected.
+  if (MCS251().CheckMCS251MultiArgIndirectCall(
+          /*IsIndirect=*/!FDecl, Args, LParenLoc, Fn->getSourceRange()))
+    return ExprError();
+
   CallExpr *TheCall;
   if (Config) {
     assert(UsesADL == ADLCallKind::NotADL &&
@@ -7658,9 +7677,22 @@ Sema::BuildCompoundLiteralExpr(SourceLocation LParenLoc, TypeSourceInfo *TInfo,
   if (IsFileScope) {
     if (!LiteralExpr->isTypeDependent() &&
         !LiteralExpr->isValueDependent() &&
-        !literalType->isDependentType()) // C99 6.5.2.5p3
+        !literalType->isDependentType()) { // C99 6.5.2.5p3
+      // Keep the C constant-initializer constraint here, but defer MCS251 A2
+      // until the enclosing initializer is complete: a compound literal in an
+      // unselected conditional arm is not known to be unused while it is built.
+      // The target check honours this context and later checks both the final
+      // value and evaluated static compound-literal objects (including &CL).
+      EnterExpressionEvaluationContext EvalContext(
+          *this, ExpressionEvaluationContext::Unevaluated,
+          /*LambdaContextDecl=*/nullptr,
+          ExpressionEvaluationContextRecord::EK_Other,
+          /*ShouldEnter=*/!getLangOpts().CPlusPlus &&
+              Context.getTargetInfo().getTriple().getArch() ==
+                  llvm::Triple::mcs251);
       if (CheckForConstantInitializer(LiteralExpr))
         return ExprError();
+    }
   } else if (literalType.getAddressSpace() != LangAS::opencl_private &&
              literalType.getAddressSpace() != LangAS::Default) {
     // Embedded-C extensions to C99 6.5.2.5:
@@ -14681,6 +14713,13 @@ QualType Sema::CheckAssignmentOperands(Expr *LHSExpr, ExprResult &RHS,
                                        BinaryOperatorKind Opc) {
   assert(!LHSExpr->hasPlaceholderType(BuiltinType::PseudoObject));
 
+  // WP4 A4: storing into an object with an _Atomic subobject (writing an
+  // atomic member, or copying over a whole struct that contains one) is a
+  // non-atomic access to the atomic subobject. Like the read side, this is
+  // decided by CheckMCS251AtomicUse at the end of the full expression, so a
+  // store written in a not-evaluated position (`sizeof(*p = 1)`, an
+  // unselected __builtin_choose_expr arm) is not refused.
+
   // Verify that LHS is a modifiable lvalue, and emit error if not.
   if (CheckForModifiableLvalue(LHSExpr, Loc, *this))
     return QualType();
@@ -16785,6 +16824,10 @@ ExprResult Sema::ActOnUnaryOp(Scope *S, SourceLocation OpLoc, tok::TokenKind Op,
 
 ExprResult Sema::ActOnAddrLabel(SourceLocation OpLoc, SourceLocation LabLoc,
                                 LabelDecl *TheDecl) {
+  // WP4 D1: computed goto is rejected in the source structure, before any
+  // optimization can turn &&label + indirect goto into an ordinary branch.
+  if (MCS251().CheckMCS251ComputedGoto(/*IsAddrOfLabel=*/true, OpLoc))
+    return ExprError();
   TheDecl->markUsed(Context);
   // Create the AST node.  The address of a label always has type 'void*'.
   auto *Res = new (Context) AddrLabelExpr(

@@ -17,6 +17,7 @@
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Sema/SemaBase.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace clang {
@@ -29,6 +30,145 @@ public:
   SemaMCS251(Sema &S);
 
   bool CheckMCS251BuiltinFunctionCall(unsigned BuiltinID, CallExpr *TheCall);
+
+  //===--------------------------------------------------------------------===//
+  // WP4 default correct-failure capabilities (FUNCTIONAL-GAPS-PLAN-Alice.md
+  // section 3 / section 4.1). These are the C-source-level halves of the
+  // unified diagnostics; the IR-layer contract check (MCS251ContractCheck,
+  // mounted at pipeline start and pre-ISel) is the safety net that also
+  // covers direct llc input. Each helper returns true when it rejected
+  // (diagnostic already emitted) and is gated on the MCS-251 target.
+  //===--------------------------------------------------------------------===//
+
+  // --- A4/A5/A6 whole-family timing contract -------------------------------
+  //
+  // The rejection is a property of *performing* an atomic operation, not of
+  // writing one down: an operand that is never evaluated (sizeof/_Alignof/
+  // typeof), an unselected _Generic association, the unconsumed arm of
+  // __builtin_choose_expr, and the untaken arm of a conditional with a
+  // constant condition must all stay accepted -- the same value/selection
+  // discipline CheckMCS251AbsolutePointerInit already applies to A2, and the
+  // same one clang's EvaluatedExprVisitor defines for its own analyses.
+  //
+  // The decision is therefore taken once per full expression by
+  // CheckMCS251AtomicUse, which walks the finished expression under those
+  // not-evaluated rules instead of judging each construct where it happens to
+  // be parsed. Judging at the point of construction cannot express this: the
+  // unconsumed arm of __builtin_choose_expr and of a constant-condition `?:`
+  // is built in a potentially-evaluated context and only becomes dead once
+  // the enclosing selection is known. The family is recognised structurally,
+  // as the IR-layer contract check does, so the two layers agree by
+  // construction.
+  //
+  // There is exactly one choke point: the source-level checks are NOT also
+  // applied at the construction sites, so a construct written in a
+  // not-evaluated position is not reported twice nor rejected early. The
+  // IR-layer contract check (MCS251ContractCheck) remains the safety net for
+  // direct llc input and for paths that do not pass a full expression.
+
+  /// A4/A5/A6: the single evaluation-aware decision point for the whole
+  /// atomic family. Walks the full expression \p E under the language's
+  /// not-evaluated rules and reports the unified diagnostic for the first
+  /// atomic construct that is actually evaluated. Returns true when it
+  /// rejected. Called once per full expression from ActOnFinishFullExpr.
+  ///
+  /// Recognised constructs, each of which is an operation when evaluated:
+  ///  - AtomicExpr, the node every __c11_atomic_*/__atomic_*/__scoped_atomic_*
+  ///    operation builds. The lock-free QUERIES are separate constexpr
+  ///    builtins that never build one -- with MaxAtomicPromoteWidth and
+  ///    MaxAtomicInlineWidth pinned to 0 they answer "not lock-free", the
+  ///    honest capability answer rather than an affirmative claim;
+  ///  - a call to the __sync_* family, to a fence builtin, to the runtime
+  ///    lock-free query, or to one of the <stdatomic.h> operation function
+  ///    names, all of which are lowered from the call itself and never reach
+  ///    BuildAtomicExpr;
+  ///  - a read of an _Atomic subobject (an lvalue-to-rvalue conversion whose
+  ///    operand type transitively contains an _Atomic subobject);
+  ///  - a write to an _Atomic subobject (a plain/compound assignment or an
+  ///    increment/decrement whose target type contains one -- which is also
+  ///    how a whole-struct copy over an atomic member is covered).
+  ///
+  /// The walk skips unevaluated operands (sizeof/_Alignof/typeof/type traits/
+  /// offsetof/noexcept), the unselected _Generic associations and controlling
+  /// expression, the unconsumed __builtin_choose_expr arm, and the untaken arm
+  /// of a conditional whose condition is an integer constant expression. A
+  /// condition that merely happens to be constant-foldable (a non-const
+  /// object initialized to 0) is NOT treated as a constant: both arms stay
+  /// reachable, because at run time either arm can be selected.
+  bool CheckMCS251AtomicUse(const Expr *E);
+
+  /// Recursive "contains an atomic object subobject" query (memoised).
+  /// True when \p T is an atomic object or contains one as a subobject, i.e.
+  /// storage whose non-atomic access this target cannot honour. Pointers to
+  /// atomic objects are ordinary values and are not themselves atomic
+  /// storage.
+  bool containsAtomicSubobject(QualType T);
+
+private:
+  /// Worker for CheckMCS251AtomicUse. Returns the first evaluated atomic
+  /// construct reachable from \p E, or nullptr. \p Type is set to the
+  /// offending type when the construct is an atomic-subobject access, and
+  /// left null when it is an atomic operation.
+  const Expr *findEvaluatedAtomicUse(const Expr *E, QualType &Type);
+
+  /// Statement half of findEvaluatedAtomicUse. A statement expression
+  /// (GNU `({ ... })`) evaluates its statements, and each of them is its own
+  /// full expression -- but whether the statement expression itself is
+  /// evaluated at all is decided by the enclosing expression. The inner
+  /// full-expression check therefore defers while a statement-expression
+  /// scope is open (see CheckMCS251AtomicUse), and the enclosing walk reaches
+  /// the statements through here.
+  const Expr *findEvaluatedAtomicUseInStmt(const Stmt *S, QualType &Type);
+
+  /// True when a GNU statement expression encloses the current point, i.e.
+  /// when the innermost enclosing compound scope belongs to a `({ ... })`.
+  /// A block or lambda boundary ends the search: those bodies run at
+  /// invocation time, not as part of the enclosing full expression.
+  bool inStatementExpressionScope() const;
+
+  /// True when the callee of \p CE is one of the operation spellings that are
+  /// lowered from the call itself (__sync_*, the fences, the runtime
+  /// lock-free query, the <stdatomic.h> function names) rather than through
+  /// BuildAtomicExpr.
+  bool isMCS251AtomicOperationCallee(const CallExpr *CE);
+
+  /// A4/A5/A6: emit the unified family diagnostic for a NON-ATOMIC access to
+  /// an object whose type transitively contains an _Atomic subobject -- an
+  /// atomic member or array element has no declaration-level diagnostic,
+  /// because the object declaration carrying it is a legal shape. Called by
+  /// CheckMCS251AtomicUse for the access it found, and by nothing else: the
+  /// decision of WHETHER the access is evaluated belongs to that walker.
+  bool CheckMCS251AtomicAccess(QualType T, SourceLocation Loc);
+
+public:
+
+  /// A4: reject the _Atomic type qualifier/specifier in user code. The
+  /// system-header exemption keeps <stdatomic.h>'s own typedefs parseable
+  /// so the TU can still include the header; every actual atomic operation
+  /// is rejected by CheckMCS251AtomicUse (at the end of its enclosing full
+  /// expression) or by the IR layer.
+  bool CheckMCS251AtomicType(QualType Underlying, SourceLocation Loc);
+
+  /// A2: reject an integer-to-pointer cast inside a static-storage
+  /// initializer (absolute-address pointer initialization).
+  bool CheckMCS251AbsolutePointerInit(const Expr *Init, SourceLocation Loc);
+
+  /// A7 (EC1): reject a call through a function pointer that passes two or
+  /// more arguments (the continuation slots are named after the callee).
+  bool CheckMCS251MultiArgIndirectCall(bool IsIndirect, ArrayRef<Expr *> Args,
+                                       SourceLocation Loc,
+                                       SourceRange Range);
+
+  /// A8: reject weak function/variable DEFINITIONS (declarations stay
+  /// accepted).
+  bool CheckMCS251WeakDefinition(bool IsFunction, SourceLocation Loc,
+                                 SourceRange Range);
+
+  /// D1: reject computed goto (address-of-label and indirect goto).
+  bool CheckMCS251ComputedGoto(bool IsAddrOfLabel, SourceLocation Loc);
+
+  /// A9: reject file-scope (module-level) inline assembly.
+  bool CheckMCS251FileScopeAsm(SourceLocation Loc);
 
   /// MCS-251 X1 (DESIGN.md B.1/B.2): CODE (target address space 4) is
   /// read-only, so every store through an `__code`-qualified lvalue --
@@ -279,6 +419,9 @@ private:
   /// and cached-token/delayed inputs are checked when their semantics
   /// actually run through the entry points above, not by source range.
   llvm::SmallVector<RestrictionFrame, 4> RestrictionFrames;
+
+  /// WP4 A4: memoised "type transitively contains an _Atomic subobject" map.
+  llvm::DenseMap<const Type *, bool> AtomicSubobjectCache;
 
   /// Declarations that received a G11 placement attribute and are waiting
   /// for the translation-unit-final pass (see NoteMCS251PlacementDecl).

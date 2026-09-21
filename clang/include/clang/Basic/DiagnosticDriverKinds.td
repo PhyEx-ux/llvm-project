@@ -16,6 +16,16 @@ def err_drv_unsupported_opt_with_suggestion : Error<
   "unsupported option '%0'; did you mean '%1'?">;
 def err_drv_unsupported_opt_for_target : Error<
   "unsupported option '%0' for target '%1'">;
+// WP4 C1: an effective debug-information request cannot be honored on
+// MCS251 (no source-level debug info is emitted). The check runs after the
+// driver has reduced every -g* option to the final DebugInfoKind, so
+// `-g -g0` (no debug) keeps compiling while `-g0 -g` (debug) fails.
+def err_drv_mcs251_debug_unsupported : Error<
+  "debug information is not supported for target 'mcs251': this toolchain "
+  "emits no source-level debug info, and silently delivering an object with "
+  "zero debug sections is not an option; build with -g0 (the linker map and "
+  "symbol tables remain available, but they are not source-level debug "
+  "information)">;
 def err_drv_unsupported_opt_for_language_mode : Error<
   "unsupported option '%0' for language mode '%1'">;
 def err_drv_unsupported_option_argument : Error<

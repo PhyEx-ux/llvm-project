@@ -60,6 +60,19 @@
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/TargetParser/TargetParser.h"
+
+// WP4: the MCS-251 contract-check entry points the clang backend drives.
+// They are DECLARED by the TargetParser library -- which every clang build
+// links -- and the module verdict is produced by a checker that the MCS251
+// target library registers for itself. A build without the MCS251 backend
+// therefore links this file without adding a dependency on MCS251CodeGen, and
+// never reaches a live call site (there is no MCS251 target machine to
+// create). The clang backend owns the verdict for this target so a deliberate
+// rejection is reported through the DiagnosticsEngine instead of
+// report_fatal_error.
+#include "llvm/TargetParser/MCS251TargetParser.h"
+
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/TargetParser/SubtargetFeature.h"
 #include "llvm/TargetParser/Triple.h"
@@ -1379,11 +1392,89 @@ bool EmitAssemblyHelper::emitAssembly(BackendAction Action,
     TheModule->setDataLayout(ContractDL);
   }
 
+  // WP4: on MCS251 the target's contract checks are owned by this backend for
+  // the clang path. They report through the DiagnosticsEngine, so a deliberate
+  // capability rejection is an ordinary rc=1 failure and never enters clang's
+  // in-process crash-recovery path (which would print a bug-report request and
+  // a stack dump for an expected failure). llc keeps the checks inside its pass
+  // pipeline. The deferral must cover the whole pipeline: the target machine
+  // consults it when mounting the contract-check passes.
+  const bool DeferredChecks =
+      TM && TM->getTargetTriple().getArch() == llvm::Triple::mcs251;
+  const bool PrevDeferred = llvm::MCS251::setContractCheckDeferred(DeferredChecks);
+  struct DeferralGuard {
+    bool Prev;
+    ~DeferralGuard() { llvm::MCS251::setContractCheckDeferred(Prev); }
+  } Guard{PrevDeferred};
+
+  // The MCS-251 target machine exists in this build (no MCS-251 backend means
+  // no mcs251 TargetMachine, so DeferredChecks is false and this cannot fire).
+  // An empty verdict from verifyModuleContractMessage means "no violation" --
+  // but it is ALSO what a build that never registered a checker returns, and
+  // those two states must not be spelled the same way: the second is a
+  // configuration in which no layer performs the check at all, and silently
+  // accepting a module there would be a false acceptance. Make it explicit.
+  if (DeferredChecks && !llvm::MCS251::hasModuleContractChecker()) {
+    Diags.Report(diag::err_fe_mcs251_contract_violation)
+        << "MCS251 contract checker is not available in this build; the "
+           "default correct-failure checks cannot be performed";
+    return false;
+  }
+
+  // Structural phase: judge the module BEFORE any optimization can erase the
+  // evidence (a devirtualized indirect call or an optimized-away indirectbr
+  // must not change the verdict).
+  if (DeferredChecks) {
+    std::string Msg = llvm::MCS251::verifyModuleContractMessage(
+        *TheModule, /*CheckArithmetic=*/false);
+    if (!Msg.empty()) {
+      Diags.Report(diag::err_fe_mcs251_contract_violation) << Msg;
+      return false;
+    }
+  }
+
   // Before executing passes, print the final values of the LLVM options.
   cl::PrintOptionValues();
 
   std::unique_ptr<llvm::ToolOutputFile> ThinLinkOS, DwoOS;
   RunOptimizationPipeline(Action, OS, ThinLinkOS, BC);
+
+  // Arithmetic phase: foldable constants and dead code are gone now, so only
+  // genuinely live unsupported operations (runtime i64, f32 outside the
+  // connected subset) are rejected. This is the same verdict llc reaches in
+  // its pre-ISel pass, reported instead of fatal.
+  //
+  // WP4: the phase is run whenever ANOTHER pipeline still follows, and is
+  // skipped only when this invocation does not generate machine code at all.
+  // The distinction matters because the two exits have different obligations:
+  //
+  //  * Action does NOT require code generation (`-emit-llvm -S` / `-emit-llvm
+  //    -c`): the IR/bitcode is handed on and llc applies the same check in its
+  //    own pipeline. Nothing here can reach a report_fatal_error, so the
+  //    verdict is deliberately left to llc and the IR is produced (rc=0). This
+  //    is also what makes `-disable-llvm-passes -emit-llvm` usable for
+  //    inspecting the unoptimized IR.
+  //
+  //  * Action DOES require code generation (`-c` / `-S`): this process runs
+  //    the whole backend, whose unsupported-operation gates are fail-closed
+  //    report_fatal_error calls. Reaching one is a clang crash (exit 70, bug
+  //    -report request, stack dump) for what is a deliberate capability
+  //    rejection, so the check must run HERE and return the ordinary rc=1
+  //    diagnostic. This holds with -disable-llvm-passes too: skipping the
+  //    check there is what let the backend fatal through. The check needs no
+  //    optimizer -- its fold/dead-code exemptions come from the local
+  //    interpreter (see checkUnsupportedArithmetic), which is exactly why it
+  //    is already correct at -O0 with the operands parked in allocas.
+  if (DeferredChecks && (actionRequiresCodeGen(Action) ||
+                         !CodeGenOpts.DisableLLVMPasses)) {
+    std::string Msg = llvm::MCS251::verifyModuleContractMessage(
+        *TheModule, /*CheckArithmetic=*/true);
+    if (!Msg.empty()) {
+      Diags.Report(diag::err_fe_mcs251_contract_violation) << Msg;
+      return false;
+    }
+  }
+
   RunCodegenPipeline(Action, OS, DwoOS);
 
   if (ThinLinkOS)
@@ -1391,6 +1482,64 @@ bool EmitAssemblyHelper::emitAssembly(BackendAction Action,
   if (DwoOS)
     DwoOS->keep();
   return true;
+}
+
+// WP4 round 6, corrected in round 7: the precise "nothing to judge" predicate
+// for the ThinLTO importing entry. Upstream fabricates a bare module
+// (identifier "empty", target triple only, no data layout) in
+// CodeGenAction::loadModule when the bitcode file carries no ThinLTO module;
+// that invocation is legal and must keep working, and the contract has no
+// construct to judge in it. A module that is empty in this sense has no
+// functions, no global variables, no aliases, no ifuncs, no named metadata
+// and no module-level inline assembly.
+//
+// Container emptiness alone (Module::empty() && Module::global_empty(), the
+// round-5 form) is NOT sufficient: module-level inline assembly and named
+// metadata (e.g. a FullDebug !llvm.dbg.cu with !llvm.module.flags) live
+// outside those two containers, and modules carrying only those were being
+// exempted from the contract check. This mirrors the upstream notion LTO's
+// own backend uses before running its passes (isEmptyModule in
+// LTOBackend.cpp), extended with the alias/ifunc tables.
+//
+// Container emptiness is not sufficient in the other direction either, which
+// round 6 did not cover: the TIED DataLayout of a module is not one of those
+// containers, and the contract check does read it (`getPointerSizeInBits(0)`
+// and the program address space). Six empty containers therefore do NOT mean
+// "no content to judge": an input that carries an explicit layout of its own
+// -- `target datalayout = "E-p:64:64"` with only a triple beside it -- has
+// declared a layout contract, and the check's verdict on it is exactly what
+// makes the entry behave like the ordinary one (measured before this fix:
+// ordinary entry rc=1 "AS0 pointer width must be 16 or 32 bits" in all four
+// IR/object cells, ThinLTO entry rc=0 for IR and a backend fatal for
+// objects). Requiring the layout STRING to be empty separates the two cases
+// exactly, because the upstream-fabricated module is default-constructed and
+// never carries one.
+//
+// The empty-string case does NOT mean the two entries then behave alike (an
+// earlier version of this comment claimed "the measured, unchanged behavior of
+// both entries"; that does not hold). Measured with a summary-carrying empty
+// module that has a triple and no explicit datalayout:
+//   * the ordinary entry `-emit-llvm` is rc=1 at O0 and O2, with
+//     `error: backend data layout '<upstream default for the triple>' does
+//     not match expected target description '<the MCS-251 layout>'`;
+//   * the ThinLTO entry with an index is rc=0 at O0 and O2.
+// That asymmetry is a PRE-EXISTING difference between the two entries, not
+// something this predicate or round 7 introduced: the predicate returns true
+// for an omitted layout on both paths, so both skip this check, and the
+// divergence comes afterwards -- the ordinary entry validates the received
+// default-constructed module's layout against the target description and
+// fails, while the ThinLTO entry takes a different backend path. So the empty
+// string is used only to separate "an explicit layout was declared" from "an
+// upstream default-constructed module that never carries a layout string at
+// all"; it makes no claim that the two entries agree when the layout is
+// omitted. This is also distinct from the bare fabricated module (the one
+// CodeGenAction::loadModule default-constructs when the input bitcode carries
+// no summary): the omitted-layout module here is read from a GIVEN bitcode
+// whose layout string happens to be empty.
+static bool isEmptyThinLTOInvocationModule(const llvm::Module &M) {
+  return M.getDataLayoutStr().empty() && M.empty() && M.global_empty() &&
+         M.alias_empty() && M.ifunc_empty() && M.named_metadata_empty() &&
+         M.getModuleInlineAsm().empty();
 }
 
 static void
@@ -1472,20 +1621,90 @@ runThinLTOBackend(CompilerInstance &CI, ModuleSummaryIndex *CombinedIndex,
   Conf.SplitDwarfOutput = CGOpts.SplitDwarfOutput;
   for (auto &Plugin : CI.getPassPlugins())
     Conf.LoadedPassPlugins.push_back(Plugin.get());
+
+  // WP4 round 6: the arithmetic phase of the MCS251 contract check for the
+  // ThinLTO importing entry. This hook runs after the importing/optimization
+  // pipeline and before code generation -- the same point the ordinary entry
+  // checks at (after RunOptimizationPipeline, before RunCodegenPipeline) --
+  // so foldable constants and dead code have been eliminated and only
+  // genuinely live unsupported operations are rejected. Round 5 ran this
+  // verdict before runThinLTOBackend, i.e. before optimization, which
+  // rejected modules the ordinary entry accepts (a truncated `mul i64 %x, 0`,
+  // a wide product living only in a constant-false select arm). A violation
+  // is reported through the ordinary DiagnosticsEngine exit (a deliberate
+  // capability rejection is an rc=1 failure, never a crash) and code
+  // generation is skipped by returning false. The predicate matches the
+  // pre-check in emitBackendOutput: a module with nothing to judge (the
+  // upstream-fabricated empty invocation module) stays exempt here too.
+  auto MCS251ArithmeticGate = [&](unsigned, const llvm::Module &Mod) -> bool {
+    if (M->getTargetTriple().getArch() != llvm::Triple::mcs251 ||
+        isEmptyThinLTOInvocationModule(Mod))
+      return true;
+    std::string Msg = llvm::MCS251::verifyModuleContractMessage(
+        Mod, /*CheckArithmetic=*/true);
+    if (!Msg.empty()) {
+      Diags.Report(diag::err_fe_mcs251_contract_violation) << Msg;
+      return false;
+    }
+    return true;
+  };
+
+  // WP4 round 7 (R2): the STRUCTURAL phase, run on the module the importer
+  // actually produced. The pre-check in emitBackendOutput judges the module
+  // the invocation loaded -- the caller's own bitcode, with `callee` still
+  // only a declaration, so an unsupported construct that lives in an IMPORTED
+  // definition is not in it. Optimization then erases that construct from the
+  // imported body before the arithmetic hook can see it either, so the
+  // importing entry reached neither verdict for the imported content
+  // (measured with a real distributed index: caller declaring and calling
+  // `callee`, the definition imported from a second module containing a
+  // sequence of alloca/store/atomic load that the optimizer removes -- the
+  // ThinLTO entry produced IR at rc=0 and a 564-byte EM_MCS251 ELF object,
+  // while the same post-import IR handed to the ordinary entry exited 1 in
+  // all four O0/O2 x IR/object cells with the atomic diagnostic). Judging the
+  // post-import module BEFORE the pipeline closes that gap and matches the
+  // ordinary entry's ordering, where the structural phase also runs before
+  // optimization.
+  //
+  // This is an additional structural verdict, not a replacement: the
+  // pre-check in emitBackendOutput and the arithmetic hook above both stay.
+  // Both gates report through the ordinary DiagnosticsEngine exit.
+  auto MCS251StructuralGate = [&](unsigned, const llvm::Module &Mod) -> bool {
+    if (M->getTargetTriple().getArch() != llvm::Triple::mcs251 ||
+        isEmptyThinLTOInvocationModule(Mod))
+      return true;
+    std::string Msg = llvm::MCS251::verifyModuleContractMessage(
+        Mod, /*CheckArithmetic=*/false);
+    if (!Msg.empty()) {
+      Diags.Report(diag::err_fe_mcs251_contract_violation) << Msg;
+      return false;
+    }
+    return true;
+  };
+  // The hook is composed, not replaced: saving temps installs its own wrapper
+  // around PostImportModuleHook, and that wrapper already forwards to
+  // whatever hook was present, so a pre-existing hook must be preserved here
+  // rather than overwritten.
+  lto::Config::ModuleHookFn ImportHook = Conf.PostImportModuleHook;
+  Conf.PostImportModuleHook = [ImportHook, &MCS251StructuralGate](
+                                  unsigned Task,
+                                  const llvm::Module &Mod) -> bool {
+    return MCS251StructuralGate(Task, Mod) &&
+           (!ImportHook || ImportHook(Task, Mod));
+  };
+  lto::Config::ModuleHookFn ActionHook;
   switch (Action) {
   case Backend_EmitNothing:
-    Conf.PreCodeGenModuleHook = [](size_t Task, const llvm::Module &Mod) {
-      return false;
-    };
+    ActionHook = [](unsigned Task, const llvm::Module &Mod) { return false; };
     break;
   case Backend_EmitLL:
-    Conf.PreCodeGenModuleHook = [&](size_t Task, const llvm::Module &Mod) {
+    ActionHook = [&](unsigned Task, const llvm::Module &Mod) {
       M->print(*OS, nullptr, CGOpts.EmitLLVMUseLists);
       return false;
     };
     break;
   case Backend_EmitBC:
-    Conf.PreCodeGenModuleHook = [&](size_t Task, const llvm::Module &Mod) {
+    ActionHook = [&](unsigned Task, const llvm::Module &Mod) {
       WriteBitcodeToFile(*M, *OS, CGOpts.EmitLLVMUseLists);
       return false;
     };
@@ -1494,6 +1713,17 @@ runThinLTOBackend(CompilerInstance &CI, ModuleSummaryIndex *CombinedIndex,
     Conf.CGFileType = getCodeGenFileType(Action);
     break;
   }
+  // Compose: the arithmetic gate decides first; only a clean module reaches
+  // the action's own hook (IR emission or the deliberate codegen skip). The
+  // object-emission actions set no hook of their own (empty std::function --
+  // code generation simply follows), so treat an absent action hook as
+  // "proceed".
+  Conf.PreCodeGenModuleHook =
+      [ActionHook, &MCS251ArithmeticGate](unsigned Task,
+                                           const llvm::Module &Mod) -> bool {
+    return MCS251ArithmeticGate(Task, Mod) &&
+           (!ActionHook || ActionHook(Task, Mod));
+  };
 
   // FIXME: Both ExecuteAction and thinBackend set up optimization remarks for
   // the same context.
@@ -1607,6 +1837,35 @@ void clang::emitBackendOutput(CompilerInstance &CI, CodeGenOptions &CGOpts,
   llvm::TimeTraceScope TimeScope("Backend");
   DiagnosticsEngine &Diags = CI.getDiagnostics();
 
+  // WP4 C1: the driver rejects an effective -g before cc1 runs; a direct
+  // `clang -cc1 -debug-info-kind=...` invocation bypasses that, so the same
+  // rule is enforced here on the reduced cc1-side value. The object writers
+  // emit no source-level debug info on this target, so continuing would
+  // silently drop the request.
+  //
+  // The cc1 value has TWO internal-only kinds that are NOT user debug
+  // requests: `LocTrackingOnly` is the compiler's own "track source
+  // locations for remarks / stack-usage diagnostics but emit no debug info"
+  // state (CompilerInvocation promotes NoDebugInfo to it whenever a
+  // location-requiring flag such as -Rpass is present), and a whitespace-free
+  // optimization recipe must keep working. Only the user-visible source-debug
+  // kinds are rejected.
+  if (CI.getTarget().getTriple().getArch() == llvm::Triple::mcs251) {
+    using llvm::codegenoptions::DebugInfoKind;
+    const DebugInfoKind K = CGOpts.getDebugInfo();
+    const bool SourceDebugRequest =
+        K == llvm::codegenoptions::DebugLineTablesOnly ||
+        K == llvm::codegenoptions::DebugDirectivesOnly ||
+        K == llvm::codegenoptions::DebugInfoConstructor ||
+        K == llvm::codegenoptions::LimitedDebugInfo ||
+        K == llvm::codegenoptions::FullDebugInfo ||
+        K == llvm::codegenoptions::UnusedTypeInfo;
+    if (SourceDebugRequest) {
+      Diags.Report(diag::err_fe_mcs251_debug_unsupported);
+      return;
+    }
+  }
+
   std::unique_ptr<llvm::Module> EmptyModule;
   if (!CGOpts.ThinLTOIndexFile.empty()) {
     // FIXME(sandboxing): Figure out how to support distributed indexing.
@@ -1630,9 +1889,77 @@ void clang::emitBackendOutput(CompilerInstance &CI, CodeGenOptions &CGOpts,
     // of an error).
     if (CombinedIndex) {
       if (!CombinedIndex->skipModuleByDistributedBackend()) {
-        runThinLTOBackend(CI, CombinedIndex.get(), M, std::move(OS),
-                          CGOpts.SampleProfileFile, CGOpts.ProfileRemappingFile,
-                          Action);
+        // WP4 round 5: this dispatch returns before EmitAssemblyHelper::
+        // emitAssembly runs, so the DeferredChecks guard inside that function
+        // never executes for the ThinLTO importing entry. The deferral flag is
+        // not set here either, so no later layer performs the MCS251 contract
+        // check on this path: measured with a real index, a runtime i64
+        // multiply and an atomic load both produced an object with rc=0, while
+        // the same module without the index exits 1. Apply the same predicate
+        // emitAssembly applies to a code-generation action, so the verdict does
+        // not depend on which entry the module arrives through.
+        //
+        // WP4 round 6: two corrections to that design.
+        //
+        // (a) The check is now two-phase, mirroring the ordinary entry in
+        // emitAssembly. Only the STRUCTURAL phase (types, address spaces,
+        // module-level constructs) runs here, before optimization can erase
+        // the evidence. The ARITHMETIC phase (unsupported i64/f32/f64
+        // operations) moved into runThinLTOBackend's PreCodeGenModuleHook --
+        // after the importing/optimization pipeline, before code generation --
+        // because judging arithmetic on the unoptimized module rejects inputs
+        // the ordinary entry accepts once folding and dead-code elimination
+        // have run (round 5 regressed exactly those: `mul i64 %x, 0` followed
+        // by a truncation, an i64 product reachable only through a
+        // constant-false select arm). Both phases report through the ordinary
+        // DiagnosticsEngine exit.
+        //
+        // (b) The "nothing to do" exemption is precise. Upstream fabricates a
+        // bare module (target triple only, no data layout) when the bitcode
+        // carries no ThinLTO module; rejecting that legal invocation would be
+        // wrong, and it holds no construct for the contract to judge. Round 5
+        // recognized it with M->empty() && M->global_empty(), which also
+        // exempted modules that still carry checkable content -- module-level
+        // inline assembly, or named metadata such as a FullDebug
+        // !llvm.dbg.cu -- leaving the ThinLTO entry without the check the
+        // ordinary entry performs on the same content. The predicate below
+        // requires every container the verifier reads to be empty; it matches
+        // the upstream "empty module" notion used inside LTO's own backend
+        // (isEmptyModule in LTOBackend.cpp) plus the alias/ifunc tables that
+        // Module::empty()/global_empty() do not cover.
+        if (M->getTargetTriple().getArch() == llvm::Triple::mcs251 &&
+            !isEmptyThinLTOInvocationModule(*M)) {
+          if (!llvm::MCS251::hasModuleContractChecker()) {
+            Diags.Report(diag::err_fe_mcs251_contract_violation)
+                << "MCS251 contract checker is not available in this build; "
+                   "the default correct-failure checks cannot be performed";
+            return;
+          }
+          std::string Msg = llvm::MCS251::verifyModuleContractMessage(
+              *M, /*CheckArithmetic=*/false);
+          if (!Msg.empty()) {
+            Diags.Report(diag::err_fe_mcs251_contract_violation) << Msg;
+            return;
+          }
+        }
+        // While the ThinLTO importing backend runs its pipeline, the clang
+        // side owns the verdict (structural above, arithmetic in the
+        // PreCodeGenModuleHook), so the pipeline-mounted contract passes must
+        // not fire: their report_fatal_error would turn a deliberate
+        // capability rejection into a crash-recovery exit (rc=70 with a bug
+        // report). This is the same deferral emitAssembly applies for the
+        // ordinary entry.
+        {
+          const bool PrevDeferred =
+              llvm::MCS251::setContractCheckDeferred(true);
+          struct ThinLTOGuard {
+            bool Prev;
+            ~ThinLTOGuard() { llvm::MCS251::setContractCheckDeferred(Prev); }
+          } DeferralGuard{PrevDeferred};
+          runThinLTOBackend(CI, CombinedIndex.get(), M, std::move(OS),
+                            CGOpts.SampleProfileFile,
+                            CGOpts.ProfileRemappingFile, Action);
+        }
         return;
       }
       // Distributed indexing detected that nothing from the module is needed

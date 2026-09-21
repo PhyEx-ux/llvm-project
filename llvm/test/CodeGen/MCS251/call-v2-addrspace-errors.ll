@@ -1,6 +1,6 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null %t/as0.ll 2>&1 | FileCheck %s --check-prefix=AS0
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null %t/as3.ll 2>&1 | FileCheck %s --check-prefix=AS3
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null %t/as0.ll 2>&1 | FileCheck %s --check-prefix=AS0
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null %t/as3.ll 2>&1 | FileCheck %s --check-prefix=AS3
 ;
 ; An explicitly non-CODE function is never a direct ecall target under v2,
 ; even when its pointer representation is also i32.  The contract verifier

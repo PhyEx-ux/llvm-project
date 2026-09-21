@@ -1,7 +1,7 @@
 ; RUN: split-file %s %t
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/crossblock.ll -o - | FileCheck %s --check-prefix=CROSS
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/sext.ll -o - | FileCheck %s --check-prefix=SEXT
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/select-alias.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FAIL
+; RUN: not llc -mtriple=mcs251 -O0 %t/select-alias.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FAIL
 
 ; P12-1 / P12-2 (Alice review round 3) regression pins for the two
 ; optnone-substitution proofs of instruction selection:

@@ -38,6 +38,16 @@ def err_fe_backend_plugin: Error<"%0">, BackendInfo;
 
 def warn_fe_backend_resource_limit: Warning<"%0 (%1) exceeds limit (%2) in '%3'">, BackendInfo, InGroup<BackendPlugin>;
 def err_fe_backend_resource_limit: Error<"%0 (%1) exceeds limit (%2) in '%3'">, BackendInfo;
+// WP4 C1: the cc1 entry point needs its own check -- the driver-level
+// rejection cannot see a direct `clang -cc1 -debug-info-kind=...`
+// invocation.
+// WP4: a target contract violation reported by the clang backend through its
+// DiagnosticsEngine (rather than report_fatal_error) so the deliberate
+// rejection is a normal rc=1 failure with no crash diagnostics.
+def err_fe_mcs251_contract_violation : Error<"%0">, BackendInfo;
+def err_fe_mcs251_debug_unsupported : Error<
+  "debug information is not supported for target 'mcs251': this toolchain "
+  "emits no source-level debug info; rebuild with -g0">, BackendInfo;
 def note_fe_backend_resource_limit: Note<"%0 (%1) exceeds limit (%2) in '%3'">, BackendInfo;
 
 def remark_fe_backend_plugin: Remark<"%0">, BackendInfo, InGroup<RemarkBackendPlugin>;

@@ -14,7 +14,7 @@
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/huge.ll -o %t/huge-v1.o 2>&1 | FileCheck %s --check-prefix=HUGE
 ; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/align.ll -o %t/align.o 2>&1 | FileCheck %s --check-prefix=ALIGN
 ; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/gepnull.ll -o %t/gepnull.o 2>&1 | FileCheck %s --check-prefix=ALG
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/inttoptr.ll -o %t/inttoptr.o 2>&1 | FileCheck %s --check-prefix=ALG
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/inttoptr.ll -o %t/inttoptr.o 2>&1 | FileCheck %s --check-prefix=INTPTR
 ; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/ascast.ll -o %t/ascast.o 2>&1 | FileCheck %s --check-prefix=ALG
 ; RUN: not --crash llc -mtriple=mcs251 %t/defs.ll -o - 2>&1 | FileCheck %s --check-prefix=TEXT
 ;
@@ -129,6 +129,10 @@
 ; W3b: the default contract is v2, so initializer algebra (GEP over null,
 ; inttoptr, addrspacecast) is rejected by the registered-capability gate of
 ; the v2 identity (still fail-closed for the same modules as before).
+; WP4 A2: an inttoptr initializer is now rejected by the structural contract
+; check with its actionable message before the v2 identity gate (gepnull and
+; addrspacecast still reach the gate).
+; INTPTR: LLVM ERROR: MCS251 contract violation: global 'q': absolute-address (integer-to-pointer cast) pointer initialization is not supported; the supported static pointer forms are null and '&symbol' with a constant offset; access fixed device addresses through a macro such as '#define PB (*(volatile uint8_t *)0xFF00)' 
 ; ALG: LLVM ERROR: MCS251: module uses an ABI capability outside the registered A4 v2 object identity
 ; TEXT: LLVM ERROR: MCS251: __xdata global 'zero': storage requires ELF object output
 

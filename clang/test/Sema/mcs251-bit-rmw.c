@@ -273,8 +273,10 @@ void stmt_decl_self(void) {
 // N1: the fallback for other statement kinds must recurse into nested
 // statements, not only direct expression children. (_Defer is covered in
 // mcs251-bit-defer.c, which needs -fdefer-ts.)
-void indirect_goto_bad(int c) {
-  ({ goto *((X ^= 1) ? &&L : &&L); L:; }); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
+void nested_if_bad(int c) {
+  // WP4 D1 removed computed goto as a nesting form; an `if` exercises the
+  // same "other statement kinds recurse into nested statements" fallback.
+  ({ if ((X ^= 1)) ; }); // expected-error {{the result of a controlled MCS251 bit toggle cannot be used; the toggle is only valid as a discarded-value expression}}
 }
 
 // N2: the LHS of an assignment is a write target, but its address computation

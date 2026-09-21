@@ -221,12 +221,12 @@ define void @ordered(i8 %v) {
 ; even when entirely unused. O0 and O2 agree; the verifier-on variant shows
 ; the generic verifier rejects the same input first, and that the target
 ; diagnostic is its own, separate layer.
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/badret.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
-; RUN: not --crash llc -mtriple=mcs251 -O2 -disable-verify -filetype=obj -mcs251-object-format=elf %t/badret.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/badparam.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/vararg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/defined.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/coldcc.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/badret.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
+; RUN: not llc -mtriple=mcs251 -O2 -disable-verify -filetype=obj -mcs251-object-format=elf %t/badret.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/badparam.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/vararg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/defined.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/coldcc.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
 ; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/badret.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIGV
 ;SIG: MCS251 contract violation: MCS251 symbolic bit intrinsic: invalid declaration or call signature
 ;SIGV: intrinsic return type expected i1, but got i8
@@ -235,47 +235,47 @@ define void @ordered(i8 %v) {
 ; L02: call form -- only a plain, direct, unbundled CallInst. The intrinsic's
 ; own identity may only ever be the direct callee of a whitelisted call, so
 ; exporting it to an initializer is rejected with the same body.
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/invoke.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/tail.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
-; RUN: not --crash llc -mtriple=mcs251 -O2 -disable-verify -filetype=obj -mcs251-object-format=elf %t/tail.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/musttail.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/bundle.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/addrtaken.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/invoke.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/tail.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
+; RUN: not llc -mtriple=mcs251 -O2 -disable-verify -filetype=obj -mcs251-object-format=elf %t/tail.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/musttail.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/bundle.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/addrtaken.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FORM
 ;FORM: MCS251 contract violation: MCS251 symbolic bit intrinsic: only direct unbundled calls are supported
 
 ; Section 1.3 B / 1.4: the handle itself inside an ordinary call's operand
 ; bundle is the handle's own frozen body, not the intrinsic's.
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/escapebundle.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=HANDLE
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/escapebundle.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=HANDLE
 ;HANDLE: MCS251 contract violation: MCS251 bit object 'flag': handle must not be used by a non-whitelisted call or operand bundle
 
 ; L03: the operand must dyn_cast DIRECTLY to a marked AS0 global. Null,
 ; undef, an ordinary global, a GEP (never stripped), a select or PHI of
 ; handles, an alloca, and a handle forwarded through a function parameter
 ; are all rejected.
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/nullarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/undefarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/plainarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/geparg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/selectarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/phiarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/allocaarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/paramhandle.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/nullarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/undefarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/plainarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/geparg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/selectarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/phiarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/allocaarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/paramhandle.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
 ;OPERAND: MCS251 contract violation: MCS251 symbolic bit intrinsic: operand must be a direct AS0 bit-object global
 
 ; L04: an illegal use inside a constant-false branch is rejected BEFORE any
 ; optimisation can remove it -- at both opt levels.
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/deadcode.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
-; RUN: not --crash llc -mtriple=mcs251 -O2 -disable-verify -filetype=obj -mcs251-object-format=elf %t/deadcode.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/deadcode.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
+; RUN: not llc -mtriple=mcs251 -O2 -disable-verify -filetype=obj -mcs251-object-format=elf %t/deadcode.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OPERAND
 
 ; L07: effect narrowing. The worst-case effect model of section 1.2 may not
 ; be narrowed at the call site (the IR reader resets attribute groups on
 ; intrinsic DECLARATIONS, so the call site is the expressible layer), and the
 ; identity operand may not carry aliasing promises or metadata.
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/callmemattr.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=EFFECTS
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/noaliasarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=EFFECTS
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/derefarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=EFFECTS
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/aliasmd.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=EFFECTS
-; RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/noaliasmd.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=EFFECTS
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/callmemattr.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=EFFECTS
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/noaliasarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=EFFECTS
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/derefarg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=EFFECTS
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/aliasmd.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=EFFECTS
+; RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/noaliasmd.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=EFFECTS
 ;EFFECTS: MCS251 contract violation: MCS251 symbolic bit intrinsic: incompatible effects or pointer attributes
 
 ; L09: the symbolic bit-address field has no assembly-text representation at

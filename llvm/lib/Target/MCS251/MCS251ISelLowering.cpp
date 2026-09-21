@@ -682,7 +682,11 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     return LowerAddrSpaceCast(Op, DAG);
   case ISD::ATOMIC_LOAD:
   case ISD::ATOMIC_STORE:
-    report_fatal_error("MCS251: atomic memory operations are not supported");
+    // WP4: predictable capability rejection -- clean exit(1), no crash
+    // diagnostics. Normally unreachable: the structural contract check
+    // rejects atomic IR first; this is the MIR-entry defense.
+    report_fatal_error("MCS251: atomic memory operations are not supported",
+                       /*GenCrashDiag=*/false);
   case ISD::INTRINSIC_VOID:
   case ISD::INTRINSIC_W_CHAIN: {
     // Both node shapes carry the intrinsic ID as operand 1 (operand 0 is the
@@ -3064,7 +3068,8 @@ SDValue MCS251TargetLowering::LowerLoad(SDValue Op, SelectionDAG &DAG) const {
   EVT ValVT = LD->getValueType(0);
 
   if (LD->isAtomic())
-    report_fatal_error("MCS251: atomic memory operations are not supported");
+    report_fatal_error("MCS251: atomic memory operations are not supported",
+                       /*GenCrashDiag=*/false);
   if (MemVT != MVT::i8 && MemVT != MVT::i16 && MemVT != MVT::i32)
     report_fatal_error("MCS251: only i8/i16/i32 memory objects are supported (load)");
 
@@ -3196,7 +3201,8 @@ SDValue MCS251TargetLowering::LowerStore(SDValue Op, SelectionDAG &DAG) const {
   SDValue Val = ST->getValue();
 
   if (ST->isAtomic())
-    report_fatal_error("MCS251: atomic memory operations are not supported");
+    report_fatal_error("MCS251: atomic memory operations are not supported",
+                       /*GenCrashDiag=*/false);
   if (MemVT != MVT::i8 && MemVT != MVT::i16 && MemVT != MVT::i32)
     report_fatal_error("MCS251: only i8/i16/i32 memory objects are supported (store)");
 
@@ -4130,8 +4136,12 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
       Mangler::getNameWithPrefix(Name, S->getSymbol(), DAG.getDataLayout());
       SlotCallee = Name.str().str();
     } else {
+      // WP4: predictable capability rejection -- clean exit(1). Normally
+      // unreachable: the structural contract check rejects the multi-argument
+      // indirect call shape first; this is the MIR-entry defense.
       report_fatal_error("MCS251: multi-argument indirect calls are not supported "
-                         "(static parameter slots require a named callee)");
+                         "(static parameter slots require a named callee)",
+                         /*GenCrashDiag=*/false);
     }
     // Finish every slot store before setting up the first argument registers.
     // Memory objects use the same measured big-endian layout as SDCC.

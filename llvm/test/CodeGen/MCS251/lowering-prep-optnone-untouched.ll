@@ -2,7 +2,7 @@
 ; RUN: llc -mtriple=mcs251 -O0 -stop-after=mcs251-lowering-prep %t/mixed.ll -o %t.mir
 ; RUN: FileCheck %s --check-prefix=IR --input-file %t.mir
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/optnone-only.ll -o - | FileCheck %s --check-prefix=ASM
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/optnone-escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
+; RUN: not llc -mtriple=mcs251 -O0 %t/optnone-escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
 ; ESCAPE: LLVM ERROR: MCS251 contract violation: i64 integer arithmetic is not yet implemented; wide-integer runtime is not connected
 
 ; P1-2: MCS251LoweringPrep is the only pass allowed to rewrite IR for this

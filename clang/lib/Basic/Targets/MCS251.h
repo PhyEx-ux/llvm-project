@@ -47,6 +47,15 @@ public:
     HasMustTail = false;
     UserLabelPrefix = "_";
 
+    // WP4 A4: no atomic model is implemented for this target, so the
+    // lock-free capability queries must never answer affirmatively. Both
+    // widths are pinned to 0 explicitly (they already default to 0; this is
+    // the documented lock, not an accident): every atomic width is larger
+    // than the max lock-free width, so __atomic_always_lock_free and
+    // __atomic_is_lock_free answer "no", and an _Atomic operation would be
+    // a non-lock-free operation rather than a silent lock-free claim.
+    MaxAtomicPromoteWidth = MaxAtomicInlineWidth = 0;
+
     // The no-flag default is xsmall/v2. Compatibility is available only when
     // a caller explicitly supplies the legacy layout contract.
     if (!Contract.isSpecified())

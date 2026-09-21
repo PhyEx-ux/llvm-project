@@ -12736,6 +12736,49 @@ def err_mcs251_bit_layout_query
     : Error<"%0 of MCS251 'bit' type is not allowed">;
 def err_mcs251_bit_atomic
     : Error<"atomic MCS251 'bit' type is not allowed">;
+// WP4 default correct-failure capabilities (FUNCTIONAL-GAPS-PLAN-Alice.md
+// section 3): unified, actionable source-level diagnostics. The IR-layer
+// contract check (MCS251ContractCheck) is the safety net for direct llc
+// input and for anything these entry points miss; these diagnostics give
+// the user the exact source location and the documented alternative.
+def err_mcs251_atomics_unsupported
+    : Error<"atomic operations (C11/GNU) are not supported on MCS251: no "
+            "atomic model is implemented and no lock-free operation is "
+            "claimed; 'volatile' does not provide atomicity; shared access "
+            "must go through an independently verified IRQ critical-section "
+            "protocol">;
+def err_mcs251_atomic_access_unsupported
+    : Error<"access to an object with an atomic subobject %0 is not "
+            "supported on MCS251: no atomic model is implemented, so the "
+            "access cannot preserve atomicity; shared access must go through "
+            "an independently verified IRQ critical-section protocol">;
+def err_mcs251_atomic_type_unsupported
+    : Error<"atomic types ('_Atomic %0') are not supported on MCS251; "
+            "use an ordinary type and guard shared access with an "
+            "independently verified IRQ critical-section protocol">;
+def err_mcs251_absolute_pointer_init
+    : Error<"absolute-address (integer-to-pointer) pointer initialization is "
+            "not supported on MCS251; the supported static pointer forms are "
+            "null and '&symbol' with a constant offset; access fixed device "
+            "addresses through a macro such as "
+            "'#define PB (*(volatile unsigned char *)0xFF00)'">;
+def err_mcs251_multiarg_indirect_call
+    : Error<"multi-argument indirect calls are not supported on MCS251 "
+            "(static parameter slots require a named callee); call the "
+            "function directly, or pass at most one argument through the "
+            "function pointer">;
+def err_mcs251_weak_definition
+    : Error<"weak %select{function|variable}0 definitions are not supported "
+            "on MCS251: the current linking model implements no weak "
+            "resolution; provide one strong definition (an unused weak "
+            "declaration is accepted)">;
+def err_mcs251_computed_goto
+    : Error<"computed goto (%select{address-of-label '&&'|indirect 'goto *'}0) "
+            "is not supported on MCS251; use a switch statement">;
+def err_mcs251_module_asm
+    : Error<"module-level inline assembly is not supported on MCS251: the "
+            "target implements no assembly-text entry in its object writers; "
+            "write the operation in C or link a prebuilt object instead">;
 def err_mcs251_bit_addrspace
     : Error<"MCS251 'bit' cannot be declared in a non-default address space">;
 // MCS251 __xdata/__code address space qualifiers (X1 slice, DESIGN.md B.1/B.2):

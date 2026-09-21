@@ -7887,6 +7887,25 @@ ExprResult Sema::ActOnFinishFullExpr(Expr *FE, SourceLocation CC,
       MCS251().CheckMCS251ControlledBitRMW(FullExpr.get(), DiscardedValue))
     return ExprError();
 
+  // WP4 A4/A5/A6: the atomic family is decided here, once per FULL EXPRESSION,
+  // so an atomic construct that the language never evaluates -- an operand of
+  // sizeof/_Alignof/typeof, an unselected _Generic association or its
+  // controlling expression, the unconsumed __builtin_choose_expr arm, the
+  // untaken arm of a constant-condition conditional, a short-circuited
+  // `&&`/`||` RHS -- stays accepted, while a construct that is actually
+  // evaluated is refused. The check owns this decision exclusively: the
+  // construction sites deliberately do not reject.
+  //
+  // One exception to "everything enclosing this full expression is known
+  // here": the statements inside a GNU statement expression ({ ... }) are
+  // themselves full expressions and reach this point before the expression
+  // that encloses the statement expression does, so the inner call cannot yet
+  // tell whether any of them runs. It defers (SemaMCS251::
+  // inStatementExpressionScope) and the enclosing call walks the statements.
+  if (FullExpr.isUsable() &&
+      MCS251().CheckMCS251AtomicUse(FullExpr.get()))
+    return ExprError();
+
   if (FullExpr.isInvalid())
     return ExprError();
 

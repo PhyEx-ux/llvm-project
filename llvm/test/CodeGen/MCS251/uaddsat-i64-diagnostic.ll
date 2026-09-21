@@ -1,10 +1,10 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/dyn-uaddsat.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=I64SAT
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/dyn-uaddsat.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=I64SAT
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/dyn-sqrt.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FSQRT
+; RUN: not llc -mtriple=mcs251 -O0 %t/dyn-uaddsat.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=I64SAT
+; RUN: not llc -mtriple=mcs251 -O2 %t/dyn-uaddsat.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=I64SAT
+; RUN: not llc -mtriple=mcs251 -O0 %t/dyn-sqrt.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FSQRT
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/const-uaddsat.ll -o - | FileCheck %s --check-prefix=FOLD
 ; I64SAT: LLVM ERROR: MCS251 contract violation: i64 intrinsic operation is not yet implemented; wide-integer runtime is not connected
-; FSQRT: LLVM ERROR: MCS251 contract violation: f32/f64 intrinsic operation is not yet implemented; soft-float runtime is not connected
+; FSQRT: LLVM ERROR: MCS251 contract violation: the f32 intrinsic 'llvm.sqrt.f32' is not in the connected f32 subset (basic arithmetic, conversions and compares are connected; math functions such as sqrt are not)
 
 ; RC-7 (P2): intrinsic rejection diagnostics must classify by operand kind.
 ; llvm.uadd.sat.i64 is wide-integer arithmetic, so it must report the i64

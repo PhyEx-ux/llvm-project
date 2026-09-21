@@ -122,3 +122,47 @@ bool llvm::MCS251::isSupportedLayout(StringRef DataLayout) {
   return DataLayout == CompatibilityLayout || DataLayout == TinyLayout ||
          DataLayout == SmallLayout;
 }
+
+//===----------------------------------------------------------------------===//
+// WP4: clang-backend contract-check transport (declared in the header).
+//
+// These live in the always-linked TargetParser library so that clang builds
+// which do not include the MCS251 backend still resolve every symbol their
+// BackendUtil references. Only the deferral flag has state here; the module
+// verdict is delegated to a checker the MCS251 target library installs.
+//===----------------------------------------------------------------------===//
+
+namespace {
+/// WP4 deferral flag: process-global on purpose -- one cc1 compiles one
+/// module per process and the flag is set/cleared around the pipeline; llc
+/// never touches it.
+bool ContractCheckDeferred = false;
+
+/// The MCS251 target library's contract checker, or nullptr when this build
+/// has no MCS251 backend. Written once from the target library's static
+/// initialization (single-threaded startup), read afterwards.
+ModuleContractCheckerFn ModuleContractChecker = nullptr;
+} // namespace
+
+bool llvm::MCS251::setContractCheckDeferred(bool Deferred) {
+  bool Prev = ContractCheckDeferred;
+  ContractCheckDeferred = Deferred;
+  return Prev;
+}
+
+bool llvm::MCS251::isContractCheckDeferred() { return ContractCheckDeferred; }
+
+void llvm::MCS251::registerModuleContractChecker(ModuleContractCheckerFn Fn) {
+  ModuleContractChecker = Fn;
+}
+
+bool llvm::MCS251::hasModuleContractChecker() {
+  return ModuleContractChecker != nullptr;
+}
+
+std::string llvm::MCS251::verifyModuleContractMessage(const Module &M,
+                                                      bool CheckArithmetic) {
+  if (!ModuleContractChecker)
+    return std::string();
+  return ModuleContractChecker(M, CheckArithmetic);
+}

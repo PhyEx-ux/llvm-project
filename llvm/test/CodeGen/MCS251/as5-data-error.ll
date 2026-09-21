@@ -1,4 +1,4 @@
-; RUN: not --crash llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
 ;
 ; X2 regression net: AS5 (bit space) stays fail-closed for ordinary data
 ; access after the AS3/AS4 channels were opened. The gate that fires first is

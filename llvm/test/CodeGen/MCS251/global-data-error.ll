@@ -1,6 +1,6 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 %t/algebra.ll -o - 2>&1 | FileCheck %s --check-prefix=ALG
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj %t/algebra.ll -o - 2>&1 | FileCheck %s --check-prefix=ALG
+; RUN: not llc -mtriple=mcs251 %t/algebra.ll -o - 2>&1 | FileCheck %s --check-prefix=ALG
+; RUN: not llc -mtriple=mcs251 -filetype=obj %t/algebra.ll -o - 2>&1 | FileCheck %s --check-prefix=ALG
 ; RUN: not --crash llc -mtriple=mcs251 %t/symleaf.ll -o - 2>&1 | FileCheck %s --check-prefix=SYMLEAF
 ; RUN: not --crash llc -mtriple=mcs251 -filetype=obj %t/symleaf.ll -o - 2>&1 | FileCheck %s --check-prefix=SYMLEAF
 ;
@@ -11,7 +11,7 @@
 ; 32-bit address into DSEG, and a symbol leaf outside the ELF object protocol
 ; is rejected (the REL writer and assembly text carry no such record).
 
-; ALG: LLVM ERROR: MCS251: defined global data requires byte-aligned default-address-space
+; ALG: LLVM ERROR: MCS251 contract violation: global 'g': absolute-address (integer-to-pointer cast) pointer initialization is not supported; the supported static pointer forms are null and '&symbol' with a constant offset; access fixed device addresses through a macro such as '#define PB (*(volatile uint8_t *)0xFF00)' 
 
 ; SYMLEAF: LLVM ERROR: MCS251: global 'g': a pointer initializer requires ELF object output
 

@@ -2,7 +2,7 @@
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/vaarg-i32.ll -o %t/a.o 2>&1 | FileCheck %s --check-prefix=E
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/vaarg-f32.ll -o %t/b.o 2>&1 | FileCheck %s --check-prefix=E
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/seven.ll -o %t/c.o 2>&1 | FileCheck %s --check-prefix=F
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/indirect.ll -o %t/d.o 2>&1 | FileCheck %s --check-prefix=C2
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/indirect.ll -o %t/d.o 2>&1 | FileCheck %s --check-prefix=C2
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/nofixed.ll -o %t/e.o 2>&1 | FileCheck %s --check-prefix=F0
 ;
 ; G2 B-S2 (G2-VARIADIC-DESIGN-draft.md R3 §4.3.5/§4.3.6/§4.4.3): ordinary
@@ -31,7 +31,7 @@
 
 ; E: LLVM ERROR: MCS251: llvm.va_arg is not supported; va_arg is lowered by clang CodeGen (MCS251ABIInfo::EmitVAArg)
 ; F: LLVM ERROR: MCS251: variadic call passes more than 6 variadic arguments (Sema cap gate missed this call; recompile the caller with a current compiler)
-; C2: LLVM ERROR: MCS251 variadic call form 'indirect' is not supported (static slots require a named callee)
+; C2: LLVM ERROR: MCS251 contract violation: multi-argument indirect calls are not supported (static parameter slots require a named callee); call the function directly, or pass at most one argument through the function pointer
 ; F0: LLVM ERROR: MCS251: a variadic definition must have at least one fixed parameter (the first source argument uses the register channel, which va_arg cannot read)
 
 ;--- vaarg-i32.ll

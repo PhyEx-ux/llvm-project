@@ -101,4 +101,10 @@ void MCS251TargetInfo::getTargetDefines(const LangOptions &Opts,
   Builder.defineMacro("__MCS251__");
   if (IntWidth == 16)
     Builder.defineMacro("__MCS251_INT16__");
+  // WP4 A4: the C11 atomics capability is not provided (no atomic model, no
+  // lock-free operation; the MaxAtomic widths stay 0). C11 requires an
+  // implementation that does not support <stdatomic.h> operations to define
+  // this macro, so well-behaved headers can disable their atomic paths
+  // instead of reaching a rejected operation.
+  Builder.defineMacro("__STDC_NO_ATOMICS__");
 }

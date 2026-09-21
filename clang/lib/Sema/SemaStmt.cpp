@@ -37,6 +37,7 @@
 #include "clang/Sema/SemaHLSL.h"
 #include "clang/Sema/SemaObjC.h"
 #include "clang/Sema/SemaOpenMP.h"
+#include "clang/Sema/SemaMCS251.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -3314,6 +3315,10 @@ StmtResult Sema::ActOnGotoStmt(SourceLocation GotoLoc,
 StmtResult
 Sema::ActOnIndirectGotoStmt(SourceLocation GotoLoc, SourceLocation StarLoc,
                             Expr *E) {
+  // WP4 D1: indirect goto has no MCS251 ABI; reject in the source structure
+  // so acceptance never depends on the optimizer removing the construct.
+  if (MCS251().CheckMCS251ComputedGoto(/*IsAddrOfLabel=*/false, GotoLoc))
+    return StmtError();
   // Convert operand to void*
   if (!E->isTypeDependent()) {
     QualType ETy = E->getType();

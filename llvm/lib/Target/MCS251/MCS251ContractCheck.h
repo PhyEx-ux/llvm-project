@@ -38,6 +38,35 @@ Error verifyModuleContract(const Module &M,
                            const std::optional<MemoryContract> &Contract,
                            bool CheckArithmetic);
 
+/// WP4 default correct-failure capabilities only (atomics, multi-argument
+/// indirect calls, weak definitions, module asm, computed goto,
+/// absolute-address static pointer initialization, debug information).
+/// Read-only. This is the WP4 subset of verifyModuleContract, exposed so the
+/// AsmPrinter's doInitialization can run it ahead of the identity
+/// classification and of the base class's module-asm emission: in the legacy
+/// pass manager every doInitialization hook runs before any runOnModule, so
+/// without this guard those two fail-closed gates preempt the WP4
+/// diagnostics on the direct-llc/MIR entries. The pass itself still runs the
+/// full contract (this subset included) at pipeline start.
+Error verifyModuleCapabilities(const Module &M);
+
+/// WP4: the clang backend (BackendUtil) has a DiagnosticsEngine and runs the
+/// checks itself before/after the optimization pipeline, so a deliberate
+/// capability rejection must not travel through report_fatal_error there --
+/// that would re-enter clang's in-process crash-recovery path and print a
+/// bug-report request / stack dump even though the failure is expected. When
+/// the check is deferred, the target's pipeline mounts no contract-check
+/// passes and the backend owns both the structural (pre-optimization) and the
+/// arithmetic (pre-codegen) verdicts. Used as an RAII scope by BackendUtil;
+/// llc never sets it.
+///
+/// setContractCheckDeferred / isContractCheckDeferred /
+/// verifyModuleContractMessage are DECLARED in MCS251TargetParser.h (included
+/// above) and DEFINED in the always-linked TargetParser library, because
+/// clang's BackendUtil references them unconditionally -- a build without the
+/// MCS251 backend must still link. This library only registers the checker
+/// that produces the verdict. Do not redefine them here.
+
 /// Legacy module pass wrapper used by the target's TargetPassConfig.
 ModulePass *
 createMCS251ContractCheckPass(std::optional<MemoryContract> Contract,

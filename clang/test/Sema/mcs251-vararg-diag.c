@@ -58,11 +58,13 @@ void ok_arrays_decay_to_ordinary_ptrs(int a0[2]) {
 }
 
 typedef int (*fixedfp)(int, int);
-void ok_indirect_fixed(void) {
+void indirect_fixed_now_rejected(void) {
   fixedfp fp = 0;
-  // Only variadic *signatures* are rejected through pointers; an indirect
-  // call to a non-variadic prototype keeps its existing behavior.
-  fp(1, 2);
+  // WP4 A7 (EC1): an indirect call with two or more arguments has no ABI on
+  // MCS251 (the static continuation slots are named after the callee), so a
+  // non-variadic multi-argument indirect call is rejected as well. Only the
+  // zero/one-argument indirect forms stay supported.
+  fp(1, 2); // expected-error {{multi-argument indirect calls are not supported on MCS251}}
 }
 
 void ok_vaarg_reads(int count, ...) {

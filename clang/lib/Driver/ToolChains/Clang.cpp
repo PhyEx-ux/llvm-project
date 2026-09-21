@@ -4954,12 +4954,37 @@ renderDebugOptions(const ToolChain &TC, const Driver &D, const llvm::Triple &T,
                      options::OPT_gno_inline_line_tables);
 
   // When emitting remarks, we need at least debug lines in the output.
+  //
+  // WP4 C1: on MCS251 this internal promotion is NOT applied. The target
+  // cannot emit source-level debug info, so the promotion would produce an
+  // "effective debug request" that the user never made (they asked for
+  // remarks) and the debug rejection would fire on `-Rpass` alone. Remarks
+  // keep working on MCS251; they simply carry no source line information,
+  // which the target cannot represent anyway. The user-facing distinction
+  // (-g request vs internal line tables) is therefore resolved where the
+  // promotion happens, and a debug-info kind reaching cc1 on MCS251 is
+  // always a genuine request.
   if (willEmitRemarks(Args) &&
-      DebugInfoKind <= llvm::codegenoptions::DebugDirectivesOnly)
+      DebugInfoKind <= llvm::codegenoptions::DebugDirectivesOnly &&
+      T.getArch() != llvm::Triple::mcs251)
     DebugInfoKind = llvm::codegenoptions::DebugLineTablesOnly;
 
   // Adjust the debug info kind for the given toolchain.
   TC.adjustDebugInfoKind(DebugInfoKind, Args);
+
+  // WP4 C1: the final reduction is done, so this is the effective debug
+  // request. On MCS251 the target emits no source-level debug info
+  // (SupportsDebugInformation == false), so an effective request is a hard
+  // error instead of the silent delivery of an object with zero debug
+  // sections. `-g -g0` reduces to NoDebugInfo and keeps compiling; `-g0 -g`
+  // reduces to a real kind and fails. The g_Group guard keeps the check off
+  // internally promoted line tables (optimization remarks / profiling
+  // recipes that did not ask for source debugging), which are not debug
+  // requests in the user's sense.
+  if (T.getArch() == llvm::Triple::mcs251 &&
+      DebugInfoKind != llvm::codegenoptions::NoDebugInfo &&
+      Args.hasArg(options::OPT_g_Group))
+    D.Diag(diag::err_drv_mcs251_debug_unsupported);
 
   // On AIX, the debugger tuning option can be omitted if it is not explicitly
   // set.

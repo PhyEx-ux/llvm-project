@@ -1,6 +1,6 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
+; RUN: not llc -mtriple=mcs251 -O0 %t/escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
+; RUN: not llc -mtriple=mcs251 -O2 %t/escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/no-escape.ll -o - | FileCheck %s --check-prefix=NOESC
 ; ESCAPE: LLVM ERROR: MCS251 contract violation: i64 integer arithmetic is not yet implemented; wide-integer runtime is not connected
 

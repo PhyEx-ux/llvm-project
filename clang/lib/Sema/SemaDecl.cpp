@@ -9145,6 +9145,19 @@ static bool CheckC23ConstexprVarType(Sema &SemaRef, SourceLocation VarLoc,
 }
 
 void Sema::CheckVariableDeclarationType(VarDecl *NewVD) {
+  // WP4 A4: an _Atomic-QUALIFIED object declaration is rejected on MCS251
+  // (no atomic model is implemented; no lock-free operation is claimed).
+  // The check is deliberately scoped to object storage: a pure type query
+  // that never creates an atomic object (sizeof/_Generic/type-trait
+  // operands, typedefs) is not an atomic use and stays accepted, while the
+  // declared object -- the thing whose accesses would silently assume a
+  // synchronization model -- is refused with the actionable family
+  // diagnostic. <stdatomic.h>'s own typedefs are exempt via the
+  // system-header check. Actual atomic operations are rejected at the
+  // builtin entry points and by the IR-layer contract check.
+  if (NewVD->getType()->isAtomicType())
+    MCS251().CheckMCS251AtomicType(
+        NewVD->getType().getAtomicUnqualifiedType(), NewVD->getLocation());
   // If the decl is already known invalid, don't check it.
   if (NewVD->isInvalidDecl())
     return;
@@ -13413,6 +13426,15 @@ void Sema::CheckMSVCRTEntryPoint(FunctionDecl *FD) {
 }
 
 bool Sema::CheckForConstantInitializer(Expr *Init, unsigned DiagID) {
+  // WP4 A2: this is the single choke point for static-storage-duration
+  // initializers (file scope and block-scope static). An integer-to-pointer
+  // cast in one denotes an absolute address, which the MCS251 static
+  // pointer whitelist deliberately excludes; give the actionable
+  // source-level diagnostic before the ordinary constant-expression
+  // machinery below (the cast IS a valid constant expression, so it would
+  // otherwise pass here and abort much later in the emitter).
+  if (MCS251().CheckMCS251AbsolutePointerInit(Init, Init->getExprLoc()))
+    return true;
   // FIXME: Need strict checking.  In C89, we need to check for
   // any assignment, increment, decrement, function-calls, or
   // commas outside of a sizeof.  In C99, it's the same list,
@@ -15464,6 +15486,62 @@ void Sema::addLifetimeBoundToImplicitThis(CXXMethodDecl *MD) {
 void Sema::CheckCompleteVariableDeclaration(VarDecl *var) {
   if (var->isInvalidDecl()) return;
 
+  // WP4 round 7 (R1): A2's absolute-address pointer-initializer rule applies to
+  // C++ static-storage-duration initializers too. The C side reaches it through
+  // CheckForConstantInitializer, which C++ deliberately does not run ("C++
+  // does not restrict the initializer"), so without this call the SOURCE layer
+  // was silent for every C++ static pointer initializer while the IR and
+  // object layers rejected the absolute ones. The C++ base-subobject shape
+  // (`struct S : B { int *p; }; S s = {{0}, (int *)0x1234};`) was only one
+  // instance of that disagreement -- `int *p = (int *)0x1234;` was equally
+  // silent -- because the base-class pairing the walker already performs
+  // (findMCS251AbsolutePointerLeaf) was never invoked on this side.
+  //
+  // The gate is the initializer being a CONSTANT initializer: a C++ dynamic
+  // initializer (`int *p = (int *)fn();`) does not become a static pointer
+  // initializer for the IR classifier either, and stays accepted here (its own
+  // paths are unchanged and separately registered). The decision itself is the
+  // shared value/provenance rule the IR and object layers use: null and
+  // '&symbol' with a constant offset are supported, an integer-cast image is
+  // not. C is untouched -- it already reports through its own branch, and
+  // reaching it twice would duplicate the diagnostic.
+  //
+  // WP4 round 8 (R1 follow-up): the rule applies to a DEFINITION, not to a
+  // TEMPLATE PATTERN. A non-dependent initializer can sit in a declaration
+  // that is still a pattern -- the out-of-line definition of a static data
+  // member of a class template, the pattern of a variable template, a
+  // static local in a function template -- and a pattern is not an object:
+  // it is instantiated (or not) later, and a specialization written for the
+  // program's actual use is a separate declaration. Judging the pattern
+  // rejected `template<class T> int *H<T>::p = (int*)0x1234;` even when the
+  // only declaration the program uses is the legal explicit specialization
+  // `template<> int *H<int>::p = nullptr;`. `isTemplated()` is exactly the
+  // pattern/definition distinction here: it is true for a template pattern
+  // (a described variable template, or a declaration whose semantic context
+  // is dependent -- a member of a class template, a static local in a
+  // function template) and false for an explicit specialization, for an
+  // implicit instantiation and for an explicit instantiation definition,
+  // whose semantic context is the non-dependent entity that was formed. Each
+  // such definition is completed on its own and reaches this check with its
+  // own initializer, so an instantiated absolute address is still rejected --
+  // by the same rule, at the point where the object is actually defined.
+  if (getLangOpts().CPlusPlus && !getLangOpts().OpenCL && var->hasInit() &&
+      var->getStorageDuration() == SD_Static && !var->isTemplated()) {
+    const Expr *Init = var->getInit();
+    if (Init && !Init->isValueDependent() &&
+        Init->isConstantInitializer(Context, /*ForRef=*/false))
+      MCS251().CheckMCS251AbsolutePointerInit(Init, Init->getExprLoc());
+  }
+
+  // WP4 A8: a weak VARIABLE definition is rejected with the actionable
+  // diagnostic; a weak declaration without storage in this TU stays
+  // accepted (matching the function rule above).
+  if (var->hasAttr<WeakAttr>() && var->isFileVarDecl() &&
+      (var->hasInit() || var->isThisDeclarationADefinition()))
+    MCS251().CheckMCS251WeakDefinition(/*IsFunction=*/false,
+                                       var->getLocation(),
+                                       var->getSourceRange());
+
   CUDA().MaybeAddConstantAttr(var);
 
   if (getLangOpts().OpenCL) {
@@ -17254,6 +17332,13 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body, bool IsInstantiation,
   if (FD && Body && Context.getTargetInfo().getTriple().getArch() ==
                         llvm::Triple::mcs251)
     checkMCS251ISRDefinition(*this, FD);
+
+  // WP4 A8: a weak function DEFINITION is rejected with the actionable
+  // diagnostic (an unused weak declaration is not a definition and stays
+  // accepted; the AsmPrinter and the linker keep their defensive checks).
+  if (FD && Body && FD->hasAttr<WeakAttr>() && !FD->isInvalidDecl())
+    MCS251().CheckMCS251WeakDefinition(/*IsFunction=*/true, FD->getLocation(),
+                                       FD->getSourceRange());
 
   if (FSI->UsesFPIntrin && FD && !FD->hasAttr<StrictFPAttr>())
     FD->addAttr(StrictFPAttr::CreateImplicit(Context));
@@ -21773,6 +21858,20 @@ void Sema::ActOnEnumBody(SourceLocation EnumLoc, SourceRange BraceRange,
 
 Decl *Sema::ActOnFileScopeAsmDecl(Expr *expr, SourceLocation StartLoc,
                                   SourceLocation EndLoc) {
+  // WP4 A9: module-level inline assembly has no assembly-text entry on this
+  // target. Reject a NON-EMPTY request at its source location; an empty
+  // string literal is not a request and keeps compiling. The IR-layer
+  // contract check rejects the module asm string as well, so direct IR
+  // input is covered too.
+  const Expr *AsmExpr = expr ? expr->IgnoreParenImpCasts() : nullptr;
+  bool Requested = true;
+  // Only a TRULY empty string literal is not a request: whitespace-only text
+  // is still text the (parser-less) streamer would receive, and the IR-layer
+  // check uses the same definition.
+  if (const auto *SL = dyn_cast_or_null<StringLiteral>(AsmExpr))
+    Requested = !SL->getString().empty();
+  if (Requested)
+    MCS251().CheckMCS251FileScopeAsm(StartLoc);
 
   FileScopeAsmDecl *New =
       FileScopeAsmDecl::Create(Context, CurContext, expr, StartLoc, EndLoc);

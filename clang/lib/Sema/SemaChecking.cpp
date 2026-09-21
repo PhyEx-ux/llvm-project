@@ -3479,10 +3479,36 @@ Sema::CheckBuiltinFunctionCall(FunctionDecl *FDecl, unsigned BuiltinID,
   case Builtin::BI__sync_swap_4:
   case Builtin::BI__sync_swap_8:
   case Builtin::BI__sync_swap_16:
+    // WP4 A4/A5/A6: the __sync_* family is an atomic operation family. The
+    // whole-family decision is taken once per FULL EXPRESSION by
+    // SemaMCS251::CheckMCS251AtomicUse, so a __sync_* call written in a
+    // not-evaluated position (an unselected _Generic association, the
+    // unconsumed __builtin_choose_expr arm) is not refused here.
     return BuiltinAtomicOverloaded(TheCallResult);
   case Builtin::BI__sync_synchronize:
+    // WP4 A6: a full memory fence is equally an atomic operation (it must
+    // not silently degrade into a no-op on a single-core target). Decided at
+    // the end of the full expression, like the rest of the family.
     Diag(TheCall->getBeginLoc(), diag::warn_atomic_implicit_seq_cst)
         << TheCall->getCallee()->getSourceRange();
+    break;
+  case Builtin::BI__atomic_is_lock_free:
+  case Builtin::BI__c11_atomic_is_lock_free:
+    // WP4 A4: the runtime lock-free QUERIES are part of the rejected family
+    // (they would need a runtime libcall the target does not provide, and no
+    // lock-free capability is claimed). The compile-time
+    // __atomic_always_lock_free is NOT: it constant-folds to false and
+    // produces no runtime artifact, so it stays a compile-time query.
+    // Decided at the end of the full expression.
+    break;
+  case Builtin::BI__c11_atomic_thread_fence:
+  case Builtin::BI__c11_atomic_signal_fence:
+  case Builtin::BI__atomic_thread_fence:
+  case Builtin::BI__atomic_signal_fence:
+  case Builtin::BI__scoped_atomic_thread_fence:
+    // WP4 A6: the fence builtins are lowered straight to IR AtomicFence in
+    // CodeGen and never pass through BuildAtomicExpr; the full-expression
+    // decision point recognises them by callee spelling.
     break;
   case Builtin::BI__builtin_nontemporal_load:
   case Builtin::BI__builtin_nontemporal_store:
@@ -5020,6 +5046,15 @@ ExprResult Sema::BuildAtomicExpr(SourceRange CallRange, SourceRange ExprRange,
                                  SourceLocation RParenLoc, MultiExprArg Args,
                                  AtomicExpr::AtomicOp Op,
                                  AtomicArgumentOrder ArgOrder) {
+  // WP4 A4/A5/A6: every atomic OPERATION is rejected on MCS251 with the
+  // unified family diagnostic. The decision is taken once per FULL EXPRESSION
+  // by SemaMCS251::CheckMCS251AtomicUse (which recognises this AtomicExpr
+  // structurally), not here: an AtomicExpr built inside a not-evaluated
+  // position -- an unselected _Generic association, the unconsumed
+  // __builtin_choose_expr arm, the untaken arm of a constant-condition
+  // conditional, a sizeof operand -- is not an operation and must stay
+  // accepted.
+
   // All the non-OpenCL operations take one of the following forms.
   // The OpenCL operations take the __c11 forms with one extra argument for
   // synchronization scope.

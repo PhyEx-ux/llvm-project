@@ -15,9 +15,18 @@
 // generic -disable-verify flag) in two phases: structural checks before any
 // optimization can erase evidence, arithmetic checks just before ISel.
 //
+// WP4 exit policy (FUNCTIONAL-GAPS-PLAN-Alice.md section 4.2): a contract
+// violation is a *predictable capability rejection*, so the error is routed
+// through report_fatal_error(..., GenCrashDiag=false), which exits with
+// status 1 and prints the plain "LLVM ERROR:" line -- no bug-report request,
+// no stack dump, no core. Both pass exits (legacy and new PM) must stay in
+// sync. Genuine internal invariant corruption elsewhere keeps the crash
+// path; this is not a repository-wide mechanical rewrite.
+//
 //===----------------------------------------------------------------------===//
 
 #include "MCS251ContractCheck.h"
+#include "MCS251GlobalInit.h"
 #include "MCS251LocalInterp.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -67,10 +76,12 @@ public:
   }
 
   // Read-only by construction: report_fatal_error on violation, never a
-  // rewrite. Every analysis is preserved.
+  // rewrite. Every analysis is preserved. WP4: the capability rejection is
+  // a normal failure -- exit(1), no crash diagnostics (see header comment).
   bool runOnModule(Module &M) override {
     if (Error Err = verifyModuleContract(M, Contract, CheckArithmetic))
-      report_fatal_error(Twine(toString(std::move(Err))));
+      report_fatal_error(Twine(toString(std::move(Err))),
+                         /*GenCrashDiag=*/false);
     return false;
   }
 
@@ -91,7 +102,8 @@ ModulePass *llvm::MCS251::createMCS251ContractCheckPass(
 PreservedAnalyses llvm::MCS251::MCS251ContractCheckPass::run(
     Module &M, ModuleAnalysisManager &) {
   if (Error Err = verifyModuleContract(M, Contract, CheckArithmetic))
-    report_fatal_error(Twine(toString(std::move(Err))));
+    report_fatal_error(Twine(toString(std::move(Err))),
+                       /*GenCrashDiag=*/false);
   return PreservedAnalyses::all();
 }
 
@@ -376,8 +388,10 @@ static Error checkUnsupportedArithmetic(const Instruction &I,
       case Instruction::FMul:
       case Instruction::FDiv:
       case Instruction::FRem:
-        return reject("f32/f64 arithmetic is not yet implemented; "
-                      "soft-float runtime is not connected");
+        return reject("this f32 operation is not in the connected f32 "
+                      "subset (the connected subset is the basic "
+                      "arithmetic/division helpers); vector and remaining "
+                      "float forms are not wired");
       case Instruction::Add:
       case Instruction::Sub:
       case Instruction::Mul:
@@ -442,9 +456,22 @@ static Error checkUnsupportedArithmetic(const Instruction &I,
       // Allow lifetime and debug intrinsics through; reject math intrinsics.
       switch (II->getIntrinsicID()) {
       default:
-        if (OperatesOnFloat)
-          return reject("f32/f64 intrinsic operation is not yet implemented; "
-                        "soft-float runtime is not connected");
+        if (OperatesOnFloat) {
+          // WP4/B2: name the operation and state the real boundary -- a
+          // basic f32 subset IS connected (add/sub/mul/div/neg helpers,
+          // conversions, compares), so the old blanket "soft-float runtime
+          // is not connected" sentence misdescribed the target. Math
+          // intrinsics such as sqrt(f32) are simply not in that subset.
+          StringRef IntrinsicName = "f32 math intrinsic";
+          if (const auto *Callee = dyn_cast<Function>(
+                  II->getCalledOperand()->stripPointerCasts()))
+            IntrinsicName = Callee->getName();
+          return reject(("the f32 intrinsic '" + Twine(IntrinsicName) +
+                         "' is not in the connected f32 subset (basic "
+                         "arithmetic, conversions and compares are "
+                         "connected; math functions such as sqrt are not)")
+                            .str());
+        }
         return reject("i64 intrinsic operation is not yet implemented; "
                       "wide-integer runtime is not connected");
       case Intrinsic::lifetime_start:
@@ -1034,7 +1061,442 @@ static Error verifyMCS251ISRStructure(const Module &M) {
   }
   return Error::success();
 }
+
+//===----------------------------------------------------------------------===//
+// WP4 default correct-failure capabilities (FUNCTIONAL-GAPS-PLAN-Alice.md
+// section 3 / section 4.1): the atomic family (A4/A5/A6), multi-argument
+// indirect calls (A7), weak definitions (A8), module asm (A9),
+// absolute-address static pointer initialization (A2), computed goto (D1)
+// and effective debug-information requests (C1) are rejected here in the
+// STRUCTURAL phase, before any optimization can erase the evidence (a
+// devirtualized indirect call or an optimized-away indirectbr must not
+// change the verdict), and again post-optimization for defense in depth.
+// On the direct-llc path this pass is the only gate. All of them are
+// predictable capability rejections: the pass exits route them through
+// report_fatal_error(..., /*GenCrashDiag=*/false) so the process fails
+// with status 1 and no crash diagnostics.
+//===----------------------------------------------------------------------===//
+
+// A4/A5/A6: one unified diagnostic family for every atomic form. The three
+// historical exits ("Cannot generate unaligned atomic load" from the DAG
+// legalizer, "Cannot select: AtomicLoadAdd" and "Cannot select:
+// AtomicFence" from ISel) aborted with a bug-report request; the family
+// replaces all of them with one sentence, the operation named, and the same
+// alternative every time. No lock-free capability is claimed.
+static Error verifyNoAtomics(const Module &M) {
+  auto AtomicReject = [](StringRef What) {
+    return reject(
+        ("C11/GNU atomic operations are not supported on this target (" +
+         Twine(What) +
+         "); volatile does not provide atomicity and no lock-free operation "
+         "is claimed; shared access must go through an independently "
+         "verified IRQ critical-section protocol")
+            .str());
+  };
+  // Known atomic-operation and atomic-query spellings. Two families:
+  //  * the compiler builtin/libcall spellings (__atomic_*, __c11_atomic_*,
+  //    __scoped_atomic_*, __sync_*), including the fence and lock-free-query
+  //    names; the queries are rejected too -- the target cannot implement
+  //    them (a lock-free answer of "false" would be a runtime libcall the
+  //    target does not provide), and no lock-free claim is made;
+  //  * the <stdatomic.h> FUNCTION names (atomic_thread_fence, ...), which are
+  //    real external declarations that a program can take the address of,
+  //    call directly, or reach with parentheses that suppress the macro.
+  // A declaration with no use is not an atomic operation (that is how the
+  // header itself is includable); a *use* is.
+  auto IsAtomicSpelling = [](StringRef N) {
+    if (N.starts_with("__sync_"))
+      return true; // every __sync_* is an operation
+    if (N.starts_with("__scoped_atomic_"))
+      return true;
+    if (N.starts_with("__atomic_"))
+      return true; // includes __atomic_fence and the lock-free queries
+    if (N.starts_with("__c11_atomic_"))
+      return true;
+    return N == "atomic_thread_fence" || N == "atomic_signal_fence" ||
+           N == "atomic_load" || N == "atomic_load_explicit" ||
+           N == "atomic_store" || N == "atomic_store_explicit" ||
+           N == "atomic_exchange" || N == "atomic_exchange_explicit" ||
+           N == "atomic_compare_exchange_strong" ||
+           N == "atomic_compare_exchange_strong_explicit" ||
+           N == "atomic_compare_exchange_weak" ||
+           N == "atomic_compare_exchange_weak_explicit" ||
+           N == "atomic_fetch_add" || N == "atomic_fetch_add_explicit" ||
+           N == "atomic_fetch_sub" || N == "atomic_fetch_sub_explicit" ||
+           N == "atomic_fetch_or" || N == "atomic_fetch_or_explicit" ||
+           N == "atomic_fetch_xor" || N == "atomic_fetch_xor_explicit" ||
+           N == "atomic_fetch_and" || N == "atomic_fetch_and_explicit" ||
+           N == "atomic_fetch_max" || N == "atomic_fetch_max_explicit" ||
+           N == "atomic_fetch_min" || N == "atomic_fetch_min_explicit" ||
+           N == "atomic_flag_test_and_set" ||
+           N == "atomic_flag_test_and_set_explicit" ||
+           N == "atomic_flag_clear" || N == "atomic_flag_clear_explicit";
+  };
+  for (const Function &F : M) {
+    if (F.isDeclaration())
+      continue;
+    for (const BasicBlock &BB : F)
+      for (const Instruction &I : BB) {
+        if (const auto *LI = dyn_cast<LoadInst>(&I)) {
+          if (LI->isAtomic())
+            return AtomicReject("atomic load");
+        } else if (const auto *SI = dyn_cast<StoreInst>(&I)) {
+          if (SI->isAtomic())
+            return AtomicReject("atomic store");
+        } else if (isa<AtomicRMWInst>(I)) {
+          return AtomicReject("atomic read-modify-write");
+        } else if (isa<AtomicCmpXchgInst>(I)) {
+          return AtomicReject("atomic compare-exchange");
+        } else if (isa<FenceInst>(&I)) {
+          return AtomicReject("atomic fence");
+        } else if (const auto *CB = dyn_cast<CallBase>(&I)) {
+          // Atomic builtins that would become runtime calls never
+          // materialize an atomic IR opcode; catch the spellings by name so
+          // the family cannot be bypassed through the library form.
+          const Function *Callee = dyn_cast<Function>(
+              CB->getCalledOperand()->stripPointerCasts());
+          if (Callee && IsAtomicSpelling(Callee->getName()))
+            return AtomicReject(("atomic builtin '" + Twine(Callee->getName()) +
+                                 "' lowered to a runtime call")
+                                    .str());
+        }
+      }
+  }
+
+  // A known atomic spelling that is merely DECLARED is not an operation (that
+  // is how <stdatomic.h> stays includable), but any real reference to it is:
+  // this catches `p = atomic_thread_fence; p(...)`, parenthesized spellings
+  // that suppress the macro, and hand-written IR that calls or exports the
+  // name indirectly, where the call site itself has no resolvable callee.
+  auto IsRegistrationUse = [](const User *U) -> bool {
+    if (isa<MetadataAsValue>(U))
+      return true; // llvm.dbg.* / debug records only
+    if (const auto *GV = dyn_cast<GlobalVariable>(U))
+      return GV->getName() == "llvm.used" ||
+             GV->getName() == "llvm.compiler.used";
+    if (isa<ConstantExpr>(U) || isa<ConstantAggregate>(U))
+      return false; // flows somewhere real: treat as a use
+    if (isa<GlobalAlias>(U) || isa<GlobalIFunc>(U))
+      return false;
+    return false; // an instruction use
+  };
+  for (const Function &F : M) {
+    if (!IsAtomicSpelling(F.getName()))
+      continue;
+    for (const User *U : F.users())
+      if (!IsRegistrationUse(U))
+        return AtomicReject(("atomic builtin '" + Twine(F.getName()) +
+                             "' referenced by code (direct call, address "
+                             "taken, or exported)")
+                                .str());
+  }
+  return Error::success();
+}
+
+// A7 (EC1): the static parameter slots that carry arguments 2..N are named
+// after the callee symbol; an indirect callee owns no symbol, so a
+// multi-argument indirect call has no ABI. Zero/one-argument indirect calls
+// use the register channel only and stay supported. This runs structurally
+// (pre-optimization): whether the optimizer devirtualizes a particular call
+// site must not decide whether the source-level construct is accepted.
+static Error verifyNoMultiArgIndirectCalls(const Module &M) {
+  for (const Function &F : M) {
+    if (F.isDeclaration())
+      continue;
+    for (const BasicBlock &BB : F)
+      for (const Instruction &I : BB) {
+        const auto *CB = dyn_cast<CallBase>(&I);
+        if (!CB || CB->arg_size() < 2)
+          continue;
+        const Value *Callee = CB->getCalledOperand()->stripPointerCasts();
+        if (isa<Function>(Callee))
+          continue;
+        return reject("multi-argument indirect calls are not supported "
+                      "(static parameter slots require a named callee); call "
+                      "the function directly, or pass at most one argument "
+                      "through the function pointer");
+      }
+  }
+  return Error::success();
+}
+
+// A8: unsupported weak DEFINITIONS are rejected at compile time instead of
+// aborting in the AsmPrinter's parameter-slot walk. An unused weak
+// declaration is not a definition and stays accepted. (The linker keeps its
+// own defensive weak/common rejection; this is not a removal of that.)
+static Error verifyNoWeakDefinitions(const Module &M) {
+  for (const GlobalValue &GV : M.global_values()) {
+    if (!GV.hasWeakAnyLinkage() && !GV.hasWeakODRLinkage())
+      continue;
+    if (const auto *F = dyn_cast<Function>(&GV)) {
+      if (!F->isDeclaration())
+        return reject("weak function definitions are not supported: the "
+                      "current linking model implements no weak resolution "
+                      "and static parameter slots require a local/external "
+                      "owner; provide one strong definition (an unused weak "
+                      "declaration is accepted)");
+    } else if (const auto *G = dyn_cast<GlobalVariable>(&GV)) {
+      if (G->hasInitializer())
+        return reject("weak global definitions are not supported: the "
+                      "current linking model implements no weak resolution; "
+                      "provide one strong definition (an unused weak "
+                      "declaration is accepted)");
+    } else if (const auto *A = dyn_cast<GlobalAlias>(&GV)) {
+      // A weak alias is a weak DEFINITION of the alias symbol: it publishes a
+      // second name with weak resolution semantics, which the current linking
+      // model does not implement (the alias itself is also unregistered in
+      // the object identity). Reject it here instead of letting the emitter's
+      // identity gate abort.
+      const GlobalValue *Aliasee = A->getAliaseeObject();
+      bool AliaseeDefined =
+          Aliasee && (isa<GlobalAlias>(Aliasee) ||
+                      (isa<Function>(Aliasee) && !Aliasee->isDeclaration()) ||
+                      (isa<GlobalVariable>(Aliasee) &&
+                       cast<GlobalVariable>(Aliasee)->hasInitializer()));
+      if (AliaseeDefined)
+        return reject("weak alias definitions are not supported: the current "
+                      "linking model implements no weak resolution; provide "
+                      "one strong definition (an unused weak declaration is "
+                      "accepted)");
+    }
+  }
+  return Error::success();
+}
+
+// A9: no target assembly parser exists, so the object writers have no
+// assembly-text entry. A non-empty module asm string must fail here instead
+// of aborting in the streamer ("Inline asm not supported by this streamer").
+static Error verifyNoModuleAsm(const Module &M) {
+  for (const Module::GlobalAsmFragment &Frag : M.getModuleInlineAsm())
+    // Only a TRULY empty fragment is not a request: whitespace-only text is
+    // still text the (parser-less) streamer would receive, and the Sema gate
+    // uses the same definition.
+    if (!Frag.Asm.empty())
+      return reject("module-level inline assembly is not supported: this "
+                    "target has no assembly-text entry in its object writers "
+                    "(no target assembly parser); write the operation in C "
+                    "or link a prebuilt object instead");
+  return Error::success();
+}
+
+// D1: computed goto. Reject both the indirect branch instruction and
+// BlockAddress constants wherever they appear (instruction operands and
+// global initializer trees -- t18 stores &&label results in a static
+// table). This runs structurally: at -O0 the IR keeps indirectbr, at -O1+
+// the optimizer removes it, and acceptance must not depend on that.
+static bool containsBlockAddress(const Constant *C,
+                                 SmallPtrSetImpl<const Constant *> &Seen) {
+  if (!Seen.insert(C).second)
+    return false;
+  if (isa<BlockAddress>(C))
+    return true;
+  for (const Use &Op : C->operands())
+    if (const auto *Child = dyn_cast<Constant>(Op.get()))
+      if (containsBlockAddress(Child, Seen))
+        return true;
+  return false;
+}
+
+static Error verifyNoComputedGoto(const Module &M) {
+  SmallPtrSet<const Constant *, 32> Seen;
+  for (const GlobalVariable &GV : M.globals())
+    if (GV.hasInitializer() &&
+        containsBlockAddress(GV.getInitializer(), Seen))
+      return reject("computed goto is not supported: an address-of-label "
+                    "constant ('blockaddress') appears in a static "
+                    "initializer; use a switch statement");
+  for (const Function &F : M) {
+    if (F.isDeclaration())
+      continue;
+    for (const BasicBlock &BB : F)
+      for (const Instruction &I : BB) {
+        if (isa<IndirectBrInst>(&I))
+          return reject("computed goto is not supported: 'indirectbr' has no "
+                        "ABI on this target; use a switch statement");
+        Seen.clear();
+        for (const Use &Op : I.operands())
+          if (const auto *C = dyn_cast<Constant>(Op.get()))
+            if (containsBlockAddress(C, Seen))
+              return reject("computed goto is not supported: an "
+                            "address-of-label constant ('blockaddress') is "
+                            "used as a value; use a switch statement");
+      }
+  }
+  return Error::success();
+}
+
+// A2: absolute-address pointer initialization. The pointer-leaf whitelist
+// itself lives in the shared MCS251GlobalInit component (the same predicate
+// the emitter consumes, so the two cannot drift); this early check uses its
+// classification to name the exact boundary before emission. Walking every
+// pointer-typed constant in the initializer tree (not just aggregate leaves)
+// keeps nested spellings covered, and a pointer-typed leaf that classifies as
+// an absolute address is rejected with the actionable message. Keepalive
+// containers are exempt exactly as in the emitter.
+static bool findAbsoluteAddressLeaf(
+    const Constant *C, const DataLayout &DL,
+    SmallPtrSetImpl<const Constant *> &Seen) {
+  if (!Seen.insert(C).second)
+    return false;
+  if (C->getType()->isPointerTy()) {
+    const GlobalValue *Base = nullptr;
+    int64_t Addend = 0;
+    if (MCS251::GlobalInit::classifyPointerLeaf(C, DL, Base, Addend) ==
+        MCS251::GlobalInit::PointerLeafKind::AbsoluteAddress)
+      return true;
+  }
+  for (const Use &Op : C->operands())
+    if (const auto *Child = dyn_cast<Constant>(Op.get()))
+      if (findAbsoluteAddressLeaf(Child, DL, Seen))
+        return true;
+  return false;
+}
+
+static Error verifyNoAbsolutePointerInit(const Module &M) {
+  const DataLayout &DL = M.getDataLayout();
+  SmallPtrSet<const Constant *, 32> Seen;
+  for (const GlobalVariable &GV : M.globals()) {
+    if (!GV.hasInitializer())
+      continue;
+    // The standard keepalive containers (llvm.used / llvm.compiler.used,
+    // appending linkage, array-of-pointers initializer, "llvm.metadata"
+    // section) are registration data, not emitted storage: the emitter
+    // exempts them structurally and a malformed MEMBER is judged by the
+    // object-identity gate, not by this initializer walk.
+    if ((GV.getName() == "llvm.used" || GV.getName() == "llvm.compiler.used") &&
+        GV.hasAppendingLinkage() && GV.hasSection() &&
+        GV.getSection() == "llvm.metadata" &&
+        isa<ArrayType>(GV.getInitializer()->getType()) &&
+        cast<ArrayType>(GV.getInitializer()->getType())
+            ->getElementType()
+            ->isPointerTy())
+      continue;
+    Seen.clear();
+    if (!findAbsoluteAddressLeaf(GV.getInitializer(), DL, Seen))
+      continue;
+    return reject(("global '" + Twine(GV.getName()) +
+                   "': absolute-address (integer-to-pointer cast) pointer "
+                   "initialization is not supported; the supported static "
+                   "pointer forms are null and '&symbol' with a constant "
+                   "offset; access fixed device addresses through a macro "
+                   "such as '#define PB (*(volatile uint8_t *)0xFF00)'")
+                      .str());
+  }
+  return Error::success();
+}
+
+// C1: an EFFECTIVE source-level debug-information request must fail instead
+// of being silently dropped (SupportsDebugInformation=false means the object
+// writers emit zero debug sections today). The distinction that matters is
+// REQUEST vs internal location tracking:
+//   * a compile unit whose emission kind is anything but NoDebug is a
+//     source-debug request (FullDebug for -g, LineTablesOnly for
+//     -gline-tables-only);
+//   * debug records and the legacy dbg intrinsics carry variable/expression
+//     debug information and are always a request;
+//   * clang's `LocTrackingOnly` state (used for -Rpass / -fstack-usage on a
+//     target without debug support) produces exactly a compile unit with
+//     emissionKind NoDebug plus subprograms and DILocations, and NO records
+//     or dbg intrinsics. That is not a debug request -- it is how source
+//     locations travel to the optimizer's remarks -- and must keep working.
+// Without a compile unit at all, a subprogram or an instruction location is
+// not a shape clang produces, so it is treated as a request (conservative;
+// reachable only through -disable-verify hand-written IR).
+static Error verifyNoDebugInfo(const Module &M) {
+  auto DebugReject = [](StringRef What) {
+    return reject(
+        ("a debug information request is not supported on this target (" +
+         Twine(What) +
+         "): source-level debug info is not emitted; rebuild without -g; "
+         "the linker map and symbol tables remain available but are not "
+         "source-level debug information")
+            .str());
+  };
+  // NOTE: Module::debug_compile_units() deliberately SKIPS NoDebug units, so
+  // it cannot distinguish "no compile unit at all" from "location-tracking
+  // only" (LocTrackingOnly emits a NoDebug CU plus subprograms/locations).
+  // Walk the named node directly.
+  NamedMDNode *CUs = M.getNamedMetadata("llvm.dbg.cu");
+  const bool HasCompileUnit = CUs && CUs->getNumOperands() != 0;
+  if (CUs)
+    for (const MDNode *N : CUs->operands()) {
+      const auto *CU = dyn_cast_or_null<DICompileUnit>(N);
+      // A malformed entry is treated as a request (fail closed).
+      if (!CU || CU->getEmissionKind() != DICompileUnit::NoDebug)
+        return DebugReject("compile unit");
+    }
+  for (const Function &F : M) {
+    if (!HasCompileUnit && F.getSubprogram())
+      return DebugReject("subprogram");
+    if (F.isDeclaration())
+      continue;
+    for (const BasicBlock &BB : F)
+      for (const Instruction &I : BB) {
+        if (!HasCompileUnit && I.getDebugLoc())
+          return DebugReject("instruction location");
+        // Debug records and the legacy dbg intrinsics are never produced by
+        // clang's location-tracking-only mode.
+        if (I.hasDbgRecords())
+          return DebugReject("debug record");
+        if (const auto *CB = dyn_cast<CallBase>(&I)) {
+          const Function *Callee =
+              dyn_cast<Function>(CB->getCalledOperand()->stripPointerCasts());
+          if (Callee && Callee->getName().starts_with("llvm.dbg."))
+            return DebugReject("debug intrinsic");
+        }
+      }
+  }
+  return Error::success();
+}
 } // namespace
+
+namespace {
+// WP4: the deferral flag and the clang-path entry point live in the
+// always-linked TargetParser library (llvm/lib/TargetParser/
+// MCS251TargetParser.cpp), because clang's BackendUtil references them
+// unconditionally and a build without the MCS251 backend must still link.
+// This library contributes the actual verdict by registering its checker.
+//
+// The checker: the same verdict as verifyModuleContract, message instead of
+// Error.
+std::string contractCheckMessage(const Module &M, bool CheckArithmetic) {
+  if (Error Err = verifyModuleContract(M, std::nullopt, CheckArithmetic))
+    return toString(std::move(Err));
+  return std::string();
+}
+
+/// Static initializer: install the checker when this library is linked in.
+/// Idempotent, so a configuration that pulls the library in twice is safe.
+struct ContractCheckerInstaller {
+  ContractCheckerInstaller() {
+    if (!llvm::MCS251::hasModuleContractChecker())
+      llvm::MCS251::registerModuleContractChecker(&contractCheckMessage);
+  }
+} Installer;
+} // namespace
+
+// WP4: the default correct-failure capability subset, shared by the full
+// contract check and by the AsmPrinter's ordering guard (see the header).
+Error llvm::MCS251::verifyModuleCapabilities(const Module &M) {
+  Triple TT(M.getTargetTriple());
+  if (TT.getArch() != Triple::mcs251)
+    return Error::success();
+  if (Error Err = verifyNoAtomics(M))
+    return Err;
+  if (Error Err = verifyNoMultiArgIndirectCalls(M))
+    return Err;
+  if (Error Err = verifyNoWeakDefinitions(M))
+    return Err;
+  if (Error Err = verifyNoModuleAsm(M))
+    return Err;
+  if (Error Err = verifyNoComputedGoto(M))
+    return Err;
+  if (Error Err = verifyNoAbsolutePointerInit(M))
+    return Err;
+  if (Error Err = verifyNoDebugInfo(M))
+    return Err;
+  return Error::success();
+}
 
 Error llvm::MCS251::verifyModuleContract(const Module &M,
                                          const std::optional<MemoryContract>
@@ -1090,6 +1552,14 @@ Error llvm::MCS251::verifyModuleContract(const Module &M,
   if (Error Err = verifyMCS251SymbolicBitIntrinsics(M, ProgramAS, ValidObjCalls))
     return Err;
   if (Error Err = verifyMCS251BitObjectUses(M, ValidObjCalls))
+    return Err;
+
+  // WP4 default correct-failure capabilities. Structural on every invocation
+  // of this pass (pre- and post-optimization alike), so neither an optimizer
+  // nor a direct-llc entry can change a verdict by erasing evidence. Each
+  // rejection names the construct and the alternative; the pass exits route
+  // them to a clean status-1 failure.
+  if (Error Err = verifyModuleCapabilities(M))
     return Err;
 
   SmallPtrSet<const Type *, 32> Seen;

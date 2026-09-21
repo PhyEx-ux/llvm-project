@@ -1939,5 +1939,11 @@ def err_mcs251_keil_interrupt_requires_function : Error<
   "interrupt suffix requires a function declarator">;
 def err_mcs251_keil_using_unsupported : Error<
   "using is not supported for MCS251 interrupt functions">;
+// WP4 B4: recognized-but-unsupported Keil C dialect storage words and
+// calling suffixes. The text is deliberately distinct from a generic parse
+// error: the spelling IS recognized, the semantics are not implemented.
+def err_mcs251_dialect_unsupported : Error<
+  "'%0' is a recognized MCS251 (Keil C) dialect spelling, but the feature it "
+  "denotes is not supported by this toolchain">;
 
 } // end of Parser diagnostics

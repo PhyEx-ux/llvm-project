@@ -39,6 +39,8 @@
 
 #include "MCS251.h"
 #include "MCS251BitObject.h"
+#include "MCS251ContractCheck.h"
+#include "MCS251GlobalInit.h"
 #include "MCS251HelperABI.h"
 #include "MCS251InstrInfo.h"
 #include "MCS251MCInstLower.h"
@@ -369,76 +371,17 @@ class MCS251AsmPrinter final : public AsmPrinter {
   //===--------------------------------------------------------------------===//
   // X3 placement support: pointer initializer leaves and the AS3/AS4
   // global-storage v1 representability walk.
+  //
+  // WP4: the support decision itself now lives in the shared component
+  // (MCS251GlobalInit.h) so the final emitter here and the early structural
+  // contract check consume one whitelist; these thin wrappers keep the
+  // historical member-call spelling at the emission sites.
   //===--------------------------------------------------------------------===//
 
-  // The supported pointer leaf: exactly &global (a GlobalVariable or Function
-  // in one of the placed storage address spaces 0/3/4) with one folded
-  // constant addend -- either the legacy ConstantExpr Add form or, since
-  // legal IR expresses pointer-plus-constant as a GEP, a getelementptr whose
-  // base is a GlobalVariable and whose indices all fold to constants under
-  // the DataLayout -- or a null pointer (a fully defined zero image that
-  // serializes no capability). GEP null, non-constant indices, inttoptr,
-  // ptrtoint, addrspacecast and all other expression algebra stay rejected,
-  // in the style of the existing conservative support checks. \return the
-  // base symbol and the folded addend on success.
   static bool isSupportedPointerLeaf(const Constant *C, const DataLayout &DL,
                                      const GlobalValue *&Base,
                                      int64_t &Addend) {
-    Base = nullptr;
-    Addend = 0;
-    if (isa<ConstantPointerNull>(C))
-      return DL.getTypeStoreSize(C->getType()) == 4;
-    const Value *BaseV = nullptr;
-    if (isa<GlobalValue>(C)) {
-      BaseV = C;
-    } else if (const auto *CE = dyn_cast<ConstantExpr>(C);
-               CE && CE->getOpcode() == Instruction::Add &&
-               CE->getNumOperands() == 2) {
-      const Value *L = CE->getOperand(0);
-      const Value *R = CE->getOperand(1);
-      if (isa<GlobalValue>(L) && isa<ConstantInt>(R)) {
-        BaseV = L;
-        Addend = cast<ConstantInt>(R)->getSExtValue();
-      } else if (isa<ConstantInt>(L) && isa<GlobalValue>(R)) {
-        BaseV = R;
-        Addend = cast<ConstantInt>(L)->getSExtValue();
-      }
-    } else if (const auto *GEP = dyn_cast<GEPOperator>(C)) {
-      // X3-R4: the sanctioned form of "&global + constant". Only a GEP
-      // directly over a GlobalVariable with fully constant indices folds; a
-      // GEP over null, over any cast (which could launder an address space),
-      // or with a non-constant index is not an object identity and keeps
-      // the rejection. The folded offset must stay inside the 24-bit
-      // effective-address discipline (any base plus such an addend that
-      // would resolve into [0,0xffffff] needs an addend in
-      // [-0xffffff,+0xffffff]; anything wider can never link legally, and
-      // the linker's pointer-interval gate re-validates the final value).
-      BaseV = GEP->getPointerOperand();
-      if (!isa<GlobalVariable>(BaseV))
-        return false;
-      const unsigned AS = GEP->getPointerAddressSpace();
-      APInt Offset(DL.getIndexSizeInBits(AS), 0);
-      if (!GEP->accumulateConstantOffset(DL, Offset))
-        return false; // non-constant index: a runtime pointer, not a leaf
-      if (!Offset.isSignedIntN(32) ||
-          Offset.sgt(0xffffff) || Offset.slt(int64_t(-0xffffff)))
-        return false; // outside the 24-bit effective-address discipline
-      Addend = Offset.getSExtValue();
-    }
-    if (!BaseV)
-      return false;
-    if (auto *F = dyn_cast<Function>(BaseV)) {
-      Base = F;
-    } else if (auto *GV = dyn_cast<GlobalVariable>(BaseV)) {
-      unsigned AS = GV->getAddressSpace();
-      if (AS != 0 && AS != 3 && AS != 4)
-        return false; // target object has no placed storage class
-      Base = GV;
-    } else {
-      return false;
-    }
-    // The 24-bit relocation channel needs the full 32/8 pointer container.
-    return DL.getTypeStoreSize(C->getType()) == 4;
+    return MCS251::GlobalInit::isSupportedPointerLeaf(C, DL, Base, Addend);
   }
 
   // v1 representability of a global INITIALIZER (X3). Admits aggregates of
@@ -452,38 +395,7 @@ class MCS251AsmPrinter final : public AsmPrinter {
   // seen-set so a constant rejected by the first walk can never look
   // "already verified" here.
   static bool hasV1PlacementInitializer(const Constant *C, const DataLayout &DL) {
-    SmallPtrSet<const Constant *, 32> Seen;
-    return hasV1PlacementInitializerImpl(C, DL, Seen);
-  }
-
-  static bool hasV1PlacementInitializerImpl(
-      const Constant *C, const DataLayout &DL,
-      SmallPtrSetImpl<const Constant *> &Seen) {
-    if (!Seen.insert(C).second)
-      return true;
-    if (isa<ConstantAggregateZero>(C) || isa<ConstantInt>(C))
-      return true;
-    Type *Ty = C->getType();
-    if (isa<PointerType>(Ty)) {
-      const GlobalValue *Base;
-      int64_t Addend;
-      return isSupportedPointerLeaf(C, DL, Base, Addend);
-    }
-    unsigned Elements = 0;
-    if (auto *AT = dyn_cast<ArrayType>(Ty))
-      Elements = AT->getNumElements();
-    else if (auto *ST = dyn_cast<StructType>(Ty))
-      Elements = ST->isOpaque() ? 0 : ST->getNumElements();
-    else
-      return false; // casts, ptrtoint, undef, ...: not an emittable leaf
-    if (!Elements)
-      return false;
-    for (unsigned I = 0; I != Elements; ++I) {
-      const Constant *Element = C->getAggregateElement(I);
-      if (!Element || !hasV1PlacementInitializerImpl(Element, DL, Seen))
-        return false;
-    }
-    return true;
+    return MCS251::GlobalInit::hasV1PlacementInitializer(C, DL);
   }
 
   //===--------------------------------------------------------------------===//
@@ -1029,55 +941,18 @@ class MCS251AsmPrinter final : public AsmPrinter {
       OutStreamer->emitRawText(Text);
   }
 
+  // WP4: both halves of the static-storage support decision (type whitelist
+  // and initializer whitelist, mutable and read-only variants) moved to the
+  // shared MCS251GlobalInit component; the AsmPrinter keeps thin wrappers so
+  // the emission sites keep their historical spelling. The comment blocks
+  // describing the accepted shapes moved with the bodies.
   static bool isSupportedMutableType(Type *Ty, const DataLayout &DL) {
-    if (Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32))
-      return true;
-    if (auto *PT = dyn_cast<PointerType>(Ty))
-      // X3: pointer leaves are supported in 4-byte containers only -- the
-      // initializer channel writes a big-endian 32-bit container whose low
-      // 24 bits are the canonical address (zero most-significant byte at
-      // container offset 0, 3-byte R_MCS251_24 field at offsets 1..3; the
-      // 32/8 pointer ABI; the 16-bit contracts keep rejecting).
-      return DL.getTypeStoreSize(PT) == 4;
-    if (auto *AT = dyn_cast<ArrayType>(Ty)) {
-      return AT->getNumElements() &&
-             isSupportedMutableType(AT->getElementType(), DL);
-    }
-    if (auto *ST = dyn_cast<StructType>(Ty)) {
-      if (ST->isOpaque() || ST->getNumElements() == 0)
-        return false;
-      return llvm::all_of(ST->elements(), [&](Type *E) {
-        return isSupportedMutableType(E, DL);
-      });
-    }
-    return false;
+    return MCS251::GlobalInit::isSupportedMutableType(Ty, DL);
   }
 
   static bool isSupportedMutableInitializer(const Constant *C,
                                             const DataLayout &DL) {
-    Type *Ty = C->getType();
-    if (!isSupportedMutableType(Ty, DL))
-      return false;
-    if (isa<ConstantAggregateZero>(C))
-      return true;
-    if (isa<ConstantInt>(C))
-      return true;
-    if (isa<PointerType>(Ty)) {
-      const GlobalValue *Base;
-      int64_t Addend;
-      return isSupportedPointerLeaf(C, DL, Base, Addend);
-    }
-    if (!isa<ArrayType>(Ty) && !isa<StructType>(Ty))
-      return false;
-    unsigned Elements = Ty->isArrayTy()
-                            ? cast<ArrayType>(Ty)->getNumElements()
-                            : cast<StructType>(Ty)->getNumElements();
-    for (unsigned I = 0; I != Elements; ++I) {
-      const Constant *Element = C->getAggregateElement(I);
-      if (!Element || !isSupportedMutableInitializer(Element, DL))
-        return false;
-    }
-    return true;
+    return MCS251::GlobalInit::isSupportedMutableInitializer(C, DL);
   }
 
   void emitInitializerZeros(uint64_t Count) {
@@ -1232,80 +1107,20 @@ class MCS251AsmPrinter final : public AsmPrinter {
   // definitions become a zero image).  The AS4-AGGREGATE slice additionally
   // accepts struct aggregates on the AllowStructs (AS4) call site only: the
   // gate keeps the isSupportedMutableInitializer shape -- recursive type
-  // qualification first, then the value-shape dispatch -- so a zero image,
-  // whole-item or member at any depth, walks the same recursive type check
-  // as a nonzero form and the zero image of an empty/opaque struct is
-  // rejected here instead of leaking through a zero early-exit.  With
-  // AllowStructs=false (the frozen AS0 path) the accepted set and the
-  // caller's rejection text are unchanged.  Undef elements and all other
-  // initializer expression relocations are rejected here and reported by
-  // the caller's policy message.
-  //
-  // Type-qualification half: the isSupportedMutableType mirror, with the
-  // struct clause gated by AllowStructs (packed vs. non-packed does not
-  // affect the decision; packing is a layout attribute over an isomorphic
-  // type tree).
+  // qualification first, then the value-shape dispatch.  Undef elements and
+  // all other initializer expression relocations are rejected here and
+  // reported by the caller's policy message.  (WP4: the bodies live in the
+  // shared MCS251GlobalInit component.)
   static bool isSupportedROType(Type *Ty, const DataLayout &DL,
                                 bool AllowStructs) {
-    if (Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32))
-      return true;
-    if (auto *PT = dyn_cast<PointerType>(Ty))
-      return DL.getTypeStoreSize(PT) == 4;
-    if (auto *AT = dyn_cast<ArrayType>(Ty))
-      return AT->getNumElements() &&
-             isSupportedROType(AT->getElementType(), DL, AllowStructs);
-    if (AllowStructs)
-      if (auto *ST = dyn_cast<StructType>(Ty)) {
-        if (ST->isOpaque() || ST->getNumElements() == 0)
-          return false;
-        return llvm::all_of(ST->elements(), [&](Type *E) {
-          return isSupportedROType(E, DL, AllowStructs);
-        });
-      }
-    return false;
+    return MCS251::GlobalInit::isSupportedROType(Ty, DL, AllowStructs);
   }
 
   static bool isSupportedROInitializer(const Constant *C, const DataLayout &DL,
                                        bool AllowZeroImage,
                                        bool AllowStructs) {
-    Type *Ty = C->getType();
-    // Two halves, in the isSupportedMutableInitializer order (design
-    // AS4-AGGREGATE-INIT-DESIGN 6A.2): type qualification first, then the
-    // value dispatch -- the zero image is never exempt from the type check.
-    if (!isSupportedROType(Ty, DL, AllowStructs))
-      return false;
-    if (isa<ConstantInt>(C))
-      return true;
-    if (isa<ConstantAggregateZero>(C))
-      return AllowZeroImage;
-    if (isa<PointerType>(Ty)) {
-      const GlobalValue *Base;
-      int64_t Addend;
-      return isSupportedPointerLeaf(C, DL, Base, Addend);
-    }
-    if (auto *AT = dyn_cast<ArrayType>(Ty)) {
-      if (!isa<ConstantDataArray>(C) && !isa<ConstantArray>(C))
-        return false;
-      for (unsigned I = 0; I != AT->getNumElements(); ++I) {
-        const Constant *Element = C->getAggregateElement(I);
-        if (!Element || !isSupportedROInitializer(Element, DL, AllowZeroImage,
-                                                  AllowStructs))
-          return false;
-      }
-      return true;
-    }
-    if (AllowStructs)
-      if (auto *ST = dyn_cast<StructType>(Ty)) {
-        for (unsigned I = 0; I != ST->getNumElements(); ++I) {
-          const Constant *Element = C->getAggregateElement(I);
-          if (!Element || !isSupportedROInitializer(Element, DL,
-                                                    AllowZeroImage,
-                                                    AllowStructs))
-            return false;
-        }
-        return true;
-      }
-    return false;
+    return MCS251::GlobalInit::isSupportedROInitializer(C, DL, AllowZeroImage,
+                                                        AllowStructs);
   }
 
   // Emits the CSEG byte image of a read-only initializer: scalars in the
@@ -1922,8 +1737,12 @@ public:
     if (F.arg_size() < 2 && !F.isVarArg())
       return;
     if (!F.hasLocalLinkage() && !F.hasExternalLinkage())
+      // WP4: predictable capability rejection (A8 weak definitions are
+      // rejected earlier by the structural contract check) -- clean exit(1),
+      // no crash diagnostics. This stays as the emitter-side defense.
       report_fatal_error("MCS251: static parameter slots require local or "
-                         "external function linkage");
+                         "external function linkage",
+                         /*GenCrashDiag=*/false);
     // SDCC overlays leaf functions only. Non-leaf slots must survive nested
     // calls, including calls into independently compiled SDCC modules.
     bool Leaf = true;
@@ -2865,6 +2684,25 @@ public:
   }
 
   bool doInitialization(Module &M) override {
+    // WP4 ordering guard: in the legacy pass manager every doInitialization
+    // hook of the pipeline runs BEFORE any runOnModule, so this entry (and
+    // the base implementation's module-asm emission) executes ahead of the
+    // contract-check passes regardless of the schedule. Run the WP4
+    // capability subset (atomics, multi-argument indirect calls, weak
+    // definitions, module asm, computed goto, absolute-address static
+    // pointer initialization, debug information) first, with the same clean
+    // exit(1) routing as the pass exits, so those capabilities are diagnosed
+    // with their actionable messages instead of being preempted by the
+    // identity classification below or by the generic "Inline asm not
+    // supported by this streamer". Only the WP4 subset runs here: the
+    // historical bit-object / ISR / address-space checks keep their
+    // established sites and their MIR-entry behavior. The check is read-only
+    // and idempotent; on the clang path it re-verifies a module the
+    // pipeline-start pass has already judged. The arithmetic half stays in
+    // the passes (it must run post-optimization).
+    if (Error Err = MCS251::verifyModuleCapabilities(M))
+      report_fatal_error(Twine(toString(std::move(Err))),
+                         /*GenCrashDiag=*/false);
     // Run the identity classification *before* the base implementation: an
     // ELF object under a v2 contract must be armed for the v2 identity
     // (EFlagsV2 installed on the ELF writer) before any section or identity

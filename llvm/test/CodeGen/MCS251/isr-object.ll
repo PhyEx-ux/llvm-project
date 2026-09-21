@@ -63,7 +63,7 @@
 ; Verifier; -start-before=mcs251-asm-printer with a MIR input starts past
 ; ContractCheck), so removing either layer's own slot re-check makes the
 ; corresponding RUN pass an invalid slot through and fail.
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob.mir > %t/ap-oob.gen.mir
 ; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ;
@@ -78,19 +78,19 @@
 ; the bare AsmPrinter text below): none is caught earlier by the .ll or
 ; .mir attribute parsers, so none of these RUNs depends on the disabled
 ; Verifier.
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-res81.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-res100.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-res13.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-sys14.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-empty.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-leadzero.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-plus45.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-minus0.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-leadspace.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-trailspace.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-junk4x5.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-alpha.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-overflow40.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-res81.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-res100.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-res13.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-sys14.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-empty.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-leadzero.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-plus45.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-minus0.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-leadspace.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-trailspace.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-junk4x5.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-alpha.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-overflow40.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-res81.mir > %t/ap-oob-res81.gen.mir
 ; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-res81.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-res100.mir > %t/ap-oob-res100.gen.mir

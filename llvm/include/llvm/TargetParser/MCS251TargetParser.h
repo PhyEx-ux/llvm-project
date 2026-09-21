@@ -12,6 +12,7 @@
 #include <string>
 
 namespace llvm {
+class Module;
 namespace MCS251 {
 
 enum class ASLayoutVersion : uint8_t { Compatibility = 1, V2 = 2 };
@@ -77,6 +78,59 @@ bool isSupportedLayout(StringRef DataLayout);
 
 /// Return the canonical compatibility layout used by Triple::computeDataLayout.
 StringRef getCompatibilityDataLayout();
+
+//===----------------------------------------------------------------------===//
+// WP4: the clang backend's contract-check entry points.
+//
+// clang/lib/CodeGen/BackendUtil.cpp drives the MCS-251 contract check itself
+// (so a deliberate capability rejection is reported through clang's
+// DiagnosticsEngine instead of report_fatal_error), and it does so
+// UNCONDITIONALLY: the call is compiled in whatever LLVM_TARGETS_TO_BUILD
+// says, and the decision to act on it is a runtime triple test
+// (`TM->getTargetTriple().getArch() == Triple::mcs251`).
+//
+// The implementations live in the MCS251 target library, which a build
+// without the MCS251 backend does not link. The declarations therefore live
+// here, in the always-linked TargetParser library, and the definitions are
+// split accordingly:
+//   * the deferral flag is pure state with no target dependency -- it is
+//     defined here, so both sides resolve it in every configuration;
+//   * the module check needs the target's contract-check implementation --
+//     it is reached through a hook the MCS251 target library registers for
+//     itself, and this library's entry point is a safe no-op when no checker
+//     is registered.
+// The alternative -- linking every clang build against MCS251CodeGen -- would
+// add a link dependency on a target the configuration does not contain.
+//===----------------------------------------------------------------------===//
+
+/// WP4: set/read the "the clang backend owns the contract verdict" deferral.
+/// While set, the MCS-251 target machine mounts no contract-check passes, so
+/// the backend's own pre-optimization and pre-codegen checks are the only
+/// ones that run. Process-global on purpose: one cc1 compiles one module per
+/// process and the flag is set/cleared around the pipeline; llc never sets it.
+bool setContractCheckDeferred(bool Deferred);
+bool isContractCheckDeferred();
+
+/// The module-contract checker's signature. Returns a printable message
+/// (empty when the module satisfies the contract).
+using ModuleContractCheckerFn = std::string (*)(const Module &M,
+                                                bool CheckArithmetic);
+
+/// Install the checker. Called by the MCS251 target library for its own
+/// build; a build without that library never calls it.
+void registerModuleContractChecker(ModuleContractCheckerFn Fn);
+
+/// True when a checker has been registered (i.e. the MCS251 backend is part
+/// of this build).
+bool hasModuleContractChecker();
+
+/// WP4 clang-path entry point: the same verdict as the target's own module
+/// contract check, but returning a printable message (empty on success)
+/// instead of an Error. Returns an empty string when no checker is
+/// registered: a build without the MCS251 backend cannot reach the call site
+/// with an MCS-251 target machine anyway (there is no such target to create),
+/// so "no verdict" is never a silent acceptance of a real module.
+std::string verifyModuleContractMessage(const Module &M, bool CheckArithmetic);
 
 } // namespace MCS251
 } // namespace llvm

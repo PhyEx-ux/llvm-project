@@ -1,20 +1,20 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/f64-arith.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/f64-arith.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/f64-neg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/f64-neg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/f64-cmp.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/f64-cmp.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/math.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=MATH
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/math.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=MATH
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/wide-int-to-float.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/wide-int-to-float.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/float-to-wide-int.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/float-to-wide-int.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/f64-to-f32.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/f64-to-f32.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/vector-add.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=VECTOR
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/vector-add.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=VECTOR
+; RUN: not llc -mtriple=mcs251 -O0 %t/f64-arith.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
+; RUN: not llc -mtriple=mcs251 -O2 %t/f64-arith.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
+; RUN: not llc -mtriple=mcs251 -O0 %t/f64-neg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
+; RUN: not llc -mtriple=mcs251 -O2 %t/f64-neg.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
+; RUN: not llc -mtriple=mcs251 -O0 %t/f64-cmp.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
+; RUN: not llc -mtriple=mcs251 -O2 %t/f64-cmp.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
+; RUN: not llc -mtriple=mcs251 -O0 %t/math.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=MATH
+; RUN: not llc -mtriple=mcs251 -O2 %t/math.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=MATH
+; RUN: not llc -mtriple=mcs251 -O0 %t/wide-int-to-float.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
+; RUN: not llc -mtriple=mcs251 -O2 %t/wide-int-to-float.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
+; RUN: not llc -mtriple=mcs251 -O0 %t/float-to-wide-int.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
+; RUN: not llc -mtriple=mcs251 -O2 %t/float-to-wide-int.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
+; RUN: not llc -mtriple=mcs251 -O0 %t/f64-to-f32.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
+; RUN: not llc -mtriple=mcs251 -O2 %t/f64-to-f32.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=F64
+; RUN: not llc -mtriple=mcs251 -O0 %t/vector-add.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=VECTOR
+; RUN: not llc -mtriple=mcs251 -O2 %t/vector-add.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=VECTOR
 ;
 ; F64 must never be aliased to the f32 ABI subset.  The unsupported math
 ; family also stays outside the connected set.  G7 S1' (PM ruling 2026-09-15,
@@ -24,9 +24,9 @@
 ; (no DI helper exists) and any f64 conversion.
 ;
 ; F64: LLVM ERROR: MCS251 contract violation: f64 IR is not supported; MCS251 only connects an explicit f32 libcall subset
-; MATH: LLVM ERROR: MCS251 contract violation: f32/f64 intrinsic operation is not yet implemented; soft-float runtime is not connected
+; MATH: LLVM ERROR: MCS251 contract violation: the f32 intrinsic '{{.*}}' is not in the connected f32 subset (basic arithmetic, conversions and compares are connected; math functions such as sqrt are not)
 ; WIDE: LLVM ERROR: MCS251 contract violation: f32 conversion is not in the connected libcall subset
-; VECTOR: LLVM ERROR: MCS251 contract violation: f32/f64 arithmetic is not yet implemented; soft-float runtime is not connected
+; VECTOR: LLVM ERROR: MCS251 contract violation: this f32 operation is not in the connected f32 subset (the connected subset is the basic arithmetic/division helpers); vector and remaining float forms are not wired
 
 ;--- vector-add.ll
 ; Scalar ABI arguments keep the rejection focused on vector arithmetic, not

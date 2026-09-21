@@ -91,13 +91,13 @@
 ; return). One path reaching a root must not excuse the whole constant, so both
 ; the O0 and O2 pipelines, and the target entry with the generic verifier
 ; disabled, must reject it.
-;RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/aggregate-return.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
-;RUN: not --crash llc -mtriple=mcs251 -O2 -filetype=obj -mcs251-object-format=elf %t/aggregate-return.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
-;RUN: not --crash llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/aggregate-return.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
-;RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/aggregate-export.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
+;RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/aggregate-return.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
+;RUN: not llc -mtriple=mcs251 -O2 -filetype=obj -mcs251-object-format=elf %t/aggregate-return.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
+;RUN: not llc -mtriple=mcs251 -O0 -disable-verify -filetype=obj -mcs251-object-format=elf %t/aggregate-return.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
+;RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/aggregate-export.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AGGRET
 ; Use the compatibility layout to reach the bit-handle verifier rather than
 ; stopping at the earlier v2 object-identity gate for addrspacecast.
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cast-shared.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CASTSH
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cast-shared.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CASTSH
 ;AGGRET: MCS251 contract violation: MCS251 bit object 'flag': handle must not escape through a constant expression or initializer
 ;CASTSH: LLVM ERROR: MCS251 contract violation: MCS251 bit object 'flag': handle must not escape through a constant expression or initializer
 
@@ -107,9 +107,9 @@
 ; non-intrinsic declaration, a real intrinsic carrying the handle in an
 ; operand bundle, an ordinary call -- is rejected with the frozen P09
 ; section 1.4 diagnostic.
-;RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/fake-intrinsic.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
-;RUN: not --crash llc -mtriple=mcs251 -O2 -filetype=obj -mcs251-object-format=elf %t/fake-intrinsic.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
-;RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bundle-intrinsic.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
+;RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/fake-intrinsic.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
+;RUN: not llc -mtriple=mcs251 -O2 -filetype=obj -mcs251-object-format=elf %t/fake-intrinsic.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
+;RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bundle-intrinsic.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
 ;CALL: MCS251 contract violation: MCS251 bit object 'flag': handle must not be used by a non-whitelisted call or operand bundle
 
 ; The bit-object protocol is ELF-only: REL objects and asm text reject it.
@@ -123,11 +123,11 @@
 
 ; Negative: a handle escape (ordinary load) is a contract violation, even at a
 ; target entry that also runs with the generic verifier disabled.
-;RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/escape-load.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPELOAD
-;RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/escape-gep.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPEGEP
-;RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/escape-ptrtoint.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPEINIT
+;RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/escape-load.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPELOAD
+;RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/escape-gep.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPEGEP
+;RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/escape-ptrtoint.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPEINIT
 
-;RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf -disable-verify %t/escape-load.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPELOAD
+;RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf -disable-verify %t/escape-load.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPELOAD
 
 ;BADINIT:  LLVM ERROR: MCS251 bit object 'flag': initializer must be the constant 0 or 1
 ;BADTYPE:  LLVM ERROR: MCS251 bit object 'flag': placeholder must be an i8 global

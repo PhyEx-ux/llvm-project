@@ -8,7 +8,11 @@
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -target-feature +int16 -ffreestanding -O2 -emit-obj -o %t %s
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -ffreestanding -O2 -S -o - %s | FileCheck %s --check-prefix=ASM
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -target-feature +int16 -ffreestanding -O2 -S -o - %s | FileCheck %s --check-prefix=ASM
-// RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -ffreestanding -debug-info-kind=limited -emit-llvm -o %t.compat.ll %s
+// RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -ffreestanding -emit-llvm -o %t.compat.ll %s
+// WP4 C1: an effective cc1-side debug request is rejected (the object
+// writers emit no source-level debug info). The fixture above no longer
+// uses -debug-info-kind=limited; the rejection is pinned here instead.
+// RUN: not %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -ffreestanding -debug-info-kind=limited -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=MCS251-DEBUG-REJECT
 // RUN: not %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,32,8,1 -fdynamic-debugging -emit-llvm -o - -x ir %t.compat.ll 2>&1 | FileCheck %s --check-prefix=DYNDBG-CONFLICT
 // RUN: %clang_cc1 -triple mcs251-unknown-none -round-trip-args -Rround-trip-cc1-args -ffreestanding -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=MEMORY-CC1-DEFAULT --implicit-check-not=error:
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,16,8,1 -round-trip-args -Rround-trip-cc1-args -ffreestanding -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=MEMORY-ROUNDTRIP-ON --implicit-check-not=error:
@@ -22,6 +26,7 @@
 // TINY: target datalayout = "E-m:s-p:16:8:8:16-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
 // COMPAT: target datalayout = "E-m:s-p:32:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8"
 // CHECK: target triple = "mcs251-unknown-none"
+// MCS251-DEBUG-REJECT: error: debug information is not supported for target 'mcs251'
 // DYNDBG-CONFLICT: error: backend data layout '{{.*}}-P4-A0-G0' does not match expected target description 'E-m:s-p:32:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8'
 // DYNDBG-CONFLICT-NOT: error: backend data layout
 // DYNDBG-CONFLICT-NOT: Assertion

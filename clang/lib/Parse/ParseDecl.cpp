@@ -2511,6 +2511,11 @@ Decl *Parser::ParseDeclarationAfterDeclarator(
 
 Decl *Parser::ParseDeclarationAfterDeclaratorAndAttributes(
     Declarator &D, const ParsedTemplateInfo &TemplateInfo, ForRangeInit *FRI) {
+  // WP4 B4: the Keil fixed-address postfix (`uint8_t v _at_ 0x30;`) is a
+  // recognized spelling with unsupported semantics; diagnose it here, where
+  // the declarator has just ended and the initializer/terminator follows.
+  DiagnoseMCS251UnsupportedAtPostfix();
+
   // RAII type used to track whether we're inside an initializer.
   struct InitializerScopeRAII {
     Parser &P;
@@ -6856,6 +6861,130 @@ void Parser::ParseMCS251KeilInterruptSuffix(Declarator &D) {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// WP4 B4: recognized-but-unsupported Keil C dialect spellings.
+//
+// The eight empirically registered spellings (`__idata`, `__pdata`, `_at_`,
+// `__at(...)`, `using N`, `__reentrant`, `__banked`, `__near`, `__far`) were
+// plain parse errors ("expected ';' after top level declarator" / "expected
+// function body after function declarator"). They are now diagnosed as
+// recognized spellings whose semantics are unimplemented. The checks are
+// deliberately narrow: they only fire in the exact syntactic position where
+// the word can only be the dialect construct, so ordinary identifiers --
+// including a variable literally named `using` in C (t17z) -- keep their
+// semantics, and the already-supported spellings (`__xdata`, `__code`,
+// `bit`, `interrupt N`) are untouched.
+//===----------------------------------------------------------------------===//
+
+namespace {
+/// The dialect spellings are a property of the MCS251 target; the bare
+/// `using` word additionally requires -fmcs251-keil so it never becomes a
+/// reserved word for ordinary C identifiers on other configurations.
+bool isMCS251DialectTarget(const Parser &P) {
+  return P.getActions()
+             .getASTContext()
+             .getTargetInfo()
+             .getTriple()
+             .getArch() == llvm::Triple::mcs251;
+}
+} // namespace
+
+bool Parser::DiagnoseMCS251UnsupportedStorageWord(Declarator &D) {
+  if (!Tok.is(tok::identifier) || !D.mayHaveIdentifier())
+    return false;
+  if (!isMCS251DialectTarget(*this))
+    return false;
+  IdentifierInfo *II = Tok.getIdentifierInfo();
+  if (!II)
+    return false;
+  StringRef Name = II->getName();
+  const bool IsAt = Name == "__at";
+  const bool IsStorage = Name == "__idata" || Name == "__pdata" ||
+                         Name == "__near" || Name == "__far";
+  if (!IsAt && !IsStorage)
+    return false;
+  // A misplaced qualifier is only proven when a real declarator name follows
+  // (or, for `__at`, its parenthesized constant argument). Anything else is
+  // an ordinary identifier use and is left untouched.
+  bool FollowedByParen = false;
+  if (IsAt) {
+    // The Keil placement form is `__at ( ADDR ) declarator-name`. A
+    // parenthesized declarator (`int __at(int);`) is an ordinary function
+    // declaration named __at and must keep compiling, so the placement form
+    // requires the token after the BALANCED parenthesis group to be the real
+    // declarator name. Look ahead without committing.
+    if (!NextToken().is(tok::l_paren))
+      return false;
+    TentativeParsingAction TPA(*this);
+    ConsumeToken(); // __at
+    BalancedDelimiterTracker T(*this, tok::l_paren);
+    bool Ok = !T.consumeOpen();
+    if (Ok)
+      T.skipToEnd();
+    FollowedByParen = Ok && Tok.is(tok::identifier);
+    TPA.Revert();
+    if (!FollowedByParen)
+      return false;
+  } else {
+    const bool FollowedByName = NextToken().is(tok::identifier);
+    if (!FollowedByName)
+      return false;
+  }
+  SourceLocation Loc = Tok.getLocation();
+  ConsumeToken();
+  if (FollowedByParen) {
+    // Drop the balanced `( ... )` argument so the real declarator name that
+    // follows parses normally and recovery does not cascade.
+    BalancedDelimiterTracker T(*this, tok::l_paren);
+    if (!T.consumeOpen())
+      T.skipToEnd();
+  }
+  Diag(Loc, diag::err_mcs251_dialect_unsupported) << Name;
+  return true;
+}
+
+bool Parser::DiagnoseMCS251UnsupportedAtPostfix() {
+  if (!Tok.is(tok::identifier))
+    return false;
+  IdentifierInfo *II = Tok.getIdentifierInfo();
+  if (!II || !II->isStr("_at_"))
+    return false;
+  if (!isMCS251DialectTarget(*this))
+    return false;
+  SourceLocation Loc = Tok.getLocation();
+  ConsumeToken();
+  // Consume the single address operand so the terminating ';' still closes
+  // the declaration normally.
+  if (Tok.isOneOf(tok::numeric_constant, tok::identifier))
+    ConsumeToken();
+  Diag(Loc, diag::err_mcs251_dialect_unsupported) << "_at_";
+  return true;
+}
+
+bool Parser::DiagnoseMCS251UnsupportedFunctionSuffix() {
+  if (!Tok.is(tok::identifier))
+    return false;
+  IdentifierInfo *II = Tok.getIdentifierInfo();
+  if (!II)
+    return false;
+  StringRef Name = II->getName();
+  const bool IsUsing = Name == "using";
+  const bool IsSuffix = Name == "__reentrant" || Name == "__banked" ||
+                        (IsUsing && getLangOpts().MCS251Keil);
+  if (!IsSuffix)
+    return false;
+  if (!isMCS251DialectTarget(*this))
+    return false;
+  SourceLocation Loc = Tok.getLocation();
+  ConsumeToken();
+  // `using N` carries a bank operand; dropping it lets the ordinary recovery
+  // still find the `{` body of a following definition.
+  if (IsUsing && Tok.isOneOf(tok::numeric_constant, tok::identifier))
+    ConsumeToken();
+  Diag(Loc, diag::err_mcs251_dialect_unsupported) << Name;
+  return true;
+}
+
 Parser::DeclGroupPtrTy
 Parser::ParseMCS251SbitDeclaration(DeclaratorContext Context) {
   assert(Tok.is(tok::kw___mcs251_sbit) &&
@@ -6938,6 +7067,12 @@ Parser::ParseMCS251SbitDeclaration(DeclaratorContext Context) {
 }
 
 void Parser::ParseDirectDeclarator(Declarator &D) {
+  // WP4 B4: a recognized-but-unsupported Keil storage word in the
+  // declarator-name position (`uint8_t __idata x;`, `uint8_t __at(0x30) w;`)
+  // gets its dedicated diagnostic here; the helper consumes the word so the
+  // real declarator name that follows still parses.
+  DiagnoseMCS251UnsupportedStorageWord(D);
+
   DeclaratorScopeObj DeclScopeObj(*this, D.getCXXScopeSpec());
 
   if (getLangOpts().CPlusPlus && D.mayHaveIdentifier()) {
@@ -7279,6 +7414,11 @@ void Parser::ParseDirectDeclarator(Declarator &D) {
       // reachable with -fmcs251-keil, since the keyword is registered
       // conditionally (IdentifierTable::AddKeywords).
       ParseMCS251KeilInterruptSuffix(D);
+    } else if (Tok.is(tok::identifier) &&
+               DiagnoseMCS251UnsupportedFunctionSuffix()) {
+      // WP4 B4: a recognized-but-unsupported dialect suffix was diagnosed
+      // and consumed; continue the loop so a following `{` body (or `;`)
+      // still reaches the ordinary declarator epilogue.
     } else if (Tok.isRegularKeywordAttribute()) {
       // For consistency with attribute parsing.
       Diag(Tok, diag::err_keyword_not_allowed) << Tok.getIdentifierInfo();

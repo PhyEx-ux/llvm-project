@@ -104,7 +104,10 @@ void use(void) { s = 0; i = 1; }
 // groups, so per-object diagnostics are only deterministic within the same
 // declaration group. Codegen continues on a safely-shaped plain handle
 // instead of crashing after the error.
-// wks-error@+2 {{cannot compile this MCS251 bit weak/section object yet}}
+// WP4 A8: the weak DEFINITION is rejected in Sema (the first error below);
+// IRGen still re-asserts its own weak/section gate for both objects, so
+// line 13 carries both diagnostics and line 14 the section one.
+// wks-error@+2 {{weak variable definitions are not supported on MCS251}} wks-error@+2 {{cannot compile this MCS251 bit weak/section object yet}}
 // wks-error@+2 {{cannot compile this MCS251 bit weak/section object yet}}
 __attribute__((weak)) __bit w;
 __bit s __attribute__((section("MYBITS")));

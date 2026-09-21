@@ -459,10 +459,11 @@ void atomic_sizeof_bit_signature(void) {
 }
 void atomic_local_declaration(void) {
   // A local declaration of the atomic-wrapped bit-signature type; the
-  // ordinary declarator entry reports the (now visible) capability.
+  // ordinary declarator entry reports the (now visible) capability. WP4 A4
+  // additionally rejects the _Atomic object declaration itself.
   // omp-error@+2 {{MCS251 bit types, objects and fixed-bit references are not supported in OpenMP constructs}} omp-note@+1 {{entered OpenMP construct here}}
 #pragma omp parallel
-  { _Atomic(sig_F) af; (void)af; }
+  { _Atomic(sig_F) af; (void)af; } // omp-error {{atomic types}} // omp-error {{access to an object with an atomic subobject}}
 }
 void atomic_type_trait_argument(void) {
   // omp-error@+2 {{MCS251 bit types, objects and fixed-bit references are not supported in OpenMP constructs}} omp-note@+1 {{entered OpenMP construct here}}
@@ -479,40 +480,46 @@ void atomic_load_bit_signature(void *raw) {
   // atomic load) is construct input.
   // omp-error@+2 {{MCS251 bit types, objects and fixed-bit references are not supported in OpenMP constructs}} omp-note@+1 {{entered OpenMP construct here}}
 #pragma omp parallel
-  { (void)__c11_atomic_load((_Atomic(sig_F) *)raw, 0)(); }
+  { (void)__c11_atomic_load((_Atomic(sig_F) *)raw, 0)(); } // omp-error {{atomic operations}}
 }
 void atomic_inferred_block(void *raw) {
   // The atomic-load form driving the return of a deduced (block) closure.
   // omp-error@+2 {{MCS251 bit types, objects and fixed-bit references are not supported in OpenMP constructs}} omp-note@+1 {{entered OpenMP construct here}}
 #pragma omp parallel
-  { (void)(^{ return __c11_atomic_load((_Atomic(sig_F) *)raw, 0)(); })(); }
+  { (void)(^{ return __c11_atomic_load((_Atomic(sig_F) *)raw, 0)(); })(); } // omp-error {{atomic operations}}
 }
 void bitcast_atomic_positives(void *raw) {
-  // Bit-free destination and atomic-wrapped types inside constructs.
+  // Bit-free destination forms stay positive; WP4 A4 rejects the two atomic
+  // rows (the _Atomic object declaration and the atomic load operation).
 #pragma omp parallel
   {
     (void)__builtin_bit_cast(_Bool, (unsigned char)1);
     (void)__builtin_bit_cast(sig_I, raw)();
     (void)(^{ return __builtin_bit_cast(sig_I, raw)(); })();
     (void)sizeof(_Atomic(sig_I));
-    _Atomic(sig_I) ai;
-    (void)ai;
+    _Atomic(sig_I) ai; // omp-error {{atomic types}}
+    (void)ai; // omp-error {{access to an object with an atomic subobject}}
     (void)__builtin_types_compatible_p(_Atomic(sig_I), _Atomic(sig_I));
     (void)_Generic(_Atomic(sig_I), default : 0);
-    (void)__c11_atomic_load((_Atomic(sig_I) *)raw, 0)();
+    (void)__c11_atomic_load((_Atomic(sig_I) *)raw, 0)(); // omp-error {{atomic operations}}
   }
 }
-// Outside constructs the F8/F9 forms keep their current (accepted) behavior.
+// Outside constructs the F8/F9 TYPE-INPUT forms keep their current (accepted)
+// behavior. WP4 A4/A5/A6 update: an _Atomic OBJECT DECLARATION and every
+// atomic OPERATION are now rejected outright (no atomic model), so the two
+// object/operation rows below carry their own expectations while the pure
+// type queries (sizeof / __builtin_types_compatible_p / _Generic) and the
+// cast spelling stay accepted.
 void outside_bitcast_atomic_inputs(void *raw) {
   (void)__builtin_bit_cast(__bit, (unsigned char)1);
   (void)__builtin_bit_cast(sig_F, raw)();
   (void)(^{ return __builtin_bit_cast(sig_F, raw)(); })();
   (void)sizeof(_Atomic(sig_F));
-  _Atomic(sig_F) af;
-  (void)af;
+  _Atomic(sig_F) af; // omp-error {{atomic types}}
+  (void)af; // omp-error {{access to an object with an atomic subobject}}
   (void)__builtin_types_compatible_p(_Atomic(sig_F), _Atomic(sig_F));
   (void)_Generic(_Atomic(sig_F), default : 0);
-  (void)__c11_atomic_load((_Atomic(sig_F) *)raw, 0)();
+  (void)__c11_atomic_load((_Atomic(sig_F) *)raw, 0)(); // omp-error {{atomic operations}}
 }
 
 // --- F10: newly written C record members bypass HandleDeclarator --------------
@@ -810,7 +817,7 @@ void acc_atomic_sizeof_bit_signature(void) {
 void acc_atomic_local_declaration(void) {
   // acc-error@+2 {{MCS251 bit types, objects and fixed-bit references are not supported in OpenACC constructs}} acc-note@+1 {{entered OpenACC construct here}}
 #pragma acc parallel
-  { _Atomic(asig_F) af; (void)af; }
+  { _Atomic(asig_F) af; (void)af; } // acc-error {{atomic types}} // acc-error {{access to an object with an atomic subobject}}
 }
 void acc_atomic_type_trait_argument(void) {
   // acc-error@+2 {{MCS251 bit types, objects and fixed-bit references are not supported in OpenACC constructs}} acc-note@+1 {{entered OpenACC construct here}}
@@ -825,12 +832,12 @@ void acc_atomic_generic_controlling_type(void) {
 void acc_atomic_load_bit_signature(void *raw) {
   // acc-error@+2 {{MCS251 bit types, objects and fixed-bit references are not supported in OpenACC constructs}} acc-note@+1 {{entered OpenACC construct here}}
 #pragma acc parallel
-  { (void)__c11_atomic_load((_Atomic(asig_F) *)raw, 0)(); }
+  { (void)__c11_atomic_load((_Atomic(asig_F) *)raw, 0)(); } // acc-error {{atomic operations}}
 }
 void acc_atomic_inferred_block(void *raw) {
   // acc-error@+2 {{MCS251 bit types, objects and fixed-bit references are not supported in OpenACC constructs}} acc-note@+1 {{entered OpenACC construct here}}
 #pragma acc parallel
-  { (void)(^{ return __c11_atomic_load((_Atomic(asig_F) *)raw, 0)(); })(); }
+  { (void)(^{ return __c11_atomic_load((_Atomic(asig_F) *)raw, 0)(); })(); } // acc-error {{atomic operations}}
 }
 void acc_bitcast_atomic_positives(void *raw) {
   // Bit-free destination and atomic-wrapped types inside constructs.
@@ -840,11 +847,11 @@ void acc_bitcast_atomic_positives(void *raw) {
     (void)__builtin_bit_cast(asig_I, raw)();
     (void)(^{ return __builtin_bit_cast(asig_I, raw)(); })();
     (void)sizeof(_Atomic(asig_I));
-    _Atomic(asig_I) ai;
-    (void)ai;
+    _Atomic(asig_I) ai; // acc-error {{atomic types}}
+    (void)ai; // acc-error {{access to an object with an atomic subobject}}
     (void)__builtin_types_compatible_p(_Atomic(asig_I), _Atomic(asig_I));
     (void)_Generic(_Atomic(asig_I), default : 0);
-    (void)__c11_atomic_load((_Atomic(asig_I) *)raw, 0)();
+    (void)__c11_atomic_load((_Atomic(asig_I) *)raw, 0)(); // acc-error {{atomic operations}}
   }
 }
 // Outside constructs the F8/F9 forms keep their current (accepted) behavior.
@@ -853,11 +860,11 @@ void acc_outside_bitcast_atomic_inputs(void *raw) {
   (void)__builtin_bit_cast(asig_F, raw)();
   (void)(^{ return __builtin_bit_cast(asig_F, raw)(); })();
   (void)sizeof(_Atomic(asig_F));
-  _Atomic(asig_F) af;
-  (void)af;
+  _Atomic(asig_F) af; // acc-error {{atomic types}}
+  (void)af; // acc-error {{access to an object with an atomic subobject}}
   (void)__builtin_types_compatible_p(_Atomic(asig_F), _Atomic(asig_F));
   (void)_Generic(_Atomic(asig_F), default : 0);
-  (void)__c11_atomic_load((_Atomic(asig_F) *)raw, 0)();
+  (void)__c11_atomic_load((_Atomic(asig_F) *)raw, 0)(); // acc-error {{atomic operations}}
 }
 
 // --- final rework mirrors: signatures, blocks, va_arg (F1/F2/F3) -----------

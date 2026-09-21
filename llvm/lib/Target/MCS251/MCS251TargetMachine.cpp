@@ -304,9 +304,14 @@ public:
     // arithmetic checks (i64/f32/f64 ops) run post-optimization in addPreISel
     // so that foldable or dead wide/float operations are not falsely rejected.
     // The check itself is read-only: it never folds or erases IR.
-    addPass(MCS251::createMCS251ContractCheckPass(
-        getTM<MCS251TargetMachine>().getMemoryContract(),
-        /*CheckArithmetic=*/false));
+    //
+    // WP4: when the clang backend owns the verdict (it reports through its
+    // DiagnosticsEngine instead of report_fatal_error, avoiding the
+    // in-process crash-recovery path), the pass is not mounted here.
+    if (!MCS251::isContractCheckDeferred())
+      addPass(MCS251::createMCS251ContractCheckPass(
+          getTM<MCS251TargetMachine>().getMemoryContract(),
+          /*CheckArithmetic=*/false));
     // P1-2: the only IR-mutating preparation (alloca constant propagation,
     // constant folding, targeted wide/float DCE), mounted early and skipping
     // optnone functions entirely. Non-optnone functions must be prepared
@@ -322,9 +327,10 @@ public:
     // functions, local interpretation inside this check for optnone ones),
     // so only genuinely live operations that would reach instruction
     // selection are rejected.
-    addPass(MCS251::createMCS251ContractCheckPass(
-        getTM<MCS251TargetMachine>().getMemoryContract(),
-        /*CheckArithmetic=*/true));
+    if (!MCS251::isContractCheckDeferred())
+      addPass(MCS251::createMCS251ContractCheckPass(
+          getTM<MCS251TargetMachine>().getMemoryContract(),
+          /*CheckArithmetic=*/true));
     return false;
   }
 
@@ -341,8 +347,10 @@ void MCS251TargetMachine::registerPassBuilderCallbacks(PassBuilder &PB) {
   // the IR-mutating preparation follows immediately after.
   PB.registerPipelineStartEPCallback(
       [this](ModulePassManager &MPM, OptimizationLevel) {
-        MPM.addPass(MCS251::MCS251ContractCheckPass(
-            getMemoryContract(), /*CheckArithmetic=*/false));
+        // WP4: skipped when the clang backend owns the checks (see addIRPasses).
+        if (!MCS251::isContractCheckDeferred())
+          MPM.addPass(MCS251::MCS251ContractCheckPass(
+              getMemoryContract(), /*CheckArithmetic=*/false));
         MPM.addPass(MCS251::MCS251LoweringPrepPass());
       });
   // RC-6: Arithmetic checks run after optimization so that foldable or dead
@@ -350,8 +358,10 @@ void MCS251TargetMachine::registerPassBuilderCallbacks(PassBuilder &PB) {
   PB.registerOptimizerLastEPCallback(
       [this](ModulePassManager &MPM, OptimizationLevel,
              ThinOrFullLTOPhase) {
-        MPM.addPass(MCS251::MCS251ContractCheckPass(
-            getMemoryContract(), /*CheckArithmetic=*/true));
+        // WP4: skipped when the clang backend owns the checks (see addIRPasses).
+        if (!MCS251::isContractCheckDeferred())
+          MPM.addPass(MCS251::MCS251ContractCheckPass(
+              getMemoryContract(), /*CheckArithmetic=*/true));
       });
 }
 

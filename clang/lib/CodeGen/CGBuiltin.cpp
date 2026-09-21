@@ -5494,6 +5494,13 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     return RValue::get(EmitNontemporalStore(*this, E));
   case Builtin::BI__c11_atomic_is_lock_free:
   case Builtin::BI__atomic_is_lock_free: {
+    // WP4 A4 CodeGen backstop: the runtime lock-free query must not silently
+    // become a libcall the target does not provide. (Sema rejects it first;
+    // this covers AST consumers that skip Sema.)
+    if (getTarget().getTriple().getArch() == llvm::Triple::mcs251) {
+      CGM.ErrorUnsupported(E, "atomic lock-free query");
+      return RValue::get(llvm::UndefValue::get(ConvertType(E->getType())));
+    }
     // Call "bool __atomic_is_lock_free(size_t size, void *ptr)". For the
     // __c11 builtin, ptr is 0 (indicating a properly-aligned object), since
     // _Atomic(T) is always properly-aligned.

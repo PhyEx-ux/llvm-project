@@ -2268,6 +2268,28 @@ private:
   /// a zero-parameter prototype.
   void ParseMCS251KeilInterruptSuffix(Declarator &D);
 
+  /// WP4 B4: recognized-but-unsupported Keil C dialect STORAGE words in a
+  /// declarator-name position -- `__idata`, `__pdata`, `__near`, `__far`
+  /// (followed by the real declarator name) and `__at` (followed by a
+  /// parenthesized constant). Emits a dedicated "recognized spelling,
+  /// unsupported semantics" diagnostic, consumes the word (and the `__at`
+  /// argument), and returns true; a bare identifier use without a following
+  /// declarator name is left completely untouched so ordinary C identifier
+  /// semantics are preserved.
+  bool DiagnoseMCS251UnsupportedStorageWord(Declarator &D);
+
+  /// WP4 B4: the recognized-but-unsupported Keil postfix storage word `_at_`
+  /// (`T v _at_ ADDR;`). Emits the dedicated diagnostic, consumes the word
+  /// and its single address operand, and returns true.
+  bool DiagnoseMCS251UnsupportedAtPostfix();
+
+  /// WP4 B4: recognized-but-unsupported function-declarator suffixes --
+  /// `using N` (bare spelling only under -fmcs251-keil), `__reentrant` and
+  /// `__banked`. Emits the dedicated diagnostic, consumes the suffix (and
+  /// the `using` bank operand), and returns true so the caller's suffix loop
+  /// can continue and still find a following function body.
+  bool DiagnoseMCS251UnsupportedFunctionSuffix();
+
   /// ParseMCS251SbitDeclaration - Parse an old-style controlled fixed bit
   /// declaration enabled by -fmcs251-keil:
   ///

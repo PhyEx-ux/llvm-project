@@ -244,6 +244,1108 @@ bool SemaMCS251::CheckCodeStore(Expr *LHS, SourceLocation Loc) {
 }
 
 //===----------------------------------------------------------------------===//
+// WP4 default correct-failure capabilities (FUNCTIONAL-GAPS-PLAN-Alice.md
+// section 3 / section 4.1). Source-level halves of the unified diagnostics;
+// the IR-layer contract check is the safety net. Every helper is gated on
+// the MCS-251 target and returns true when it rejected.
+//===----------------------------------------------------------------------===//
+
+// Recursive containment test with a per-Sema memo. A record is inspected
+// member by member; arrays recurse into their element type. Pointers are NOT
+// traversed (a pointer to an atomic object is an ordinary value here).
+bool SemaMCS251::containsAtomicSubobject(QualType T) {
+  T = T.getCanonicalType();
+  if (T.isNull())
+    return false;
+  if (T->isAtomicType())
+    return true;
+  if (!T->isArrayType() && !T->isRecordType())
+    return false;
+  if (const Type *Key = T.getTypePtr()) {
+    auto It = AtomicSubobjectCache.find(Key);
+    if (It != AtomicSubobjectCache.end())
+      return It->second;
+  }
+  bool Found = false;
+  if (const auto *AT = dyn_cast<ArrayType>(T.getTypePtr())) {
+    Found = containsAtomicSubobject(AT->getElementType());
+  } else if (const auto *RT = dyn_cast<RecordType>(T.getTypePtr())) {
+    for (const FieldDecl *FD : RT->getDecl()->fields())
+      if (containsAtomicSubobject(FD->getType())) {
+        Found = true;
+        break;
+      }
+  }
+  AtomicSubobjectCache[T.getTypePtr()] = Found;
+  return Found;
+}
+
+bool SemaMCS251::CheckMCS251AtomicAccess(QualType T, SourceLocation Loc) {
+  if (!isMCS251Target(getASTContext()))
+    return false;
+  if (!T->isAtomicType() && !T->isArrayType() && !T->isRecordType())
+    return false; // fast path: scalars/pointers are never containers here
+  if (!containsAtomicSubobject(T))
+    return false;
+  // A directly _Atomic-typed access is reported here as well: an atomic
+  // MEMBER or ARRAY ELEMENT has no declaration-level diagnostic (the object
+  // declaration that carries it is a legal shape), and for a top-level
+  // atomic variable the declaration check has already reported the type.
+  Diag(Loc, diag::err_mcs251_atomic_access_unsupported) << T;
+  return true;
+}
+
+//===----------------------------------------------------------------------===//
+// A4/A5/A6: the evaluation-aware decision point for the whole atomic family.
+//
+// Rejecting at the construction site is wrong: an operand that is written in
+// a potentially-evaluated context but never actually evaluated is not an
+// operation. The unconsumed arm of __builtin_choose_expr and the untaken arm
+// of a conditional with a constant condition are exactly that -- both are
+// built as ordinary potentially-evaluated expressions, and only the enclosing
+// selection decides that they are dead. sizeof/_Alignof/typeof and the
+// _Generic controlling expression are already parsed in an Unevaluated
+// context, but the walk below skips them explicitly as well, so the two
+// paths agree and neither one reports a construct the other would accept.
+//
+// The decision is therefore taken once per FULL EXPRESSION by
+// CheckMCS251AtomicUse, from ActOnFinishFullExpr. One correction to the
+// original statement of this rule: the end of a full expression is NOT
+// automatically the point where every enclosing selection is known. A GNU
+// statement expression ({ ... }) contains statements that are each their own
+// full expression, and they are checked before the expression that encloses
+// the statement expression -- which is what decides whether any of them runs
+// at all -- is known. That inner call therefore DEFERS
+// (inStatementExpressionScope) and the statements are walked from the
+// enclosing full expression, where the answer is known. Everything else in a
+// single full expression (the arms of :?, choose_expr, _Generic, a
+// short-circuited RHS) really is decided by the time the end of that full
+// expression is reached.
+//===----------------------------------------------------------------------===//
+
+namespace {
+/// The conditional forms whose selection is decided by a constant condition:
+/// `c ? a : b` (ConditionalOperator) and the GNU `c ?: b`
+/// (BinaryConditionalOperator). Both carry their arms as (true, false).
+bool isConstantCondition(const Expr *Cond, ASTContext &Ctx) {
+  if (!Cond)
+    return false;
+  if (Cond->isValueDependent())
+    return false;
+  // Deliberately an INTEGER CONSTANT EXPRESSION, not a fold of whatever the
+  // expression happens to evaluate to: `int c = 0; c ? A : B;` can select
+  // either arm at run time and both arms stay reachable. Only a condition the
+  // language itself treats as constant (an enumerator, an integer literal, a
+  // sizeof result, ...) makes an arm dead.
+  return static_cast<bool>(
+      Cond->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx));
+}
+} // namespace
+
+// True when \p N is one of the operation spellings that are lowered from the
+// call itself rather than through BuildAtomicExpr. Mirrors the IR-layer
+// contract check's name rule (MCS251ContractCheck.cpp verifyNoAtomics), so a
+// construct accepted here is not rejected there and vice versa.
+static bool isMCS251AtomicOperationName(StringRef N) {
+  // The compile-time lock-free query is NOT an operation: it is a constexpr
+  // query that always folds to a constant (false here, because
+  // MaxAtomicPromoteWidth and MaxAtomicInlineWidth are pinned to 0) and
+  // leaves no runtime artifact. It is the honest capability answer, so it
+  // stays accepted -- and it never reaches IR to be caught there.
+  if (N == "__atomic_always_lock_free")
+    return false;
+  if (N.starts_with("__sync_") || N.starts_with("__scoped_atomic_") ||
+      N.starts_with("__atomic_") || N.starts_with("__c11_atomic_"))
+    return true;
+  // The <stdatomic.h> function names: real external declarations a program
+  // can take the address of, call directly, or reach with parentheses that
+  // suppress the macro.
+  return N == "atomic_thread_fence" || N == "atomic_signal_fence" ||
+         N == "atomic_load" || N == "atomic_load_explicit" ||
+         N == "atomic_store" || N == "atomic_store_explicit" ||
+         N == "atomic_exchange" || N == "atomic_exchange_explicit" ||
+         N == "atomic_compare_exchange_strong" ||
+         N == "atomic_compare_exchange_strong_explicit" ||
+         N == "atomic_compare_exchange_weak" ||
+         N == "atomic_compare_exchange_weak_explicit" ||
+         N == "atomic_fetch_add" || N == "atomic_fetch_add_explicit" ||
+         N == "atomic_fetch_sub" || N == "atomic_fetch_sub_explicit" ||
+         N == "atomic_fetch_or" || N == "atomic_fetch_or_explicit" ||
+         N == "atomic_fetch_xor" || N == "atomic_fetch_xor_explicit" ||
+         N == "atomic_fetch_and" || N == "atomic_fetch_and_explicit" ||
+         N == "atomic_fetch_max" || N == "atomic_fetch_max_explicit" ||
+         N == "atomic_fetch_min" || N == "atomic_fetch_min_explicit" ||
+         N == "atomic_flag_test_and_set" ||
+         N == "atomic_flag_test_and_set_explicit" ||
+         N == "atomic_flag_clear" || N == "atomic_flag_clear_explicit";
+}
+
+bool SemaMCS251::isMCS251AtomicOperationCallee(const CallExpr *CE) {
+  if (!CE)
+    return false;
+  const FunctionDecl *FD = CE->getDirectCallee();
+  if (!FD)
+    return false;
+  return isMCS251AtomicOperationName(FD->getName());
+}
+
+// The worker. Returns the first EVALUATED atomic construct reachable from
+// \p E, or nullptr. The order (innermost-first via the generic child scan)
+// matches the order the old per-construction-site checks reported in for
+// straight-line code, so diagnostics stay where the user expects them.
+const Expr *SemaMCS251::findEvaluatedAtomicUse(const Expr *E, QualType &Type) {
+  if (!E)
+    return nullptr;
+  ASTContext &Ctx = getASTContext();
+
+  // ---- not-evaluated operands: never an operation -------------------------
+  // sizeof/_Alignof (UnaryExprOrTypeTraitExpr), type traits
+  // (ExpressionTraitExpr) and noexcept (CXXNoexceptExpr) all have operands
+  // that the language does not evaluate. The operand may still be walked for
+  // nothing; skipping is what keeps `sizeof(atomic_load(p))` accepted.
+  if (isa<UnaryExprOrTypeTraitExpr>(E) || isa<ExpressionTraitExpr>(E) ||
+      isa<CXXNoexceptExpr>(E))
+    return nullptr;
+
+  // __builtin_offsetof is NOT all-unevaluated, which is why it is not in the
+  // list above: the components are member designators, but the array SUBSCRIPT
+  // EXPRESSIONS of a component (`offsetof(T, a[i])`) are ordinary evaluated
+  // operands of the address computation, and children() exposes exactly those
+  // index expressions. Falling through to the child scan below visits them, so
+  // an atomic operation written in an offsetof index is an operation like any
+  // other. (The type operand itself is not an expression and is not scanned.)
+
+  // _Generic: the controlling expression is not evaluated, and only the
+  // selected association's expression is. Not-yet-resolved (dependent)
+  // selections are accepted -- the target's own types are never dependent, so
+  // nothing is lost.
+  if (const auto *GSE = dyn_cast<GenericSelectionExpr>(E)) {
+    if (GSE->isResultDependent())
+      return nullptr;
+    return findEvaluatedAtomicUse(GSE->getResultExpr(), Type);
+  }
+
+  // __builtin_choose_expr: only the selected arm is evaluated.
+  if (const auto *ChE = dyn_cast<ChooseExpr>(E)) {
+    if (ChE->isConditionDependent())
+      return nullptr;
+    return findEvaluatedAtomicUse(ChE->getChosenSubExpr(), Type);
+  }
+
+  // `c ? a : b` with an integer-constant `c`: only the selected arm is
+  // evaluated. Without a constant condition both arms are reachable and are
+  // walked (see isConstantCondition).
+  if (const auto *CO = dyn_cast<ConditionalOperator>(E)) {
+    const Expr *Found = findEvaluatedAtomicUse(CO->getCond(), Type);
+    if (Found)
+      return Found;
+    if (isConstantCondition(CO->getCond(), Ctx)) {
+      std::optional<llvm::APSInt> C =
+          CO->getCond()->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx);
+      return findEvaluatedAtomicUse(
+          C->isZero() ? CO->getFalseExpr() : CO->getTrueExpr(), Type);
+    }
+    Found = findEvaluatedAtomicUse(CO->getTrueExpr(), Type);
+    if (Found)
+      return Found;
+    return findEvaluatedAtomicUse(CO->getFalseExpr(), Type);
+  }
+  // The GNU `c ?: b` form: the COMMON expression is evaluated unconditionally
+  // -- it produces the value that the condition tests and, when non-zero, the
+  // value of the whole operator. It cannot be reached through getCond(): that
+  // condition is written in terms of the OpaqueValueExpr bound to the common
+  // expression, and OpaqueValueExpr::children() is deliberately empty, so a
+  // walk that only follows getCond() would never visit the real operands (an
+  // atomic operation written there would go unreported). getCommon() is
+  // therefore the only path to them; getTrueExpr() is the same OpaqueValueExpr
+  // placeholder and needs no separate walk.
+  //
+  // Selection: a constant common expression decides the operator by itself.
+  //  * non-zero -> the false arm is dead, and the common expression is the
+  //    value;
+  //  * zero -> the false arm is the value and is walked.
+  // A non-constant common expression leaves the false arm reachable, so it is
+  // walked as well. `getCond()` adds nothing beyond what the common expression
+  // already covers, and skipping it keeps one diagnostic per construct.
+  if (const auto *BCO = dyn_cast<BinaryConditionalOperator>(E)) {
+    const Expr *Found = findEvaluatedAtomicUse(BCO->getCommon(), Type);
+    if (Found)
+      return Found;
+    if (isConstantCondition(BCO->getCommon(), Ctx)) {
+      std::optional<llvm::APSInt> C = BCO->getCommon()
+                                          ->IgnoreParenImpCasts()
+                                          ->getIntegerConstantExpr(Ctx);
+      if (!C->isZero())
+        return nullptr; // the common expression is the value; false arm dead
+    }
+    return findEvaluatedAtomicUse(BCO->getFalseExpr(), Type);
+  }
+
+  // Short-circuit `&&` / `||`: the RHS is evaluated only when the LHS does
+  // not decide the result. A constant LHS decides it, exactly as the bit
+  // scanners in this file already assume (getFoldedCondition).
+  if (const auto *BO = dyn_cast<BinaryOperator>(E)) {
+    if (BO->getOpcode() == BO_LAnd || BO->getOpcode() == BO_LOr) {
+      const Expr *Found = findEvaluatedAtomicUse(BO->getLHS(), Type);
+      if (Found)
+        return Found;
+      if (std::optional<bool> C = getFoldedCondition(BO->getLHS(), Ctx)) {
+        const bool Decides = BO->getOpcode() == BO_LAnd ? !*C : *C;
+        if (Decides)
+          return nullptr;
+      }
+      return findEvaluatedAtomicUse(BO->getRHS(), Type);
+    }
+  }
+
+  // Designated initializers: only the initializer is evaluated.
+  if (const auto *DIE = dyn_cast<DesignatedInitExpr>(E))
+    return findEvaluatedAtomicUse(DIE->getInit(), Type);
+
+  // Only the capture initializers of a lambda are evaluated at the point the
+  // lambda is written; the body runs later.
+  if (const auto *LE = dyn_cast<LambdaExpr>(E)) {
+    for (const Expr *Init : LE->capture_inits())
+      if (const Expr *Found = findEvaluatedAtomicUse(Init, Type))
+        return Found;
+    return nullptr;
+  }
+  // A statement expression (GNU `({ ... })`) evaluates its statements and its
+  // value is that of the last expression statement. Whether the statement
+  // expression itself is evaluated at all, though, is decided by the ENCLOSING
+  // expression -- `sizeof(({...}))` and the untaken arm of a constant-condition
+  // conditional never run it. Each inner statement is its own full expression
+  // and so reaches CheckMCS251AtomicUse on its own, but at that moment the
+  // enclosing selection is not yet known; the inner call therefore defers (see
+  // inStatementExpressionScope at the top of CheckMCS251AtomicUse) and the
+  // statements are walked here, from the enclosing full expression, where the
+  // answer is known. Walking them here is what keeps a genuine operation
+  // (`({ atomic_load(p); 0; })`) reported exactly once.
+  if (const auto *SE = dyn_cast<StmtExpr>(E))
+    return findEvaluatedAtomicUseInStmt(SE->getSubStmt(), Type);
+
+  // ---- the operations themselves -----------------------------------------
+  // Every __c11_atomic_*/__atomic_*/__scoped_atomic_* operation builds an
+  // AtomicExpr (including the ones that lower to a libcall). The lock-free
+  // QUERIES are separate constexpr builtins that never build one; the runtime
+  // query reaches IR as an ordinary call and is caught by name below.
+  if (isa<AtomicExpr>(E)) {
+    Type = QualType();
+    return E;
+  }
+  if (const auto *CE = dyn_cast<CallExpr>(E))
+    if (isMCS251AtomicOperationCallee(CE)) {
+      Type = QualType();
+      return E;
+    }
+
+  // ---- reads and writes of an _Atomic subobject --------------------------
+  // A READ is an lvalue-to-rvalue conversion of a type that transitively
+  // contains an _Atomic subobject. Testing the conversion (rather than every
+  // expression of such a type) is what keeps a decayed `&x` and a
+  // not-evaluated operand out: neither performs the conversion.
+  if (const auto *Cast = dyn_cast<CastExpr>(E)) {
+    if (Cast->getCastKind() == CK_LValueToRValue) {
+      QualType T = Cast->getSubExpr()->getType();
+      if (containsAtomicSubobject(T)) {
+        Type = T;
+        return E;
+      }
+    }
+  }
+  // A WRITE is an assignment / compound assignment / increment whose TARGET
+  // has such a type. This is also how a whole-structure copy over an atomic
+  // member and an array-element store are covered.
+  if (const auto *BO = dyn_cast<BinaryOperator>(E)) {
+    if (BO->isAssignmentOp()) {
+      QualType T = BO->getLHS()->getType();
+      if (containsAtomicSubobject(T)) {
+        Type = T;
+        return E;
+      }
+    }
+  }
+  if (const auto *UO = dyn_cast<UnaryOperator>(E)) {
+    if (UO->isIncrementDecrementOp()) {
+      QualType T = UO->getSubExpr()->getType();
+      if (containsAtomicSubobject(T)) {
+        Type = T;
+        return E;
+      }
+    }
+  }
+
+  // ---- default: every child is potentially evaluated ----------------------
+  for (const Stmt *Sub : E->children())
+    if (const auto *SubE = dyn_cast_or_null<Expr>(Sub))
+      if (const Expr *Found = findEvaluatedAtomicUse(SubE, Type))
+        return Found;
+  return nullptr;
+}
+
+// A constant-false condition makes a branch dead along the FALL-THROUGH path,
+// but it does not make the branch's statements unreachable: `goto` can enter a
+// label and a switch outside the branch can enter a case label, both from
+// outside the branch. Pruning a branch that carries such an entry point would
+// therefore skip statements that do run, so those branches are walked instead.
+//
+// A `case`/`default` label is an entry point only when the switch it belongs
+// to lies OUTSIDE \p S. A case label nested in a switch that is itself inside
+// \p S is reached only by first reaching \p S, so it does not by itself defeat
+// pruning. \p SwitchDepth counts the switch statements already opened within
+// the region being examined.
+static bool hasExternalEntryPoint(const Stmt *S, unsigned SwitchDepth) {
+  if (!S)
+    return false;
+  if (isa<LabelStmt>(S))
+    return true;
+  if ((isa<CaseStmt>(S) || isa<DefaultStmt>(S)) && SwitchDepth == 0)
+    return true;
+  if (isa<SwitchStmt>(S)) {
+    // Everything under a switch (its body, and its condition/init which cannot
+    // contain case labels) is one level deeper.
+    for (const Stmt *Sub : S->children())
+      if (hasExternalEntryPoint(Sub, SwitchDepth + 1))
+        return true;
+    return false;
+  }
+  for (const Stmt *Sub : S->children())
+    if (hasExternalEntryPoint(Sub, SwitchDepth))
+      return true;
+  return false;
+}
+
+static bool hasExternalEntryPoint(const Stmt *S) {
+  return hasExternalEntryPoint(S, 0);
+}
+
+// Statement half of the walk. A statement expression is reached from the
+// enclosing full expression precisely because the inner full-expression check
+// deferred (see inStatementExpressionScope); from here the statements are
+// walked with the enclosing expression's evaluation decision already made.
+// Only the construct kinds that CHANGE which operands are evaluated need a
+// case of their own; everything else is covered by the generic child scan,
+// which visits expressions and nested statements alike.
+const Expr *SemaMCS251::findEvaluatedAtomicUseInStmt(const Stmt *S,
+                                                     QualType &Type) {
+  if (!S)
+    return nullptr;
+  ASTContext &Ctx = getASTContext();
+
+  // An expression statement is an expression node in the statement list.
+  if (const auto *E = dyn_cast<Expr>(S))
+    return findEvaluatedAtomicUse(E, Type);
+
+  if (const auto *C = dyn_cast<CompoundStmt>(S)) {
+    for (const Stmt *Sub : C->body())
+      if (const Expr *Found = findEvaluatedAtomicUseInStmt(Sub, Type))
+        return Found;
+    return nullptr;
+  }
+
+  // A declaration's initializer is evaluated.
+  if (const auto *DS = dyn_cast<DeclStmt>(S)) {
+    for (const Decl *D : DS->decls())
+      if (const auto *VD = dyn_cast<VarDecl>(D))
+        if (const Expr *Found = findEvaluatedAtomicUse(VD->getInit(), Type))
+          return Found;
+    return nullptr;
+  }
+
+  // `if`: the condition drives the selection; a constant condition makes the
+  // other branch dead ALONG THE FALL-THROUGH PATH. A branch that `goto` can
+  // enter at a label (or an enclosing switch at a case label) still runs, so it
+  // is walked rather than skipped. The init-statement (C23) is always
+  // evaluated.
+  if (const auto *IS = dyn_cast<IfStmt>(S)) {
+    if (const Expr *Found = findEvaluatedAtomicUseInStmt(IS->getInit(), Type))
+      return Found;
+    if (const Expr *Found = findEvaluatedAtomicUseInStmt(
+            IS->getConditionVariableDeclStmt(), Type))
+      return Found;
+    if (const Expr *Found = findEvaluatedAtomicUse(IS->getCond(), Type))
+      return Found;
+    if (isConstantCondition(IS->getCond(), Ctx)) {
+      std::optional<llvm::APSInt> C =
+          IS->getCond()->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx);
+      const Stmt *Dead = C->isZero() ? IS->getThen() : IS->getElse();
+      const Stmt *Live = C->isZero() ? IS->getElse() : IS->getThen();
+      if (const Expr *Found = findEvaluatedAtomicUseInStmt(Live, Type))
+        return Found;
+      if (!hasExternalEntryPoint(Dead))
+        return nullptr;
+    }
+    if (const Expr *Found = findEvaluatedAtomicUseInStmt(IS->getThen(), Type))
+      return Found;
+    return findEvaluatedAtomicUseInStmt(IS->getElse(), Type);
+  }
+
+  // `while`: a constant-false condition never runs the body by fall-through;
+  // a body that `goto` can enter still does, so it is walked in that case.
+  if (const auto *WS = dyn_cast<WhileStmt>(S)) {
+    if (const Expr *Found = findEvaluatedAtomicUseInStmt(
+            WS->getConditionVariableDeclStmt(), Type))
+      return Found;
+    if (const Expr *Found = findEvaluatedAtomicUse(WS->getCond(), Type))
+      return Found;
+    if (isConstantCondition(WS->getCond(), Ctx)) {
+      std::optional<llvm::APSInt> C =
+          WS->getCond()->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx);
+      if (C->isZero() && !hasExternalEntryPoint(WS->getBody()))
+        return nullptr;
+    }
+    return findEvaluatedAtomicUseInStmt(WS->getBody(), Type);
+  }
+
+  // `for`: a constant-false condition skips both the increment and the body by
+  // fall-through; a body or increment reachable at a label still runs.
+  if (const auto *FS = dyn_cast<ForStmt>(S)) {
+    if (const Expr *Found = findEvaluatedAtomicUseInStmt(FS->getInit(), Type))
+      return Found;
+    if (const Expr *Found = findEvaluatedAtomicUseInStmt(
+            FS->getConditionVariableDeclStmt(), Type))
+      return Found;
+    if (const Expr *Found = findEvaluatedAtomicUse(FS->getCond(), Type))
+      return Found;
+    if (isConstantCondition(FS->getCond(), Ctx)) {
+      std::optional<llvm::APSInt> C =
+          FS->getCond()->IgnoreParenImpCasts()->getIntegerConstantExpr(Ctx);
+      // The increment runs only after a body iteration, so the same entry-point
+      // test covers both.
+      if (C->isZero() && !hasExternalEntryPoint(FS->getBody()) &&
+          !hasExternalEntryPoint(FS->getInc()))
+        return nullptr;
+    }
+    if (const Expr *Found = findEvaluatedAtomicUse(FS->getInc(), Type))
+      return Found;
+    return findEvaluatedAtomicUseInStmt(FS->getBody(), Type);
+  }
+
+  // `do ... while`: the body always runs.
+  if (const auto *DS = dyn_cast<DoStmt>(S)) {
+    if (const Expr *Found = findEvaluatedAtomicUseInStmt(DS->getBody(), Type))
+      return Found;
+    return findEvaluatedAtomicUse(DS->getCond(), Type);
+  }
+
+  // `switch`: the condition is evaluated and every case is reachable from the
+  // switch itself, so the whole body is walked. This does not depend on
+  // constant-folding the condition: a `case` is an entry point regardless of
+  // the controlling value (a constant condition simply makes the other cases
+  // unreachable at run time, which does not matter here because the body walk
+  // is a superset). The condition variable's initializer is evaluated.
+  if (const auto *SS = dyn_cast<SwitchStmt>(S)) {
+    if (const Expr *Found = findEvaluatedAtomicUseInStmt(SS->getInit(), Type))
+      return Found;
+    if (const Expr *Found = findEvaluatedAtomicUseInStmt(
+            SS->getConditionVariableDeclStmt(), Type))
+      return Found;
+    if (const Expr *Found = findEvaluatedAtomicUse(SS->getCond(), Type))
+      return Found;
+    return findEvaluatedAtomicUseInStmt(SS->getBody(), Type);
+  }
+
+  // `return`: the operand is evaluated.
+  if (const auto *RS = dyn_cast<ReturnStmt>(S))
+    return findEvaluatedAtomicUse(RS->getRetValue(), Type);
+
+  // Labels and attributes are transparent.
+  if (const auto *LS = dyn_cast<LabelStmt>(S))
+    return findEvaluatedAtomicUseInStmt(LS->getSubStmt(), Type);
+  if (const auto *AS = dyn_cast<AttributedStmt>(S))
+    return findEvaluatedAtomicUseInStmt(AS->getSubStmt(), Type);
+
+  // An inline-asm statement evaluates the expressions of its operands (the
+  // constraint strings and so on are not expressions).
+  if (const auto *GS = dyn_cast<GCCAsmStmt>(S)) {
+    for (unsigned I = 0, N = GS->getNumOutputs(); I != N; ++I)
+      if (const Expr *Found = findEvaluatedAtomicUse(GS->getOutputExpr(I), Type))
+        return Found;
+    for (unsigned I = 0, N = GS->getNumInputs(); I != N; ++I)
+      if (const Expr *Found = findEvaluatedAtomicUse(GS->getInputExpr(I), Type))
+        return Found;
+    return nullptr;
+  }
+
+  // Fallback: every expression child is evaluated and every statement child is
+  // walked. This is the same "potentially evaluated" default the expression
+  // walk uses. Measured behaviour, not a soundness claim: the enumerations
+  // above do NOT by themselves make this an over-approximation. The
+  // label/case-entry cases are exactly where the earlier claim ("may only ever
+  // report MORE ... never fewer") was false -- a constant-false branch with a
+  // `goto` label inside it was pruned and its operation went unreported. The
+  // fallback is reached only for construct kinds with no case above, and the
+  // constant-condition pruning above now consults hasExternalEntryPoint so a
+  // branch with an outside entry point is walked instead.
+  for (const Stmt *Sub : S->children()) {
+    if (const auto *SubE = dyn_cast_or_null<Expr>(Sub)) {
+      if (const Expr *Found = findEvaluatedAtomicUse(SubE, Type))
+        return Found;
+    } else if (const Expr *Found = findEvaluatedAtomicUseInStmt(Sub, Type)) {
+      return Found;
+    }
+  }
+  return nullptr;
+}
+
+bool SemaMCS251::inStatementExpressionScope() const {
+  for (auto It = SemaRef.FunctionScopes.rbegin(),
+            End = SemaRef.FunctionScopes.rend();
+       It != End; ++It) {
+    sema::FunctionScopeInfo *FSI = *It;
+    if (isa<sema::BlockScopeInfo>(FSI) || isa<sema::LambdaScopeInfo>(FSI))
+      break;
+    for (const auto &Scope : FSI->CompoundScopes)
+      if (Scope.IsStmtExpr)
+        return true;
+  }
+  return false;
+}
+
+bool SemaMCS251::CheckMCS251AtomicUse(const Expr *E) {
+  if (!E)
+    return false;
+  if (!isMCS251Target(getASTContext()))
+    return false;
+
+  // A statement inside a GNU statement expression is checked by the parser via
+  // ActOnFinishFullExpr before the enclosing full expression -- which decides
+  // whether the statement expression itself is evaluated at all -- is known.
+  // `sizeof(({ atomic_load(p); 0; }))` is the case that makes the distinction
+  // observable: the inner full expression already knows the atomic operation,
+  // but only the enclosing `sizeof` knows that nothing ever runs. The inner
+  // call therefore defers, and the enclosing full expression walks the
+  // statements through findEvaluatedAtomicUseInStmt. This mirrors the
+  // deferral the controlled-bit scanner has always used for the same reason.
+  if (inStatementExpressionScope())
+    return false;
+
+  QualType Type;
+  const Expr *Found = findEvaluatedAtomicUse(E, Type);
+  if (!Found)
+    return false;
+  if (Type.isNull()) {
+    // An atomic OPERATION (builtin family, fence, runtime lock-free query).
+    // The diagnostic points at the closing parenthesis -- the same position
+    // the family's original per-construction-site hook used, so the
+    // established expectations keep their column (the builtin macro
+    // expansion can put the "begin" location on a different line).
+    SourceLocation Loc = Found->getExprLoc();
+    SourceRange Range = Found->getSourceRange();
+    if (const auto *AE = dyn_cast<AtomicExpr>(Found)) {
+      Loc = AE->getRParenLoc();
+      Range = SourceRange(AE->getBuiltinLoc(), AE->getRParenLoc());
+    }
+    Diag(Loc, diag::err_mcs251_atomics_unsupported) << Range;
+    return true;
+  }
+  // A non-atomic access to an object that transitively contains an _Atomic
+  // subobject: reuse the shared emitter so the message stays identical.
+  return CheckMCS251AtomicAccess(Type, Found->getExprLoc());
+}
+
+// A4: the _Atomic qualifier/specifier in user code. System headers (the
+// <stdatomic.h> typedefs) are exempt so the TU can still include the header;
+// actual operations are rejected by CheckMCS251AtomicUse at the end of the
+// enclosing full expression, or by the IR-layer atomic check for paths that
+// do not pass one (direct llc input).
+bool SemaMCS251::CheckMCS251AtomicType(QualType Underlying,
+                                       SourceLocation Loc) {
+  if (!isMCS251Target(getASTContext()))
+    return false;
+  if (getASTContext().getSourceManager().isInSystemHeader(Loc))
+    return false;
+  Diag(Loc, diag::err_mcs251_atomic_type_unsupported) << Underlying;
+  return true;
+}
+
+// A2: an integer-to-pointer cast in a static-storage initializer denotes an
+// absolute address; the emitter's pointer-leaf whitelist deliberately
+// excludes it. The supported static pointer forms are the SAME ones the IR
+// layer's shared classifier accepts (MCS251::GlobalInit::classifyPointerLeaf):
+// null, and '&symbol' with a constant offset. The decision is therefore taken
+// on the FINAL constant value and its provenance, not on the presence of a
+// cast node:
+//   * the initializer is folded with the ordinary constant evaluator
+//     (Expr::EvaluateAsRValue, which never emits a diagnostic of its own);
+//   * a folded null value, or a value whose base is a declaration, is in the
+//     supported domain and is accepted -- this is what makes
+//     `&v ?: (int*)0x1234`, `&v ? &v : (int*)0x1234`, a pointer comparison
+//     that selects null, and `(int*)!((int*)0x1234)` accepted;
+//   * a folded value with NO base and a non-zero offset is the integer cast
+//     image itself, i.e. an absolute address, and is rejected;
+//   * when the initializer does not fold, the shape walk below decides, so a
+//     non-constant operand keeps its previous diagnostic.
+//
+// The shape walk is also the LOCATION finder: it names the cast that produced
+// the rejected value, which keeps the established diagnostic column. It is
+// value-aware in the same ways the folded decision is (unevaluated operands,
+// _Generic selection, constant-condition selection, comma left operand).
+static const Expr *findMCS251IntegralToPointerCast(const Expr *E,
+                                                  ASTContext &Ctx) {
+  if (!E)
+    return nullptr;
+  E = E->IgnoreParens();
+  if (const auto *GSE = dyn_cast<GenericSelectionExpr>(E))
+    return findMCS251IntegralToPointerCast(GSE->getResultExpr(), Ctx);
+  if (const auto *CO = dyn_cast<ConditionalOperator>(E)) {
+    if (!CO->getCond()->isValueDependent())
+      if (std::optional<llvm::APSInt> C =
+              CO->getCond()->IgnoreParenImpCasts()->getIntegerConstantExpr(
+                  Ctx))
+        return findMCS251IntegralToPointerCast(
+            C->isZero() ? CO->getFalseExpr() : CO->getTrueExpr(), Ctx);
+    if (const Expr *Found = findMCS251IntegralToPointerCast(CO->getTrueExpr(), Ctx))
+      return Found;
+    return findMCS251IntegralToPointerCast(CO->getFalseExpr(), Ctx);
+  }
+  if (isa<UnaryExprOrTypeTraitExpr>(E))
+    return nullptr; // its operand is not evaluated
+  // A comma expression's VALUE is its right operand: the left operand is
+  // evaluated for its side effects and discarded, so a cast written there does
+  // not initialize the object and is judged by the ordinary language rules
+  // instead. `int *p = ((int *)0x1234, (int *)0);` initializes null -- only the
+  // RHS is walked, and the initializer is accepted (the LHS draws the usual
+  // unused-value warning, which is not this check's business).
+  if (const auto *BO = dyn_cast<BinaryOperator>(E)) {
+    if (BO->getOpcode() == BO_Comma)
+      return findMCS251IntegralToPointerCast(BO->getRHS(), Ctx);
+  }
+  if (const auto *CE = dyn_cast<CastExpr>(E)) {
+    if (CE->getCastKind() == CK_IntegralToPointer)
+      return CE;
+    return findMCS251IntegralToPointerCast(CE->getSubExpr(), Ctx);
+  }
+  if (const auto *ILE = dyn_cast<InitListExpr>(E)) {
+    for (const Expr *El : ILE->inits())
+      if (const Expr *Found = findMCS251IntegralToPointerCast(El, Ctx))
+        return Found;
+    return nullptr;
+  }
+  for (const Stmt *Sub : E->children())
+    if (const auto *SubE = dyn_cast_or_null<Expr>(Sub))
+      if (const Expr *Found = findMCS251IntegralToPointerCast(SubE, Ctx))
+        return Found;
+  return nullptr;
+}
+
+/// How the FINAL constant value of a pointer-typed initializer classifies
+/// against the shared pointer-leaf support domain.
+enum class MCS251PointerInitValue {
+  Supported, ///< null, or a base declaration with a constant offset
+  Absolute,  ///< no base, non-zero offset: the integer cast image
+  Unknown,   ///< did not fold; the shape walk decides
+};
+
+static MCS251PointerInitValue
+classifyMCS251PointerInitValue(const Expr *Init, ASTContext &Ctx) {
+  if (!Init || Init->isValueDependent())
+    return MCS251PointerInitValue::Unknown;
+  Expr::EvalResult R;
+  // EvaluateAsRValue is silent: its EvalResult carries no diagnostic sink, so
+  // neither the folding notes nor the cast notes reach the user. A failed fold
+  // simply means "Unknown".
+  if (!Init->EvaluateAsRValue(R, Ctx) || !R.Val.isLValue())
+    return MCS251PointerInitValue::Unknown;
+  const APValue &V = R.Val;
+  if (V.isNullPointer())
+    return MCS251PointerInitValue::Supported;
+  APValue::LValueBase Base = V.getLValueBase();
+  if (Base) {
+    // A declaration base is '&symbol[+offset]'. A non-declaration base (a
+    // string literal, a compound literal, a temporary) is likewise not an
+    // integer cast image.
+    return MCS251PointerInitValue::Supported;
+  }
+  // No base: the offset is the integer that was converted. A zero offset is a
+  // wholly zero image (null); anything else is an absolute address.
+  return V.getLValueOffset().isZero() ? MCS251PointerInitValue::Supported
+                                      : MCS251PointerInitValue::Absolute;
+}
+
+static const Expr *findMCS251AbsolutePointerLeaf(const Expr *Init, QualType Ty,
+                                                ASTContext &Ctx);
+
+/// Decide one pointer-typed leaf initializer.
+static const Expr *checkMCS251PointerInitLeaf(const Expr *Init,
+                                              ASTContext &Ctx) {
+  switch (classifyMCS251PointerInitValue(Init, Ctx)) {
+  case MCS251PointerInitValue::Supported:
+    return nullptr;
+  case MCS251PointerInitValue::Absolute:
+    // Name the cast when there is one (the established column), otherwise the
+    // initializer itself.
+    if (const Expr *Cast = findMCS251IntegralToPointerCast(Init, Ctx))
+      return Cast;
+    return Init;
+  case MCS251PointerInitValue::Unknown:
+    break;
+  }
+  return findMCS251IntegralToPointerCast(Init, Ctx);
+}
+
+/// Look through parentheses and no-op casts. A functional-style aggregate
+/// initializer (`X{...}`) is written as a NoOp cast around its initializer
+/// list, so without this the list is not recognised as the value source and
+/// the element walk never starts. Only the aggregate path uses this: a
+/// pointer-typed leaf is judged on its own expression, so the established
+/// diagnostic column (which names the cast) is preserved there.
+static const Expr *stripMCS251NoOpCasts(const Expr *E) {
+  while (true) {
+    E = E->IgnoreParens();
+    const auto *CE = dyn_cast<CastExpr>(E);
+    if (!CE || CE->getCastKind() != CK_NoOp)
+      return E;
+    E = CE->getSubExpr();
+  }
+}
+
+/// Walk an initializer tree to its pointer-typed leaves. Aggregates are
+/// descended so an absolute address nested in an array or struct element is
+/// judged by the same rule as a scalar one (the source-level decision then
+/// agrees with the IR/object layers, which already walk every pointer leaf).
+static const Expr *findMCS251AbsolutePointerLeaf(const Expr *Init, QualType Ty,
+                                                ASTContext &Ctx) {
+  if (!Init || Ty.isNull())
+    return nullptr;
+  Init = Init->IgnoreParens();
+  // A comma expression's value is its right operand; the left is discarded.
+  if (const auto *BO = dyn_cast<BinaryOperator>(Init))
+    if (BO->getOpcode() == BO_Comma)
+      return findMCS251AbsolutePointerLeaf(BO->getRHS(), Ty, Ctx);
+  if (Ty->isPointerType())
+    return checkMCS251PointerInitLeaf(Init, Ctx);
+  Init = stripMCS251NoOpCasts(Init);
+  if (const auto *CE = dyn_cast<ConstantExpr>(Init))
+    return findMCS251AbsolutePointerLeaf(CE->getSubExpr(), Ty, Ctx);
+  if (const auto *CL = dyn_cast<CompoundLiteralExpr>(Init))
+    return findMCS251AbsolutePointerLeaf(CL->getInitializer(), Ty, Ctx);
+  if (const auto *GSE = dyn_cast<GenericSelectionExpr>(Init))
+    return GSE->isResultDependent()
+               ? nullptr
+               : findMCS251AbsolutePointerLeaf(GSE->getResultExpr(), Ty, Ctx);
+  if (const auto *CE = dyn_cast<ChooseExpr>(Init))
+    return CE->isConditionDependent()
+               ? nullptr
+               : findMCS251AbsolutePointerLeaf(CE->getChosenSubExpr(), Ty, Ctx);
+  // A conditional aggregate initializer takes its value from ONE arm -- the
+  // SELECTED arm when the condition is an integer constant expression. This is
+  // the selection rule findMCS251IntegralToPointerCast already applies to
+  // pointer-typed leaves, extended to the aggregate case, whose arms are
+  // initializer lists: judging the unselected arm would reject a program whose
+  // object is initialized with the selected value and can therefore never hold
+  // the dead arm's address (`true ? X{nullptr} : X{(int*)0x1234}` initializes
+  // the object to null). With a non-constant condition neither arm is dead --
+  // either can supply the value at run time -- so both are walked, exactly as
+  // the pointer-leaf rule does. (In practice the caller's gate is the
+  // initializer being a CONSTANT initializer, so a non-constant conditional
+  // does not reach here; the walk is written to agree with the pointer rule
+  // regardless, so the two do not diverge if that gate ever moves.)
+  if (const auto *CO = dyn_cast<ConditionalOperator>(Init)) {
+    if (!CO->getCond()->isValueDependent())
+      if (std::optional<llvm::APSInt> C =
+              CO->getCond()->IgnoreParenImpCasts()->getIntegerConstantExpr(
+                  Ctx))
+        return findMCS251AbsolutePointerLeaf(
+            C->isZero() ? CO->getFalseExpr() : CO->getTrueExpr(), Ty, Ctx);
+    if (const Expr *Found =
+            findMCS251AbsolutePointerLeaf(CO->getTrueExpr(), Ty, Ctx))
+      return Found;
+    return findMCS251AbsolutePointerLeaf(CO->getFalseExpr(), Ty, Ctx);
+  }
+  const auto *ILE = dyn_cast<InitListExpr>(Init);
+  if (!ILE)
+    return nullptr;
+  if (const auto *AT = Ctx.getAsArrayType(Ty)) {
+    QualType ET = AT->getElementType();
+    for (const Expr *El : ILE->inits())
+      if (const Expr *Found = findMCS251AbsolutePointerLeaf(El, ET, Ctx))
+        return Found;
+    return nullptr;
+  }
+  if (const auto *RT = Ty->getAs<RecordType>()) {
+    const RecordDecl *RD = RT->getDecl();
+    if (!RD)
+      return nullptr;
+    // A union initializes exactly ONE member, and the semantic form names it
+    // through getInitializedFieldInUnion() -- a designated initializer may
+    // select any member, not the first one declared. Pairing the single
+    // initializer with the first field (the declaration-order rule below)
+    // would judge it under the wrong type in both directions: a non-pointer
+    // member's integer initializer read as a pointer (false rejection) and a
+    // pointer member's initializer read as an integer (missed rejection that
+    // then disagrees with the IR/object layers).
+    if (RD->isUnion()) {
+      if (const FieldDecl *FD = ILE->getInitializedFieldInUnion())
+        if (ILE->getNumInits() >= 1)
+          return findMCS251AbsolutePointerLeaf(ILE->getInits()[0],
+                                               FD->getType(), Ctx);
+      return nullptr;
+    }
+    // The semantic form of an initializer list stores its initializers in
+    // declaration order (designators are resolved by then), but it is the
+    // list of initializable SUBOBJECTS, not of fields. Two kinds of subobject
+    // occupy no field slot there, and pairing the nth initializer with the
+    // nth entry of RD->fields() (counted from zero) misaligns the walk from
+    // the first of them onwards, in both directions:
+    //
+    //  * an unnamed bitfield cannot be initialized and gets no entry, so with
+    //    `struct S { unsigned :0; int *p; }` and `{ .p = (int *)0x1234 }` the
+    //    only initializer was compared against the bitfield's type -- the
+    //    source layer accepted what the IR and object layers reject;
+    //  * a C++ class initializes its base subobjects BEFORE its fields
+    //    ([dcl.init.aggr]), and the semantic list carries one entry per base
+    //    ahead of the field entries (implicitly created when the source does
+    //    not name the base), so with `struct S : B { int *p; }` and
+    //    `{{0}, (int *)0x1234}` the second initializer was read as the first
+    //    field.
+    //
+    // The mispairing also produced a false rejection: with
+    // `struct S { unsigned :0; int *p; unsigned t; }` and
+    // `{ .p = 0, .t = (unsigned)(long)(int *)0x1234 }` the pointer member's
+    // null initializer was read as the unnamed bitfield's and the integer
+    // member's initializer was judged against the pointer member's type.
+    auto WalkSubobject = [&](const Expr *Sub, QualType SubTy) -> const Expr * {
+      return findMCS251AbsolutePointerLeaf(Sub, SubTy, Ctx);
+    };
+    unsigned I = 0;
+    if (const auto *CXXRD = dyn_cast<CXXRecordDecl>(RD)) {
+      for (const CXXBaseSpecifier &Base : CXXRD->bases()) {
+        if (I >= ILE->getNumInits())
+          return nullptr;
+        if (const Expr *Found = WalkSubobject(ILE->getInits()[I], Base.getType()))
+          return Found;
+        ++I;
+      }
+    }
+    for (const FieldDecl *FD : RD->fields()) {
+      if (FD->isUnnamedBitField())
+        continue;
+      if (I >= ILE->getNumInits())
+        break;
+      if (const Expr *Found = WalkSubobject(ILE->getInits()[I], FD->getType()))
+        return Found;
+      ++I;
+    }
+    return nullptr;
+  }
+  return nullptr;
+}
+
+/// True when the FOLDED value of an aggregate initializer contains a pointer
+/// leaf that is an integer cast image: no object base and a non-zero offset.
+/// This is the same support predicate classifyMCS251PointerInitValue applies
+/// to a single pointer leaf, lifted to the aggregates the shape walk cannot
+/// descend -- a constructor call or a constant function return, whose value
+/// clang has already computed but whose syntax has no initializer list to pair
+/// with the member. A declaration base (a symbol, an array element, a function)
+/// is supported regardless of its offset, exactly as in the scalar case; a
+/// non-declaration base (a string literal, a compound literal, a temporary) is
+/// likewise not an integer cast image. Nothing here inspects the type: a
+/// non-pointer leaf cannot carry a pointer, and a union's ACTIVE member is the
+/// only one whose value the object has.
+static bool mcs251FoldedValueHasAbsolutePointerLeaf(const APValue &V) {
+  if (V.isLValue()) {
+    if (V.isNullPointer())
+      return false;
+    if (V.getLValueBase())
+      return false;
+    return !V.getLValueOffset().isZero();
+  }
+  if (V.isStruct()) {
+    for (unsigned I = 0, N = V.getStructNumBases(); I != N; ++I)
+      if (mcs251FoldedValueHasAbsolutePointerLeaf(V.getStructBase(I)))
+        return true;
+    for (unsigned I = 0, N = V.getStructNumFields(); I != N; ++I)
+      if (mcs251FoldedValueHasAbsolutePointerLeaf(V.getStructField(I)))
+        return true;
+    return false;
+  }
+  if (V.isUnion())
+    return mcs251FoldedValueHasAbsolutePointerLeaf(V.getUnionValue());
+  if (V.isArray()) {
+    for (unsigned I = 0, N = V.getArrayInitializedElts(); I != N; ++I)
+      if (mcs251FoldedValueHasAbsolutePointerLeaf(V.getArrayInitializedElt(I)))
+        return true;
+    if (V.hasArrayFiller() &&
+        mcs251FoldedValueHasAbsolutePointerLeaf(V.getArrayFiller()))
+      return true;
+    return false;
+  }
+  // An integer, a float or a complex value is not a pointer leaf.
+  return false;
+}
+
+// A pointer to a compound literal has a supported object base, but that
+// object's own static initializer must also be supported. Check these objects
+// separately from the enclosing initializer's VALUE, after selection is known.
+// In particular, an evaluated comma LHS can create an object even though its
+// value is discarded. Unevaluated operands and unselected arms create none.
+static const Expr *findMCS251EvaluatedStaticCompoundLiteral(const Expr *E,
+                                                         ASTContext &Ctx) {
+  if (!E || E->isValueDependent())
+    return nullptr;
+  if (isa<UnaryExprOrTypeTraitExpr, ExpressionTraitExpr, TypeTraitExpr>(E))
+    return nullptr;
+  if (const auto *GSE = dyn_cast<GenericSelectionExpr>(E))
+    return GSE->isResultDependent()
+               ? nullptr
+               : findMCS251EvaluatedStaticCompoundLiteral(GSE->getResultExpr(),
+                                                          Ctx);
+  if (const auto *CE = dyn_cast<ChooseExpr>(E))
+    return CE->isConditionDependent()
+               ? nullptr
+               : findMCS251EvaluatedStaticCompoundLiteral(CE->getChosenSubExpr(),
+                                                          Ctx);
+  if (const auto *CO = dyn_cast<AbstractConditionalOperator>(E)) {
+    const auto *BCO = dyn_cast<BinaryConditionalOperator>(CO);
+    const Expr *Cond = BCO ? BCO->getCommon() : CO->getCond();
+    if (const Expr *Found =
+            findMCS251EvaluatedStaticCompoundLiteral(Cond, Ctx))
+      return Found;
+    if (std::optional<bool> C = getFoldedCondition(Cond, Ctx))
+      return findMCS251EvaluatedStaticCompoundLiteral(
+          *C ? CO->getTrueExpr() : CO->getFalseExpr(), Ctx);
+    if (const Expr *Found =
+            findMCS251EvaluatedStaticCompoundLiteral(CO->getTrueExpr(), Ctx))
+      return Found;
+    return findMCS251EvaluatedStaticCompoundLiteral(CO->getFalseExpr(), Ctx);
+  }
+  if (const auto *BO = dyn_cast<BinaryOperator>(E)) {
+    if (BO->isLogicalOp()) {
+      if (const Expr *Found =
+              findMCS251EvaluatedStaticCompoundLiteral(BO->getLHS(), Ctx))
+        return Found;
+      if (std::optional<bool> C = getFoldedCondition(BO->getLHS(), Ctx))
+        if (BO->getOpcode() == BO_LAnd ? !*C : *C)
+          return nullptr;
+      return findMCS251EvaluatedStaticCompoundLiteral(BO->getRHS(), Ctx);
+    }
+  }
+  if (const auto *CL = dyn_cast<CompoundLiteralExpr>(E))
+    if (CL->isFileScope())
+      if (const Expr *Found = findMCS251AbsolutePointerLeaf(
+              CL->getInitializer(), CL->getType(), Ctx))
+        return Found;
+  for (const Stmt *Child : E->children())
+    if (const auto *Sub = dyn_cast_or_null<Expr>(Child))
+      if (const Expr *Found =
+              findMCS251EvaluatedStaticCompoundLiteral(Sub, Ctx))
+        return Found;
+  return nullptr;
+}
+
+bool SemaMCS251::CheckMCS251AbsolutePointerInit(const Expr *Init,
+                                                SourceLocation Loc) {
+  if (!isMCS251Target(getASTContext()))
+    return false;
+  if (!Init)
+    return false;
+  if (!getLangOpts().CPlusPlus) {
+    // BuildCompoundLiteralExpr retains the language constant-initializer
+    // check in this context, deferring only A2 to the completed initializer.
+    if (SemaRef.isUnevaluatedContext())
+      return false;
+    if (const Expr *Found =
+            findMCS251EvaluatedStaticCompoundLiteral(Init, getASTContext())) {
+      Diag(Found->getExprLoc(), diag::err_mcs251_absolute_pointer_init);
+      return true;
+    }
+  }
+  // Only a pointer-typed object, or an aggregate that can contain one, has an
+  // absolute-address initializer. This keeps scalar non-pointer initializers
+  // whose subexpressions merely contain a cast (e.g. `unsigned n =
+  // sizeof(PB);`) out of the walk.
+  QualType Ty = Init->getType();
+  if (Ty.isNull())
+    return false;
+  if (!Ty->isPointerType() && !Ty->isArrayType() && !Ty->isRecordType())
+    return false;
+  // Walk the initializer itself: IgnoreParenImpCasts() must NOT be applied at
+  // the top level, because it strips the explicit cast being looked for.
+  const Expr *Found =
+      findMCS251AbsolutePointerLeaf(Init, Ty, getASTContext());
+  // A record or array whose initializer is not an initializer list but a
+  // constructor call or a constant function return (`X x{(int*)0x1234};`,
+  // `X x = mk();`) has no initializer-list element to pair with a member, so
+  // the shape walk above cannot see the value it carries. The object's own
+  // folded value names the pointer leaves directly, and judging THAT is both
+  // the most faithful reading of "the value the object is initialized with"
+  // and what the IR/object layers already do (they walk the emitted
+  // initializer's constant, not the source syntax). The fallback is
+  // conservative in the only direction that matters here: it can add a
+  // rejection only when the folded value genuinely contains a pointer leaf
+  // with no object base and a non-zero offset, i.e. an integer cast image.
+  // Null and '&symbol[+offset]' leaves -- including string literals, function
+  // pointers, and every other member of the existing positive set -- fold to
+  // a supported leaf and are left accepted, and a value that does not fold
+  // (a dynamic initializer) is skipped rather than guessed at.
+  if (!Found && (Ty->isRecordType() || Ty->isArrayType()) &&
+      !Init->isValueDependent()) {
+    ASTContext &Ctx = getASTContext();
+    Expr::EvalResult R;
+    if (Init->EvaluateAsRValue(R, Ctx) &&
+        mcs251FoldedValueHasAbsolutePointerLeaf(R.Val)) {
+      // Name the cast when there is one (the established column), otherwise
+      // the initializer itself.
+      const Expr *Cast = findMCS251IntegralToPointerCast(Init, Ctx);
+      Found = Cast ? Cast : Init;
+    }
+  }
+  if (!Found)
+    return false;
+  (void)Loc;
+  Diag(Found->getExprLoc(), diag::err_mcs251_absolute_pointer_init);
+  return true;
+}
+
+// A7 (EC1): an indirect call with two or more arguments needs the static
+// continuation slots, which are named after the callee symbol -- a function
+// pointer owns none. Zero/one-argument indirect calls (register channel
+// only) and direct calls of any arity keep their existing behavior.
+bool SemaMCS251::CheckMCS251MultiArgIndirectCall(bool IsIndirect,
+                                                 ArrayRef<Expr *> Args,
+                                                 SourceLocation Loc,
+                                                 SourceRange Range) {
+  if (!isMCS251Target(getASTContext()))
+    return false;
+  if (!IsIndirect || Args.size() < 2)
+    return false;
+  Diag(Loc, diag::err_mcs251_multiarg_indirect_call) << Range;
+  return true;
+}
+
+// A8: weak DEFINITIONS. A weak declaration that is never defined in this TU
+// stays accepted; the linker keeps its own defensive weak/common rejection.
+bool SemaMCS251::CheckMCS251WeakDefinition(bool IsFunction,
+                                           SourceLocation Loc,
+                                           SourceRange Range) {
+  if (!isMCS251Target(getASTContext()))
+    return false;
+  Diag(Loc, diag::err_mcs251_weak_definition)
+      << (IsFunction ? 0 : 1) << Range;
+  return true;
+}
+
+// D1: computed goto in either spelling.
+bool SemaMCS251::CheckMCS251ComputedGoto(bool IsAddrOfLabel,
+                                         SourceLocation Loc) {
+  if (!isMCS251Target(getASTContext()))
+    return false;
+  Diag(Loc, diag::err_mcs251_computed_goto)
+      << (IsAddrOfLabel ? 0 : 1);
+  return true;
+}
+
+// A9: file-scope (module-level) inline assembly.
+bool SemaMCS251::CheckMCS251FileScopeAsm(SourceLocation Loc) {
+  if (!isMCS251Target(getASTContext()))
+    return false;
+  Diag(Loc, diag::err_mcs251_module_asm);
+  return true;
+}
+
+//===----------------------------------------------------------------------===//
 // Builtins that write through a pointer argument (X1-2, X1-5, X1-6)
 //===----------------------------------------------------------------------===//
 

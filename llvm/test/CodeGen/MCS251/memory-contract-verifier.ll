@@ -1,7 +1,7 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -disable-verify -filetype=null %t/declaration.ll 2>&1 | FileCheck %s
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -disable-verify -filetype=null %t/alloca.ll 2>&1 | FileCheck %s
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -disable-verify -filetype=null %t/load-payload.ll 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -disable-verify -filetype=null %t/declaration.ll 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -disable-verify -filetype=null %t/alloca.ll 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -disable-verify -filetype=null %t/load-payload.ll 2>&1 | FileCheck %s
 ;
 ; The target verifier is a required pre-ISel pass, independent of LLVM's
 ; generic verifier. It traverses declarations, instruction result types and

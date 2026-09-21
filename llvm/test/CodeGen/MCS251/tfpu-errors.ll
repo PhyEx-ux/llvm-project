@@ -17,13 +17,13 @@
 ;      still policed by the target check" pattern).
 ;
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/generic_math.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=RC5
-; RUN: not --crash llc -mtriple=mcs251 -O0 %t/generic_math.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=RC5
-; RUN: not --crash llc -mtriple=mcs251 -O2 %t/unknown_name.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=RC5
+; RUN: not llc -mtriple=mcs251 -O2 %t/generic_math.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=RC5
+; RUN: not llc -mtriple=mcs251 -O0 %t/generic_math.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=RC5
+; RUN: not llc -mtriple=mcs251 -O2 %t/unknown_name.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=RC5
 ; RUN: not llc -mtriple=mcs251 -O2 %t/wrong_signature.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=VERIF
-; RUN: not --crash llc -mtriple=mcs251 -O2 -disable-verify %t/wrong_signature.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
+; RUN: not llc -mtriple=mcs251 -O2 -disable-verify %t/wrong_signature.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=SIG
 
-; RC5: LLVM ERROR: MCS251 contract violation: f32/f64 intrinsic operation is not yet implemented; soft-float runtime is not connected
+; RC5: LLVM ERROR: MCS251 contract violation: the f32 intrinsic '{{.*}}' is not in the connected f32 subset (basic arithmetic, conversions and compares are connected; math functions such as sqrt are not)
 ; VERIF: intrinsic return type expected i32, but got float
 ; SIG: LLVM ERROR: MCS251 contract violation: MCS251 TFPU intrinsic: invalid signature (the connected form is the i32 bit-pattern intrinsic; float-typed or wrong-arity spellings are rejected)
 
