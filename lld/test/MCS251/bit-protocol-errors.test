@@ -94,7 +94,7 @@
 # RUN:   | FileCheck %s --check-prefix=FIELDBOUND
 # RUN: yaml2obj addr8-opcode-bypass.yaml -o opb.o
 # RUN: not mcs251-lld opb.o --area-start=CSEG=0xff0200 -o %t/opb.elf 2>&1 \
-# RUN:   | FileCheck %s --check-prefix=FIELDBOUND
+# RUN:   | FileCheck %s --check-prefix=FIELDOPCODE
 # RUN: yaml2obj addr8-truncated-jb.yaml -o tjb.o
 # RUN: not mcs251-lld tjb.o --area-start=CSEG=0xff0200 -o %t/tjb.elf 2>&1 \
 # RUN:   | FileCheck %s --check-prefix=FIELDTRUNC
@@ -102,6 +102,10 @@
 # RUN: not mcs251-lld rob.o --area-start=CSEG=0xff0200 -o %t/rob.elf 2>&1 \
 # RUN:   | FileCheck %s --check-prefix=FIELDRELOCOP
 # FIELDBOUND: is not a decodable instruction stream
+# The 74-form sibling: with 0x00 now a real NOP (added to the trusted length
+# table for the frozen CRT's classic code), `74 D2 00` decodes and the field
+# at offset 2 is correctly rejected as a non-operand position.
+# FIELDOPCODE: BITADDR8 field at 0x2 in .text is not the bit-address operand of a bit instruction
 # FIELDTRUNC: ends in a truncated instruction
 # FIELDRELOCOP: is not the bit-address operand of a bit instruction
 # --- a genuine bit-opcode boundary stays accepted (positive control) ---
@@ -115,7 +119,9 @@
 # RUN: yaml2obj addr8-pre-launder.yaml -o pl.o
 # RUN: not mcs251-lld pl.o --area-start=CSEG=0xff0200 -o %t/pl.elf 2>&1 \
 # RUN:   | FileCheck %s --check-prefix=FIELDPRE
-# FIELDPRE: is not a decodable instruction stream
+# FIELDPRE: BITADDR8 field at 0x2 in .text is not the bit-address operand of a bit instruction
+# (with 0x00 a real NOP in the trusted table the original stream decodes, and
+# the field position itself is what fails - still on the ORIGINAL bytes.)
 # --- decoding continues past the last field: a truncated tail fails closed ---
 # .text = D2 00 20: the SETB/field at offsets 0-1 is valid, but the trailing
 # 20 is a jb with both operand bytes missing.  The old code broke out of the

@@ -1,0 +1,205 @@
+# E1/WP2 R11-1: per-combination grading of an intersecting slot pair.
+#
+# One pair of intersecting slots can carry BOTH a registered-ISR access on one
+# side and a foreground access on the other.  Those are TWO different context
+# combinations of the same slot pair, and they must be graded separately:
+# selecting a single combination for the pair let a weaker, merely PRESUMED
+# foreground candidate (an uncalled function, not traced to the reset chain)
+# replace an ISR-vs-ISR combination whose positive evidence -- registered ISR
+# roots on both sides, intersecting extents, and a declared preemption pair --
+# was complete and unchanged.  The link then dropped from `proven' (rc=1) to
+# `conditional' (rc=0) and published an ELF, although the ISR-vs-ISR violation
+# still held.
+#
+# This file pins the corrected behaviour: each applicable combination writes
+# its own group (the group key carries the kind), each keeps its own proof
+# rule, and no weaker candidate can mask a stronger established one.  Nothing
+# is relaxed: the foreground side still needs positive reset-chain
+# reachability, and the ISR-vs-ISR combination still needs a declared
+# preemption pair.  Exit codes are asserted exactly with expect-rc.py.
+#
+# The fixtures place two two-argument leaves' static parameter slots in two
+# overlaid OSEG sections (byte-identical ranges).  Mode `presumed' registers
+# ONE ISR only, so no ISR-vs-ISR combination exists and the anti-mis-upgrade
+# contrast applies.
+
+# RUN: rm -rf %t-seed && mkdir -p %t-seed
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml -o %t.crt.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt.o
+# RUN: printf 'preempt _irq1 _irq2\n' > %t-seed/declared.cfg
+
+# --- (a) BASELINE: only the ISR-vs-ISR combination applies.  Declared
+# --- preemption between the two registered ISR roots is a proven violation:
+# --- rc=1, the proof names both ISR roots, and no artifact is published.
+# RUN: %python %S/Inputs/isr-two-slot-fixture.py %t-seed/base.yaml none
+# RUN: yaml2obj %t-seed/base.yaml -o %t.base.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.base.o
+# RUN: rm -f %t.base.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.base.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/declared.cfg -o %t.base.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=BASE
+# BASE: error: ISR reentrancy: proven static parameter-slot contract violation: parameter slots are shared across two registered ISRs
+# BASE: ISR context roots: _irq1 _irq2
+# BASE: A side ISR roots: _irq1
+# BASE: B side ISR roots: _irq2
+# BASE: error: ISR reentrancy:   interleaving condition: declared preemption between the two ISR roots (external preemption contract)
+# BASE-NOT: conditional slot overlap
+# RUN: not test -e %t.base.elf
+
+# --- (b) CORE REGRESSION: the SAME link plus ONE ordinary function that is
+# --- never called and CALLS `_left', hence reaches `_left's slot.  The
+# --- uncalled root supplies only PRESUMED foreground context and must not mask
+# --- the ISR-vs-ISR combination: the link stays a PROVEN violation, rc=1, and
+# --- no artifact is published.
+# RUN: %python %S/Inputs/isr-two-slot-fixture.py %t-seed/unused-call.yaml unused-call
+# RUN: yaml2obj %t-seed/unused-call.yaml -o %t.uc.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.uc.o
+# RUN: rm -f %t.uc.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.uc.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/declared.cfg -o %t.uc.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=UNUSED-CALL
+# UNUSED-CALL: ISR reentrancy: proven static parameter-slot contract violation: parameter slots are shared across two registered ISRs
+# UNUSED-CALL: ISR context roots: _irq1 _irq2
+# UNUSED-CALL: A side ISR roots: _irq1
+# UNUSED-CALL: B side ISR roots: _irq2
+# UNUSED-CALL: error: ISR reentrancy:   interleaving condition: declared preemption between the two ISR roots (external preemption contract)
+# The default severity path publishes only PROVEN violations; the weaker
+# presumed-foreground candidate of the same slot pair is not silently dropped,
+# it is recorded as its own conditional group -- asserted from the structured
+# records in (f) below, and shown in warn mode here:
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld %t.crt.o %t.uc.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/declared.cfg --isr-reentrancy=warn \
+# RUN:   -o %t.ucw2.elf 2>&1 | FileCheck %s --check-prefix=UNUSED-CALL-WARN
+# UNUSED-CALL-WARN: warning: ISR reentrancy: conditional slot overlap
+# UNUSED-CALL-WARN: missing condition(s) for a proven violation: foreground reachability is presumed (uncalled root), not traced to the reset chain
+# UNUSED-CALL-WARN: warning: ISR reentrancy: proven static parameter-slot contract violation: parameter slots are shared across two registered ISRs
+# RUN: not test -e %t.uc.elf
+
+# --- (c) adjacent shape: the uncalled root only MATERIALIZES the slot
+# --- address (a read, no call).  Same conclusion: rc=1 and a proven
+# --- ISR-vs-ISR violation, with the presumed-foreground group still reported
+# --- separately.
+# RUN: %python %S/Inputs/isr-two-slot-fixture.py %t-seed/unused-read.yaml unused-read
+# RUN: yaml2obj %t-seed/unused-read.yaml -o %t.ur.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.ur.o
+# RUN: rm -f %t.ur.elf
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.ur.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/declared.cfg -o %t.ur.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=UNUSED-READ
+# UNUSED-READ: error: ISR reentrancy: proven static parameter-slot contract violation: parameter slots are shared across two registered ISRs
+# UNUSED-READ: error: ISR reentrancy:   interleaving condition: declared preemption between the two ISR roots (external preemption contract)
+# A hard failure renders the proven violation; the separate presumed-foreground
+# group of the same slot pair is still recorded, as warn mode shows:
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld %t.crt.o %t.ur.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/declared.cfg --isr-reentrancy=warn \
+# RUN:   -o %t.urw.elf 2>&1 | FileCheck %s --check-prefix=UNUSED-READ-WARN
+# UNUSED-READ-WARN: warning: ISR reentrancy: conditional slot overlap
+# UNUSED-READ-WARN: missing condition(s) for a proven violation: foreground reachability is presumed (uncalled root), not traced to the reset chain
+# UNUSED-READ-WARN: warning: ISR reentrancy: proven static parameter-slot contract violation: parameter slots are shared across two registered ISRs
+# RUN: not test -e %t.ur.elf
+
+# --- (d) REVERSE CONTRAST: the same ISR-vs-ISR pair with NO preemption
+# --- declaration.  The ISR-vs-ISR proof rule is not relaxed: the group stays
+# --- conditional, rc=0, and the missing condition is named.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld %t.crt.o %t.base.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   -o %t.und.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=UNDECLARED --implicit-check-not="proven static parameter-slot"
+# UNDECLARED: warning: ISR reentrancy: conditional slot overlap: parameter slots are shared across two registered ISRs
+# UNDECLARED: missing condition(s) for a proven violation: ISR-vs-ISR preemption is not declared in the preemption contract
+
+# --- (e) ONLY PRESUMED FOREGROUND, no ISR-vs-ISR combination: ONE registered
+# --- ISR plus an uncalled root that reaches the same slot.  The presumed
+# --- foreground candidate must NOT be upgraded: the link stays conditional,
+# --- rc=0, and the presumed-reachability condition is named.
+# RUN: %python %S/Inputs/isr-two-slot-fixture.py %t-seed/presumed.yaml presumed
+# RUN: yaml2obj %t-seed/presumed.yaml -o %t.p.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.p.o
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld %t.crt.o %t.p.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   -o %t.presumed.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=PRESUMED --implicit-check-not="proven static parameter-slot"
+# PRESUMED: warning: ISR reentrancy: conditional slot overlap
+# PRESUMED: missing condition(s) for a proven violation: foreground reachability is presumed (uncalled root), not traced to the reset chain
+
+# --- (f) the structured facts must carry the SAME verdicts from the SAME
+# --- records, and neither combination may be recorded twice: the baseline
+# --- publishes exactly ONE conflict group, and the mixed case publishes the
+# --- distinct ISR-vs-foreground (kind=0) and ISR-vs-ISR (kind=1) groups, one
+# --- record each.
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld %t.crt.o %t.base.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/declared.cfg --isr-reentrancy=warn \
+# RUN:   --link-facts=%t.base.facts -o %t.basew.elf 2> %t.basew.err
+# RUN: FileCheck %s --check-prefix=BASE-FACTS < %t.base.facts
+# BASE-FACTS: conflict kind=1 proven=1 same_slot=0 range=[0x0,0x2) exact=1
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld %t.crt.o %t.uc.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/declared.cfg --isr-reentrancy=warn \
+# RUN:   --link-facts=%t.uc.facts -o %t.ucw.elf 2> %t.ucw.err
+# RUN: FileCheck %s --check-prefix=MIXED-FACTS < %t.uc.facts
+# MIXED-FACTS: conflict kind=0 proven=0 same_slot=1 {{.*}}missing=foreground reachability is presumed (uncalled root), not traced to the reset chain
+# MIXED-FACTS: conflict kind=0 proven=0 same_slot=0 {{.*}}missing=foreground reachability is presumed (uncalled root), not traced to the reset chain
+# MIXED-FACTS: conflict kind=1 proven=1 same_slot=0 range=[0x0,0x2) exact=1 {{.*}}roots_a=_irq1 roots_b=_irq2
+# Exactly one record per group key: the two kind=0 rows differ in same_slot, so
+# all three keys are distinct.  Asserted by comparing the key COUNT with the
+# SET of keys in the helper, NOT with `uniq -d | FileCheck --prefix=X-NOT:`:
+# the extracted fields are numeric (`kind=`, `same_slot=`, `range=`), so the
+# word `conflict` never reaches FileCheck and the -NOT pattern passed even
+# with a duplicated key present (measured in the round-13 review).
+# RUN: %python %S/Inputs/isr-conflict-keys-unique.py %t.uc.facts
+
+# --- (g) REAL-COMPILER cross-check: the same two shapes compiled by llc.
+# --- The core regression (b) is reproduced end to end from checked-in IR:
+# --- without the uncalled root rc=1, with it still rc=1 and proven.
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %S/Inputs/reentrancy-two-slot-isr.ll -o %t.irbase.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.irbase.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/declared.cfg -o %t.irbase.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=IR-BASE
+# IR-BASE: error: ISR reentrancy: proven static parameter-slot contract violation: parameter slots are shared across two registered ISRs
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %S/Inputs/reentrancy-two-slot-isr-unused.ll -o %t.irmixed.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.irmixed.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/declared.cfg -o %t.irmixed.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=IR-MIXED
+# IR-MIXED: error: ISR reentrancy: proven static parameter-slot contract violation: parameter slots are shared across two registered ISRs
+# IR-MIXED: error: ISR reentrancy:   interleaving condition: declared preemption between the two ISR roots (external preemption contract)
+# RUN: not test -e %t.irmixed.elf
+
+# --- (h) COEXISTENCE: two registered ISRs, a declared preemption pair, AND a
+# --- positively rooted foreground caller of `_left'.  All three combinations
+# --- of the same slot pair now hold at once -- the same-slot ISR/foreground
+# --- group, the different-slot ISR/foreground group and the ISR/ISR group --
+# --- and each is recorded exactly once under its own key.  Before this
+# --- correction the pair-level `Kind' selection could report only the
+# --- ISR/foreground combinations and dropped the ISR/ISR one.
+# RUN: %python %S/Inputs/isr-two-slot-fixture.py %t-seed/fg-call.yaml fg-call
+# RUN: yaml2obj %t-seed/fg-call.yaml -o %t.fgc.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.fgc.o
+# RUN: %python %S/Inputs/expect-rc.py 0 mcs251-lld %t.crt.o %t.fgc.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/declared.cfg --isr-reentrancy=warn \
+# RUN:   --link-facts=%t.fgc.facts -o %t.fgc.elf 2> %t.fgc.err
+# RUN: FileCheck %s --check-prefix=FGC-FACTS < %t.fgc.facts
+# FGC-FACTS: conflict kind=0 proven=1 same_slot=1
+# FGC-FACTS: conflict kind=0 proven=1 same_slot=0
+# FGC-FACTS: conflict kind=1 proven=1 same_slot=0
+# RUN: %python %S/Inputs/isr-conflict-keys-unique.py %t.fgc.facts

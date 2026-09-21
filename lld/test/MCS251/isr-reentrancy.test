@@ -28,18 +28,23 @@
 # SHARED: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}})
 # SHARED: warning: ISR reentrancy:   direct foreground callers of 'helper': _main ({{.*}})
 # SHARED: warning: ISR reentrancy:   parameter slots of {{.*}}shared.o (per defining object): .mcs251.DSEG.7 0x0000 +0x4
-# SHARED: warning: ISR reentrancy:   coverage boundary: only direct control-flow relocations are analyzed
+# SHARED: warning: ISR reentrancy: coverage status: open -
 
-# --- (b) ISR-only helper: no warning.
+# --- (b) ISR-only helper: no conflict warning.  E1/WP2: the analysis always
+# --- prints its coverage status (zero conflicts still report the state), so
+# --- the assertion is "no warning/conflict line" plus the status line.
 # RUN: yaml2obj %t-seed/isr-only.yaml -o %t.only.o
 # RUN: %python %S/Inputs/isr-v2flags.py %t.only.o
 # RUN: mcs251-lld %t.crt.o %t.only.o --area-start=HOME=0xff0000 \
 # RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 --map=%t.only.map -o %t.only.elf \
 # RUN:   2> %t.only.err
-# RUN: FileCheck %s --check-prefix=ONLY-ERR --allow-empty < %t.only.err
+# RUN: FileCheck %s --check-prefix=ONLY-ERR < %t.only.err
 # RUN: FileCheck %s --check-prefix=ONLY-MAP < %t.only.map
-# ONLY-ERR-NOT: ISR reentrancy
+# ONLY-ERR-NOT: ISR reentrancy: function
+# ONLY-ERR-NOT: proven static parameter-slot
+# ONLY-ERR-NOT: conditional slot overlap
+# ONLY-ERR: warning: ISR reentrancy: coverage status:
 # ONLY-MAP: IRQ 01 0xff000b ISR _irq1
 
 # --- (c) two registered ISRs share the helper.
@@ -54,7 +59,7 @@
 # TWOISR: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}}) _irq2 ({{.*}})
 # TWOISR-NOT: direct foreground callers
 # TWOISR: warning: ISR reentrancy:   parameter slots of {{.*}}two.o (per defining object): none found
-# TWOISR: warning: ISR reentrancy:   coverage boundary: only direct control-flow relocations are analyzed
+# TWOISR: warning: ISR reentrancy: coverage status: open -
 
 # --- (d) the diagnosis can be turned off.
 # RUN: mcs251-lld %t.crt.o %t.shared.o --area-start=HOME=0xff0000 \
@@ -66,14 +71,20 @@
 
 # --- (e) boundary: the only non-ISR "caller" is an indirect call (helper's
 # --- address taken through the data relocation R_MCS251_16).  That edge is
-# --- invisible by design, so the ISR-only helper stays silent.
+# --- invisible by design, so the ISR-only helper stays silent on conflicts.
+# --- E1/WP2: taking a function's address is NOT an indirect call, so the
+# --- coverage status must not record an unknown indirect call site for this
+# --- link (the R_MCS251_16 reference is informational only).
 # RUN: yaml2obj %t-seed/indirect.yaml -o %t.ind.o
 # RUN: %python %S/Inputs/isr-v2flags.py %t.ind.o
 # RUN: mcs251-lld %t.crt.o %t.ind.o --area-start=HOME=0xff0000 \
 # RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 -o %t.ind.elf 2> %t.ind.err
-# RUN: FileCheck %s --check-prefix=INDIRECT --allow-empty < %t.ind.err
-# INDIRECT-NOT: ISR reentrancy
+# RUN: FileCheck %s --check-prefix=INDIRECT < %t.ind.err
+# INDIRECT-NOT: ISR reentrancy: function
+# INDIRECT-NOT: proven static parameter-slot
+# INDIRECT-NOT: unknown indirect call site
+# INDIRECT: warning: ISR reentrancy: coverage status:
 
 # --- (f) cross-TU mix: ISR in one object, foreground caller in another, the
 # --- helper (and its parameter slot) in a third.
@@ -107,7 +118,7 @@
 # ALIAS: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}})
 # ALIAS: warning: ISR reentrancy:   direct foreground callers of 'helper': _main ({{.*}})
 # ALIAS: warning: ISR reentrancy:   parameter slots of {{.*}}alias.o (per defining object): .mcs251.DSEG.7 0x0000 +0x4
-# ALIAS: warning: ISR reentrancy:   coverage boundary: only direct control-flow relocations are analyzed
+# ALIAS: warning: ISR reentrancy: coverage status: open -
 # ALIAS-NOT: z_irq_alias
 
 # --- (h) interior-label regression: zz_loop sits inside _irq1 at the ecall
@@ -124,7 +135,7 @@
 # INNER: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}})
 # INNER: warning: ISR reentrancy:   direct foreground callers of 'helper': _main ({{.*}})
 # INNER: warning: ISR reentrancy:   parameter slots of {{.*}}inner.o (per defining object): none found
-# INNER: warning: ISR reentrancy:   coverage boundary: only direct control-flow relocations are analyzed
+# INNER: warning: ISR reentrancy: coverage status: open -
 # INNER-NOT: zz_loop
 
 # --- (i) same-address STT_FUNC alias regression: A_irq_alias is a local
@@ -144,7 +155,7 @@
 # FUNCALIAS: warning: ISR reentrancy:   ISR entries reaching 'helper': _irq1 ({{.*}})
 # FUNCALIAS: warning: ISR reentrancy:   direct foreground callers of 'helper': _main ({{.*}})
 # FUNCALIAS: warning: ISR reentrancy:   parameter slots of {{.*}}funcalias.o (per defining object): .mcs251.DSEG.7 0x0000 +0x4
-# FUNCALIAS: warning: ISR reentrancy:   coverage boundary: only direct control-flow relocations are analyzed
+# FUNCALIAS: warning: ISR reentrancy: coverage status: open -
 # FUNCALIAS-NOT: A_irq_alias
 
 #--- shared.yaml
@@ -161,9 +172,9 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
     # _irq1@0: ecall helper (9A + addr24); reti (32)
-    # helper@5: ret (22)
-    # _main@6: ecall helper (9A + addr24); ret (22)
-    Content: '9A00000032229A00000022'
+    # helper@5: eret (AA)
+    # _main@6: ecall helper (9A + addr24); eret (AA)
+    Content: '9A00000032AA9A000000AA'
   - Name: .mcs251.DSEG.7
     Type: SHT_NOBITS
     Flags: [ SHF_ALLOC, SHF_WRITE ]
@@ -247,7 +258,7 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
     # _irq1@0: ecall helper; reti.  helper@5: ret.  _main@6: ret.
-    Content: '9A000000322222'
+    Content: '9A00000032AAAA'
   - Name: .mcs251.isr
     Type: SHT_PROGBITS
     Flags: [ ]
@@ -322,8 +333,8 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
     # _irq1@0: ecall helper; reti.  _irq2@5: ecall helper; reti.
-    # helper@10: ret.  _main@11: ret.
-    Content: '9A000000329A000000322222'
+    # helper@10: eret.  _main@11: eret.
+    Content: '9A000000329A00000032AAAA'
   - Name: .mcs251.isr
     Type: SHT_PROGBITS
     Flags: [ ]
@@ -560,7 +571,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
-    Content: '9A00000022'
+    Content: '9A000000AA'
   - Name: .rela.text
     Type: SHT_RELA
     Flags: [ ]
@@ -605,7 +616,7 @@ Sections:
     Type: SHT_PROGBITS
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
-    Content: '22'
+    Content: 'AA'
   - Name: .mcs251.DSEG.7
     Type: SHT_NOBITS
     Flags: [ SHF_ALLOC, SHF_WRITE ]
@@ -644,9 +655,9 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
     # _irq1@0: ecall helper (9A + addr24); reti (32)
-    # helper@5: ret (22)
-    # _main@6: ecall helper (9A + addr24); ret (22)
-    Content: '9A00000032229A00000022'
+    # helper@5: eret (AA)
+    # _main@6: ecall helper (9A + addr24); eret (AA)
+    Content: '9A00000032AA9A000000AA'
   - Name: .mcs251.DSEG.7
     Type: SHT_NOBITS
     Flags: [ SHF_ALLOC, SHF_WRITE ]
@@ -739,9 +750,9 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
     # _irq1@0 (size 7): nop nop; zz_loop@2: ecall helper (reloc @0x3); reti@6
-    # helper@7: ret (22)
-    # _main@8 (size 5): ecall helper (reloc @0x9); ret@0xC
-    Content: '00009A00000032229A00000022'
+    # helper@7: eret (AA)
+    # _main@8 (size 5): ecall helper (reloc @0x9); eret@0xC
+    Content: '00009A00000032AA9A000000AA'
   - Name: .mcs251.isr
     Type: SHT_PROGBITS
     Flags: [ ]
@@ -829,9 +840,9 @@ Sections:
     Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
     AddressAlign: 1
     # _irq1@0: ecall helper (9A + addr24); reti (32)
-    # helper@5: ret (22)
-    # _main@6: ecall helper (9A + addr24); ret (22)
-    Content: '9A00000032229A00000022'
+    # helper@5: eret (AA)
+    # _main@6: ecall helper (9A + addr24); eret (AA)
+    Content: '9A00000032AA9A000000AA'
   - Name: .mcs251.DSEG.7
     Type: SHT_NOBITS
     Flags: [ SHF_ALLOC, SHF_WRITE ]

@@ -25,6 +25,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <vector>
@@ -58,6 +59,18 @@ struct FlavorOptions {
   bool AuditReport = false;
   bool AuditVerify = false;
   std::string ReportPath;
+  // E2 (WP3 feed): the versioned link-facts output path (--link-facts).
+  std::string FactsPath;
+  // R5-3: the external preemption contract is a READ INPUT of this link, so
+  // its path is remembered and takes part in the same-file matrix that keeps
+  // every publication (final and staging) from resolving onto an input.
+  // R5-r2: the option is REJECTED when repeated, so this holds at most one
+  // path -- but it stays a container so the matrix arm iterates the input
+  // set rather than reading one "last wins" field.  The set/vector shape is
+  // what makes the invariant checkable: were duplicates ever accepted
+  // again, the matrix would already cover every one of them instead of the
+  // final element alone.
+  std::vector<std::string> PreemptionConfigPaths;
   // Tracked so the verifier receives exactly the window numbers the link was
   // given, and never a default the user did not ask for.
   bool EdataEndGiven = false;
@@ -428,56 +441,6 @@ bool buildExecutable(const LinkerResult &Result, bool KeepSymbols,
   return true;
 }
 
-// The classic publication writer: build the bytes, write them to `<Path>.tmp`
-// and rename over the target.  A plain link passes Positions=nullptr and gets
-// the exact pre-D2 bytes and diagnostics.
-bool writeExecutable(const LinkerResult &Result, bool KeepSymbols,
-                     const std::vector<uint8_t> *Positions, StringRef Path,
-                     raw_ostream &Err) {
-  std::vector<uint8_t> ELF;
-  if (!buildExecutable(Result, KeepSymbols, Positions, ELF, Err))
-    return false;
-
-  std::string Temp = (Path + ".tmp").str();
-  std::error_code EC;
-  {
-    raw_fd_ostream OS(Temp, EC, sys::fs::OF_None);
-    if (EC)
-      return fail(Err, "cannot open temporary output " + Temp);
-    OS.write(reinterpret_cast<const char *>(ELF.data()), ELF.size());
-    OS.flush();
-    // R5-7 (same class as the private writers): close explicitly and clear a
-    // close error so the destructor cannot escalate it to a fatal LLVM ERROR.
-    OS.close();
-    if (OS.has_error()) {
-      OS.clear_error();
-      return fail(Err, "cannot write temporary output " + Temp);
-    }
-  }
-  EC = sys::fs::rename(Temp, Path);
-  if (EC) {
-    sys::fs::remove(Temp);
-    return fail(Err, "cannot replace output " + Path);
-  }
-  return true;
-}
-
-// G11-D review B8: pre-flight a publication destination.  The audit path
-// writes its private artifacts, verifies, and only then publishes; if the
-// report's directory does not exist, the failure must be found BEFORE the ELF
-// is placed, otherwise a failed run leaves a brand-new ELF that looks like a
-// successful product.
-//
-// G11-D review R2-7 (B8): the probe itself must be side-effect free on files
-// THIS RUN DID NOT CREATE.
-//   * A destination that already exists as a DIRECTORY can never be renamed
-//     onto, so it is refused up front (the probe used to pass by writing
-//     `<path>.tmp`, and the real ELF was replaced before the report's
-//     rename failed).
-//   * The writability probe uses a UNIQUE scratch name in the destination's
-//     directory.  Probing through `<path>.tmp` truncated and deleted a
-//     PRE-EXISTING file at that path even when the run then failed; the
-//     publication temp path belongs to the real writers only.
 bool probeDestination(StringRef Path, StringRef Kind, raw_ostream &Err) {
   if (sys::fs::is_directory(Path))
     return fail(Err, "cannot replace " + Kind + " " + Path);
@@ -574,6 +537,7 @@ struct Publication {
   bool Staged = false;
   bool BackedUp = false;
   bool Published = false;
+  std::string Bytes; // The artifact contents, determined once.
 };
 
 // Stage one artifact: write the already-determined bytes to `<final>.tmp`
@@ -912,6 +876,11 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
   bool FlashBaseGiven = false;
   bool FlashSizeGiven = false;
   bool ReportGiven = false;
+  // R4-4: the --print-input rejection below keys on whether the OPTION was
+  // given, not on whether the parsed pair set is non-empty -- a contract file
+  // holding only comments still names a contract the user asked to have
+  // validated.
+  bool PreemptionConfigGiven = false;
   for (size_t I = 1; I < Args.size(); ++I) {
     StringRef A(Args[I]);
     auto take = [&](StringRef Name) -> std::optional<StringRef> {
@@ -931,13 +900,130 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
       O.Core.EnableStackGate = true;
     } else if (A == "--no-stack-gate") {
       return fail(Err, "--no-stack-gate is not supported; SPEC mandates the stack gate");
-    } else if (A == "--isr-reentrancy") {
-      // E2: static parameter-slot reentrancy diagnosis; on by default.
-      O.Core.IsrReentrancyDiag = true;
+    } else if (A == "--isr-reentrancy" || A.starts_with("--isr-reentrancy=")) {
+      // E1 (WP2): the CONFLICT SEVERITY axis, separate from coverage.  The
+      // default (and the bare flag) is Error: the address-level static
+      // parameter-slot check runs and a PROVEN contract violation fails the
+      // link.  warn/off are diagnostic experiment modes; their output is
+      // explicitly marked uncertified and can never certify the link.
+      StringRef V = "error";
+      if (A.starts_with("--isr-reentrancy="))
+        V = A.substr(strlen("--isr-reentrancy="));
+      if (V == "error")
+        O.Core.IsrReentrancy = IsrReentrancySeverity::Error;
+      else if (V == "warn")
+        O.Core.IsrReentrancy = IsrReentrancySeverity::Warn;
+      else if (V == "off")
+        O.Core.IsrReentrancy = IsrReentrancySeverity::Off;
+      else
+        return fail(Err, "invalid --isr-reentrancy value '" + V +
+                             "' (expected off, warn or error)");
     } else if (A == "--no-isr-reentrancy") {
-      // Opt out for builds whose ABI-safe call relationships are guaranteed
-      // by other means; the diagnosis is a warning, never an error.
-      O.Core.IsrReentrancyDiag = false;
+      // Compat form of the experiment mode: disables the reentrancy
+      // diagnostics entirely; the coverage state then reports unchecked.
+      O.Core.IsrReentrancy = IsrReentrancySeverity::Off;
+    } else if (A == "--isr-reentrancy-coverage=allow" ||
+               A == "--isr-reentrancy-coverage=require") {
+      // E1 (WP2): the COVERAGE axis, independent of severity.  allow (the
+      // default) tolerates unknown analysis facts but the run explicitly
+      // does not constitute a complete certification; require (ISR
+      // certification recipes) fails the link on any unknown fact.
+      O.Core.IsrReentrancyCoverageRequire =
+          A == "--isr-reentrancy-coverage=require";
+    } else if (A.starts_with("--isr-preemption-config=")) {
+      // E1: the external preemption contract.  The shell reads and
+      // syntax-validates the board input here; the core only checks every
+      // name resolves to a registered ISR entry and never guesses board
+      // configuration.  Grammar: one `preempt <isrA> <isrB>` pair per line,
+      // '#' comments and blank lines ignored.  Without a contract the
+      // default applies: a registered ISR may preempt the foreground;
+      // nothing is assumed between two registered ISRs.
+      StringRef Path = A.substr(strlen("--isr-preemption-config="));
+      if (Path.empty())
+        return fail(Err, "invalid --isr-preemption-config: expected a "
+                         "non-empty file path");
+      // R5-r2: the option is REJECTED when repeated.  Accepting it made the
+      // two halves of one option disagree: the PAIR SET accumulated across
+      // files (a merge no consumer was told about) while the remembered
+      // PATH was last-wins, so the publication-vs-input matrix protected
+      // only the LAST file.  `--isr-preemption-config=A
+      // --isr-preemption-config=B --link-facts=A` therefore passed every
+      // mode's path check and published facts over A -- a contract file
+      // that had already been read and had already contributed pairs to the
+      // analysis.  Neither half is a defensible reading of two occurrences:
+      // a union of two boards' contracts is not a contract any single board
+      // declares, and "the last one is the real one" silently discards
+      // declarations the user made.  Rejecting keeps one file == one
+      // contract == one input path, which is what the analysis and the path
+      // matrix both assume.  (The alternative -- keeping a path SET and
+      // still merging the pairs -- would keep the analysis semantics
+      // unexplained while only widening the matrix, so it is not taken.)
+      if (PreemptionConfigGiven)
+        return fail(Err, "duplicate --isr-preemption-config: the preemption "
+                         "contract is a single input file, so repeated "
+                         "occurrences are rejected (the declared pairs are "
+                         "not merged across files)");
+      PreemptionConfigGiven = true;
+      // R5-3: remember the contract path.  The file is a READ INPUT of this
+      // link (its text decides which preemption pairs are declared), so it
+      // must take part in the same publication-vs-input matrix as the object
+      // files and the placement manifests: otherwise --link-facts pointing
+      // at the contract path made the two arms ORDERS on one file, every
+      // mode returned 0, and the contract text was replaced by facts bytes
+      // after it had been parsed.
+      O.PreemptionConfigPaths.push_back(Path.str());
+      // R5-r2: provenance for the pair diagnostics.  The path is made
+      // lexically absolute for the SAME reason the placement manifest's is:
+      // the diagnostic must name a file the user can open from wherever the
+      // build ran, and the spelling stays lexical (no realpath) so a
+      // symlinked alias is reported as written.
+      const std::string AbsPath = lexicalAbsolute(Path);
+      auto Buf = MemoryBuffer::getFile(Path, /*IsText=*/true);
+      if (!Buf)
+        return fail(Err, "cannot read --isr-preemption-config file " + Path);
+      unsigned LineNo = 0;
+      SmallVector<StringRef, 32> Lines;
+      Buf->get()->getBuffer().split(Lines, '\n');
+      for (StringRef Line : Lines) {
+        ++LineNo;
+        Line = Line.trim();
+        if (Line.empty() || Line.starts_with("#"))
+          continue;
+        if (!Line.starts_with("preempt "))
+          return fail(Err, "invalid --isr-preemption-config line " +
+                               Twine(LineNo) + ": expected 'preempt <isrA> "
+                               "<isrB>'");
+        SmallVector<StringRef, 3> Words;
+        Line.split(Words, ' ', -1, /*KeepEmpty=*/false);
+        if (Words.size() != 3)
+          return fail(Err, "invalid --isr-preemption-config line " +
+                               Twine(LineNo) + ": expected exactly two ISR "
+                               "entry names");
+        // A pair repeated inside one contract is ONE declaration: the first
+        // occurrence (and therefore the first line) is kept, so a
+        // diagnostic never points at a redundant later repeat.
+        auto Same = [&](const LinkerConfig::IsrPreemptionPair &E) {
+          return StringRef(E.NameA) == Words[1] &&
+                 StringRef(E.NameB) == Words[2];
+        };
+        if (std::find_if(O.Core.IsrPreemptionPairs.begin(),
+                         O.Core.IsrPreemptionPairs.end(),
+                         Same) == O.Core.IsrPreemptionPairs.end())
+          O.Core.IsrPreemptionPairs.push_back(
+              {Words[1].str(), Words[2].str(), AbsPath, LineNo});
+      }
+    } else if (A.starts_with("--link-facts=")) {
+      // E2 (WP3 feed): write the versioned link-facts interface (final
+      // capacities, object/section/symbol identity, ISR registration, the
+      // direct call graph, indirect-call sites, execution contexts and the
+      // reentrancy report) so an independent budgeter never re-parses
+      // diagnostics text to rebuild relationships.
+      StringRef P = A.substr(strlen("--link-facts="));
+      if (P.empty())
+        return fail(Err, "invalid --link-facts: expected a non-empty file "
+                         "path");
+      O.FactsPath = P.str();
+      O.Core.EmitLinkFacts = true;
     } else if (A == "--keep-symbols") {
       // E5: keep a final symbol table in the ELF and function-level rows in
       // the map.  Off by default: the frozen release artifacts (manifest.json
@@ -1097,9 +1183,19 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
     } else if (A == "--oformat=ihex" || A == "--oformat") {
       return fail(Err, "Intel HEX is produced by llvm-objcopy -O ihex");
     } else if (A == "--help") {
-      Out << "mcs251-lld [--stack-gate] [--isr-reentrancy] [--keep-symbols] "
-             "[--placement-report=<path>] [--verify-placement] "
-             "[options] file...\n";
+      Out << "mcs251-lld [--stack-gate] [--isr-reentrancy[=off|warn|error]] "
+             "[--isr-reentrancy-coverage=allow|require] "
+             "[--isr-preemption-config=<path>] [--link-facts=<path>] "
+             "[--keep-symbols] [--placement-report=<path>] "
+             "[--verify-placement] [options] file...\n"
+             "  --isr-preemption-config: one 'preempt <isrA> <isrB>' pair per "
+             "line; it declares the two registered ISRs able to interleave "
+             "with each other (not a directed/causal priority graph).  The "
+             "option may be given AT MOST ONCE: one file is one contract, and "
+             "pairs are not merged across files.  A pair must name two "
+             "DISTINCT registered ISRs, since this contract language "
+             "expresses interleaving between two entries, not a same-ISR "
+             "self-reentrancy relation\n";
       O.HelpOrVersion = true;
       return true;
     } else if (A == "--version") {
@@ -1128,6 +1224,12 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
   }
   if (O.Core.Inputs.empty())
     return fail(Err, "no input files");
+  // E1 (WP2): a certification recipe cannot disable the check it requires.
+  if (O.Core.IsrReentrancyCoverageRequire &&
+      O.Core.IsrReentrancy == IsrReentrancySeverity::Off)
+    return fail(Err, "--isr-reentrancy-coverage=require cannot be combined "
+                     "with --isr-reentrancy=off: disabling the check never "
+                     "certifies the link");
   if (!O.Core.PrintInput && O.Output.empty())
     O.Output = O.Core.Inputs.front() + ".elf";
   // G11-D audit validation (contract §1).  Audit output must be a real
@@ -1228,10 +1330,286 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
       }
     }
   }
+  // E2 (WP3 feed): the facts artifact is a published output like the map or
+  // the placement report, so it gets the same path-conflict validation and
+  // can never be silently dropped by combining it with another option.
+  if (!O.FactsPath.empty() && O.Core.PrintInput)
+    return fail(Err, "--link-facts cannot be combined with --print-input");
+  // The external preemption contract names registered ISR entries, which
+  // --print-input never resolves: the combination is rejected whenever the
+  // OPTION was given -- including a contract file whose pair set is empty
+  // (comments only), which still asks for a validation that mode cannot
+  // perform (review finding 4, round 4).
+  if (O.Core.PrintInput && PreemptionConfigGiven)
+    return fail(Err, "--isr-preemption-config cannot be combined with "
+                     "--print-input: the registered ISR set is not resolved "
+                     "in that mode");
+  // A valid non-empty preemption contract used to return early here, which
+  // skipped the publication path matrix below: `--link-facts=<ELF>.tmp` then
+  // silently consumed the ELF's staging path in EVERY output mode (review
+  // finding 1, round 4).  The core still validates the contract names for
+  // every real link; the shell validates the artifact paths for every mode.
+  // Publication path matrix: EVERY artifact contributes its final AND its
+  // staging (`<final>.tmp`) path; no pair may collide with another artifact
+  // or with any input (objects or manifests).  This applies to every output
+  // mode, so a requested artifact can never be silently lost to another one
+  // (review finding 6, round 3).
+  {
+    struct PubPath {
+      std::string Path, Kind;
+      bool Staged;
+    };
+    std::vector<PubPath> Pubs;
+    auto Add = [&](const std::string &P, const char *K) {
+      if (P.empty())
+        return;
+      Pubs.push_back({P, K, false});
+      Pubs.push_back({P + ".tmp", K, true});
+    };
+    Add(O.Output, "output");
+    Add(O.Map, "map");
+    Add(O.FactsPath, "link facts");
+    if (O.AuditReport)
+      Add(O.ReportPath, "placement report");
+    for (size_t I = 0; I < Pubs.size(); ++I)
+      for (size_t J = I + 1; J < Pubs.size(); ++J)
+        if (sameFilePath(Pubs[I].Path, Pubs[J].Path))
+          return fail(Err, std::string("publication path conflict: ") +
+                               Pubs[I].Kind + " and " + Pubs[J].Kind +
+                               " resolve to the same file");
+    for (const PubPath &P : Pubs)
+      for (const std::string &In : O.Core.Inputs)
+        if (sameFilePath(P.Path, In))
+          return fail(Err, std::string("publication path conflict: ") + P.Kind +
+                               " conflicts with an input file");
+    for (const PubPath &P : Pubs)
+      for (const LinkerConfig::ManifestEntry &ME : O.Core.PlacementManifest)
+        if (sameFilePath(P.Path, ME.Path))
+          return fail(Err, std::string("publication path conflict: ") + P.Kind +
+                               " conflicts with an input file");
+    // R5-3: the preemption contract is a read input too, and it is named
+    // separately because the diagnostic has to say WHICH file was about to
+    // be consumed.  sameFilePath already covers the path, a symlink alias
+    // and a hard link (it asks the file system for device+inode whenever
+    // both names exist), so this arm reuses it instead of a string compare.
+    // R5-r2: the arm walks the whole recorded input set, not one last-wins
+    // field, so the invariant is structural: every contract file the parser
+    // read is protected by the same matrix.  (Repeat occurrences are
+    // rejected earlier, so today the set holds one entry.)
+    for (const std::string &Cfg : O.PreemptionConfigPaths)
+      for (const PubPath &P : Pubs)
+        if (sameFilePath(P.Path, Cfg))
+          return fail(Err, std::string("publication path conflict: ") + P.Kind +
+                               " conflicts with the --isr-preemption-config "
+                               "input file");
+  }
   return true;
 }
 
+// E2 (WP3 feed): serialize the versioned link-facts interface.  Line grammar
+// (version 1): one record per line, fields space-separated; every record is
+// `key args...` with plain numbers decimal and addresses/sizes 0x-hex.  A
+// name is always the LAST field of its line and runs to the end of the line,
+// so symbol names never need quoting.  Consumers key facts by the numeric
+// identities (object ordinal, section index, symbol index); names are
+// informational.
+void serializeLinkFacts(const LinkerResult &Result, raw_ostream &OS) {
+  const LinkerResult::LinkFacts &F = Result.Facts;
+  auto H = [](uint64_t V) { return format_hex(V, 0, false); };
+  auto ID = [](const LinkerResult::ReentrancyID &I) {
+    return std::to_string(I.ObjectId) + ":" +
+           (I.Section == 0xffffffffu ? std::string("-")
+                                     : std::to_string(I.Section)) +
+           ":" +
+           (I.SymIndex == 0xffffffffu
+                ? std::string("-")
+                : std::to_string(I.SymIndex));
+  };
+  OS << "MCS251-LINK-FACTS " << F.Version << "\n";
+  OS << "format text " << F.Version << "\n";
+  for (size_t I = 0; I != F.Objects.size(); ++I)
+    OS << "obj " << I << " sha256=" << F.Objects[I].Sha256 << " path "
+       << F.Objects[I].Path << "\n";
+  for (const auto &S : F.Sections)
+    OS << "sec " << S.ObjectId << " " << S.InputShndx << " region=" << S.Region
+       << " space=" << unsigned(S.Space) << " addr=" << H(S.Address)
+       << " size=" << H(S.Size) << " flags=" << H(S.Flags) << " name "
+       << S.Name << "\n";
+  for (const auto &S : F.Symbols)
+    OS << "sym " << S.ObjectId << " " << S.SymIndex
+       << " addr=" << H(S.Address) << " size=" << H(S.Size)
+       << " type=" << unsigned(S.Type) << " bind=" << unsigned(S.Bind)
+       << " name " << S.Name << "\n";
+  for (const auto &I : F.Isrs)
+    OS << "isr slot=" << I.Slot << " entry=" << ID(I.Entry) << " name "
+       << I.Name << "\n";
+  for (const auto &E : F.Edges)
+    OS << "edge " << ID(E.From) << " -> " << ID(E.To)
+       << " evidence=" << unsigned(E.Evidence) << "\n";
+  for (const auto &C : F.Contracts)
+    OS << "contract version=" << unsigned(C.Version)
+       << " kind=" << unsigned(C.Kind) << " site=" << C.ObjectId << ":"
+       << C.Shndx << ":" << H(C.Offset) << " target=" << ID(C.Target)
+       << " name " << C.Name << "\n";
+  for (const auto &I : F.ICalls)
+    OS << "icall obj=" << I.ObjectId << " sec=" << I.Shndx
+       << " off=" << H(I.Offset) << " in=" << ID(I.In) << "\n";
+  for (const auto &C : F.Contexts) {
+    OS << "ctx " << ID(C.Function) << " fg=" << (C.Fg ? 1 : 0)
+       << " fg_contract=" << (C.FgContract ? 1 : 0) << " isr=";
+    for (size_t I = 0; I != C.IsrRoots.size(); ++I)
+      OS << (I ? "," : "") << C.IsrRoots[I];
+    OS << "\n";
+  }
+  OS << "cap spx=" << F.Cap.Spx << " capacity=" << F.Cap.CapacityBytes
+     << " edata_end=" << H(F.Cap.EdataEnd) << " iram_size=" << F.Cap.IramSize
+     << " stack_high=" << H(F.Cap.StackHigh) << "\n";
+  for (const auto &A : F.Cap.Areas)
+    OS << "area " << A.first << "=" << H(A.second) << "\n";
+  const LinkerResult::ReentrancyReport &R = F.Reentrancy;
+  static const char *States[] = {"undeclared", "unchecked", "open", "closed"};
+  OS << "reentrancy version=" << R.Version
+     << " coverage=" << States[R.CoverageState & 3]
+     << " isrs=" << R.RegisteredIsrs << " functions=" << R.Functions
+     << " slots=" << R.Slots << "\n";
+  for (const auto &U : R.Unknowns)
+    OS << "unknown kind=" << unsigned(U.Kind) << " count=" << U.Count << "\n";
+  // Conflict records carry the COMPLETE participating slot set and the
+  // per-slot access evidence, plus the specific pair that established the
+  // group, so a consumer never has to reconstruct them from diagnostics.
+  // R4-2: slots= names the DECIDING pair -- the pair whose evidence chain is
+  // complete when proven=1, not merely the first pair seen; the group-level
+  // missing= is emitted only for a group that is NOT proven, and every pair
+  // gets its own conflict_pair record attributing its verdict (and its
+  // missing conditions) to exactly that pair.
+  // R5-2: a proven record also carries the DECIDING pair's roots_a/roots_b
+  // -- never the union over every established pair -- so slots=, roots_a=
+  // and roots_b= describe the SAME pair.
+  for (const auto &C : R.Conflicts) {
+    auto RootList = [](const std::vector<std::string> &V) {
+      std::string S;
+      for (size_t I = 0; I != V.size(); ++I)
+        S += (I ? "," : "") + V[I];
+      return S;
+    };
+    OS << "conflict kind=" << unsigned(C.Kind) << " proven=" << C.Proven
+       << " same_slot=" << (C.SameSlot ? 1 : 0) << " range=[" << H(C.Lo) << ","
+       << H(C.Hi) << ")"
+       << " exact=" << (C.ExtentExact ? 1 : 0) << " slots=" << ID(C.SlotA)
+       << "," << ID(C.SlotB) << " members=" << C.Slots.size();
+    if (C.Proven) {
+      if (!C.DecidingRootsA.empty())
+        OS << " roots_a=" << RootList(C.DecidingRootsA);
+      if (!C.DecidingRootsB.empty())
+        OS << " roots_b=" << RootList(C.DecidingRootsB);
+    }
+    if (!C.Proven && !C.MissingConditions.empty())
+      OS << " missing=" << C.MissingConditions;
+    OS << "\n";
+    for (const auto &P : C.Pairs) {
+      OS << "conflict_pair group=[" << H(C.Lo) << "," << H(C.Hi) << ") a="
+         << ID(P.A) << " b=" << ID(P.B) << " proven=" << (P.Proven ? 1 : 0);
+      if (!P.RootsA.empty())
+        OS << " roots_a=" << RootList(P.RootsA);
+      if (!P.RootsB.empty())
+        OS << " roots_b=" << RootList(P.RootsB);
+      if (!P.MissingConditions.empty())
+        OS << " missing=" << P.MissingConditions;
+      OS << "\n";
+    }
+    for (const auto &S : C.Slots) {
+      OS << "conflict_slot group=[" << H(C.Lo) << "," << H(C.Hi) << ") id="
+         << ID(S.ID) << " addr=" << H(S.Lo) << " size=" << H(S.Hi - S.Lo)
+         << " extent_known=" << (S.ExtentKnown ? 1 : 0)
+         << " section_granular=" << (S.SectionGranular ? 1 : 0)
+         << " region=" << S.Region << " name " << S.Name << "\n";
+      for (const auto &A : S.Accesses)
+        OS << "conflict_access group=[" << H(C.Lo) << "," << H(C.Hi)
+           << ") slot=" << ID(S.ID) << " by=" << ID(A.Accessor)
+           << " role=" << unsigned(A.Role) << " evidence=" << unsigned(A.Evidence)
+           << " edge_evidence=" << unsigned(A.EdgeEvidence)
+           << " context=" << unsigned(A.Context)
+           << " isr_rooted=" << (A.IsrRooted ? 1 : 0)
+           << " fg_rooted=" << (A.FgRooted ? 1 : 0) << " name " << A.AccessorName
+           << "\n";
+    }
+  }
+  for (const auto &C : R.Candidates) {
+    OS << "candidate function=" << ID(C.Function)
+       << " mixed=" << (C.Mixed ? 1 : 0) << " multiisr=" << (C.MultiIsr ? 1 : 0)
+       << " roots=";
+    for (size_t I = 0; I != C.IsrRoots.size(); ++I)
+      OS << (I ? "," : "") << C.IsrRoots[I];
+    OS << " fgcallers=";
+    for (size_t I = 0; I != C.FgCallers.size(); ++I)
+      OS << (I ? "," : "") << C.FgCallers[I];
+    OS << "\n";
+  }
+}
+
 } // namespace
+
+// Publish a set of already-determined artifacts as one transaction:
+// pre-flight every destination, stage every `<final>.tmp`, back up every
+// existing final path, then rename in order; any failure restores/reclaims
+// exactly what this run owns (design §9.4).  Used by the plain link path so
+// the map, the facts file and the ELF can never be left half-published
+// (review finding 6, round 3).
+static bool publishTransaction(std::vector<Publication> &Pubs, raw_ostream &Err) {
+  for (Publication &P : Pubs) {
+    if (!probeDestination(P.Final, P.Kind, Err))
+      return false;
+    P.Temp = P.Final + ".tmp";
+  }
+  auto CleanOwned = [&]() {
+    for (const Publication &P : Pubs) {
+      if (P.Staged && !P.Published)
+        sys::fs::remove(P.Temp);
+      if (!P.Published && !P.Backup.empty())
+        sys::fs::remove(P.Backup);
+    }
+  };
+  for (Publication &P : Pubs)
+    if (!stagePublication(P, P.Bytes, Err)) {
+      CleanOwned();
+      return false;
+    }
+  for (Publication &P : Pubs)
+    if (!backupPublication(P, Err)) {
+      CleanOwned();
+      return false;
+    }
+  for (Publication &P : Pubs) {
+    std::error_code EC = sys::fs::rename(P.Temp, P.Final);
+    if (EC) {
+      sys::fs::remove(P.Temp);
+      P.Staged = false;
+      bool RestoredAll = true;
+      for (auto It = Pubs.rbegin(); It != Pubs.rend(); ++It)
+        if (It->Published && !restorePublication(*It))
+          RestoredAll = false;
+      CleanOwned();
+      if (!RestoredAll)
+        return fail(Err, "cannot replace " + P.Kind + " " + P.Final +
+                             " and the previous state could not be fully "
+                             "restored");
+      return fail(Err, "cannot replace " + P.Kind + " " + P.Final);
+    }
+    P.Published = true;
+  }
+  // Committed: the last rename succeeded, so the backups of the replaced
+  // artifacts are removed.  A cleanup failure is reported but never turns
+  // the publication into a failure (the same contract as the audit path,
+  // design §9.5); the retained path is named.  R4-1: the plain path used to
+  // return here directly and left every `.pubbk.*` backup behind after a
+  // successful overwrite.
+  for (const Publication &P : Pubs)
+    if (!P.Backup.empty() && sys::fs::exists(P.Backup) &&
+        sys::fs::remove(P.Backup))
+      Err << "mcs251-lld: warning: cannot remove the publication backup "
+          << P.Backup << "\n";
+  return true;
+}
 
 bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
           bool ExitEarly, bool DisableOutput) {
@@ -1302,6 +1680,8 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
     // because this invocation produces no output.
     if (Audit)
       return fail(Err, "placement audit requires output generation");
+    if (!Options.FactsPath.empty())
+      return fail(Err, "--link-facts requires output generation");
     return true;
   }
   if (PrintInput) {
@@ -1310,10 +1690,42 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
     return true;
   }
   if (!Audit) {
-    if (!Options.Map.empty() && !writeText(Options.Map, Result.Map, "map", Err))
+    // One transaction for the whole artifact set: the map, the facts file
+    // and the ELF are determined first, then staged, backed up and renamed
+    // together, so a failure can never leave a half-published set or a
+    // stale artifact behind (review finding 6, round 3).
+    std::vector<Publication> Pubs;
+    if (!Options.Map.empty()) {
+      Publication P;
+      P.Final = Options.Map;
+      P.Kind = "map";
+      P.Bytes = Result.Map;
+      Pubs.push_back(std::move(P));
+    }
+    if (!Options.FactsPath.empty()) {
+      std::string FactsText;
+      raw_string_ostream FactsOS(FactsText);
+      serializeLinkFacts(Result, FactsOS);
+      FactsOS.flush();
+      Publication P;
+      P.Final = Options.FactsPath;
+      P.Kind = "link facts";
+      P.Bytes = std::move(FactsText);
+      Pubs.push_back(std::move(P));
+    }
+    std::vector<uint8_t> ElfBytes;
+    if (!buildExecutable(Result, KeepSymbols, /*Positions=*/nullptr, ElfBytes,
+                         Err))
       return false;
-    return writeExecutable(Result, KeepSymbols, /*Positions=*/nullptr,
-                           Options.Output, Err);
+    {
+      Publication P;
+      P.Final = Options.Output;
+      P.Kind = "output";
+      P.Bytes.assign(reinterpret_cast<const char *>(ElfBytes.data()),
+                     ElfBytes.size());
+      Pubs.push_back(std::move(P));
+    }
+    return publishTransaction(Pubs, Err);
   }
 
   // G11-D2: the positioning NOTE is serialized ONCE from the collected
@@ -1331,6 +1743,18 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
   raw_string_ostream ReportOS(ReportText);
   serializePlacementReport(Result, ReportOS);
   ReportOS.flush();
+
+  // E2: the link-facts text is serialized once, up front, so the facts
+  // artifact takes part in the SAME pre-flight + staging + publication
+  // transaction as the ELF, the map and the placement report: requesting
+  // facts can never be silently dropped because another audit option is in
+  // play (review finding 5).
+  std::string FactsText;
+  if (!Options.FactsPath.empty()) {
+    raw_string_ostream FactsOS(FactsText);
+    serializeLinkFacts(Result, FactsOS);
+    FactsOS.flush();
+  }
 
   // Private scratch space, never a sibling of the user's output: an audit that
   // fails must not leave a brand-new path that looks like a successful
@@ -1400,6 +1824,9 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
   if (Options.AuditReport &&
       !probeDestination(Options.ReportPath, "placement report", Err))
     return false;
+  if (!Options.FactsPath.empty() &&
+      !probeDestination(Options.FactsPath, "link facts", Err))
+    return false;
 
   // (b) G11-D2 (design §9.4): the publication transaction.  Stage every
   //     artifact FIRST (exclusive ownership of `<final>.tmp`), then back up
@@ -1436,6 +1863,11 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
   }
   if (Options.AuditReport &&
       !AddPub(Options.ReportPath, "placement report", ReportText)) {
+    CleanOwned();
+    return false;
+  }
+  if (!Options.FactsPath.empty() &&
+      !AddPub(Options.FactsPath, "link facts", FactsText)) {
     CleanOwned();
     return false;
   }

@@ -469,6 +469,7 @@ static unsigned mcs251InstrLen(ArrayRef<uint8_t> B, size_t Off) {
   }
   switch (Op) {
   // Single-byte classics.
+  case 0x00: // nop (MCS251MCCodeEmitter.cpp: the delay-chain NOP, classic 0x00)
   case 0x13: // rrc a
   case 0x33: // rlc a
   case 0xC3: // clr c
@@ -2199,7 +2200,18 @@ private:
   bool validateIRQFinalAssets();
   bool validateXInit();
   bool validateXDATAInit();
-  void diagnoseIsrReentrancy(LinkerResult &Result);
+  // E1 (WP2): the single authoritative ISR reentrancy analysis.  Returns
+  // false ONLY as a normal link failure under the configured severity /
+  // coverage policy (a proven slot-conflict violation, or coverage=require
+  // with unknown facts); the failure details are written to Err BEFORE the
+  // false return.  Warnings and the always-on coverage status go into
+  // Result.Diagnostics; the structured report lands in Result.Reentrancy and
+  // the versioned facts interface in Result.Facts.
+  bool diagnoseIsrReentrancy(LinkerResult &Result);
+  // E2 (WP3 feed): the layout-only part of the versioned link-facts
+  // interface (objects, sections, symbols, capacities), shared by the IRQ
+  // analysis path and the no-IRQ facts-only path.
+  void collectLinkFactsBasic(LinkerResult &Result);
   void buildMap(raw_ostream &Out) const;
   void collectSymbols(std::vector<OutputSymbol> &Out) const;
   void printInputs(raw_ostream &Out) const;
@@ -6067,7 +6079,95 @@ bool Linker::validateXDATAInit() {
 //     linker sees no function-level slot ownership, so the warning lists the
 //     DSEG/OSEG parameter-slot sections of the object that defines the
 //     function.
-void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
+bool Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
+  // The external preemption contract is board INPUT, never a guess: every
+  // declared pair must name two REGISTERED ISR entries of this link.  The
+  // check runs unconditionally - independent of the diagnostic severity and
+  // of whether the facts interface was requested - so a malformed input
+  // contract can never change its verdict with an unrelated output switch.
+  if (!Config.IsrPreemptionPairs.empty()) {
+    std::set<std::string> Registered;
+    for (InputSymbol *S : IsrSymbols)
+      Registered.insert(S->Name);
+    // R5-r2: name the contract line each rejected pair came from.  The
+    // location is rendered as `<file>:<line> (from '<A> <B>')`, with the
+    // lexically absolute path the shell recorded, so a multi-line contract
+    // points at the offending row instead of leaving the user to search the
+    // file for the two names.
+    auto At = [](const LinkerConfig::IsrPreemptionPair &P) {
+      return P.File + ":" + std::to_string(P.Line) + " (from '" + P.NameA +
+             " " + P.NameB + "')";
+    };
+    for (const LinkerConfig::IsrPreemptionPair &P : Config.IsrPreemptionPairs) {
+      if (!Registered.count(P.NameA))
+        return fail(Err, "ISR preemption contract names '" + P.NameA +
+                             "', which is not a registered ISR entry of this "
+                             "link (at " + At(P) + ")");
+      if (!Registered.count(P.NameB))
+        return fail(Err, "ISR preemption contract names '" + P.NameB +
+                             "', which is not a registered ISR entry of this "
+                             "link (at " + At(P) + ")");
+      // Round-5 finding 4: a pair naming the SAME entry twice is REJECTED
+      // rather than accepted and then dropped.  The pair declares "this ISR
+      // can preempt itself", which this release cannot evaluate: the
+      // analysis compares a WRITE root against a DIFFERENT USE root
+      // (W.first != U.first below), so such a pair produced zero conflict
+      // groups and no root-pair record at all - the declaration was
+      // silently discarded while the link reported success.  Accepting the
+      // line and drawing no conclusion is worse than rejecting it: the user
+      // sees a contract that was read and (apparently) honoured.  The
+      // reject is unconditional (every severity mode, with or without
+      // --link-facts), because a malformed input must not change its
+      // verdict with an unrelated output switch.
+      //
+      // Choosing reject over "evaluate self-preemption" (round-5 review
+      // wording): the CONTRACT LANGUAGE AND ANALYSIS DOMAIN of this version
+      // do not carry a same-ISR self-reentrancy relation at all - the
+      // relation is expressed as "two registered ISR entries that can
+      // interleave", so a single entry named twice is outside what the
+      // input grammar can express and gets an explicit reject.  This is a
+      // statement about THIS language, not a claim that the hardware
+      // forbids a handler from being re-entered: whether the same IRQ can be
+      // raised while its handler runs depends on the board's interrupt
+      // controller and the handler's acknowledge timing, both outside the
+      // linker's inputs, and a future contract revision may define that
+      // relation on purpose.  No conclusion about hardware self-preemption
+      // is drawn either way.
+      if (P.NameA == P.NameB)
+        return fail(Err, "ISR preemption contract declares '" + P.NameA +
+                             "' preempting itself at " + At(P) +
+                             ": a preemption pair must name two DISTINCT "
+                             "registered ISR entries");
+    }
+  }
+  // No input carries `.mcs251.isr` metadata: the asynchronous entry set is
+  // UNDECLARED.  That is a distinct state from "no asynchronous entry" and
+  // from "unchecked"; no reentrancy diagnostics are produced for such a
+  // link, and a certification recipe must not read it as closed.
+  if (!IrqMode) {
+    Result.Reentrancy.Version = 1;
+    Result.Reentrancy.CoverageState = 0; // undeclared
+    if (Config.EmitLinkFacts) {
+      collectLinkFactsBasic(Result);
+      Result.Facts.Reentrancy = Result.Reentrancy;
+    }
+    if (Config.IsrReentrancyCoverageRequire) {
+      Err << "mcs251-lld: error: ISR reentrancy: coverage=require rejected "
+             "the link: no input declares IRQ metadata, so the "
+             "asynchronous entry set is undeclared\n";
+      return false;
+    }
+    return true;
+  }
+  // Off and no facts requested: the check is disabled and nothing is
+  // collected - zero cost, zero output, and the coverage state stays
+  // "unchecked" rather than silently "closed".
+  if (Config.IsrReentrancy == IsrReentrancySeverity::Off &&
+      !Config.EmitLinkFacts) {
+    Result.Reentrancy.Version = 1;
+    Result.Reentrancy.CoverageState = 1; // unchecked
+    return true;
+  }
   // Function nodes: the CANONICAL OWNER symbols of per-section function
   // intervals in ALLOC code sections.  Graph nodes, call-edge endpoints and
   // context roots all use the same canonical identity.  Attribution rules:
@@ -6096,7 +6196,8 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
   //      a label offset) truncates the presumed gap there; call sites at or
   //      after that label inside a size-less function are attributed to the
   //      label or to nothing.  This limit is also named in every warning's
-  //      coverage-boundary line.
+  //      coverage-boundary line and counted as an unknown fact whenever a
+  //      size-less interval actually owns attributed evidence.
   //   2. Normalization: same-address aliases and interior labels (STT_NOTYPE
   //      or any other type defined at or inside a STT_FUNC interval) own
   //      nothing, so a call site or call target inside the function is never
@@ -6119,6 +6220,7 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
     uint64_t Lo = 0;
     uint64_t Hi = 0;
     InputSymbol *Sym = nullptr;
+    bool Sized = false; // Hi came from an explicit st_size, not a bounded gap
   };
   std::map<InputSection *, std::vector<InputSymbol *>> Candidates;
   for (auto &F : Files)
@@ -6210,9 +6312,10 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
             Node = V[K];
       }
       if (Node && (!Covered || HasFunc)) {
+        bool Sized = Hi != 0;
         if (!Hi)
           Hi = NextBound(Addr); // rule 1: size-less group owns the bounded gap
-        Ints.push_back({Addr, Hi, Node});
+        Ints.push_back({Addr, Hi, Node, Sized});
         FuncNodes.push_back(Node);
       }
       I = J;
@@ -6227,12 +6330,12 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
               });
     Funcs[Sec] = std::move(Ints);
   }
-  auto Containing = [&](InputSection *Sec, uint64_t Off) -> InputSymbol * {
+  auto Containing = [&](InputSection *Sec,
+                        uint64_t Off) -> const Interval * {
     auto It = Funcs.find(Sec);
     if (It == Funcs.end())
       return nullptr;
-    InputSymbol *Best = nullptr;
-    uint64_t BestLo = 0, BestHi = 0;
+    const Interval *Best = nullptr;
     for (const Interval &I : It->second) {
       if (I.Lo > Off)
         break;
@@ -6240,13 +6343,11 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
         continue;
       // Innermost owner wins among (malformed) overlapping intervals:
       // the closest start, then the shortest span, then the name.
-      if (!Best || I.Lo > BestLo ||
-          (I.Lo == BestLo &&
-           (I.Hi < BestHi || (I.Hi == BestHi && I.Sym->Name < Best->Name)))) {
-        Best = I.Sym;
-        BestLo = I.Lo;
-        BestHi = I.Hi;
-      }
+      if (!Best || I.Lo > Best->Lo ||
+          (I.Lo == Best->Lo &&
+           (I.Hi < Best->Hi || (I.Hi == Best->Hi &&
+                                I.Sym->Name < Best->Sym->Name))))
+        Best = &I;
     }
     return Best;
   };
@@ -6254,21 +6355,502 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
     StringRef P = S->File->Path;
     return P.substr(P.rfind('/') + 1).str();
   };
+  // Object identity table: input ordinal per InputFile (E1 slot identity and
+  // the E2 facts interface key evidence by object ordinal + input section +
+  // symbol index, never by name).
+  std::map<InputFile *, uint32_t> ObjId;
+  for (size_t I = 0; I != Files.size(); ++I)
+    ObjId[Files[I].get()] = uint32_t(I);
+  auto SymID = [&](InputSymbol *S) -> LinkerResult::ReentrancyID {
+    if (!S || !S->File)
+      return {0, 0xffffffffu, 0xffffffffu};
+    return {ObjId[S->File], S->Sec ? S->Sec->Index : 0xffffffffu,
+            uint32_t(S - &S->File->Symbols[0])};
+  };
+  // Anonymous slot-area identity: the section IS the identity (several
+  // anonymous OSEG areas in one object must stay distinguishable).
+  auto AreaID = [&](InputSection *Sec) -> LinkerResult::ReentrancyID {
+    return {ObjId[Sec->File], Sec->Index, 0xffffffffu};
+  };
+
+  // Coverage facts.  Each kind is reported on its own; together they decide
+  // the coverage state (open vs closed).  None of them invalidates a
+  // specific PROVEN violation (whose evidence chain is positive), but an
+  // open state always means the run does not constitute a complete
+  // certification: more conflicts may exist that the analysis cannot see.
+  uint64_t UnknownICalls = 0;         // real ECALLr instructions (any target)
+  uint64_t UnknownDirectCalls = 0;    // 0x9A at a boundary, no reloc cover
+  uint64_t UnknownControlTargets = 0; // skipped/unresolved control relocs
+  uint64_t UndecodableSections = 0;   // boundary decode failed (ECALLr blind)
+  uint64_t UnattributedAccess = 0;    // slot-range data reloc outside funcs
+  uint64_t UnsizedOwners = 0;         // size-less owners of attributed proof
+  uint64_t AddressTakenRefs = 0;      // data relocs to code symbols
+  uint64_t UnverifiedControl = 0;     // control reloc off a confirmed opcode
+  uint64_t UnverifiedAccess = 0;      // slot-storage ref, access unconfirmed
+  // Candidate slot-storage references, by section: only a COMPLETE producer
+  // address sequence turns one into a confirmed access.
+  std::map<InputSection *, std::vector<const Relocation *>> SlotStorageRelocs;
+  bool AnyContractEdge = false;       // platform-contract chain edge in use
+  std::set<InputSymbol *> UnsizedOwnerSet;
 
   // Direct call edges from control-flow relocations.
   auto IsControlType = [](uint32_t T) {
     return T == ELF::R_MCS251_24 || T == ELF::R_MCS251_J16 ||
            T == ELF::R_MCS251_J11 || T == ELF::R_MCS251_PC8;
   };
+  auto IsDataAddrType = [](uint32_t T) {
+    return T == ELF::R_MCS251_16 || T == ELF::R_MCS251_LO8 ||
+           T == ELF::R_MCS251_MID8 || T == ELF::R_MCS251_HI8;
+  };
   std::set<std::pair<InputSymbol *, InputSymbol *>> EdgeSet;
   std::vector<std::pair<InputSymbol *, InputSymbol *>> Edges;
+  // Evidence class of each edge: EvVerifiedControl when the opcode was
+  // confirmed at a trusted boundary, EvContract for the frozen platform
+  // chain shapes.  Kept so a proven conclusion can name what it rests on.
+  std::map<std::pair<InputSymbol *, InputSymbol *>, uint8_t> EdgeEv;
+
+  // ---- trusted instruction map (final post-relocation bytes) -----------
+  // Decoded ONCE per code section; every piece of machine-level evidence
+  // (control transfers, slot accesses, ECALLr) is confirmed against it.  A
+  // section that cannot be decoded yields no instruction facts at all: its
+  // bytes are an unknown, never a guess.
+  struct Instr {
+    uint32_t Start = 0, Len = 0;
+    uint8_t Op = 0, Spec = 0;
+  };
+  std::map<InputSection *, std::vector<Instr>> Instrs;
   for (auto &F : Files)
     for (auto &S : F->Sections) {
-      if (!S->IsAlloc || !S->IsCode || S->IsNobits)
+      if (!S->IsAlloc || !S->IsCode || S->IsNobits || S->Size == 0)
+        continue;
+      std::vector<uint8_t> Bytes(S->Size, 0);
+      bool Complete = true;
+      for (uint64_t I = 0; I < S->Size; ++I) {
+        auto It = Image.find(uint32_t(S->Address + I));
+        if (It == Image.end()) {
+          Complete = false;
+          break;
+        }
+        Bytes[size_t(I)] = It->second;
+      }
+      if (!Complete) {
+        ++UndecodableSections;
+        continue;
+      }
+      std::vector<Instr> V;
+      size_t Cur = 0;
+      bool Failed = false;
+      while (Cur < S->Size) {
+        unsigned Len = mcs251InstrLen(Bytes, Cur);
+        if (Len == 0 || Cur + Len > S->Size) {
+          Failed = true;
+          break;
+        }
+        V.push_back({uint32_t(Cur), Len, Bytes[Cur],
+                     Len >= 2 ? Bytes[Cur + 1] : uint8_t(0)});
+        Cur += Len;
+      }
+      if (Failed) {
+        ++UndecodableSections;
+        continue;
+      }
+      Instrs[S.get()] = std::move(V);
+    }
+  auto InstrCovering = [&](InputSection *S,
+                           uint32_t Off) -> const Instr * {
+    auto It = Instrs.find(S);
+    if (It == Instrs.end())
+      return nullptr;
+    for (const Instr &I : It->second) {
+      if (Off >= I.Start && Off < I.Start + I.Len)
+        return &I;
+      if (I.Start > Off)
+        break;
+    }
+    return nullptr;
+  };
+  // A control relocation is machine CALL/JUMP evidence only when it sits on
+  // a confirmed control opcode at a trusted instruction boundary.  The
+  // verified encodings are those the producer and the frozen platform
+  // actually emit:
+  //   * R_MCS251_24 on `ecall` 0x9A / `ejmp` 0x8A, inside the addr24 operand
+  //     (MCS251MCCodeEmitter.cpp; verified against frozen objects);
+  //   * the reset trampoline's R_MCS251_J16: validateIRQReservedRangesAndCRT
+  //     already enforces HOME == exactly `02` + one zero-addend J16 at
+  //     offset 1, so that single shape is platform-contract evidence.
+  // J11/PC8 have no grounded opcode mapping in this release and are treated
+  // as unknowns.
+  // Frozen-CRT reset/boot chain contract, VERSION 1: a CLOSED, enumerable
+  // set of sites in the object that carries the validated reset trampoline
+  // and the IRQ_DEFAULT record (review finding 5, round 3).  Nothing else in
+  // the platform sections is contract evidence.
+  //   kind 0 - HOME trampoline: a 3-byte section starting with the classic
+  //            LJMP opcode 0x02 and exactly one zero-addend R_MCS251_J16 at
+  //            offset 1 (the shape validateIRQReservedRangesAndCRT enforces).
+  //   kind 1 - BOOT chain: the ONE supported CRT profile (the frozen crt-irq
+  //            startup asset and its byte-identical v2-identity twin),
+  //            recognized by a CONSTRAINED TEMPLATE -- fixed 0x106-byte
+  //            layout, the complete 12-anchor relocation set, and template
+  //            byte equality outside the relocation fields -- whose three
+  //            FIXED chain sites 0x3C/0x40/0x44 resolve IN ORDER to the
+  //            documented walker roles __mcs251_globals_init,
+  //            __mcs251_xdata_init, _main (runtime README byte table,
+  //            independently closed by check-crt-irq.py).
+  // A variant that moves a site, puts a `9A` inside an operand, adds a
+  // stray `9A`, changes a target, reorders the chain or otherwise deviates
+  // from the template fails the profile match and yields NO contract
+  // evidence (the sites then fall back to ordinary opcode verification,
+  // i.e. unknown for the hand-written classic bodies); raw byte similarity
+  // never upgrades an unknown object to the supported profile.
+  struct CrtContractSite {
+    uint8_t Kind = 0;
+    InputSection *Sec = nullptr;
+    uint32_t Off = 0;
+    InputSymbol *Target = nullptr;
+  };
+  std::vector<CrtContractSite> CrtContract;
+  std::map<const Relocation *, uint8_t> ContractRelocs; // reloc -> kind
+  auto ResolveRelocSymbol = [&](InputFile *F,
+                                const Relocation &R) -> InputSymbol * {
+    InputSymbol *IS = findSymbol(*F, R.Sym);
+    if (!IS)
+      return nullptr;
+    if (!IS->Defined) {
+      auto It = Globals.find(IS->Name);
+      if (It == Globals.end())
+        return nullptr;
+      return It->second;
+    }
+    return IS;
+  };
+  if (CrtFile) {
+    // kind 0: the reset trampoline.
+    for (auto &S : CrtFile->Sections) {
+      if (S->Region != "HOME")
+        continue;
+      if (S->Size == 3 && S->Data.size() >= 3 && S->Data[0] == 0x02 &&
+          S->Relocs.size() == 1 && S->Relocs[0].Type == ELF::R_MCS251_J16 &&
+          S->Relocs[0].Offset == 1 && S->Relocs[0].Addend == 0) {
+        CrtContractSite Site;
+        Site.Kind = 0;
+        Site.Sec = S.get();
+        Site.Off = 1;
+        Site.Target = ResolveRelocSymbol(CrtFile, S->Relocs[0]);
+        CrtContract.push_back(Site);
+        ContractRelocs[&S->Relocs[0]] = 0;
+      }
+    }
+    // kind 1: the boot chain, validated as a CONSTRAINED PROFILE (review
+    // finding 3, round 4).  The only supported profile is the frozen crt-irq
+    // startup asset (runtime/crt-irq.yaml; its v2-identity twin carries the
+    // same BOOT byte for byte), and it is recognized by TEMPLATE, never by
+    // relocation filtering alone:
+    //   * the section size is exactly 0x106;
+    //   * the COMPLETE relocation set is exactly the 12 frozen anchors
+    //     below -- same offsets, same types, zero addends, same symbol
+    //     names -- so an added or dropped relocation is a different object;
+    //   * every byte OUTSIDE the relocation fields equals the frozen
+    //     template, so the three `9A` ecall opcodes sit at the FIXED sites
+    //     0x3C/0x40/0x44 and no other `9A` -- including one inside an
+    //     operand such as the immediate of a classic `MOV direct,#imm`
+    //     (`75 00 9A`) -- can appear anywhere in the section;
+    //   * the three chain anchors resolve, in offset order, to the
+    //     documented walker roles.
+    // A BOOT shape that deviates in any way is NOT a supported CRT profile:
+    // it keeps its unknown grading, and raw byte similarity can never
+    // upgrade it to contract evidence.
+    //
+    // Each anchor also carries the LANDING IDENTITY the profile depends on
+    // (review finding 1, round 5).  Matching the symbol NAME alone is not
+    // closure: the same object can keep all 0x106 template bytes and all 12
+    // relocations while moving a walker symbol's VALUE, so the linked ECALL
+    // no longer enters the documented walker.  Moving
+    // `__mcs251_globals_init' from BOOT+0x4A to BOOT+0x48 turns the first
+    // chain ECALL's target into the `80 FE' halt self-loop while every byte
+    // and every relocation field stays byte-identical; the same holds for
+    // `__mcs251_xdata_init' off BOOT+0xA0.  Both walker roles are therefore
+    // pinned to their frozen BOOT offset here, and the checks below verify
+    // the resolved symbol is DEFINED IN THIS CRT, sits in the object's BOOT
+    // section, and lands exactly on that offset.
+    //
+    // `LandOff' is the frozen BOOT-relative entry offset, or NoLanding for
+    // anchors whose target is not a BOOT entry of this object (the stack
+    // base is platform storage, the four XINIT/XDATA_INIT records are data
+    // labels, and `_main' is the application's undefined-resolved entry).
+    static constexpr uint32_t NoLanding = 0xFFFFFFFFu;
+    struct CrtBootAnchor {
+      uint32_t Off;
+      uint32_t Type;
+      uint8_t Width;
+      const char *Sym;
+      uint32_t LandOff;
+    };
+    static const CrtBootAnchor BootAnchors[] = {
+        {0x0A, ELF::R_MCS251_16, 2, "__mcs251_stack_base", NoLanding},
+        {0x3D, ELF::R_MCS251_24, 3, "__mcs251_globals_init", 0x4A},
+        {0x41, ELF::R_MCS251_24, 3, "__mcs251_xdata_init", 0xA0},
+        {0x45, ELF::R_MCS251_24, 3, "_main", NoLanding},
+        {0x4C, ELF::R_MCS251_MID8, 1, "s_XINIT", NoLanding},
+        {0x4D, ELF::R_MCS251_LO8, 1, "s_XINIT", NoLanding},
+        {0x51, ELF::R_MCS251_HI8, 1, "s_XINIT", NoLanding},
+        {0x54, ELF::R_MCS251_16, 2, "l_XINIT", NoLanding},
+        {0xA2, ELF::R_MCS251_MID8, 1, "s_XDATA_INIT", NoLanding},
+        {0xA3, ELF::R_MCS251_LO8, 1, "s_XDATA_INIT", NoLanding},
+        {0xA7, ELF::R_MCS251_HI8, 1, "s_XDATA_INIT", NoLanding},
+        {0xAA, ELF::R_MCS251_16, 2, "l_XDATA_INIT", NoLanding},
+    };
+    // The walker roles the BOOT chain depends on: the ECALL at a chain site
+    // must enter the walker body at its frozen BOOT offset, in this object.
+    // The chain site offset and the walker entry offset are DIFFERENT
+    // numbers (0x3D -> 0x4A, 0x41 -> 0xA0) and both are frozen; conflating
+    // them is exactly the gap this closes.
+    auto LandingMatches = [&](const InputSymbol *Sym, InputSection *Boot,
+                              uint32_t Want) -> bool {
+      return Sym && Sym->Defined && Sym->File == CrtFile && Boot &&
+             Sym->Sec == Boot && Sym->Value == Want;
+    };
+    // The frozen 0x106-byte BOOT template (runtime/crt-irq.yaml
+    // `.mcs251.BOOT` Content; relocation fields hold zero placeholders and
+    // are excluded from the comparison below).
+    static const uint8_t BootTemplate[] = {
+    0xC2, 0xAF, 0x75, 0xD0, 0x00, 0x75, 0xE3, 0x00, 0x7E, 0xF8, 0x00, 0x00,
+    0x75, 0x20, 0x00, 0x75, 0x21, 0x00, 0x75, 0x22, 0x00, 0x75, 0x23, 0x00,
+    0x75, 0x24, 0x00, 0x75, 0x25, 0x00, 0x75, 0x26, 0x00, 0x75, 0x27, 0x00,
+    0x75, 0x28, 0x00, 0x75, 0x29, 0x00, 0x75, 0x2A, 0x00, 0x75, 0x2B, 0x00,
+    0x75, 0x2C, 0x00, 0x75, 0x2D, 0x00, 0x75, 0x2E, 0x00, 0x75, 0x2F, 0x00,
+    0x9A, 0x00, 0x00, 0x00, 0x9A, 0x00, 0x00, 0x00, 0x9A, 0x00, 0x00, 0x00,
+    0x80, 0xFE, 0x7E, 0x08, 0x00, 0x00, 0x7A, 0x0C, 0x00, 0x00, 0x7E, 0x24,
+    0x00, 0x00, 0xBE, 0x24, 0x00, 0x00, 0x68, 0x43, 0x0B, 0x0A, 0x40, 0x0B,
+    0x0C, 0x0B, 0x0C, 0x7D, 0xA4, 0x0B, 0x0A, 0x60, 0x0B, 0x0C, 0x0B, 0x0C,
+    0x0B, 0x0A, 0x80, 0x0B, 0x0C, 0x0B, 0x0C, 0x9E, 0x24, 0x00, 0x06, 0x7E,
+    0xE0, 0x00, 0xBE, 0x64, 0x00, 0x00, 0x68, 0x09, 0x7A, 0x49, 0xE0, 0x0B,
+    0x44, 0x1B, 0x64, 0x80, 0xF1, 0xBE, 0x84, 0x00, 0x00, 0x68, 0xC7, 0x7E,
+    0x0B, 0xE0, 0x0B, 0x0C, 0x7A, 0xA9, 0xE0, 0x0B, 0xA4, 0x1B, 0x84, 0x1B,
+    0x24, 0x80, 0xEA, 0xAA, 0x7E, 0x08, 0x00, 0x00, 0x7A, 0x0C, 0x00, 0x00,
+    0x7E, 0x24, 0x00, 0x00, 0xBE, 0x24, 0x00, 0x00, 0x68, 0x4F, 0x7E, 0x0B,
+    0xE0, 0x0B, 0x0C, 0x0B, 0x0A, 0x40, 0x0B, 0x0C, 0x0B, 0x0C, 0x0B, 0x0A,
+    0x60, 0x0B, 0x0C, 0x0B, 0x0C, 0x0B, 0x0A, 0x80, 0x0B, 0x0C, 0x0B, 0x0C,
+    0x9E, 0x24, 0x00, 0x07, 0x7A, 0xE1, 0x84, 0x7A, 0x81, 0x83, 0x7A, 0x91,
+    0x82, 0xBE, 0x84, 0x00, 0x00, 0x68, 0x15, 0x7E, 0x0B, 0xE0, 0x0B, 0x0C,
+    0x7C, 0xBE, 0xF0, 0xA3, 0x1B, 0x24, 0x1B, 0x84, 0xBE, 0x84, 0x00, 0x00,
+    0x68, 0xBA, 0x80, 0xEB, 0xBE, 0x64, 0x00, 0x00, 0x68, 0xB2, 0xE4, 0xF0,
+    0xA3, 0x1B, 0x64, 0x80, 0xF3, 0xAA, 0xC2, 0xAF, 0x80, 0xFE
+    };
+    size_t BootSectionCount = 0;
+    for (auto &S : CrtFile->Sections)
+      if (S->Region == "BOOT")
+        ++BootSectionCount;
+    if (BootSectionCount == 1)
+      for (auto &S : CrtFile->Sections) {
+        if (S->Region != "BOOT")
+          continue;
+        bool Match = S->Size == sizeof(BootTemplate) &&
+                     S->Data.size() >= S->Size &&
+                     S->Relocs.size() == std::size(BootAnchors);
+        std::vector<const Relocation *> RS;
+        if (Match) {
+          for (const Relocation &R : S->Relocs)
+            RS.push_back(&R);
+          llvm::sort(RS, [](const Relocation *A, const Relocation *B) {
+            return A->Offset < B->Offset;
+          });
+          std::vector<bool> Field(sizeof(BootTemplate), false);
+          for (size_t K = 0; Match && K != std::size(BootAnchors); ++K) {
+            const InputSymbol *Sym = findSymbol(*CrtFile, RS[K]->Sym);
+            if (RS[K]->Offset != BootAnchors[K].Off ||
+                RS[K]->Type != BootAnchors[K].Type || RS[K]->Addend != 0 ||
+                !Sym || Sym->Name != BootAnchors[K].Sym)
+              Match = false;
+            // Round-5 finding 1: a matching NAME is not a matching LANDING.
+            // Every anchor whose target the profile identifies also has to
+            // resolve to the object/section/offset the profile names, so a
+            // symbol VALUE moved under an unchanged name and unchanged
+            // relocation set cannot keep contract evidence.
+            if (Match && BootAnchors[K].LandOff != NoLanding &&
+                !LandingMatches(Sym, S.get(), BootAnchors[K].LandOff))
+              Match = false;
+            for (uint32_t W = 0; W < BootAnchors[K].Width; ++W)
+              Field[BootAnchors[K].Off + W] = true;
+          }
+          for (uint32_t K = 0; Match && K < sizeof(BootTemplate); ++K)
+            if (!Field[K] && S->Data[K] != BootTemplate[K])
+              Match = false;
+        }
+        if (!Match)
+          continue;
+        for (size_t K = 0; K != RS.size(); ++K) {
+          if (RS[K]->Type != ELF::R_MCS251_24)
+            continue; // only the three chain sites carry kind 1 evidence
+          CrtContractSite Site;
+          Site.Kind = 1;
+          Site.Sec = S.get();
+          Site.Off = RS[K]->Offset;
+          Site.Target = ResolveRelocSymbol(CrtFile, *RS[K]);
+          CrtContract.push_back(Site);
+          ContractRelocs[RS[K]] = 1;
+        }
+      }
+  }
+  // A control relocation is machine CALL/JUMP evidence only when it sits on
+  // a confirmed control opcode at a trusted instruction boundary.  The
+  // verified encodings are those the producer and the frozen platform
+  // actually emit:
+  //   * R_MCS251_24 on `ecall` 0x9A / `ejmp` 0x8A, inside the addr24 operand
+  //     (MCS251MCCodeEmitter.cpp; verified against frozen objects);
+  //   * the reset trampoline's R_MCS251_J16: validateIRQReservedRangesAndCRT
+  //     already enforces HOME == exactly `02` + one zero-addend J16 at
+  //     offset 1, so that single shape is platform-contract evidence.
+  // J11/PC8 have no grounded opcode mapping in this release and are treated
+  // as unknowns.
+  // Frozen-CRT reset/boot chain contract: the object carrying the validated
+  // reset trampoline and the IRQ_DEFAULT record is the frozen CRT (CrtFile).
+  // Its BOOT/HOME code is hand-assembled classic-8051, outside this
+  // release's trusted length table, but its control sites are pinned by the
+  // runtime's documented byte table and independently closed by
+  // validation/mcs251-elf/runtime/check-crt-irq.py: each R_MCS251_24 there
+  // sits one byte past the documented 0x9A `ecall` opcode.  That is
+  // platform-contract evidence, and the facts interface reports it as such
+  // - never as a verified instruction decode.
+  // Contract evidence is decided by RELOCATION IDENTITY in the closed table
+  // built above, never by a byte look-alike: a relocated site that is not one
+  // of the enumerated contract sites is an unknown.
+  auto IsContractReloc = [&](const Relocation &R) {
+    return ContractRelocs.count(&R) != 0;
+  };
+  auto ControlEvidence = [&](InputSection *S,
+                             const Relocation &R) -> uint8_t {
+    // The enumerated platform-contract sites come first: the frozen CRT's
+    // reset/boot chain is hand-assembled classic code that the trusted length
+    // table does not decode, and the contract does not depend on one.
+    if (IsContractReloc(R))
+      return LinkerResult::EvContract;
+    const Instr *I = InstrCovering(S, R.Offset);
+    if (!I)
+      return LinkerResult::EvUnverified;
+    const uint32_t Rel = R.Offset - I->Start;
+    if (R.Type == ELF::R_MCS251_24)
+      return ((I->Op == 0x9A || I->Op == 0x8A) && I->Len == 4 && Rel >= 1 &&
+              Rel <= 3)
+                 ? LinkerResult::EvVerifiedControl
+                 : LinkerResult::EvUnverified;
+    return LinkerResult::EvUnverified;
+  };
+  // ---- E1 slot index (address level) ----------------------------------
+  // A standard parameter slot is a defined STT_OBJECT symbol in an alloc
+  // non-code DSEG/OSEG/EDATA section whose name carries the producer's
+  // `_PARM_<n>` convention (MCS251ISelLowering.cpp parameterSlot /
+  // MCS251AsmPrinter.cpp emitParameterSlots).  The NAME is the recognizer -
+  // the frozen ABI has no other marker - but it is never the identity: the
+  // key is (input object ordinal, symbol table index).  An OSEG section with
+  // no sized slot symbols is still a slot AREA by the producer contract
+  // (OSEG holds only parameter slots), so it gets one section-granular
+  // entry; a DSEG/EDATA section without slot symbols is NOT claimed (its
+  // bytes may be ordinary statics).
+  struct SlotEntry {
+    LinkerResult::ReentrancyID ID;
+    std::string Name;
+    InputSection *Sec = nullptr;
+    uint64_t Lo = 0, Hi = 0;
+    bool ExtentKnown = true;
+    bool SectionGranular = false;
+    InputSymbol *OwnerFn = nullptr; // _X_PARM_n -> X, auxiliary attribution
+    struct Access {
+      InputSymbol *From = nullptr;
+      const Interval *Iv = nullptr;
+      uint8_t Role = 0; // 0 undetermined, 1 caller-write, 2 callee-read
+      uint8_t Evidence = LinkerResult::EvVerifiedAccess;
+      uint8_t EdgeEvidence = 0; // class of the accessor -> owner edge
+    };
+    std::vector<Access> Accesses;
+  };
+  std::vector<SlotEntry> Slots;
+  std::map<InputSection *, std::vector<size_t>> SlotsOfSection;
+  {
+    auto IsSlotName = [](StringRef N) {
+      size_t P = N.rfind("_PARM_");
+      if (P == StringRef::npos || P + 6 >= N.size())
+        return false;
+      for (size_t I = P + 6; I < N.size(); ++I)
+        if (N[I] < '0' || N[I] > '9')
+          return false;
+      return true;
+    };
+    auto SlotCapable = [](InputSection *S) {
+      return S && S->IsAlloc && !S->IsCode && !S->Synthesized &&
+             (S->Region == "DSEG" || S->Region == "OSEG" ||
+              S->Region == "EDATA");
+    };
+    for (size_t ObjI = 0; ObjI != Files.size(); ++ObjI) {
+      InputFile *F = Files[ObjI].get();
+      for (size_t SecI = 0; SecI != F->Sections.size(); ++SecI) {
+        InputSection *S = F->Sections[SecI].get();
+        if (!SlotCapable(S) || S->Size == 0)
+          continue;
+        bool AnySizedSlot = false;
+        for (size_t SymI = 0; SymI != F->Symbols.size(); ++SymI) {
+          InputSymbol &Y = F->Symbols[SymI];
+          if (!Y.Defined || Y.Sec != S || Y.Type != ELF::STT_OBJECT ||
+              !IsSlotName(Y.Name))
+            continue;
+          SlotEntry E;
+          E.ID = SymID(&Y);
+          E.Name = Y.Name;
+          E.Sec = S;
+          E.Lo = Y.Address;
+          if (Y.Size) {
+            E.Hi = E.Lo + Y.Size;
+            AnySizedSlot = true;
+          } else {
+            E.Hi = E.Lo; // zero-extent: the range is unknown, not empty-safe
+            E.ExtentKnown = false;
+          }
+          // Auxiliary owner attribution by naming convention only.
+          StringRef Base(Y.Name.data(), Y.Name.rfind("_PARM_"));
+          for (InputSymbol &C : F->Symbols)
+            if (&C != &Y && C.Defined && C.Type == ELF::STT_FUNC &&
+                C.Name == Base) {
+              E.OwnerFn = &C;
+              break;
+            }
+          if (!E.OwnerFn) {
+            auto It = Globals.find(Base.str());
+            if (It != Globals.end() && It->second->Defined &&
+                It->second->Type == ELF::STT_FUNC)
+              E.OwnerFn = It->second;
+          }
+          SlotsOfSection[S].push_back(Slots.size());
+          Slots.push_back(std::move(E));
+        }
+        if (!AnySizedSlot && S->Region == "OSEG") {
+          // OSEG is parameter-slot storage by contract; with no sized slot
+          // symbol the whole section is one section-granular slot area.
+          SlotEntry E;
+          E.ID = AreaID(S);
+          E.Name = "<anonymous parameter slots of " + S->Name + ">";
+          E.Sec = S;
+          E.Lo = S->Address;
+          E.Hi = S->Address + S->Size;
+          E.SectionGranular = true;
+          SlotsOfSection[S].push_back(Slots.size());
+          Slots.push_back(std::move(E));
+        }
+      }
+    }
+    for (auto &P : SlotsOfSection)
+      std::sort(P.second.begin(), P.second.end(),
+                [&](size_t A, size_t B) { return Slots[A].Lo < Slots[B].Lo; });
+  }
+
+  // ---- relocation pass: call edges, slot accesses, coverage facts -------
+  // Every edge and every access carries an EVIDENCE CLASS.  Only confirmed
+  // machine-level evidence may drive context propagation and a proven
+  // conclusion; a control relocation on a non-control instruction or a
+  // storage reference that is not a confirmed slot access is an unknown.
+  for (auto &F : Files)
+    for (auto &S : F->Sections) {
+      if (!S->IsAlloc || !S->IsCode)
         continue;
       for (const Relocation &R : S->Relocs) {
-        if (!IsControlType(R.Type))
-          continue;
         InputSymbol *IS = findSymbol(*F, R.Sym);
         if (!IS)
           continue;
@@ -6279,30 +6861,279 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
             continue; // unresolved cross-object: documented boundary
           Target = It->second;
         }
-        InputSymbol *To = nullptr;
-        if (IS->Type == ELF::STT_SECTION) {
-          if (R.Addend < 0 || !IS->Sec)
+        const Interval *FromIv = Containing(S.get(), R.Offset);
+        if (IsControlType(R.Type)) {
+          const uint8_t CtrlEv = ControlEvidence(S.get(), R);
+          if (CtrlEv == LinkerResult::EvUnverified) {
+            // A control-typed relocation without a confirmed control
+            // instruction is NOT call evidence (review finding 3).
+            ++UnverifiedControl;
             continue;
-          To = Containing(IS->Sec,
-                          uint64_t(IS->Value) + uint64_t(R.Addend));
-        } else if (Target->Defined && Target->Sec &&
-                   Target->Type != ELF::STT_SECTION) {
-          To = Containing(Target->Sec,
-                          uint64_t(Target->Value) + uint64_t(R.Addend));
-          if (!To)
-            To = Target; // target outside every known function interval
+          }
+          InputSymbol *To = nullptr;
+          if (IS->Type == ELF::STT_SECTION) {
+            if (R.Addend < 0 || !IS->Sec) {
+              ++UnknownControlTargets;
+              continue;
+            }
+            const Interval *Iv = Containing(
+                IS->Sec, uint64_t(IS->Value) + uint64_t(R.Addend));
+            if (!Iv) {
+              // The target lies in the section but outside every known
+              // function interval.  Never dereference a null interval
+              // (review finding 2).
+              ++UnknownControlTargets;
+              continue;
+            }
+            To = Iv->Sym;
+          } else if (Target->Defined && Target->Sec &&
+                     Target->Type != ELF::STT_SECTION) {
+            if (Target->Sec->IsCode) {
+              const Interval *Iv =
+                  Containing(Target->Sec,
+                             uint64_t(Target->Value) + uint64_t(R.Addend));
+              if (!Iv) {
+                // The target lands in the code section but outside every
+                // known function interval: no attribution, so no edge and an
+                // explicit unknown - never an unconditional fallback to the
+                // symbol (review finding 3, round 3).
+                ++UnknownControlTargets;
+                continue;
+              }
+              To = Iv->Sym;
+            } else {
+              // A control relocation naming a DATA symbol is not a call edge
+              // (a computed-address reference); it cannot establish context.
+              ++UnknownControlTargets;
+              continue;
+            }
+          } else {
+            ++UnknownControlTargets;
+            continue;
+          }
+          if (!FromIv) {
+            // The call site lies outside every known function interval.
+            ++UnknownControlTargets;
+            continue;
+          }
+          InputSymbol *From = FromIv->Sym;
+          if (!FromIv->Sized)
+            UnsizedOwnerSet.insert(From);
+          if (!To || From == To)
+            continue;
+          // A control edge into a registered ISR or the default entry is
+          // already a hard R3 error; such edges never survive to this stage.
+          if (To == DefaultSym || IsrSymbols.count(To))
+            continue;
+          if (EdgeSet.insert({From, To}).second)
+            Edges.push_back({From, To});
+          auto &Ev = EdgeEv[{From, To}];
+          Ev = std::max<uint8_t>(Ev, CtrlEv);
+          if (CtrlEv == LinkerResult::EvContract)
+            AnyContractEdge = true;
+          continue;
         }
-        InputSymbol *From = Containing(S.get(), R.Offset);
-        if (!From || !To || From == To)
+        if (!IsDataAddrType(R.Type))
           continue;
-        // A control edge into a registered ISR or the default entry is
-        // already a hard R3 error; such edges never survive to this stage.
-        if (To == DefaultSym || IsrSymbols.count(To))
+        // Data-address relocation: the caller-write/callee-read evidence for
+        // the static-slot ABI (MCS251ISelLowering.cpp writes the caller's
+        // slot stores before the first argument register is set up; the
+        // callee reads them at entry).  Resolve the target's final address
+        // and attribute the access to every slot whose range contains it.
+        InputSection *TS = nullptr;
+        if (IS->Type == ELF::STT_SECTION) {
+          if (R.Addend < 0 || !IS->Sec || !IS->Sec->IsAlloc)
+            continue;
+          TS = IS->Sec;
+        } else {
+          if (!Target->Defined || !Target->Sec || !Target->Sec->IsAlloc)
+            continue;
+          TS = Target->Sec;
+        }
+        // Code targets are handled by the complete-sequence scan below
+        // (a full address materialization of code is informational only).
+        if (TS->IsCode)
           continue;
-        if (EdgeSet.insert({From, To}).second)
-          Edges.push_back({From, To});
+        if (SlotsOfSection.find(TS) == SlotsOfSection.end())
+          continue; // ordinary statics: not parameter-slot storage
+        // Candidate slot-storage reference: it becomes a CONFIRMED access
+        // only through the complete producer address-materialization
+        // sequence verified below.  Anything left over is an unknown.
+        SlotStorageRelocs[S.get()].push_back(&R);
       }
     }
+
+  // ---- confirmed slot accesses: the COMPLETE address sequence -----------
+  // The producer materializes a 24-bit absolute address as a PAIR of
+  // instructions (verified byte for byte against a frozen object):
+  //   `7E <spec 8> <mid8> <lo8>`   MID8 at +2, LO8 at +3
+  //   `7A <spec+4> <hi8> 00`       HI8 at +3, immediately following
+  //   (the spec forms observed from the frozen producer: 0x08/0x0C and
+  //    0x18/0x1C; the register relationship spec_hi == spec_lo + 4 is
+  //    verified, not assumed)
+  // A single relocation is NOT an access.  All three relocations must be
+  // present, must be the right types at the right positions, and must all
+  // resolve to the SAME target address; only then is one access recorded for
+  // the function containing the sequence.  A half sequence (e.g. the 7A half
+  // replaced by a NOP, or the HI8 relocation removed) stays an unknown.
+  std::map<InputSection *, std::map<uint32_t, const Relocation *>> RelocAt;
+  for (auto &F : Files)
+    for (auto &S : F->Sections) {
+      if (!S->IsAlloc || !S->IsCode)
+        continue;
+      for (const Relocation &R : S->Relocs)
+        RelocAt[S.get()][R.Offset] = &R;
+    }
+  std::set<const Relocation *> ConsumedRelocs;
+  for (auto &F : Files)
+    for (auto &S : F->Sections) {
+      auto II = Instrs.find(S.get());
+      if (II == Instrs.end())
+        continue;
+      const std::vector<Instr> &V = II->second;
+      for (size_t K = 0; K + 1 < V.size(); ++K) {
+        const Instr &Lo = V[K];
+        const Instr &Hi = V[K + 1];
+        // Register relationship: the producer writes the low half with the
+        // `7E <spec>` form (nibble 8) and the high half with `7A <spec+4>`
+        // (nibble C), immediately following - observed as (0x08,0x0C) and
+        // (0x18,0x1C) across frozen producer output.
+        if (!(Lo.Op == 0x7E && Lo.Len == 4 && (Lo.Spec & 0x0F) == 8))
+          continue;
+        if (!(Hi.Op == 0x7A && Hi.Len == 4 && (Hi.Spec & 0x0F) == 0xC &&
+              Hi.Spec == Lo.Spec + 4))
+          continue;
+        if (Hi.Start != Lo.Start + 4)
+          continue;
+        auto &RM = RelocAt[S.get()];
+        auto IM = RM.find(Lo.Start + 2);
+        auto IL = RM.find(Lo.Start + 3);
+        auto IH = RM.find(Hi.Start + 3);
+        if (IM == RM.end() || IL == RM.end() || IH == RM.end())
+          continue;
+        const Relocation *M = IM->second, *L = IL->second, *H = IH->second;
+        if (M->Type != ELF::R_MCS251_MID8 || L->Type != ELF::R_MCS251_LO8 ||
+            H->Type != ELF::R_MCS251_HI8)
+          continue;
+        // Resolve all three and require ONE common final address.
+        auto Resolve = [&](const Relocation &R)
+            -> std::optional<std::pair<InputSection *, uint64_t>> {
+          InputSymbol *IS = findSymbol(*F, R.Sym);
+          if (!IS)
+            return std::nullopt;
+          InputSymbol *T = IS;
+          if (!IS->Defined) {
+            auto It = Globals.find(IS->Name);
+            if (It == Globals.end())
+              return std::nullopt;
+            T = It->second;
+          }
+          if (IS->Type == ELF::STT_SECTION) {
+            if (R.Addend < 0 || !IS->Sec || !IS->Sec->IsAlloc)
+              return std::nullopt;
+            return std::make_pair(IS->Sec, uint64_t(IS->Sec->Address) +
+                                               uint64_t(IS->Value) +
+                                               uint64_t(R.Addend));
+          }
+          if (!T->Defined || !T->Sec || !T->Sec->IsAlloc)
+            return std::nullopt;
+          return std::make_pair(T->Sec,
+                                uint64_t(T->Address) + uint64_t(R.Addend));
+        };
+        auto TM = Resolve(*M);
+        auto TL = Resolve(*L);
+        auto TH = Resolve(*H);
+        if (!TM || !TL || !TH)
+          continue;
+        if (TM->first != TL->first || TL->first != TH->first ||
+            TM->second != TL->second || TL->second != TH->second)
+          continue; // the three fields do not describe one address
+        ConsumedRelocs.insert(M);
+        ConsumedRelocs.insert(L);
+        ConsumedRelocs.insert(H);
+        InputSection *TS = TM->first;
+        const uint64_t TAddr = TM->second;
+        if (TS->IsCode) {
+          ++AddressTakenRefs; // a full address materialization of code
+          continue;
+        }
+        auto SI = SlotsOfSection.find(TS);
+        if (SI == SlotsOfSection.end())
+          continue; // ordinary statics: not parameter-slot storage
+        const Interval *FromIv = Containing(S.get(), Lo.Start);
+        if (!FromIv) {
+          ++UnattributedAccess;
+          continue;
+        }
+        if (!FromIv->Sized)
+          UnsizedOwnerSet.insert(FromIv->Sym);
+        for (size_t SlotIdx : SI->second) {
+          SlotEntry &E = Slots[SlotIdx];
+          if (E.ExtentKnown ? (TAddr >= E.Lo && TAddr < E.Hi)
+                            : (TAddr >= E.Lo && TAddr <= E.Hi))
+            E.Accesses.push_back(
+                {FromIv->Sym, FromIv, 0, LinkerResult::EvVerifiedAccess,
+                 LinkerResult::EvContract});
+        }
+      }
+    }
+  // Any slot-storage reference not consumed by a complete sequence is an
+  // unknown: address references are not accesses.
+  for (auto &P : SlotStorageRelocs)
+    for (const Relocation *R : P.second)
+      if (!ConsumedRelocs.count(R))
+        ++UnverifiedAccess;
+  // Access roles: the ABI role is a DERIVED label, granted only on
+  // confirmed evidence - the slot's owner reading its own slot at entry, or
+  // an accessor with a confirmed call edge to the owner writing the slot.
+  for (SlotEntry &E : Slots)
+    for (SlotEntry::Access &A : E.Accesses) {
+      if (E.OwnerFn && A.From == E.OwnerFn)
+        A.Role = 2; // callee-read
+      else if (E.OwnerFn && EdgeSet.count({A.From, E.OwnerFn})) {
+        A.Role = 1; // caller-write
+        A.EdgeEvidence = EdgeEv[{A.From, E.OwnerFn}];
+      } else
+        A.Role = 0; // undetermined: not used as proven evidence
+    }
+
+  // ---- trusted-instruction-boundary ECALLr scan ------------------------
+  // Reuses the trusted instruction map built above: real `ecall r` (0x99)
+  // instructions are indirect call sites with unknown targets - taking an
+  // address is never counted - and a direct `ecall` (0x9A) whose operand
+  // field carries no relocation is an unknown call site too.
+  std::vector<LinkerResult::LinkFacts::ICall> ICalls;
+  for (auto &F : Files)
+    for (auto &S : F->Sections) {
+      auto It = Instrs.find(S.get());
+      if (It == Instrs.end())
+        continue; // undecodable (already counted) or not a code section
+      for (const Instr &I : It->second) {
+        if (I.Op == 0x99) { // ecall r: a real indirect call, target unknown
+          ++UnknownICalls;
+          LinkerResult::LinkFacts::ICall IC;
+          IC.ObjectId = ObjId[F.get()];
+          IC.Shndx = S->Index;
+          IC.Offset = I.Start;
+          const Interval *Iv = Containing(S.get(), I.Start);
+          IC.In = Iv ? SymID(Iv->Sym)
+                     : LinkerResult::ReentrancyID{0, 0xffffffffu, 0xffffffffu};
+          ICalls.push_back(IC);
+          if (Iv && !Iv->Sized)
+            UnsizedOwnerSet.insert(Iv->Sym);
+        } else if (I.Op == 0x9A) { // ecall: operand must be reloc-covered
+          bool Covered = false;
+          for (const Relocation &R : S->Relocs)
+            if (R.Offset > I.Start && R.Offset < I.Start + 4) {
+              Covered = true;
+              break;
+            }
+          if (!Covered)
+            ++UnknownDirectCalls;
+        }
+      }
+    }
+  UnsizedOwners = UnsizedOwnerSet.size();
 
   // Context fixpoint.  Bit0 = reachable in ISR context, bit1 = reachable in
   // foreground context.  Roots[X] = the distinct registered ISR entries from
@@ -6311,6 +7142,14 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
   // Foreground roots are the functions no collected call edge enters: module
   // entry, reset-chain heads, uncalled functions.  Registered ISR entries and
   // the default entry are entered by hardware, never foreground roots.
+  //
+  // E1 (WP2) additionally separates POSITIVE foreground reachability
+  // (FgRooted: reachable from the platform reset chain head ResetSym along
+  // visible edges - the reset entry runs in the foreground by the hardware
+  // ABI contract) from the uncalled-root presumption.  Only the positive
+  // form is used to grade an address-level violation as proven: an invisible
+  // call elsewhere cannot remove a visible path, but it could reveal that a
+  // presumed foreground root is in fact only entered asynchronously.
   std::map<InputSymbol *, unsigned> Ctx;
   std::map<InputSymbol *, std::set<InputSymbol *>> Roots;
   {
@@ -6348,8 +7187,730 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
       }
     }
   }
+  std::set<InputSymbol *> FgRooted;
+  if (ResetSym) {
+    std::vector<InputSymbol *> Work{ResetSym};
+    FgRooted.insert(ResetSym);
+    while (!Work.empty()) {
+      InputSymbol *Cur = Work.back();
+      Work.pop_back();
+      for (const auto &E : Edges)
+        if (E.first == Cur && FgRooted.insert(E.second).second)
+          Work.push_back(E.second);
+    }
+  }
 
-  // Warned functions: ISR+foreground mix, or two or more ISR roots.
+  // ---- address-level slot conflict detection ---------------------------
+  // TWO shapes are checked, both from confirmed machine-level evidence:
+  //   * DIFFERENT slots whose final data-space ranges intersect (OSEG
+  //     overlaid areas);
+  //   * ONE slot reached from both contexts (the same static parameter slot
+  //     shared by an ISR-context caller and a foreground caller), which the
+  //     legacy function-level view cannot see at all.
+  // Precise address intersection and the concurrency violation are reported
+  // separately; a violation is graded Proven only when every condition below
+  // is established, and every weakness is named.  Weak evidence is never
+  // upgraded: an access participates only if its instruction was confirmed
+  // (EvVerifiedAccess), a clobber needs a CONFIRMED caller-write access, and
+  // the foreground side needs positive reset-chain reachability.
+  auto AccessorContext = [&](InputSymbol *S) -> unsigned {
+    auto CI = Ctx.find(S);
+    return CI == Ctx.end() ? 0u : CI->second;
+  };
+  auto AccessorIsrRooted = [&](InputSymbol *S) {
+    auto CI = Ctx.find(S);
+    return CI != Ctx.end() && (CI->second & 1) && !Roots[S].empty();
+  };
+  auto AccessorFgRooted = [&](InputSymbol *S) {
+    return FgRooted.count(S) != 0 && (AccessorContext(S) & 2) != 0;
+  };
+  auto AccessorsSized = [&](SlotEntry &E) {
+    for (SlotEntry::Access &A : E.Accesses)
+      if (A.Iv && !A.Iv->Sized)
+        return false;
+    return true;
+  };
+  auto DeclaredPreemptible = [&](InputSymbol *A, InputSymbol *B) {
+    for (const LinkerConfig::IsrPreemptionPair &P : Config.IsrPreemptionPairs)
+      if ((StringRef(P.NameA) == A->Name && StringRef(P.NameB) == B->Name) ||
+          (StringRef(P.NameA) == B->Name && StringRef(P.NameB) == A->Name))
+        return true;
+    return false;
+  };
+  auto SameID = [](const LinkerResult::ReentrancyID &A,
+                   const LinkerResult::ReentrancyID &B) {
+    return A.ObjectId == B.ObjectId && A.Section == B.Section &&
+           A.SymIndex == B.SymIndex;
+  };
+  auto ShortName = [&](InputSection *S) {
+    if (!S || !S->File)
+      return std::string();
+    StringRef P = S->File->Path;
+    return P.substr(P.rfind('/') + 1).str();
+  };
+  auto FillSlotEvidence = [&](SlotEntry &E,
+                              LinkerResult::ReentrancySlotEvidence &Out) {
+    Out.ID = E.ID;
+    Out.Name = E.Name;
+    Out.SectionName = E.Sec ? E.Sec->Name : std::string();
+    Out.Region = E.Sec ? E.Sec->Region : std::string();
+    Out.FileName = ShortName(E.Sec);
+    Out.Lo = uint32_t(E.Lo);
+    Out.Hi = uint32_t(E.Hi);
+    Out.ExtentKnown = E.ExtentKnown;
+    Out.SectionGranular = E.SectionGranular;
+    std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint8_t, uint8_t>>
+        SeenAccess;
+    for (SlotEntry::Access &A : E.Accesses) {
+      // One evidence entry per (accessor, role, evidence, context): the
+      // producer's 24-bit address materialization carries three relocations
+      // for ONE access.
+      LinkerResult::ReentrancyID Aid = SymID(A.From);
+      if (!SeenAccess
+               .insert({Aid.ObjectId, Aid.Section, Aid.SymIndex, A.Role,
+                        uint8_t(AccessorContext(A.From))})
+               .second)
+        continue;
+      LinkerResult::ReentrancyAccess PA;
+      PA.Accessor = Aid;
+      PA.AccessorName = A.From->Name;
+      PA.AccessorFile = ShortFile(A.From);
+      PA.Role = A.Role;
+      PA.Evidence = A.Evidence;
+      PA.EdgeEvidence = A.EdgeEvidence;
+      PA.Context = uint8_t(AccessorContext(A.From));
+      PA.IsrRooted = AccessorIsrRooted(A.From);
+      PA.FgRooted = AccessorFgRooted(A.From);
+      Out.Accesses.push_back(std::move(PA));
+    }
+  };
+  // Internal accumulator; the PUBLIC records are materialized from it and are
+  // the single authoritative result every consumer renders from.
+  struct GroupAcc {
+    struct PairAcc {
+      LinkerResult::ReentrancyID A{}, B{};
+      std::set<InputSymbol *> RootsA, RootsB;
+      bool Proven = false;
+      std::set<std::string> Missing;
+    };
+    std::string Key;
+    uint8_t Kind = 0;
+    bool Same = false;
+    bool Proven = false;
+    uint64_t Lo = 0, Hi = 0;
+    bool Exact = true;
+    LinkerResult::ReentrancyID A{}, B{};
+    std::vector<size_t> Members;
+    std::set<InputSymbol *> RootsIsr, RootsA, RootsB;
+    // The DECIDING pair's root evidence (the pair that established Proven).
+    std::set<InputSymbol *> ProvenRootsA, ProvenRootsB;
+    std::set<std::string> Missing;
+    std::vector<PairAcc> Pairs;
+  };
+  std::map<std::string, size_t> GroupIndex;
+  std::vector<GroupAcc> Accs;
+  auto Touch = [&](const std::string &Key, uint8_t Kind, bool Same,
+                   uint64_t Lo, uint64_t Hi, bool Exact,
+                   const LinkerResult::ReentrancyID &A,
+                   const LinkerResult::ReentrancyID &B) -> GroupAcc & {
+    auto It = GroupIndex.find(Key);
+    if (It != GroupIndex.end())
+      return Accs[It->second];
+    GroupAcc G;
+    G.Key = Key;
+    G.Kind = Kind;
+    G.Same = Same;
+    G.Lo = Lo;
+    G.Hi = Hi;
+    G.Exact = Exact;
+    G.A = A;
+    G.B = B;
+    GroupIndex[Key] = Accs.size();
+    Accs.push_back(std::move(G));
+    return Accs.back();
+  };
+
+  // PER-PAIR evaluation: every candidate pair keeps its OWN slot identities,
+  // its OWN root evidence and its OWN missing conditions.  The group is
+  // proven when at least ONE pair has no missing condition, and the DECIDING
+  // pair -- the FIRST pair that establishes the group, an explicit selection
+  // -- contributes its identities and roots as the group's serialized
+  // evidence; later established pairs no longer overwrite it, and the union
+  // over established pairs is never called the deciding pair's evidence
+  // (review finding 2, round 5).  Only the non-proven pairs' reasons are
+  // kept for the group's explanatory message.
+  auto EvaluatePair = [&](GroupAcc &G,
+                          const std::set<std::string> &PairMissing,
+                          const std::set<InputSymbol *> &RootsA,
+                          const std::set<InputSymbol *> &RootsB,
+                          const LinkerResult::ReentrancyID &A,
+                          const LinkerResult::ReentrancyID &B) {
+    GroupAcc::PairAcc P;
+    P.A = A;
+    P.B = B;
+    P.RootsA = RootsA;
+    P.RootsB = RootsB;
+    P.Proven = PairMissing.empty();
+    P.Missing = PairMissing;
+    G.Pairs.push_back(std::move(P));
+    if (PairMissing.empty()) {
+      // R5-2: the DECIDING pair is the FIRST pair that establishes the
+      // group -- an explicit selection, recorded ONCE.  The assignment used
+      // to run for every established pair, so a same-slot group with two
+      // established combinations (a symmetric `preempt _irq2 _irq3'
+      // declaration makes both (_irq2,_irq3) and (_irq3,_irq2) proven)
+      // ended up publishing the LAST one as the deciding pair: `slots=',
+      // the A/B side lines and the facts roots_a/roots_b then described
+      // (_irq3,_irq2) while the text named the deciding pair in the same
+      // breath.  Later established pairs keep their own records in Pairs
+      // and never overwrite this selection.
+      if (!G.Proven) {
+        const GroupAcc::PairAcc &Deciding = G.Pairs.back();
+        G.A = A;
+        G.B = B;
+        G.ProvenRootsA = Deciding.RootsA;
+        G.ProvenRootsB = Deciding.RootsB;
+      }
+      G.Proven = true;
+    } else
+      for (const std::string &M : PairMissing)
+        G.Missing.insert(M);
+  };
+
+  // ---- shape 1: ONE slot reached from interleavable contexts -----------
+  for (size_t I = 0; I < Slots.size(); ++I) {
+    SlotEntry &E = Slots[I];
+    if (E.Accesses.empty())
+      continue;
+    bool FgUse = false, FgWrite = false;
+    std::map<InputSymbol *, bool> RootUse, RootWrite;
+    for (SlotEntry::Access &A : E.Accesses) {
+      const unsigned C = AccessorContext(A.From);
+      if (C & 1) {
+        for (InputSymbol *R : Roots[A.From]) {
+          RootUse[R] = true;
+          if (A.Role == 1)
+            RootWrite[R] = true;
+        }
+      }
+      if (C & 2) {
+        FgUse = true;
+        if (A.Role == 1)
+          FgWrite = true;
+      }
+    }
+    if (RootUse.empty())
+      continue; // no ISR-context access: nothing to interleave with
+    // Shared preconditions for a same-slot pair.
+    std::set<std::string> BaseMissing;
+    if (!E.ExtentKnown)
+      BaseMissing.insert("slot extent unknown (no st_size): only an "
+                         "address-level hit is established");
+    if (!AccessorsSized(E))
+      BaseMissing.insert("an accessor's attribution relies on a size-less "
+                         "function interval");
+
+    // (a) ISR vs foreground on one slot.
+    if (FgUse) {
+      const bool IsrWrite = !RootWrite.empty();
+      if (IsrWrite || FgWrite) {
+        std::set<std::string> Missing = BaseMissing;
+        bool Positive = false;
+        for (SlotEntry::Access &A : E.Accesses)
+          if ((AccessorContext(A.From) & 2) && AccessorFgRooted(A.From)) {
+            Positive = true;
+            break;
+          }
+        if (!Positive)
+          Missing.insert("foreground reachability is presumed (uncalled "
+                         "root), not traced to the reset chain");
+        const std::string Key = Twine("s:" + Twine::utohexstr(E.Lo) + ":" +
+                                      Twine::utohexstr(E.Hi)).str();
+        GroupAcc &G =
+            Touch(Key, 0, true, E.Lo, E.Hi, E.ExtentKnown, E.ID, E.ID);
+        G.Members.push_back(I);
+        std::set<InputSymbol *> IsrRoots;
+        for (auto &P : RootUse) {
+          G.RootsIsr.insert(P.first);
+          IsrRoots.insert(P.first);
+        }
+        EvaluatePair(G, Missing, IsrRoots, {}, E.ID, E.ID);
+      }
+    }
+    // (b) ISR vs ISR on one slot: a confirmed write from one registered ISR
+    //    root against a use from a DIFFERENT root, under the declared
+    //    preemption contract.  R4-2: every (writer root, user root)
+    //    combination is its own pair with its own declaration check, so a
+    //    group of three roots declared for only one combination proves via
+    //    THAT combination and records ITS roots as the deciding evidence.
+    if (!RootWrite.empty() && RootUse.size() >= 2) {
+      bool Pair = false;
+      for (auto &W : RootWrite)
+        for (auto &U : RootUse)
+          if (W.first != U.first)
+            Pair = true;
+      if (Pair) {
+        const std::string Key = Twine("s1:" + Twine::utohexstr(E.Lo) + ":" +
+                                      Twine::utohexstr(E.Hi)).str();
+        GroupAcc &G =
+            Touch(Key, 1, true, E.Lo, E.Hi, E.ExtentKnown, E.ID, E.ID);
+        G.Members.push_back(I);
+        for (auto &P : RootUse)
+          G.RootsIsr.insert(P.first);
+        for (auto &W : RootWrite)
+          for (auto &U : RootUse)
+            if (W.first != U.first) {
+              std::set<std::string> Missing = BaseMissing;
+              if (!DeclaredPreemptible(W.first, U.first))
+                Missing.insert("ISR-vs-ISR preemption is not declared in the "
+                               "preemption contract");
+              std::set<InputSymbol *> RA{W.first}, RB{U.first};
+              G.RootsA.insert(W.first);
+              G.RootsB.insert(U.first);
+              EvaluatePair(G, Missing, RA, RB, E.ID, E.ID);
+            }
+      }
+    }
+  }
+
+  // ---- shape 2: DIFFERENT slots whose ranges intersect -----------------
+  for (size_t I = 0; I != Slots.size(); ++I)
+    for (size_t J = I + 1; J != Slots.size(); ++J) {
+      SlotEntry &A = Slots[I];
+      SlotEntry &B = Slots[J];
+      // Only slots with confirmed accesses participate: owning a slot and
+      // actually accessing it are different facts.
+      if (A.Accesses.empty() || B.Accesses.empty())
+        continue;
+      const bool ExtentOverlap =
+          A.ExtentKnown && B.ExtentKnown && A.Lo < B.Hi && B.Lo < A.Hi;
+      const bool AddressHitA =
+          !A.ExtentKnown && B.ExtentKnown && A.Lo >= B.Lo && A.Lo < B.Hi;
+      const bool AddressHitB =
+          !B.ExtentKnown && A.ExtentKnown && B.Lo >= A.Lo && B.Lo < A.Hi;
+      if (!ExtentOverlap && !AddressHitA && !AddressHitB)
+        continue;
+      auto RootsOf = [&](SlotEntry &E, std::set<InputSymbol *> &Out) {
+        for (SlotEntry::Access &X : E.Accesses) {
+          const unsigned C = AccessorContext(X.From);
+          if (C & 1)
+            for (InputSymbol *R : Roots[X.From])
+              Out.insert(R);
+        }
+      };
+      auto FgHas = [&](SlotEntry &E) {
+        for (SlotEntry::Access &X : E.Accesses)
+          if (AccessorContext(X.From) & 2)
+            return true;
+        return false;
+      };
+      auto HasWrite = [&](SlotEntry &E) {
+        for (SlotEntry::Access &X : E.Accesses)
+          if (X.Role == 1)
+            return true;
+        return false;
+      };
+      std::set<InputSymbol *> RootsA, RootsB;
+      RootsOf(A, RootsA);
+      RootsOf(B, RootsB);
+      // R11-1: EVERY applicable context combination is graded on its own.
+      // The ISR-vs-foreground and ISR-vs-ISR combinations of one slot pair
+      // are not alternatives: a pair can carry a registered-ISR access on
+      // one side AND a foreground access on the other, and selecting a
+      // single Kind for the pair let either combination mask the other.
+      // A purely PRESUMED foreground root (an uncalled function, not traced
+      // to the reset chain) could therefore replace an ISR-vs-ISR
+      // combination whose positive evidence was complete and unchanged.
+      // The two combinations are now collected and each writes its OWN
+      // group (the group key carries the kind), so a weaker combination can
+      // no longer hide a stronger, independently established one.  The
+      // proof rule of each combination is untouched: the foreground side
+      // must still be positively reset-chain-rooted and the ISR-vs-ISR
+      // combination still needs a declared preemption pair.
+      std::set<uint8_t> Kinds;
+      if ((!RootsA.empty() && FgHas(B)) || (!RootsB.empty() && FgHas(A)))
+        Kinds.insert(0); // ISR vs foreground
+      if (!RootsA.empty() && !RootsB.empty()) {
+        bool Distinct = false;
+        for (InputSymbol *R : RootsA)
+          for (InputSymbol *R2 : RootsB)
+            if (R != R2)
+              Distinct = true;
+        // One shared ISR root only: both sides are the same context, so no
+        // ISR-vs-ISR combination is applicable.
+        if (Distinct)
+          Kinds.insert(1); // ISR vs ISR
+      }
+      if (Kinds.empty())
+        continue; // no interleavable contexts
+      // A clobber needs at least one CONFIRMED caller-write access.
+      if (!HasWrite(A) && !HasWrite(B))
+        continue;
+      uint64_t Lo, Hi;
+      bool Exact;
+      if (ExtentOverlap) {
+        Lo = std::max(A.Lo, B.Lo);
+        Hi = std::min(A.Hi, B.Hi);
+        Exact = true;
+      } else {
+        Lo = AddressHitA ? A.Lo : B.Lo;
+        Hi = Lo; // address-level hit, extent unknown
+        Exact = false;
+      }
+      for (uint8_t Kind : Kinds) {
+        const std::string Key =
+            (Twine(uint32_t(Kind)) + ":" + Twine::utohexstr(Lo) + ":" +
+             Twine::utohexstr(Hi) + (Exact ? ":x" : ":i"))
+                .str();
+        // PER-PAIR grading: a group is Proven when ANY of its pairs is
+        // proven; a pair's missing conditions are merged into the group only
+        // to explain the pairs that are not (review finding 2, round 3).
+        std::set<std::string> Missing;
+        if (!Exact)
+          Missing.insert("slot extent unknown (no st_size): only an "
+                         "address-level hit is established");
+        if (!AccessorsSized(A) || !AccessorsSized(B))
+          Missing.insert("an accessor's attribution relies on a size-less "
+                         "function interval");
+        if (Kind == 0) {
+          // The foreground side must be POSITIVELY traced to the reset chain.
+          SlotEntry &FgSlot = (!RootsA.empty() && FgHas(B)) ? B : A;
+          bool Positive = false;
+          for (SlotEntry::Access &X : FgSlot.Accesses)
+            if ((AccessorContext(X.From) & 2) && AccessorFgRooted(X.From)) {
+              Positive = true;
+              break;
+            }
+          if (!Positive)
+            Missing.insert("foreground reachability is presumed (uncalled "
+                           "root), not traced to the reset chain");
+        } else {
+          bool Declared = false;
+          for (InputSymbol *R : RootsA)
+            for (InputSymbol *R2 : RootsB)
+              if (R != R2 && DeclaredPreemptible(R, R2))
+                Declared = true;
+          if (!Declared)
+            Missing.insert("ISR-vs-ISR preemption is not declared in the "
+                           "preemption contract");
+        }
+        GroupAcc &G = Touch(Key, Kind, false, Lo, Hi, Exact, A.ID, B.ID);
+        G.Members.push_back(I);
+        G.Members.push_back(J);
+        for (InputSymbol *R : RootsA)
+          G.RootsA.insert(R);
+        for (InputSymbol *R : RootsB)
+          G.RootsB.insert(R);
+        for (InputSymbol *R : RootsA)
+          G.RootsIsr.insert(R);
+        for (InputSymbol *R : RootsB)
+          G.RootsIsr.insert(R);
+        EvaluatePair(G, Missing, RootsA, RootsB, A.ID, B.ID);
+      }
+    }
+
+  // ---- materialize the authoritative structured records ----------------
+  LinkerResult::ReentrancyReport &Rep = Result.Reentrancy;
+  Rep.Version = 1;
+  Rep.Functions = uint32_t(FuncNodes.size());
+  Rep.Slots = uint32_t(Slots.size());
+  Rep.RegisteredIsrs = uint32_t(IsrSymbols.size());
+  Rep.Conflicts.reserve(Accs.size());
+  for (GroupAcc &G : Accs) {
+    LinkerResult::ReentrancyConflict C;
+    C.Kind = G.Kind;
+    // PER-PAIR proof: the group is proven when ANY of its pairs is; the
+    // DECIDING pair's identities are SlotA/SlotB (G.A/G.B are updated by
+    // EvaluatePair when a pair establishes the group), and the merged
+    // Missing set only explains the pairs that are not.
+    C.Proven = G.Proven;
+    C.SameSlot = G.Same;
+    C.Lo = uint32_t(G.Lo);
+    C.Hi = uint32_t(G.Hi);
+    C.ExtentExact = G.Exact;
+    C.SlotA = G.A;
+    C.SlotB = G.B;
+    for (size_t SI : G.Members) {
+      bool Seen = false;
+      for (const LinkerResult::ReentrancySlotEvidence &S : C.Slots)
+        if (SameID(S.ID, Slots[SI].ID))
+          Seen = true;
+      if (Seen)
+        continue;
+      LinkerResult::ReentrancySlotEvidence Ev;
+      FillSlotEvidence(Slots[SI], Ev);
+      C.Slots.push_back(std::move(Ev));
+    }
+    std::sort(C.Slots.begin(), C.Slots.end(),
+              [](const LinkerResult::ReentrancySlotEvidence &A,
+                 const LinkerResult::ReentrancySlotEvidence &B) {
+                if (A.Lo != B.Lo)
+                  return A.Lo < B.Lo;
+                if (A.Hi != B.Hi)
+                  return A.Hi < B.Hi;
+                return A.Name < B.Name;
+              });
+    // ISR context roots: every ISR root touching the group (explanation).
+    for (InputSymbol *R : G.RootsIsr)
+      C.IsrRootsA.push_back(R->Name);
+    auto SortUniq = [](std::vector<std::string> &V) {
+      std::sort(V.begin(), V.end());
+      V.erase(std::unique(V.begin(), V.end()), V.end());
+    };
+    SortUniq(C.IsrRootsA);
+    for (const std::string &M : G.Missing)
+      C.MissingConditions += C.MissingConditions.empty() ? M : ("; " + M);
+    // The per-pair records: every candidate pair with its own verdict, so a
+    // partially established group distinguishes its proven pair from the
+    // pairs whose conditions are still missing (R4-2).
+    for (const GroupAcc::PairAcc &P : G.Pairs) {
+      LinkerResult::ReentrancyConflict::PairEvidence PE;
+      PE.A = P.A;
+      PE.B = P.B;
+      PE.Proven = P.Proven;
+      for (const std::string &M : P.Missing)
+        PE.MissingConditions += PE.MissingConditions.empty() ? M : ("; " + M);
+      for (InputSymbol *R : P.RootsA)
+        PE.RootsA.push_back(R->Name);
+      for (InputSymbol *R : P.RootsB)
+        PE.RootsB.push_back(R->Name);
+      SortUniq(PE.RootsA);
+      SortUniq(PE.RootsB);
+      C.Pairs.push_back(std::move(PE));
+    }
+    // Side attribution.  R5-2: a PROVEN group's side lines and the facts
+    // `roots_a=/roots_b=' fields name the DECIDING pair's roots -- the ONE
+    // pair whose evidence chain established the group -- never the union
+    // over every established pair (with `_irq1/_irq2' and `_irq2/_irq3' both
+    // declared that union named `_irq1 _irq2' / `_irq2 _irq3', roots the
+    // deciding pair does not have).  Both fields are filled from the SAME
+    // accumulating sets the group's pair records carry, and they are left
+    // EMPTY for a conditional group (which has no proven pair to name).
+    if (G.Proven) {
+      for (InputSymbol *R : G.ProvenRootsA)
+        C.DecidingRootsA.push_back(R->Name);
+      for (InputSymbol *R : G.ProvenRootsB)
+        C.DecidingRootsB.push_back(R->Name);
+      SortUniq(C.DecidingRootsA);
+      SortUniq(C.DecidingRootsB);
+      C.IsrRootsB = C.DecidingRootsB;
+    } else {
+      // No proven pair: the side lines explain the candidate set (the union
+      // over the pairs whose conditions are still missing), and the facts
+      // publish no roots_a/roots_b at all.
+      for (const GroupAcc::PairAcc &P : G.Pairs)
+        for (InputSymbol *R : P.RootsB)
+          C.IsrRootsB.push_back(R->Name);
+      SortUniq(C.IsrRootsB);
+    }
+    Rep.Conflicts.push_back(std::move(C));
+  }
+  Rep.CoverageState = 0; // refined by the policy block below
+
+  const bool CheckEnabled = Config.IsrReentrancy != IsrReentrancySeverity::Off;
+  const bool CoverageClosed = UnknownICalls == 0 && UnknownDirectCalls == 0 &&
+                              UnknownControlTargets == 0 &&
+                              UndecodableSections == 0 &&
+                              UnattributedAccess == 0 && UnsizedOwners == 0 &&
+                              UnverifiedControl == 0 && UnverifiedAccess == 0;
+  auto PushUnknown = [&](uint8_t K, uint64_t N) {
+    if (N)
+      Rep.Unknowns.push_back({K, uint32_t(N)});
+  };
+  PushUnknown(0, UnknownICalls);
+  PushUnknown(1, UnknownDirectCalls);
+  PushUnknown(2, UnknownControlTargets);
+  PushUnknown(3, UndecodableSections);
+  PushUnknown(4, UnattributedAccess);
+  PushUnknown(5, UnsizedOwners);
+  PushUnknown(6, UnverifiedControl);
+  PushUnknown(7, UnverifiedAccess);
+
+  // ---- rendering (from the STRUCTURED records) + policy ----------------
+  // Warnings and the coverage status accumulate in Diagnostics (printed by
+  // the shell on a successful link); on a hard failure the SAME coverage
+  // status text is written to Err so the failure never hides the current
+  // state, and PROVEN-violation detail goes to Err before the failing
+  // return.
+  std::string Out;
+  raw_string_ostream OS(Out);
+  auto Hex6 = [](uint64_t V) {
+    std::string X = "0x" + Twine::utohexstr(V).str();
+    while (X.size() < 6)
+      X.insert(2, "0");
+    return X;
+  };
+  auto RenderConflict = [&](raw_ostream &S, const char *Sev,
+                            const LinkerResult::ReentrancyConflict &C) {
+    S << "mcs251-lld: " << Sev << ": ISR reentrancy: "
+      << (C.Proven ? "proven static parameter-slot contract violation"
+                   : "conditional slot overlap")
+      << ": ";
+    if (C.SameSlot)
+      S << "one parameter slot is reached from interleavable contexts";
+    else
+      S << "parameter slots are shared across "
+        << (C.Kind == 0 ? "the ISR and foreground execution contexts"
+                        : "two registered ISRs");
+    S << " at [" << Hex6(C.Lo) << "," << Hex6(C.Hi) << ")"
+      << (C.ExtentExact ? "" : " (exact extent not established)") << "\n";
+    // R4-2: the pair line names the pair that DECIDED the group and is
+    // printed only for a proven group -- a conditional group has no proven
+    // pair, and printing one claimed evidence the records did not hold.
+    if (C.Proven)
+      S << "mcs251-lld: " << Sev << ": ISR reentrancy:   proven pair: "
+        << Hex6(C.SlotA.ObjectId) << ":" << Hex6(C.SlotA.Section) << ":"
+        << Hex6(C.SlotA.SymIndex) << " / " << Hex6(C.SlotB.ObjectId) << ":"
+        << Hex6(C.SlotB.Section) << ":" << Hex6(C.SlotB.SymIndex) << "\n";
+    // R4-2: per-pair verdicts for multi-pair groups -- which pairs are
+    // established and which pairs the group-level missing string explains.
+    // A single-pair group is already fully described by the lines above.
+    // R5-2: a SAME-SLOT group's pairs differ only in their roots, so every
+    // per-pair line names its own write root and use root; without them the
+    // six lines of a three-root slot carried the same slot ID twice and were
+    // indistinguishable.  The root identity comes from the pair's OWN
+    // record; the A/B side lines below name the deciding pair only, so the
+    // per-pair lines are the ONLY place a non-deciding pair's roots appear.
+    for (const LinkerResult::ReentrancyConflict::PairEvidence &P : C.Pairs) {
+      if (C.Pairs.size() == 1)
+        break;
+      auto JoinRoots = [](const std::vector<std::string> &V) {
+        std::string R;
+        for (size_t I = 0; I != V.size(); ++I)
+          R += (I ? "," : "") + V[I];
+        return R;
+      };
+      S << "mcs251-lld: " << Sev << ": ISR reentrancy:   pair "
+        << Hex6(P.A.ObjectId) << ":" << Hex6(P.A.Section) << ":"
+        << Hex6(P.A.SymIndex) << " / " << Hex6(P.B.ObjectId) << ":"
+        << Hex6(P.B.Section) << ":" << Hex6(P.B.SymIndex);
+      // Write root / use root.  For a SAME-SLOT pair the two slot IDs are
+      // identical and the roots are the pair's ONLY identity -- the six
+      // combinations of a three-root slot would otherwise print the same
+      // slot ID six times and be indistinguishable.  For the
+      // different-slot shape the pair's own A/B slot IDs already tell the
+      // lines apart, so the root parenthetical is added only where it is
+      // load-bearing.
+      if (SameID(P.A, P.B) && (!P.RootsA.empty() || !P.RootsB.empty()))
+        S << " (write root " << JoinRoots(P.RootsA) << "; use root "
+          << JoinRoots(P.RootsB) << ")";
+      S << ": " << (P.Proven ? "established" : ("missing " + P.MissingConditions))
+        << "\n";
+    }
+    for (const LinkerResult::ReentrancySlotEvidence &E : C.Slots) {
+      S << "mcs251-lld: " << Sev << ": ISR reentrancy:   slot " << E.Name
+        << " [object " << E.ID.ObjectId << " section " << E.ID.Section
+        << (E.ID.SymIndex == 0xffffffffu
+                ? std::string(" anonymous")
+                : (" symbol " + std::to_string(E.ID.SymIndex)))
+        << "] " << Hex6(E.Lo);
+      if (E.ExtentKnown)
+        S << " +" << Twine::utohexstr(E.Hi - E.Lo).str();
+      else
+        S << " (extent unknown)";
+      S << " in " << E.SectionName << " (" << E.FileName << ")"
+        << (E.SectionGranular ? " [section-granular producer contract]" : "")
+        << "\n";
+      std::set<std::string> Seen;
+      for (const LinkerResult::ReentrancyAccess &A : E.Accesses) {
+        std::string Ref = A.AccessorName + " (" + A.AccessorFile + ")";
+        if (!Seen.insert(Ref).second)
+          continue;
+        std::string CtxName = (A.Context & 3) == 3 ? "ISR+foreground"
+                              : (A.Context & 1)     ? "ISR"
+                                                    : "foreground";
+        std::string Role = A.Role == 1 ? "writes slot before the call "
+                                         "(caller side of the static-slot "
+                                         "ABI, confirmed call)"
+                          : A.Role == 2
+                              ? "reads slot at entry (callee side of the "
+                                "static-slot ABI)"
+                              : "accesses slot (role undetermined)";
+        S << "mcs251-lld: " << Sev << ": ISR reentrancy:     by '"
+          << A.AccessorName << "' (" << A.AccessorFile << ", " << CtxName
+          << " context; " << Role << ")\n";
+      }
+    }
+    if (!C.IsrRootsA.empty()) {
+      S << "mcs251-lld: " << Sev << ": ISR reentrancy:   ISR context roots:";
+      for (const std::string &R : C.IsrRootsA)
+        S << " " << R;
+      S << "\n";
+    }
+    if (C.Kind == 1) {
+      auto DumpRoots = [&](const char *Which, const std::vector<std::string> &V) {
+        S << "mcs251-lld: " << Sev << ": ISR reentrancy:   " << Which
+          << " side ISR roots:";
+        for (const std::string &X : V)
+          S << " " << X;
+        S << "\n";
+      };
+      // R5-2: for a PROVEN group the two side lines name the DECIDING pair's
+      // roots, taken from the structured record (C.DecidingRootsA/B, filled
+      // from the deciding pair's own root sets).  Deriving them here by
+      // unioning every established pair used to print `_irq1 _irq2' /
+      // `_irq2 _irq3' for a group whose deciding pair was `_irq2/_irq3'.
+      // A conditional group has no deciding pair: the lines then explain the
+      // candidate set (union over the pairs whose conditions are missing).
+      std::vector<std::string> SideA, SideB;
+      if (C.Proven) {
+        SideA = C.DecidingRootsA;
+        SideB = C.DecidingRootsB;
+      } else {
+        for (const LinkerResult::ReentrancyConflict::PairEvidence &P : C.Pairs) {
+          SideA.insert(SideA.end(), P.RootsA.begin(), P.RootsA.end());
+          SideB.insert(SideB.end(), P.RootsB.begin(), P.RootsB.end());
+        }
+      }
+      auto SortUniqSide = [](std::vector<std::string> &V) {
+        std::sort(V.begin(), V.end());
+        V.erase(std::unique(V.begin(), V.end()), V.end());
+      };
+      SortUniqSide(SideA);
+      SortUniqSide(SideB);
+      DumpRoots("A", SideA);
+      DumpRoots("B", SideB);
+    }
+    if (C.Proven) {
+      S << "mcs251-lld: " << Sev << ": ISR reentrancy:   interleaving "
+        << "condition: "
+        << (C.Kind == 1 ? "declared preemption between the two ISR roots "
+                          "(external preemption contract)"
+                        : "registered ISR preempts foreground (default "
+                          "preemption contract)")
+        << "\n";
+      bool ContractEdge = false, VerifiedEdge = false;
+      for (const LinkerResult::ReentrancySlotEvidence &E : C.Slots)
+        for (const LinkerResult::ReentrancyAccess &A : E.Accesses)
+          if (A.Role == 1) {
+            if (A.EdgeEvidence == LinkerResult::EvContract)
+              ContractEdge = true;
+            else
+              VerifiedEdge = true;
+          }
+      S << "mcs251-lld: " << Sev << ": ISR reentrancy:   evidence: slot "
+        << "accesses verified at trusted instruction boundaries; control "
+        << "transfers: confirmed opcodes";
+      if (AnyContractEdge || ContractEdge)
+        S << ", plus the frozen-CRT reset/boot chain platform contract";
+      if (!VerifiedEdge && !ContractEdge)
+        S << " (context only)";
+      S << "\n";
+    } else {
+      S << "mcs251-lld: " << Sev << ": ISR reentrancy:   missing "
+        << "condition(s) for a proven violation: " << C.MissingConditions
+        << "\n";
+    }
+    S << "mcs251-lld: " << Sev << ": ISR reentrancy:   coverage boundary: "
+      << "only direct control-flow relocations are analyzed; indirect calls, "
+      << "call sites without relocation records, prebuilt runtime objects, "
+      << "and unresolved cross-object targets are not covered; functions "
+      << "without st_size have no exact bounds, so an interior label can "
+      << "truncate their presumed interval\n";
+  };
+
+  // Legacy function-level candidate relations (IC-014: candidate only,
+  // never auto-upgraded to a hard error by the severity switch).
   std::vector<InputSymbol *> Warned;
   for (const auto &P : Ctx) {
     InputSymbol *X = P.first;
@@ -6360,91 +7921,312 @@ void Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
     if (Mixed || MultiISR)
       Warned.push_back(X);
   }
-  if (Warned.empty())
-    return;
   std::sort(Warned.begin(), Warned.end(),
             [](const InputSymbol *A, const InputSymbol *B) {
               if (A->File->Path != B->File->Path)
                 return A->File->Path < B->File->Path;
               return A->Name < B->Name;
             });
-
-  std::string Out;
-  raw_string_ostream OS(Out);
-  for (InputSymbol *X : Warned) {
-    const bool Mixed = (Ctx[X] & 3) == 3;
-    const bool MultiISR = Roots[X].size() >= 2;
-    if (Mixed)
-      OS << "mcs251-lld: warning: ISR reentrancy: function '" << X->Name
-         << "' (" << ShortFile(X)
-         << ") is called from both ISR and foreground code\n";
-    if (MultiISR)
-      OS << "mcs251-lld: warning: ISR reentrancy: function '" << X->Name
-         << "' (" << ShortFile(X) << ") is called from multiple registered "
-         << "ISRs\n";
-    OS << "mcs251-lld: warning: ISR reentrancy:   ISR entries reaching '"
-       << X->Name << "':";
-    // Sort by rendered reference: the root set iterates in pointer order,
-    // which is not deterministic.
-    std::vector<std::string> RootRefs;
-    for (InputSymbol *R : Roots[X])
-      RootRefs.push_back(R->Name + " (" + ShortFile(R) + ")");
-    std::sort(RootRefs.begin(), RootRefs.end());
-    for (const std::string &Ref : RootRefs)
-      OS << " " << Ref;
-    OS << '\n';
-    // Direct foreground-context callers, deduplicated, stable order.
-    std::set<std::string> Seen;
-    std::vector<std::string> FG;
-    for (const auto &E : Edges)
-      if (E.second == X && (Ctx.count(E.first) && (Ctx[E.first] & 2))) {
-        std::string Ref = E.first->Name + " (" + ShortFile(E.first) + ")";
-        if (Seen.insert(Ref).second)
-          FG.push_back(Ref);
+  auto RenderCandidates = [&](raw_ostream &S) {
+    for (InputSymbol *X : Warned) {
+      const bool Mixed = (Ctx[X] & 3) == 3;
+      const bool MultiISR = Roots[X].size() >= 2;
+      if (Mixed)
+        S << "mcs251-lld: warning: ISR reentrancy: function '" << X->Name
+          << "' (" << ShortFile(X)
+          << ") is called from both ISR and foreground code\n";
+      if (MultiISR)
+        S << "mcs251-lld: warning: ISR reentrancy: function '" << X->Name
+          << "' (" << ShortFile(X) << ") is called from multiple registered "
+          << "ISRs\n";
+      S << "mcs251-lld: warning: ISR reentrancy:   ISR entries reaching '"
+        << X->Name << "':";
+      std::vector<std::string> RootRefs;
+      for (InputSymbol *R : Roots[X])
+        RootRefs.push_back(R->Name + " (" + ShortFile(R) + ")");
+      std::sort(RootRefs.begin(), RootRefs.end());
+      for (const std::string &Ref : RootRefs)
+        S << " " << Ref;
+      S << '\n';
+      std::set<std::string> Seen;
+      std::vector<std::string> FG;
+      for (const auto &E : Edges)
+        if (E.second == X && (Ctx.count(E.first) && (Ctx[E.first] & 2))) {
+          std::string Ref = E.first->Name + " (" + ShortFile(E.first) + ")";
+          if (Seen.insert(Ref).second)
+            FG.push_back(Ref);
+        }
+      if (!FG.empty()) {
+        std::sort(FG.begin(), FG.end());
+        S << "mcs251-lld: warning: ISR reentrancy:   direct foreground "
+          << "callers of '" << X->Name << "':";
+        for (const std::string &Ref : FG)
+          S << " " << Ref;
+        S << '\n';
       }
-    if (!FG.empty()) {
-      std::sort(FG.begin(), FG.end());
-      OS << "mcs251-lld: warning: ISR reentrancy:   direct foreground callers "
-         << "of '" << X->Name << "':";
-      for (const std::string &Ref : FG)
-        OS << " " << Ref;
-      OS << '\n';
+      S << "mcs251-lld: warning: ISR reentrancy:   parameter slots of "
+        << ShortFile(X) << " (per defining object):";
+      bool AnySlot = false;
+      std::vector<InputSection *> SlotSecs;
+      for (const auto &SP : X->File->Sections) {
+        InputSection *S = SP.get();
+        if (S->IsAlloc && (S->Region == "DSEG" || S->Region == "EDATA" ||
+                           S->Region == "OSEG") &&
+            S->Size)
+          SlotSecs.push_back(S);
+      }
+      std::sort(SlotSecs.begin(), SlotSecs.end(),
+                [](const InputSection *A, const InputSection *B) {
+                  return A->Address < B->Address;
+                });
+      for (InputSection *SlotSec : SlotSecs) {
+        AnySlot = true;
+        S << " " << SlotSec->Name << " " << format_hex(SlotSec->Address, 6, false)
+          << " +" << format_hex(SlotSec->Size, 0, false);
+      }
+      if (!AnySlot)
+        S << " none found";
+      S << '\n';
     }
-    // Static parameter slots of the defining object (per-object attribution).
-    OS << "mcs251-lld: warning: ISR reentrancy:   parameter slots of "
-       << ShortFile(X) << " (per defining object):";
-    bool AnySlot = false;
-    std::vector<InputSection *> Slots;
-    for (const auto &SP : X->File->Sections) {
-      InputSection *S = SP.get();
-      if (S->IsAlloc && (S->Region == "DSEG" || S->Region == "EDATA" ||
-                         S->Region == "OSEG") &&
-          S->Size)
-        Slots.push_back(S);
+  };
+  std::string StatusLine;
+  {
+    raw_string_ostream SL(StatusLine);
+    SL << "mcs251-lld: warning: ISR reentrancy: coverage status: ";
+    if (!CoverageClosed) {
+      SL << "open -";
+      bool First = true;
+      auto One = [&](const char *What, uint64_t N) {
+        if (!N)
+          return;
+        SL << (First ? " " : ", ") << N << " " << What;
+        First = false;
+      };
+      One("unknown indirect call site(s) (ECALLr)", UnknownICalls);
+      One("direct ecall(s) without relocation", UnknownDirectCalls);
+      One("unresolved control target(s)", UnknownControlTargets);
+      One("code section(s) without trusted instruction boundaries",
+          UndecodableSections);
+      One("unattributed slot access(es)", UnattributedAccess);
+      One("size-less attributed function(s)", UnsizedOwners);
+      One("control relocation(s) without a confirmed control instruction",
+          UnverifiedControl);
+      One("slot-storage reference(s) without a confirmed access",
+          UnverifiedAccess);
+      SL << "; this link does not constitute complete ISR reentrancy "
+         << "certification";
+    } else {
+      SL << "closed (no unknown call evidence)";
     }
-    std::sort(Slots.begin(), Slots.end(),
-              [](const InputSection *A, const InputSection *B) {
-                return A->Address < B->Address;
-              });
-    for (InputSection *S : Slots) {
-      AnySlot = true;
-      // Same hex conventions as the map rows: width 6 includes the "0x"
-      // prefix, sizes print minimal width with their own "0x".
-      OS << " " << S->Name << " " << format_hex(S->Address, 6, false)
-         << " +" << format_hex(S->Size, 0, false);
-    }
-    if (!AnySlot)
-      OS << " none found";
-    OS << '\n';
+    SL << "; " << Rep.Functions << " function(s), " << Rep.Slots
+       << " slot(s), " << Rep.Conflicts.size() << " address conflict group(s), "
+       << Warned.size() << " function candidate(s)"
+       << "; ISR entries registered: " << Rep.RegisteredIsrs;
+    if (CheckEnabled && Config.IsrReentrancy == IsrReentrancySeverity::Warn)
+      SL << "; severity=warn is a diagnostic experiment mode: uncertified";
+    SL << "\n";
   }
-  OS << "mcs251-lld: warning: ISR reentrancy:   coverage boundary: only "
-     << "direct control-flow relocations are analyzed; indirect calls, call "
-     << "sites without relocation records, prebuilt runtime objects, and "
-     << "unresolved cross-object targets are not covered; functions without "
-     << "st_size have no exact bounds, so an interior label can truncate "
-     << "their presumed interval\n";
+
+  bool HardFail = false;
+  if (CheckEnabled) {
+    if (Config.IsrReentrancy == IsrReentrancySeverity::Error)
+      for (const LinkerResult::ReentrancyConflict &C : Rep.Conflicts)
+        if (C.Proven) {
+          RenderConflict(Err, "error", C);
+          HardFail = true;
+        }
+    for (const LinkerResult::ReentrancyConflict &C : Rep.Conflicts) {
+      if (Config.IsrReentrancy == IsrReentrancySeverity::Error && C.Proven)
+        continue; // already emitted as a hard error above
+      RenderConflict(OS, "warning", C);
+    }
+    RenderCandidates(OS);
+    // The coverage status is ALWAYS emitted - on the success path through
+    // Diagnostics, and on the hard-failure path directly to Err - exactly
+    // once, so a failing link still reports its current coverage state.
+    bool StatusOnErr = false;
+    if (HardFail) {
+      Err << StatusLine;
+      StatusOnErr = true;
+    } else
+      OS << StatusLine;
+    if (Config.IsrReentrancyCoverageRequire && !Rep.Unknowns.empty()) {
+      Err << "mcs251-lld: error: ISR reentrancy: coverage=require rejected "
+          << "the link: " << Rep.Unknowns.size() << " unknown fact ";
+      Err << (Rep.Unknowns.size() == 1 ? "category" : "categories");
+      for (const LinkerResult::ReentrancyUnknown &U : Rep.Unknowns)
+        Err << " [" << unsigned(U.Kind) << "]=" << U.Count;
+      Err << "; a certification recipe must close or explicitly accept "
+          << "every unknown before use\n";
+      HardFail = true;
+    }
+    Rep.Candidates.reserve(Warned.size());
+    for (InputSymbol *X : Warned) {
+      LinkerResult::ReentrancyCandidate C;
+      C.Function = SymID(X);
+      C.Mixed = (Ctx[X] & 3) == 3;
+      C.MultiIsr = Roots[X].size() >= 2;
+      for (InputSymbol *R : Roots[X])
+        C.IsrRoots.push_back(R->Name);
+      for (const auto &E : Edges)
+        if (E.second == X && Ctx.count(E.first) && (Ctx[E.first] & 2))
+          C.FgCallers.push_back(E.first->Name);
+      std::sort(C.FgCallers.begin(), C.FgCallers.end());
+      C.FgCallers.erase(std::unique(C.FgCallers.begin(), C.FgCallers.end()),
+                        C.FgCallers.end());
+      Rep.Candidates.push_back(std::move(C));
+    }
+    // When coverage=require turns an otherwise-successful run into a failure
+    // after the status line went to Diagnostics, emit it to Err too: the
+    // failing run must carry it, exactly once.
+    if (HardFail && !StatusOnErr)
+      Err << StatusLine;
+  }
+  Rep.CoverageState = !CheckEnabled  ? 1
+                      : CoverageClosed ? 3
+                                       : 2;
   OS.flush();
-  Result.Diagnostics = std::move(Out);
+  if (!Out.empty()) {
+    if (Result.Diagnostics.empty())
+      Result.Diagnostics = std::move(Out);
+    else
+      Result.Diagnostics += Out;
+  }
+
+  // ---- E2: versioned link-facts interface -------------------------------
+  if (Config.EmitLinkFacts) {
+    collectLinkFactsBasic(Result);
+    LinkerResult::LinkFacts &LF = Result.Facts;
+    for (uint32_t Slot = 0; Slot < MCS251ISR::ISRVectorCount; ++Slot)
+      if (InputSymbol *Sym = SlotSym[Slot]) {
+        LinkerResult::LinkFacts::IsrEntry E;
+        E.Slot = Slot;
+        E.Entry = SymID(Sym);
+        E.Name = Sym->Name;
+        LF.Isrs.push_back(std::move(E));
+      }
+    for (const auto &E : Edges) {
+      LinkerResult::LinkFacts::Edge FE;
+      FE.From = SymID(E.first);
+      FE.To = SymID(E.second);
+      auto It = EdgeEv.find(E);
+      FE.Evidence = It == EdgeEv.end() ? 0 : It->second;
+      LF.Edges.push_back(std::move(FE));
+    }
+    LF.ICalls = std::move(ICalls);
+    for (const CrtContractSite &S : CrtContract) {
+      LinkerResult::LinkFacts::Contract C;
+      C.Version = 1;
+      C.Kind = S.Kind;
+      C.ObjectId = ObjId[CrtFile];
+      C.Shndx = S.Sec ? S.Sec->Index : 0xffffffffu;
+      C.Offset = S.Off;
+      C.Target = SymID(S.Target);
+      C.Name = S.Target ? S.Target->Name : std::string();
+      LF.Contracts.push_back(std::move(C));
+    }
+    // Foreground reachability that does NOT depend on any contract edge, so
+    // a consumer can see exactly when the frozen-CRT chain carried it.
+    std::set<InputSymbol *> FgNoContract;
+    if (ResetSym) {
+      std::vector<InputSymbol *> Work{ResetSym};
+      FgNoContract.insert(ResetSym);
+      while (!Work.empty()) {
+        InputSymbol *Cur = Work.back();
+        Work.pop_back();
+        for (const auto &E : Edges) {
+          if (E.first != Cur)
+            continue;
+          auto It = EdgeEv.find(E);
+          if (It != EdgeEv.end() && It->second == LinkerResult::EvContract)
+            continue;
+          if (FgNoContract.insert(E.second).second)
+            Work.push_back(E.second);
+        }
+      }
+    }
+    for (InputSymbol *N : FuncNodes) {
+      auto CI = Ctx.find(N);
+      if (CI == Ctx.end())
+        continue;
+      LinkerResult::LinkFacts::Context C;
+      C.Function = SymID(N);
+      C.Fg = (CI->second & 2) != 0;
+      C.FgContract =
+          FgRooted.count(N) != 0 && FgNoContract.count(N) == 0;
+      for (InputSymbol *R : Roots[N])
+        C.IsrRoots.push_back(R->Name);
+      std::sort(C.IsrRoots.begin(), C.IsrRoots.end());
+      LF.Contexts.push_back(std::move(C));
+    }
+    LF.Reentrancy = Rep;
+  }
+  return !HardFail;
+}
+
+// E2 (WP3 feed): object/section/symbol identity and final capacities.  The
+// identity columns are (object ordinal, input section index) and (object
+// ordinal, symbol table index); names are carried for humans.  Shared by the
+// IRQ analysis path and the no-IRQ facts-only path.
+void Linker::collectLinkFactsBasic(LinkerResult &Result) {
+  LinkerResult::LinkFacts &LF = Result.Facts;
+  LF.Version = 1;
+  for (const auto &F : Files) {
+    SHA256 Hash;
+    Hash.update(F->Buffer->getBuffer());
+    LinkerResult::LinkFacts::Object O;
+    O.Path = F->Path;
+    auto D = Hash.final();
+    O.Sha256 = llvm::toHex(ArrayRef<uint8_t>(D.data(), D.size()),
+                           /*LowerCase=*/true);
+    LF.Objects.push_back(std::move(O));
+  }
+  for (size_t ObjI = 0; ObjI != Files.size(); ++ObjI)
+    for (const auto &SP : Files[ObjI]->Sections) {
+      const InputSection &S = *SP;
+      if (!S.IsAlloc || S.Region == "IGNORE")
+        continue;
+      LinkerResult::LinkFacts::Section R;
+      R.ObjectId = uint32_t(ObjI);
+      R.InputShndx = S.Index;
+      R.Name = S.Name;
+      R.Region = S.Region;
+      const StringRef Rg = S.Region;
+      if (Rg == "CSEG" || Rg == "HOME" || Rg == "VECS" || Rg == "BOOT" ||
+          Rg == "XINIT" || Rg == "XDATA_INIT")
+        R.Space = 2;
+      else if (Rg == "XSEG")
+        R.Space = 1;
+      else
+        R.Space = 0;
+      R.Address = S.Address;
+      R.Size = uint32_t(S.Size);
+      R.Flags = S.Flags;
+      LF.Sections.push_back(std::move(R));
+    }
+  for (size_t ObjI = 0; ObjI != Files.size(); ++ObjI)
+    for (size_t SymI = 0; SymI != Files[ObjI]->Symbols.size(); ++SymI) {
+      const InputSymbol &S = Files[ObjI]->Symbols[SymI];
+      if (!S.Defined || S.Name.empty() || S.Type == ELF::STT_SECTION)
+        continue;
+      if (Files[ObjI]->BitSection && S.Sec == Files[ObjI]->BitSection)
+        continue;
+      LinkerResult::LinkFacts::Symbol R;
+      R.ObjectId = uint32_t(ObjI);
+      R.SymIndex = uint32_t(SymI);
+      R.Name = S.Name;
+      R.Address = S.Address;
+      R.Size = S.Size;
+      R.Type = S.Type;
+      R.Bind = S.Bind;
+      LF.Symbols.push_back(std::move(R));
+    }
+  LF.Cap.Spx = SPX;
+  LF.Cap.CapacityBytes = Capacity;
+  LF.Cap.EdataEnd = Config.EdataEnd;
+  LF.Cap.IramSize = Config.IramSize;
+  LF.Cap.StackHigh = StackH;
+  LF.Cap.Areas = Config.AreaStarts;
 }
 
 void Linker::printInputs(raw_ostream &Out) const {
@@ -6828,14 +8610,18 @@ bool Linker::run(LinkerResult &Result) {
   if (!errorUndefined() || !applyRelocations() || !validateXInit() ||
       !validateXDATAInit())
     return false;
-  // E2: static parameter-slot reentrancy diagnosis (COMPILER-ASSESSMENT
-  // 2026-09-10 section 5).  Runs after layout and relocation application so
-  // every call-edge target has its final address and the R3 checks have
-  // already rejected every edge that targets a registered ISR or the default
-  // entry.  Warning-only: it never fails the link and never touches the
-  // image, the map or the symbol outputs.
-  if (IrqMode && Config.IsrReentrancyDiag)
-    diagnoseIsrReentrancy(Result);
+  // E1 (WP2): the single authoritative ISR reentrancy analysis.  Runs after
+  // final layout, relocation application and initialization validation, and
+  // before the success snapshot (symbols, positioning, image handover), so
+  // every slot range, call-edge target and instruction byte is final.  A
+  // PROVEN slot-conflict contract violation under the default severity is a
+  // NORMAL link failure: the detail lines are written to the error stream
+  // inside the analysis, before the failing return, never only into a
+  // success-only diagnostic channel.  The structured report always lands in
+  // Result.Reentrancy; the versioned link-facts interface lands in
+  // Result.Facts when requested.
+  if (!diagnoseIsrReentrancy(Result))
+    return false;
   Result.Entry = llvm::any_of(AllSections,
                               [](const InputSection *S) { return S->Region == "HOME"; })
                      ? areaStart("HOME", 0) : 0;

@@ -1,0 +1,4442 @@
+# E1/WP2: lld-native ADDRESS-LEVEL static parameter-slot reentrancy check and
+# the versioned link-facts interface (IC-014; review round 2).  The legacy
+# function-level diagnosis cannot see that two DIFFERENT leaf functions'
+# parameter slots land on the same bytes, nor that ONE slot is reached from
+# both contexts.  These cases pin the reviewed contract:
+#   * both shapes are detected (different slots intersecting; one slot shared
+#     from interleavable contexts) and a PROVEN violation fails the link by
+#     default, with the exact shared range and per-slot access evidence;
+#   * only CONFIRMED machine-level evidence may justify "proven": a control
+#     relocation must sit on a real control opcode at a trusted instruction
+#     boundary (a `mov`-immediate carrying R_MCS251_24 is not a call), and a
+#     slot access must be the producer's confirmed 24-bit absolute address
+#     materialization (`7E 18 mm ll` + `7A 1C hh 00`);
+#   * a control target outside every function interval is an unknown, never a
+#     crash; neither is a non-call R24;
+#   * the structured result is authoritative: complete participating slot set,
+#     per-slot access evidence, and the specific proving pair, all rendered
+#     from the same records the facts interface publishes;
+#   * coverage status is emitted on the success AND failure paths; severity
+#     (off/warn/error) and coverage (allow/require) are separate axes;
+#   * the external preemption contract is validated independently of both;
+#   * requesting facts never changes any verdict, and facts are published in
+#     every output mode (plain, placement audit, verify).
+# The fixtures use the producer's real encodings and the real CRT; two cases
+# additionally drive the REAL compiler (llc) from checked-in IR.
+
+# RUN: rm -rf %t-seed && split-file %s %t-seed
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml -o %t.crt.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt.o
+
+# --- (a) proven address-level conflict: two different leaf slots in overlaid
+# --- OSEG areas, one reached only from a registered ISR and one only from the
+# --- foreground.  Exact shared range [0x0000,0x0002) (the lowest DSEG window
+# --- is empty in this link), the proving pair, both sides' caller-write and
+# --- callee-read evidence, and default rc=1 with no artifact.
+# RUN: yaml2obj %t-seed/conflict.yaml -o %t.c.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.c.o
+# RUN: rm -f %t.c.elf
+# RUN: not mcs251-lld %t.crt.o %t.c.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.c.elf 2> %t.c.err
+# RUN: FileCheck %s --check-prefix=CONFLICT < %t.c.err
+# CONFLICT: error: ISR reentrancy: proven static parameter-slot contract violation: parameter slots are shared across the ISR and foreground execution contexts at [0x0000,0x0002)
+# CONFLICT: error: ISR reentrancy:   proven pair: {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} / {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}
+# CONFLICT: error: ISR reentrancy:   slot _fg_scale_PARM_2 [object {{[0-9]+}} section {{[0-9]+}} symbol {{[0-9]+}}] 0x0000 +2 in .mcs251.OSEG.3
+# CONFLICT: error: ISR reentrancy:     by '_main' ({{.*}}, foreground context; writes slot before the call (caller side of the static-slot ABI, confirmed call))
+# CONFLICT: error: ISR reentrancy:     by '_fg_scale' ({{.*}}, foreground context; reads slot at entry (callee side of the static-slot ABI))
+# CONFLICT: error: ISR reentrancy:   slot _isr_scale_PARM_2 [object {{[0-9]+}} section {{[0-9]+}} symbol {{[0-9]+}}] 0x0000 +2 in .mcs251.OSEG.1
+# CONFLICT: error: ISR reentrancy:     by '_irq1' ({{.*}}, ISR context; writes slot before the call (caller side of the static-slot ABI, confirmed call))
+# CONFLICT: error: ISR reentrancy:     by '_isr_scale' ({{.*}}, ISR context; reads slot at entry (callee side of the static-slot ABI))
+# CONFLICT: error: ISR reentrancy:   ISR context roots: _irq1
+# CONFLICT: error: ISR reentrancy:   interleaving condition: registered ISR preempts foreground (default preemption contract)
+# CONFLICT: error: ISR reentrancy:   evidence: slot accesses verified at trusted instruction boundaries; control transfers: confirmed opcodes, plus the frozen-CRT reset/boot chain platform contract
+# CONFLICT: warning: ISR reentrancy: coverage status: open -
+# CONFLICT-SAME: 1 address conflict group
+# A hard failure leaves no success artifact.
+# RUN: not test -e %t.c.elf
+
+# --- (b) the SAME slot reached from both contexts (the review finding 1
+# --- shape): one leaf whose static slot is written by an ISR-context caller
+# --- and by a foreground caller.  This must be proven, not just reported as
+# --- a function-level candidate.
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %S/Inputs/reentrancy-shared-slot.ll -o %t.shared.o
+# RUN: not mcs251-lld %t.crt.o %t.shared.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.shared.elf 2> %t.shared.err
+# RUN: FileCheck %s --check-prefix=SHARED-PROVEN < %t.shared.err
+# SHARED-PROVEN: error: ISR reentrancy: proven static parameter-slot contract violation: one parameter slot is reached from interleavable contexts at [0x000c,0x000e)
+# SHARED-PROVEN: error: ISR reentrancy:   proven pair: {{.*}} / {{.*}}
+# SHARED-PROVEN: error: ISR reentrancy:     by '_timer0_isr' ({{.*}}, ISR context; writes slot before the call
+# SHARED-PROVEN: error: ISR reentrancy:     by '_main' ({{.*}}, foreground context; writes slot before the call
+# SHARED-PROVEN: error: ISR reentrancy:   interleaving condition: registered ISR preempts foreground
+
+# --- (c) legal contrast, REAL compiler output: a function called from BOTH
+# --- contexts that has NO static parameter slot (one argument) must NOT be
+# --- reported as an address-level violation; the legacy candidate warning and
+# --- a zero-conflict coverage status are all that appear.
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %S/Inputs/reentrancy-shared-noslot.ll -o %t.noslot.o
+# RUN: mcs251-lld %t.crt.o %t.noslot.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.noslot.elf 2> %t.noslot.err
+# RUN: FileCheck %s --check-prefix=NOSLOT --implicit-check-not="proven static parameter-slot" --implicit-check-not="conditional slot overlap" < %t.noslot.err
+# NOSLOT: warning: ISR reentrancy: function '_isr_scale' ({{.*}}) is called from both ISR and foreground code
+# NOSLOT: warning: ISR reentrancy: coverage status: open -
+# NOSLOT-SAME: 0 address conflict group
+
+# --- (d) severity axis: warn downgrades the proven violation to a warning and
+# --- marks the run uncertified; off is silent; require on a proven violation
+# --- still fails.
+# RUN: mcs251-lld %t.crt.o %t.c.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn -o %t.w.elf 2> %t.w.err
+# RUN: FileCheck %s --check-prefix=WARN < %t.w.err
+# WARN: warning: ISR reentrancy: proven static parameter-slot contract violation
+# WARN: warning: ISR reentrancy: coverage status: {{.*}}uncertified
+# RUN: mcs251-lld %t.crt.o %t.c.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=off -o %t.o.elf 2> %t.o.err
+# RUN: FileCheck %s --check-prefix=OFF --allow-empty < %t.o.err
+# OFF-NOT: ISR reentrancy
+# RUN: not mcs251-lld %t.crt.o %t.c.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy-coverage=require \
+# RUN:   -o %t.r.elf 2>&1 | FileCheck %s --check-prefix=REQ-PROVEN
+# REQ-PROVEN: coverage=require rejected the link
+# A certification recipe cannot disable the check it requires.
+# RUN: not mcs251-lld %t.crt.o %t.c.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=off \
+# RUN:   --isr-reentrancy-coverage=require -o %t.ro.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=REQ-OFF
+# REQ-OFF: coverage=require cannot be combined with --isr-reentrancy=off
+
+# --- (e) no conflict: only the foreground side touches a slot.  No violation
+# --- may appear anywhere in the output, while the coverage status (with zero
+# --- conflicts) is still printed.
+# RUN: yaml2obj %t-seed/nocase.yaml -o %t.n.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.n.o
+# R5: the two-ISR slotless contrast used by (z1)/(z8)/(z9).
+# RUN: yaml2obj %t-seed/nocase2.yaml -o %t.n2.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.n2.o
+# RUN: mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.n.elf 2> %t.n.err
+# RUN: FileCheck %s --check-prefix=NOCASE --implicit-check-not="proven static parameter-slot" --implicit-check-not="conditional slot overlap" --implicit-check-not="unknown indirect call site" --implicit-check-not="without a confirmed control instruction" < %t.n.err
+# NOCASE: warning: ISR reentrancy: coverage status: open -
+# NOCASE-SAME: 1 slot(s), 0 address conflict group
+
+# --- (f) a REAL `ecall r` (0x99) is an unknown indirect call site: the
+# --- default coverage policy reports it and still links; coverage=require
+# --- rejects the link.
+# RUN: yaml2obj %t-seed/icall.yaml -o %t.i.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.i.o
+# RUN: mcs251-lld %t.crt.o %t.i.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.i.elf 2> %t.i.err
+# RUN: FileCheck %s --check-prefix=ICALL < %t.i.err
+# ICALL: warning: ISR reentrancy: coverage status: open - 1 unknown indirect call site(s) (ECALLr)
+# RUN: not mcs251-lld %t.crt.o %t.i.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy-coverage=require \
+# RUN:   -o %t.i2.elf 2> %t.i2.err
+# RUN: FileCheck %s --check-prefix=ICALL-REQ < %t.i2.err
+# ICALL-REQ: error: ISR reentrancy: coverage=require rejected the link:
+# ICALL-REQ: unknown fact
+
+# --- (g) section symbol + addend and a same-address OBJECT alias: the ISR side
+# --- writes `.mcs251.OSEG.1 + 2` and the foreground side `.mcs251.OSEG.3 + 2`,
+# --- so the conflicting pair is the `_PARM_3` slots at offset 2 with shared
+# --- range [0x0002,0x0004); the untouched `_PARM_2` slots and the OBJECT alias
+# --- must not appear.
+# RUN: yaml2obj %t-seed/addend-alias.yaml -o %t.a.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.a.o
+# RUN: not mcs251-lld %t.crt.o %t.a.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.a.elf 2> %t.a.err
+# RUN: FileCheck %s --check-prefix=ADDEND --implicit-check-not="_isr_scale_PARM_2" --implicit-check-not="_fg_scale_PARM_2" --implicit-check-not="z_isr_alias" < %t.a.err
+# ADDEND: proven static parameter-slot contract violation: parameter slots are shared across the ISR and foreground execution contexts at [0x0002,0x0004)
+# ADDEND: slot _fg_scale_PARM_3
+# ADDEND: slot _isr_scale_PARM_3
+
+# --- (h) a slot with no st_size: the address hit is established but the
+# --- extent is not, so the finding stays CONDITIONAL with the missing
+# --- condition named and the default severity does not fail the link.
+# RUN: yaml2obj %t-seed/nosize.yaml -o %t.z.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.z.o
+# RUN: mcs251-lld %t.crt.o %t.z.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.z.elf 2> %t.z.err
+# RUN: FileCheck %s --check-prefix=NOSIZE --implicit-check-not="proven static parameter-slot" < %t.z.err
+# NOSIZE: warning: ISR reentrancy: conditional slot overlap: parameter slots are shared across the ISR and foreground execution contexts
+# NOSIZE: warning: ISR reentrancy:   slot _isr_scale_PARM_2 {{.*}} (extent unknown) in .mcs251.OSEG.1
+# NOSIZE: missing condition(s) for a proven violation: slot extent unknown (no st_size)
+
+# --- (i) an EDATA-region slot is indexed by final address: the ISR-side slot
+# --- lives in `.mcs251.edata` (window >= 0x100) and cannot intersect the OSEG
+# --- slot in the low window, so the link succeeds with both slots counted and
+# --- the facts show the EDATA placement.
+# RUN: yaml2obj %t-seed/edata.yaml -o %t.e.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.e.o
+# RUN: mcs251-lld %t.crt.o %t.e.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --edata-end=0x0fff --link-facts=%t.e.facts \
+# RUN:   -o %t.e.elf 2> %t.e.err
+# RUN: FileCheck %s --check-prefix=EDATA --implicit-check-not="proven static parameter-slot" --implicit-check-not="conditional slot overlap" < %t.e.err
+# EDATA: warning: ISR reentrancy: coverage status: open -
+# EDATA-SAME: 2 slot(s), 0 address conflict group
+# RUN: FileCheck %s --check-prefix=EDATA-FACTS < %t.e.facts
+# EDATA-FACTS: sec {{[0-9]+}} {{[0-9]+}} region=EDATA space=0 addr=0x1{{[0-9a-f]+}} size=0x2 flags=0x3 name .mcs251.edata
+
+# --- (j) cross-object resolution: the slot and its owner are defined in one
+# --- object while the ISR-context writer lives in ANOTHER object and reaches
+# --- both through undefined global symbols (Globals resolution).
+# RUN: yaml2obj %t-seed/xa.yaml -o %t.xa.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.xa.o
+# RUN: yaml2obj %t-seed/xb.yaml -o %t.xb.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.xb.o
+# RUN: not mcs251-lld %t.crt.o %t.xb.o %t.xa.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.x.elf 2> %t.x.err
+# RUN: FileCheck %s --check-prefix=XOBJ < %t.x.err
+# XOBJ: error: ISR reentrancy: proven static parameter-slot contract violation
+# XOBJ: slot _fg_scale_PARM_2 [object {{[0-9]+}} section {{[0-9]+}} symbol {{[0-9]+}}]
+# XOBJ: by '_main' ({{.*}}xb.o, foreground context; writes slot before the call
+# XOBJ: slot helper_PARM_2 [object {{[0-9]+}} section {{[0-9]+}} symbol {{[0-9]+}}]
+# XOBJ: by '_irq1' ({{.*}}xa.o, ISR context; writes slot before the call
+
+# --- (k) a control relocation whose target lies INSIDE the code section but
+# --- outside every function interval must be an unknown, never a crash; the
+# --- allow policy links and require fails.
+# RUN: yaml2obj %t-seed/unowned.yaml -o %t.u.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.u.o
+# RUN: mcs251-lld %t.crt.o %t.u.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.u.elf 2> %t.u.err
+# RUN: FileCheck %s --check-prefix=UNOWNED < %t.u.err
+# UNOWNED: coverage status: open - 1 unresolved control target(s)
+# RUN: not mcs251-lld %t.crt.o %t.u.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy-coverage=require \
+# RUN:   -o %t.u2.elf 2>&1 | FileCheck %s --check-prefix=UNOWNED-REQ
+# UNOWNED-REQ: coverage=require rejected the link
+
+# --- (l) a control relocation on a `mov`-immediate instruction is NOT call
+# --- evidence: the ISR-side leaf keeps no ISR context even though its slot
+# --- accesses are real, so the link stays non-proven under allow and is
+# --- rejected by require.
+# RUN: yaml2obj %t-seed/noncall.yaml -o %t.k.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.k.o
+# RUN: mcs251-lld %t.crt.o %t.k.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.k.elf 2> %t.k.err
+# RUN: FileCheck %s --check-prefix=NONCALL --implicit-check-not="proven static parameter-slot" --implicit-check-not="conditional slot overlap" < %t.k.err
+# NONCALL: coverage status: open -
+# NONCALL-SAME: 1 control relocation(s) without a confirmed control instruction
+# NONCALL-SAME: 0 address conflict group
+# RUN: not mcs251-lld %t.crt.o %t.k.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy-coverage=require \
+# RUN:   -o %t.k2.elf 2>&1 | FileCheck %s --check-prefix=NONCALL-REQ
+# NONCALL-REQ: coverage=require rejected the link
+
+# --- (m) ISR vs ISR: two registered ISRs' overlaid slots.  Without a declared
+# --- preemption pair the overlap is conditional; with the pair declared it is
+# --- proven.  The external preemption contract is validated independently of
+# --- severity and of whether facts were requested.
+# RUN: yaml2obj %t-seed/two-isr.yaml -o %t.t.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.t.o
+# RUN: mcs251-lld %t.crt.o %t.t.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.t2.elf 2> %t.t2.err
+# RUN: FileCheck %s --check-prefix=TWO-COND < %t.t2.err
+# TWO-COND: warning: ISR reentrancy: conditional slot overlap: parameter slots are shared across two registered ISRs at [0x0000,0x0002)
+# TWO-COND: missing condition(s) for a proven violation: ISR-vs-ISR preemption is not declared in the preemption contract
+# RUN: not mcs251-lld %t.crt.o %t.t.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt.txt \
+# RUN:   -o %t.t3.elf 2> %t.t3.err
+# RUN: FileCheck %s --check-prefix=TWO-PROVEN < %t.t3.err
+# TWO-PROVEN: error: ISR reentrancy: proven static parameter-slot contract violation
+# TWO-PROVEN: interleaving condition: declared preemption between the two ISR roots (external preemption contract)
+# RUN: not mcs251-lld %t.crt.o %t.t.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/bad-preempt.txt \
+# RUN:   -o %t.t4.elf 2> %t.t4.err
+# RUN: FileCheck %s --check-prefix=PREEMPT-ERR < %t.t4.err
+# PREEMPT-ERR: error: ISR preemption contract names 'no_such_isr', which is not a registered ISR entry
+# The same invalid contract fails with severity off and with facts requested:
+# the input contract never depends on unrelated switches.
+# RUN: not mcs251-lld %t.crt.o %t.t.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=off \
+# RUN:   --isr-preemption-config=%t-seed/bad-preempt.txt -o %t.t5.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=PREEMPT-OFF
+# PREEMPT-OFF: not a registered ISR entry
+# RUN: not mcs251-lld %t.crt.o %t.t.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=off \
+# RUN:   --isr-preemption-config=%t-seed/bad-preempt.txt \
+# RUN:   --link-facts=%t.t6.facts -o %t.t6.elf 2>&1 | \
+# RUN:   FileCheck %s --check-prefix=PREEMPT-OFF-FACTS
+# PREEMPT-OFF-FACTS: not a registered ISR entry
+
+# --- (n) the structured result is authoritative and complete: a group with
+# --- three ISR-side slots and one foreground slot must publish ALL four
+# --- participating slots, their per-slot access evidence, and the specific
+# --- proving pair - in the facts interface.
+# RUN: yaml2obj %t-seed/multis.yaml -o %t.m.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.m.o
+# RUN: mcs251-lld %t.crt.o %t.m.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn \
+# RUN:   --link-facts=%t.m.facts -o %t.m.elf 2> %t.m.err
+# RUN: FileCheck %s --check-prefix=MULTI-LOG < %t.m.err
+# MULTI-LOG: warning: ISR reentrancy: conditional slot overlap: parameter slots are shared across two registered ISRs
+# MULTI-LOG: warning: ISR reentrancy:   slot _s1_PARM_2
+# MULTI-LOG: warning: ISR reentrancy:   slot _s2_PARM_2
+# MULTI-LOG: warning: ISR reentrancy:   slot _s3_PARM_2
+# MULTI-LOG: warning: ISR reentrancy: proven static parameter-slot contract violation: parameter slots are shared across the ISR and foreground execution contexts
+# MULTI-LOG: warning: ISR reentrancy:   slot _fg_PARM_2
+# MULTI-LOG: warning: ISR reentrancy:   slot _s1_PARM_2
+# MULTI-LOG: warning: ISR reentrancy:   slot _s2_PARM_2
+# MULTI-LOG: warning: ISR reentrancy:   slot _s3_PARM_2
+# RUN: FileCheck %s --check-prefix=MULTI-FACTS < %t.m.facts
+# MULTI-FACTS: conflict kind=0 proven=1 same_slot=0 range=[0x0,0x2) exact=1 slots={{.*}} members=4
+# MULTI-FACTS: conflict_slot group=[0x0,0x2) {{.*}}name _fg_PARM_2
+# MULTI-FACTS: conflict_slot group=[0x0,0x2) {{.*}}name _s1_PARM_2
+# MULTI-FACTS: conflict_slot group=[0x0,0x2) {{.*}}name _s2_PARM_2
+# MULTI-FACTS: conflict_slot group=[0x0,0x2) {{.*}}name _s3_PARM_2
+# MULTI-FACTS: conflict_access group=[0x0,0x2) slot={{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} by={{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} role=1 evidence=3 edge_evidence={{[0-9]+}}
+# MULTI-FACTS: conflict_access {{.*}} role=2 evidence=3
+
+# --- (o) the versioned facts interface: version header, object identity,
+# --- section/symbol records keyed by numeric identity, ISR registration, the
+# --- direct call graph, per-function contexts, capacities and the reentrancy
+# --- report.  No warning text is parsed.
+# RUN: mcs251-lld %t.crt.o %t.c.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn \
+# RUN:   --link-facts=%t.c2.facts -o %t.c2.elf 2> %t.c2.err
+# RUN: FileCheck %s --check-prefix=FACTS < %t.c2.facts
+# FACTS: MCS251-LINK-FACTS 1
+# FACTS: format text 1
+# FACTS: obj {{[0-9]+}} sha256={{[0-9a-f]+}} path
+# FACTS: sec {{[0-9]+}} {{[0-9]+}} region=OSEG space=0 addr=0x0 size=0x2 flags=0x10000003 name .mcs251.OSEG.1
+# FACTS: sym {{[0-9]+}} {{[0-9]+}} addr=0x0 size=0x2 type=1 bind=0 name _isr_scale_PARM_2
+# FACTS: isr slot=1 entry={{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} name _irq1
+# FACTS: edge {{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} -> {{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} evidence={{[0-9]+}}
+# FACTS: contract version=1 kind=0 site={{[0-9]+}}:{{[0-9]+}}:0x1 target={{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} name __mcs251_selfstart_boot
+# FACTS: contract version=1 kind=1 site={{[0-9]+}}:{{[0-9]+}}:0x3d target={{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} name __mcs251_globals_init
+# FACTS: contract version=1 kind=1 site={{[0-9]+}}:{{[0-9]+}}:0x41 target={{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} name __mcs251_xdata_init
+# FACTS: contract version=1 kind=1 site={{[0-9]+}}:{{[0-9]+}}:0x45 target={{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} name _main
+# FACTS: ctx {{.*}} fg=0 fg_contract={{[0-9]+}} isr=_irq1
+# FACTS: ctx {{.*}} fg=1 fg_contract=1 isr=
+# FACTS: cap spx=
+# FACTS: reentrancy version=1 coverage=open isrs=1 functions={{[0-9]+}} slots=2
+# FACTS: unknown kind=3 count=
+# FACTS: conflict kind=0 proven=1 same_slot=0 range=[0x0,0x2) exact=1
+# The address-taken-only link records NO indirect call site.
+# RUN: mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.n.facts -o %t.n2.elf
+# RUN: FileCheck %s --check-prefix=NOICALL < %t.n.facts
+# NOICALL-NOT: icall
+# NOICALL: reentrancy version=1 coverage=
+
+# --- (p) facts publication is independent of the output mode: plain, with the
+# --- placement report, and with the verifier all publish the facts file; the
+# --- facts path is validated against the other outputs and inputs.
+# RUN: mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --placement-report=%t.rep.txt \
+# RUN:   --link-facts=%t.p.facts -o %t.p.elf
+# RUN: FileCheck %s --check-prefix=P-FACTS < %t.p.facts
+# P-FACTS: MCS251-LINK-FACTS 1
+# RUN: mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --verify-placement \
+# RUN:   --link-facts=%t.v.facts -o %t.v.elf
+# RUN: FileCheck %s --check-prefix=V-FACTS < %t.v.facts
+# V-FACTS: MCS251-LINK-FACTS 1
+# off + facts is still a pure collection: silent stderr, coverage=unchecked.
+# RUN: mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=off \
+# RUN:   --link-facts=%t.off.facts -o %t.off.elf 2> %t.off.err
+# RUN: FileCheck %s --check-prefix=OFF-FACTS --allow-empty < %t.off.err
+# OFF-FACTS-NOT: ISR reentrancy
+# RUN: FileCheck %s --check-prefix=OFF-COV < %t.off.facts
+# OFF-COV: reentrancy version=1 coverage=unchecked
+# The facts path may not collide with another artifact or an input.
+# RUN: not mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.off.elf -o %t.off.elf \
+# RUN:   2>&1 | FileCheck %s --check-prefix=FACTS-CONFLICT
+# FACTS-CONFLICT: publication path conflict: output and link facts resolve to the same file
+# RUN: not mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --print-input --link-facts=%t.q.facts \
+# RUN:   2>&1 | FileCheck %s --check-prefix=FACTS-PRINT
+# FACTS-PRINT: --link-facts cannot be combined with --print-input
+
+# --- (q) ROUND-3: ONE two-argument function called from two registered ISRs.
+# --- The same-slot ISR/ISR shape must be detected: with the preemption pair
+# --- declared the slot's shared writer contexts are a PROVEN default failure;
+# --- without a declaration it stays conditional.
+# RUN: yaml2obj %t-seed/twoshared.yaml -o %t.ts.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.ts.o
+# RUN: mcs251-lld %t.crt.o %t.ts.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.ts.elf 2> %t.ts.err
+# RUN: FileCheck %s --check-prefix=SAMESTR-ISR-COND --implicit-check-not="proven static parameter-slot" < %t.ts.err
+# SAMESTR-ISR-COND: warning: ISR reentrancy: conditional slot overlap: one parameter slot is reached from interleavable contexts
+# SAMESTR-ISR-COND: missing condition(s) for a proven violation: ISR-vs-ISR preemption is not declared
+# RUN: not mcs251-lld %t.crt.o %t.ts.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-2.txt \
+# RUN:   -o %t.ts2.elf 2> %t.ts2.err
+# RUN: FileCheck %s --check-prefix=SAMESTR-ISR-PROVEN < %t.ts2.err
+# SAMESTR-ISR-PROVEN: error: ISR reentrancy: proven static parameter-slot contract violation: one parameter slot is reached from interleavable contexts
+# SAMESTR-ISR-PROVEN: error: ISR reentrancy:     by '_irq1' ({{.*}}, ISR context; writes slot before the call
+# SAMESTR-ISR-PROVEN: error: ISR reentrancy:     by '_irq2' ({{.*}}, ISR context; writes slot before the call
+# SAMESTR-ISR-PROVEN: interleaving condition: declared preemption between the two ISR roots (external preemption contract)
+
+# --- (r) ROUND-3: group aggregation must keep per-pair proof.  Three
+# --- ISR-side slots overlaid on one address: with only `_irq1/_irq2`
+# --- declared the (_s1,_s2) pair is proven and the link fails, even though
+# --- the other combinations are not declared.
+# RUN: yaml2obj %t-seed/merge3.yaml -o %t.m3.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.m3.o
+# RUN: mcs251-lld %t.crt.o %t.m3.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.m3.elf 2> %t.m3.err
+# RUN: FileCheck %s --check-prefix=M3-COND --implicit-check-not="proven static parameter-slot" < %t.m3.err
+# M3-COND: warning: ISR reentrancy: conditional slot overlap
+# RUN: not mcs251-lld %t.crt.o %t.m3.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-2.txt \
+# RUN:   -o %t.m3b.elf 2> %t.m3b.err
+# RUN: mcs251-lld %t.crt.o %t.m3.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-2.txt \
+# RUN:   --isr-reentrancy=warn --link-facts=%t.m3.facts -o %t.m3c.elf 2> %t.m3c.err
+# RUN: FileCheck %s --check-prefix=M3-PROVEN < %t.m3b.err
+# M3-PROVEN: error: ISR reentrancy: proven static parameter-slot contract violation: parameter slots are shared across two registered ISRs
+# M3-PROVEN: proven pair: {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} / {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}
+# M3-PROVEN: slot _s1_PARM_2
+# M3-PROVEN: slot _s2_PARM_2
+# RUN: FileCheck %s --check-prefix=M3-FACTS < %t.m3.facts
+# M3-FACTS: conflict kind=1 proven=1 same_slot=0 range=[0x0,0x2) exact=1 slots=1:2:13,1:3:14 members=3
+# M3-FACTS: conflict_slot group=[0x0,0x2) {{.*}}name _s3_PARM_2
+
+# --- (s) ROUND-3: a HALF address materialization (the high half replaced by
+# --- a NOP, the HI8 relocations removed) is not an access: the link must stay
+# --- non-proven and report the leftover storage references as unknown.
+# RUN: yaml2obj %t-seed/partial.yaml -o %t.p.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.p.o
+# RUN: mcs251-lld %t.crt.o %t.p.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.p.elf 2> %t.p.err
+# RUN: FileCheck %s --check-prefix=PARTIAL --implicit-check-not="proven static parameter-slot" --implicit-check-not="conditional slot overlap" < %t.p.err
+# PARTIAL: coverage status: open -
+# PARTIAL-SAME: 8 slot-storage reference(s) without a confirmed access
+# PARTIAL-SAME: 0 address conflict group(s)
+# RUN: not mcs251-lld %t.crt.o %t.p.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy-coverage=require \
+# RUN:   -o %t.p2.elf 2>&1 | FileCheck %s --check-prefix=PARTIAL-REQ
+# PARTIAL-REQ: coverage=require rejected the link
+
+# --- (t) ROUND-3: a control relocation to a normal symbol plus a nonzero
+# --- addend that lands outside every function interval is an unknown with NO
+# --- edge (the unconditional fallback is gone).
+# RUN: yaml2obj %t-seed/unownedsym.yaml -o %t.us.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.us.o
+# RUN: mcs251-lld %t.crt.o %t.us.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.us.facts -o %t.us.elf 2> %t.us.err
+# RUN: FileCheck %s --check-prefix=UNOWNSYM < %t.us.err
+# UNOWNSYM: coverage status: open - 1 unresolved control target(s)
+# UNOWNSYM: 0 address conflict group(s)
+# RUN: FileCheck %s --check-prefix=UNOWNSYM-FACTS < %t.us.facts
+# UNOWNSYM-FACTS: unknown kind=2 count=1
+
+# --- (u) ROUND-3: the platform contract is a CLOSED set.  A CRT variant with
+# --- the `_main` chain site moved out of position must be REJECTED: no
+# --- contract records, no contract-evidence edges, no contract-derived
+# --- foreground context, and the shared-slot case stays conditional.
+# RUN: %python %S/Inputs/crt-badcontract.py %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml %t.crtbad.yaml
+# RUN: yaml2obj %t.crtbad.yaml -o %t.crtbad.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crtbad.o
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %S/Inputs/reentrancy-shared-slot.ll -o %t.shared2.o
+# RUN: mcs251-lld %t.crtbad.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.cb.facts -o %t.cb.elf 2> %t.cb.err
+# RUN: FileCheck %s --check-prefix=BADCONTRACT --implicit-check-not="proven static parameter-slot" < %t.cb.err
+# BADCONTRACT: conditional slot overlap
+# RUN: FileCheck %s --check-prefix=BADCONTRACT-FACTS < %t.cb.facts
+# The intact reset trampoline is still contract evidence (kind 0), but the
+# MOVED boot chain must not be enumerated or used:
+# BADCONTRACT-FACTS-NOT: contract version=1 kind=1
+# BADCONTRACT-FACTS: reentrancy version=1 coverage=
+# The same object with the unmodified CRT is proven and carries the contract:
+# RUN: mcs251-lld %t.crt.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn \
+# RUN:   --link-facts=%t.shared.facts -o %t.shared3.elf 2> %t.shared3.err
+# RUN: FileCheck %s --check-prefix=GOODCONTRACT < %t.shared.facts
+# GOODCONTRACT: edge {{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} -> {{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} evidence=4
+# GOODCONTRACT: contract version=1 kind=0 site={{[0-9]+}}:{{[0-9]+}}:0x1
+# GOODCONTRACT: contract version=1 kind=1 site={{[0-9]+}}:{{[0-9]+}}:0x45 target={{[0-9]+}}:{{[0-9]+}}:{{[0-9]+}} name _main
+# GOODCONTRACT: ctx {{.*}} fg_contract=1
+
+# --- (v) ROUND-3: the artifact set is ONE transaction in every mode.  A
+# --- failing stage must leave the pre-existing artifacts untouched, and no
+# --- artifact may silently vanish to another one's staging path.
+# RUN: rm -rf %t-pub && mkdir %t-pub && cd %t-pub
+# RUN: mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --map=a.map --link-facts=a.facts -o a.elf
+# RUN: test -s a.map && test -s a.facts && test -s a.elf
+# RUN: printf 'OLD-MAP' > b.map
+# RUN: not mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --map=b.map \
+# RUN:   --link-facts=missing-dir/b.facts -o b.elf 2> b.err
+# RUN: FileCheck %s --check-prefix=PUB-STAGE < b.map
+# PUB-STAGE: OLD-MAP
+# RUN: not test -e b.elf
+# RUN: printf 'OLD-MAP-C' > c.map
+# RUN: not mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --map=c.map --link-facts=c.facts \
+# RUN:   -o no-such-dir/c.elf 2> c.err
+# RUN: FileCheck %s --check-prefix=PUB-ELF < c.map
+# PUB-ELF: OLD-MAP-C
+# RUN: not test -e c.facts
+# RUN: not mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=d.elf.tmp -o d.elf \
+# RUN:   2> d.err
+# RUN: FileCheck %s --check-prefix=PUB-ALIAS < d.err
+# PUB-ALIAS: publication path conflict
+
+# --- (w) ROUND-3: --print-input resolves no symbols, so the external
+# --- preemption contract cannot be validated there: the combination is
+# --- rejected instead of silently skipped.
+# RUN: not mcs251-lld --print-input --isr-preemption-config=%t-seed/preempt-2.txt %t.n.o 2>&1 | FileCheck %s --check-prefix=PI-PREEMPT
+# PI-PREEMPT: --isr-preemption-config cannot be combined with --print-input
+# RUN: not mcs251-lld --print-input --link-facts=%t-pub/pi.facts %t.n.o 2>&1 | FileCheck %s --check-prefix=PI-FACTS
+# PI-FACTS: --link-facts cannot be combined with --print-input
+
+# --- (x) support-domain contrast: a callee body with the CLASSIC 8051 RET
+# --- byte 0x22 stays outside the trusted length table, so the link cannot
+# --- certify (or prove) anything for it - coverage=require fails.
+# RUN: yaml2obj %t-seed/legacy.yaml -o %t.lg.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.lg.o
+# RUN: mcs251-lld %t.crt.o %t.lg.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.lg.facts -o %t.lg.elf 2> %t.lg.err
+# RUN: FileCheck %s --check-prefix=LEGACY --implicit-check-not="proven static parameter-slot" < %t.lg.err
+# LEGACY: coverage status: open -
+# LEGACY-SAME: 3 code section(s) without trusted instruction boundaries, 1 size-less attributed function(s), 2 control relocation(s) without a confirmed control instruction, 12 slot-storage reference(s) without a confirmed access
+# LEGACY-SAME: this link does not constitute complete ISR reentrancy certification
+# RUN: FileCheck %s --check-prefix=LEGACY-FACTS < %t.lg.facts
+# LEGACY-FACTS: unknown kind=3 count=3
+# LEGACY-FACTS: unknown kind=6 count=2
+# LEGACY-FACTS: unknown kind=7 count=12
+# RUN: not mcs251-lld %t.crt.o %t.lg.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy-coverage=require \
+# RUN:   -o %t.lg2.elf 2>&1 | FileCheck %s --check-prefix=LEGACY-REQ
+# LEGACY-REQ: coverage=require rejected the link
+
+# --- (y) the codeptr-shaped case in full: a control relocation on a non-call
+# --- instruction AND slot-storage references on mov-immediates must be
+# --- reported as the COMPLETE unknown set (1 unconfirmed control transfer,
+# --- 9 unconfirmed slot-storage references, plus the CRT's own unknowns),
+# --- never as a proven violation.
+# RUN: yaml2obj %t-seed/weakrefs.yaml -o %t.wr.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.wr.o
+# RUN: mcs251-lld %t.crt.o %t.wr.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.wr.facts -o %t.wr.elf 2> %t.wr.err
+# RUN: FileCheck %s --check-prefix=WEAKREFS --implicit-check-not="proven static parameter-slot" --implicit-check-not="conditional slot overlap" < %t.wr.err
+# WEAKREFS: coverage status: open -
+# WEAKREFS-SAME: 1 control relocation(s) without a confirmed control instruction, 9 slot-storage reference(s) without a confirmed access
+# RUN: FileCheck %s --check-prefix=WEAKREFS-FACTS < %t.wr.facts
+# WEAKREFS-FACTS: unknown kind=6 count=1
+# WEAKREFS-FACTS: unknown kind=7 count=9
+# RUN: not mcs251-lld %t.crt.o %t.wr.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy-coverage=require \
+# RUN:   -o %t.wr2.elf 2>&1 | FileCheck %s --check-prefix=WEAKREFS-REQ
+# WEAKREFS-REQ: coverage=require rejected the link
+
+# --- (z1) ROUND-4: a VALID non-empty preemption contract must not bypass the
+# --- publication path matrix.  The facts alias on the ELF's staging path is
+# --- rejected in EVERY output mode (plain, placement report, verify), the
+# --- old artifacts stay byte-identical, and the same command with a distinct
+# --- facts path still succeeds.  R5 note: the contract names two DISTINCT
+# --- ISR entries (`preempt _irq1 _irq2` on the two-ISR slotless fixture),
+# --- so the success control does not depend on the rejected same-name
+# --- pair handling of (z9).
+# RUN: rm -rf %t-z1 && mkdir %t-z1 && cd %t-z1
+# RUN: printf 'OLD-ELF' > z.elf
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-2.txt \
+# RUN:   --link-facts=z.elf.tmp -o z.elf 2> z1.err
+# RUN: FileCheck %s --check-prefix=PATH-ALIAS-C < z1.err
+# RUN: FileCheck %s --check-prefix=PATH-OLD < z.elf
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-2.txt \
+# RUN:   --placement-report=zr.txt --link-facts=z.elf.tmp -o z.elf 2> z2.err
+# RUN: FileCheck %s --check-prefix=PATH-ALIAS-C < z2.err
+# RUN: FileCheck %s --check-prefix=PATH-OLD < z.elf
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-2.txt \
+# RUN:   --verify-placement --link-facts=z.elf.tmp -o z.elf 2> z3.err
+# RUN: FileCheck %s --check-prefix=PATH-ALIAS-C < z3.err
+# RUN: FileCheck %s --check-prefix=PATH-OLD < z.elf
+# RUN: mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-2.txt \
+# RUN:   --link-facts=zf.facts -o z2.elf 2> z4.err
+# RUN: test -s z2.elf && test -s zf.facts
+# PATH-ALIAS-C: publication path conflict: output and link facts resolve to the same file
+# PATH-OLD: OLD-ELF
+
+# --- (z2) ROUND-4: proof-pair records must name the DECIDING pair.  With
+# --- three ISR-side slots on one address and only `_irq2/_irq3` declared,
+# --- the group proves via (_s2,_s3): that exact pair is the serialized
+# --- `slots=`, carries the A/B root evidence, and the other pairs are listed
+# --- with their own missing declaration.  Four ISR slots declared for
+# --- `_irq3/_irq4` behave the same.
+# RUN: not mcs251-lld %t.crt.o %t.m3.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-23.txt \
+# RUN:   -o %t.m3d.elf 2> %t.m3d.err
+# RUN: FileCheck %s --check-prefix=PAIR23 < %t.m3d.err
+# RUN: mcs251-lld %t.crt.o %t.m3.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-23.txt \
+# RUN:   --isr-reentrancy=warn --link-facts=%t.m3d.facts -o %t.m3e.elf 2> %t.m3e.err
+# RUN: FileCheck %s --check-prefix=PAIR23-FACTS < %t.m3d.facts
+# PAIR23: proven static parameter-slot contract violation
+# PAIR23: proven pair: 0x0001:0x0003:0x000e / 0x0001:0x0004:0x000f
+# PAIR23: pair 0x0001:0x0002:0x000d / 0x0001:0x0003:0x000e: missing ISR-vs-ISR preemption is not declared
+# PAIR23: pair 0x0001:0x0003:0x000e / 0x0001:0x0004:0x000f: established
+# PAIR23: A side ISR roots: _irq2
+# PAIR23: B side ISR roots: _irq3
+# PAIR23-FACTS: conflict kind=1 proven=1 same_slot=0 range=[0x0,0x2) exact=1 slots=1:3:14,1:4:15 members=3
+# PAIR23-FACTS: conflict_pair group=[0x0,0x2) a=1:2:13 b=1:3:14 proven=0 roots_a=_irq1 roots_b=_irq2 missing=ISR-vs-ISR preemption is not declared in the preemption contract
+# PAIR23-FACTS: conflict_pair group=[0x0,0x2) a=1:3:14 b=1:4:15 proven=1 roots_a=_irq2 roots_b=_irq3
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %S/Inputs/reentrancy-four-isr.ll -o %t.f4.o
+# RUN: not mcs251-lld %t.crt.o %t.f4.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-34.txt \
+# RUN:   -o %t.f4a.elf 2> %t.f4a.err
+# RUN: mcs251-lld %t.crt.o %t.f4.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-34.txt \
+# RUN:   --isr-reentrancy=warn --link-facts=%t.f4.facts -o %t.f4b.elf 2> %t.f4b.err
+# RUN: FileCheck %s --check-prefix=PAIR34-FACTS < %t.f4.facts
+# PAIR34-FACTS: conflict kind=1 proven=1 same_slot=0 range=[0xa,0xc) exact=1 slots=1:9:9,1:10:12 members=4
+# PAIR34-FACTS: conflict_pair group=[0xa,0xc) a=1:7:2 b=1:8:6 proven=0 roots_a=_irq1 roots_b=_irq2 missing=ISR-vs-ISR preemption is not declared in the preemption contract
+# PAIR34-FACTS: conflict_pair group=[0xa,0xc) a=1:9:9 b=1:10:12 proven=1 roots_a=_irq3 roots_b=_irq4
+
+# --- (z3) ROUND-4: CRT contract closedness.  A `9A` inside an OPERAND
+# --- (`75 00 9A`, the immediate of a classic MOV direct,#imm) behind which
+# --- the `_main` chain relocation was moved, and a FOURTH raw `9A` with no
+# --- relocation, are both OUTSIDE the constrained profile: no contract
+# --- records, no contract-evidence boot chain, and the shared-slot case
+# --- stays conditional.  The intact CRT in the same shape stays proven.
+# RUN: %python %S/Inputs/crt-profile-variant.py %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml %t.crt-operand.yaml operand
+# RUN: yaml2obj %t.crt-operand.yaml -o %t.crt-op.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt-op.o
+# RUN: mcs251-lld %t.crt-op.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.op.facts -o %t.op.elf 2> %t.op.err
+# RUN: FileCheck %s --check-prefix=OPERAND9A --implicit-check-not="proven static parameter-slot" < %t.op.err
+# OPERAND9A: conditional slot overlap
+# RUN: FileCheck %s --check-prefix=OPERAND9A-FACTS < %t.op.facts
+# OPERAND9A-FACTS-NOT: contract version=1 kind=1
+# OPERAND9A-FACTS: contract version=1 kind=0
+# RUN: %python %S/Inputs/crt-profile-variant.py %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml %t.crt-fourth.yaml fourth
+# RUN: yaml2obj %t.crt-fourth.yaml -o %t.crt-f4.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt-f4.o
+# RUN: mcs251-lld %t.crt-f4.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.f9.facts -o %t.f9.elf 2> %t.f9.err
+# RUN: FileCheck %s --check-prefix=FOURTH9A --implicit-check-not="proven static parameter-slot" < %t.f9.err
+# FOURTH9A: conditional slot overlap
+# RUN: FileCheck %s --check-prefix=FOURTH9A-FACTS < %t.f9.facts
+# FOURTH9A-FACTS-NOT: contract version=1 kind=1
+# FOURTH9A-FACTS: contract version=1 kind=0
+# RUN: not mcs251-lld %t.crt.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.intact.elf 2> %t.intact.err
+# RUN: FileCheck %s --check-prefix=INTACT-CRT < %t.intact.err
+# INTACT-CRT: proven static parameter-slot contract violation
+
+# --- (z4) ROUND-4: an EMPTY (comment-only) preemption contract combined
+# --- with --print-input is rejected on OPTION PRESENCE: the file names a
+# --- contract the user asked to have validated, and that mode resolves no
+# --- symbols to validate it against.
+# RUN: not mcs251-lld --print-input --isr-preemption-config=%t-seed/preempt-empty.txt %t.n.o 2>&1 | FileCheck %s --check-prefix=PI-EMPTY
+# PI-EMPTY: --isr-preemption-config cannot be combined with --print-input
+
+# --- (z5) ROUND-4: a successful plain-mode link that OVERWRITES existing
+# --- artifacts removes its publication backups: the ELF/map/facts are new
+# --- and no `.pubbk.*` residue stays behind.
+# RUN: rm -rf %t-z5 && mkdir %t-z5 && cd %t-z5
+# RUN: printf 'OLD' > e.elf
+# RUN: printf 'OLD' > e.map
+# RUN: printf 'OLD' > e.facts
+# RUN: mcs251-lld %t.crt.o %t.n.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --map=e.map --link-facts=e.facts -o e.elf 2> e.err
+# The three artifacts are REPLACED (none still says OLD)...
+# RUN: head -c 3 e.elf | not grep OLD
+# RUN: not grep OLD e.map
+# RUN: not grep OLD e.facts
+# ... and no publication backup is left behind.
+# RUN: find . -name '*pubbk*' | count 0
+
+# --- (z6) ROUND-5 finding 1: the CRT profile is closed on the chain
+# --- targets' LANDING POINTS, not only on their names.  A CRT whose
+# --- `__mcs251_globals_init` (or `__mcs251_xdata_init`) keeps its NAME,
+# --- its section, all 12 anchors and all 0x106 template bytes but moves
+# --- its symbol VALUE (onto the `80 FE` halt self-loop at 0x48) is NOT the
+# --- supported profile: no kind=1 records, no contract-evidence chain, and
+# --- the shared-slot case stays conditional.  The intact CRT in the same
+# --- shape stays proven (positive baseline).
+# RUN: %python %S/Inputs/crt-profile-variant.py %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml %t.crt-wg.yaml walker-g
+# RUN: yaml2obj %t.crt-wg.yaml -o %t.crt-wg.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt-wg.o
+# RUN: mcs251-lld %t.crt-wg.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.wg.facts -o %t.wg.elf 2> %t.wg.err
+# RUN: FileCheck %s --check-prefix=WALKER-G --implicit-check-not="proven static parameter-slot" < %t.wg.err
+# WALKER-G: conditional slot overlap
+# RUN: FileCheck %s --check-prefix=WALKER-G-FACTS < %t.wg.facts
+# WALKER-G-FACTS-NOT: contract version=1 kind=1
+# WALKER-G-FACTS: contract version=1 kind=0
+# RUN: %python %S/Inputs/crt-profile-variant.py %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml %t.crt-wx.yaml walker-x
+# RUN: yaml2obj %t.crt-wx.yaml -o %t.crt-wx.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt-wx.o
+# RUN: mcs251-lld %t.crt-wx.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.wx.facts -o %t.wx.elf 2> %t.wx.err
+# RUN: FileCheck %s --check-prefix=WALKER-X --implicit-check-not="proven static parameter-slot" < %t.wx.err
+# WALKER-X: conditional slot overlap
+# RUN: FileCheck %s --check-prefix=WALKER-X-FACTS < %t.wx.facts
+# WALKER-X-FACTS-NOT: contract version=1 kind=1
+# WALKER-X-FACTS: contract version=1 kind=0
+# Two further landing variants: the two walkers TRADE entry points (both
+# names, sections, all 12 anchors and all 0x106 bytes unchanged; both values
+# are still legitimate BOOT offsets), and a walker name that moves to an
+# INTERIOR label of its own body (0x56, still inside the region the chain is
+# documented to enter).  Neither is the frozen entry, so neither is contract
+# evidence.
+# RUN: %python %S/Inputs/crt-profile-variant.py %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml %t.crt-ws.yaml walker-swap
+# RUN: yaml2obj %t.crt-ws.yaml -o %t.crt-ws.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt-ws.o
+# RUN: mcs251-lld %t.crt-ws.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.ws.facts -o %t.ws.elf 2> %t.ws.err
+# RUN: FileCheck %s --check-prefix=WALKER-SWAP --implicit-check-not="proven static parameter-slot" < %t.ws.err
+# WALKER-SWAP: conditional slot overlap
+# RUN: FileCheck %s --check-prefix=WALKER-LAND-FACTS < %t.ws.facts
+# WALKER-LAND-FACTS-NOT: contract version=1 kind=1
+# WALKER-LAND-FACTS: contract version=1 kind=0
+# RUN: %python %S/Inputs/crt-profile-variant.py %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml %t.crt-wi.yaml walker-interior
+# RUN: yaml2obj %t.crt-wi.yaml -o %t.crt-wi.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt-wi.o
+# RUN: mcs251-lld %t.crt-wi.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --link-facts=%t.wi.facts -o %t.wi.elf 2> %t.wi.err
+# RUN: FileCheck %s --check-prefix=WALKER-INTERIOR --implicit-check-not="proven static parameter-slot" < %t.wi.err
+# WALKER-INTERIOR: conditional slot overlap
+# RUN: FileCheck %s --check-prefix=WALKER-LAND-FACTS < %t.wi.facts
+# The coverage state also loses the BOOT-chain carrier: with no kind=1 chain
+# the two walker bodies are ordinary (undecodable, hand-written) code, so
+# neither walker nor the module entry is contract-carried and the BOOT-chain
+# evidence=4 edges disappear.  The kind=0 HOME trampoline survives (it is an
+# independent, still-valid contract site), so the counts drop to: no kind=1
+# chain site, one contract edge (reset -> paired BOOT entry), one contract
+# context (that BOOT entry).
+# RUN: not grep 'contract version=1 kind=1' %t.wg.facts
+# RUN: grep '^edge .* evidence=4' %t.wg.facts | count 1
+# RUN: grep '^ctx .* fg_contract=1' %t.wg.facts | count 1
+# Positive baseline in the same shape: the intact CRT keeps the contract,
+# with the three frozen chain sites, the four contract-evidence edges and
+# the five contract-carried contexts.
+# RUN: not mcs251-lld %t.crt.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 -o %t.wintact.elf 2> %t.wintact.err
+# RUN: FileCheck %s --check-prefix=WALKER-INTACT < %t.wintact.err
+# WALKER-INTACT: proven static parameter-slot contract violation
+# The facts baseline needs the publishable (warn) mode: a default-severity
+# failure deliberately publishes nothing.
+# RUN: mcs251-lld %t.crt.o %t.shared2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn --link-facts=%t.wintact.facts -o %t.wintact2.elf 2> %t.wintact2.err
+# RUN: FileCheck %s --check-prefix=WALKER-INTACT-W < %t.wintact2.err
+# WALKER-INTACT-W: proven static parameter-slot contract violation
+# RUN: FileCheck %s --check-prefix=WALKER-INTACT-FACTS < %t.wintact.facts
+# WALKER-INTACT-FACTS: contract version=1 kind=1 site=0:{{[0-9]+}}:0x3d
+# WALKER-INTACT-FACTS: contract version=1 kind=1 site=0:{{[0-9]+}}:0x41
+# WALKER-INTACT-FACTS: contract version=1 kind=1 site=0:{{[0-9]+}}:0x45
+# WALKER-INTACT-FACTS: {{^}}ctx {{.*}} fg_contract=1
+# Exactly three chain sites, exactly four contract-evidence edges and exactly
+# five contract-carried contexts: the landing check must not add or drop an
+# anchor that the frozen profile does satisfy.
+# RUN: grep 'contract version=1 kind=1' %t.wintact.facts | count 3
+# RUN: grep '^edge .* evidence=4' %t.wintact.facts | count 4
+# RUN: grep '^ctx .* fg_contract=1' %t.wintact.facts | count 5
+# The two extra landing variants degrade exactly like walker-g/walker-x.
+# RUN: not grep 'contract version=1 kind=1' %t.ws.facts
+# RUN: not grep 'contract version=1 kind=1' %t.wi.facts
+
+# --- (z7) ROUND-5 finding 2: the DECIDING pair's roots, and per-pair root
+# --- identity.  One two-argument function called from THREE registered
+# --- ISRs: the same-slot group has six ordered (writer root, user root)
+# --- combinations.  With only `_irq2/_irq3' declared the two established
+# --- combinations and the four missing ones are each named with their OWN
+# --- write root and use root; the A/B side lines and the facts roots_a/
+# --- roots_b carry the DECIDING pair's roots only.  With `_irq1/_irq2' and
+# --- `_irq2/_irq3' both declared (FOUR established combinations) the side
+# --- lines still name exactly the deciding pair, never the union.
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %S/Inputs/reentrancy-three-isr.ll -o %t.f3.o
+# RUN: not mcs251-lld %t.crt.o %t.f3.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-23.txt \
+# RUN:   -o %t.f3a.elf 2> %t.f3a.err
+# RUN: FileCheck %s --check-prefix=PAIR3-EST --implicit-check-not="A side ISR roots: _irq2 _irq3" --implicit-check-not="B side ISR roots: _irq2 _irq3" < %t.f3a.err
+# The six per-pair lines, in evaluation order, each with its own roots.
+# PAIR3-EST: proven static parameter-slot contract violation
+# PAIR3-EST: pair {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} / {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} (write root _irq1; use root _irq2): missing ISR-vs-ISR preemption is not declared
+# PAIR3-EST: pair {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} / {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} (write root _irq1; use root _irq3): missing ISR-vs-ISR preemption is not declared
+# PAIR3-EST: pair {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} / {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} (write root _irq2; use root _irq1): missing ISR-vs-ISR preemption is not declared
+# PAIR3-EST: pair {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} / {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} (write root _irq2; use root _irq3): established
+# PAIR3-EST: pair {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} / {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} (write root _irq3; use root _irq1): missing ISR-vs-ISR preemption is not declared
+# PAIR3-EST: pair {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} / {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} (write root _irq3; use root _irq2): established
+# The side lines name the DECIDING pair only (anchored to the line end, so
+# a union form cannot match).
+# PAIR3-EST: A side ISR roots: _irq2{{$}}
+# PAIR3-EST: B side ISR roots: _irq3{{$}}
+# RUN: mcs251-lld %t.crt.o %t.f3.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-23.txt \
+# RUN:   --isr-reentrancy=warn --link-facts=%t.f3.facts -o %t.f3b.elf 2> %t.f3b.err
+# RUN: FileCheck %s --check-prefix=PAIR3-FACTS < %t.f3.facts
+# PAIR3-FACTS: conflict kind=1 proven=1 same_slot=1 {{.*}} roots_a=_irq2 roots_b=_irq3{{$}}
+# PAIR3-FACTS: conflict_pair {{.*}} proven=0 roots_a=_irq1 roots_b=_irq2 missing=ISR-vs-ISR preemption is not declared in the preemption contract
+# PAIR3-FACTS: conflict_pair {{.*}} proven=0 roots_a=_irq1 roots_b=_irq3 missing=ISR-vs-ISR preemption is not declared in the preemption contract
+# PAIR3-FACTS: conflict_pair {{.*}} proven=0 roots_a=_irq2 roots_b=_irq1 missing=ISR-vs-ISR preemption is not declared in the preemption contract
+# PAIR3-FACTS: conflict_pair {{.*}} proven=1 roots_a=_irq2 roots_b=_irq3
+# PAIR3-FACTS: conflict_pair {{.*}} proven=0 roots_a=_irq3 roots_b=_irq1 missing=ISR-vs-ISR preemption is not declared in the preemption contract
+# PAIR3-FACTS: conflict_pair {{.*}} proven=1 roots_a=_irq3 roots_b=_irq2
+# Two declarations -> FOUR established combinations; the side lines still
+# name exactly the deciding pair (first established in evaluation order),
+# never the union over every established pair.
+# RUN: not mcs251-lld %t.crt.o %t.f3.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-1223.txt \
+# RUN:   -o %t.f3c.elf 2> %t.f3c.err
+# RUN: FileCheck %s --check-prefix=PAIR3-TWO --implicit-check-not="A side ISR roots: _irq1 _irq2" --implicit-check-not="B side ISR roots: _irq2 _irq3" < %t.f3c.err
+# PAIR3-TWO: proven static parameter-slot contract violation
+# PAIR3-TWO: A side ISR roots: _irq1{{$}}
+# PAIR3-TWO: B side ISR roots: _irq2{{$}}
+# RUN: mcs251-lld %t.crt.o %t.f3.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-1223.txt \
+# RUN:   --isr-reentrancy=warn --link-facts=%t.f3c.facts -o %t.f3d.elf 2> %t.f3d.err
+# RUN: FileCheck %s --check-prefix=PAIR3-TWO-FACTS < %t.f3c.facts
+# PAIR3-TWO-FACTS: conflict kind=1 proven=1 same_slot=1 {{.*}} roots_a=_irq1 roots_b=_irq2{{$}}
+
+# --- (z8) ROUND-5 finding 3: the preemption contract FILE is an input.
+# --- No published artifact -- final or staging -- may resolve to the same
+# --- file (same path, symlink or hard link) in ANY output mode; before the
+# --- fix the facts publication silently replaced the contract text with
+# --- `MCS251-LINK-FACTS 1' while all three modes still returned 0.  The
+# --- success control uses a contract of two DISTINCT ISR names.
+# RUN: rm -rf %t-z8 && mkdir %t-z8 && cd %t-z8
+# RUN: cp %t-seed/preempt-2.txt pc.txt
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=pc.txt \
+# RUN:   --link-facts=pc.txt -o p1.elf 2> p1.err
+# RUN: FileCheck %s --check-prefix=CFG-PATH < p1.err
+# RUN: FileCheck %s --check-prefix=CFG-INTACT < pc.txt
+# RUN: ln -s pc.txt pc.lnk
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=pc.txt \
+# RUN:   --link-facts=pc.lnk -o p2.elf 2> p2.err
+# RUN: FileCheck %s --check-prefix=CFG-PATH < p2.err
+# RUN: FileCheck %s --check-prefix=CFG-INTACT < pc.txt
+# RUN: ln pc.txt pc.hard
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=pc.hard \
+# RUN:   --link-facts=pc.txt -o p3.elf 2> p3.err
+# RUN: FileCheck %s --check-prefix=CFG-PATH < p3.err
+# RUN: FileCheck %s --check-prefix=CFG-INTACT < pc.txt
+# The staging path counts too: a contract named `<facts>.tmp' would be
+# consumed by the facts publication's write-and-rename.
+# RUN: cp %t-seed/preempt-2.txt pstg.facts.tmp
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=pstg.facts.tmp \
+# RUN:   --link-facts=pstg.facts -o p4.elf 2> p4.err
+# RUN: FileCheck %s --check-prefix=CFG-PATH < p4.err
+# RUN: FileCheck %s --check-prefix=CFG-INTACT < pstg.facts.tmp
+# Audit and verify modes reject the same combination.
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=pc.txt \
+# RUN:   --placement-report=pr.txt --link-facts=pc.txt -o p5.elf 2> p5.err
+# RUN: FileCheck %s --check-prefix=CFG-PATH < p5.err
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=pc.txt \
+# RUN:   --verify-placement --link-facts=pc.txt -o p6.elf 2> p6.err
+# RUN: FileCheck %s --check-prefix=CFG-PATH < p6.err
+# Success control: the same contract with a DISTINCT facts path links.
+# RUN: mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=pc.txt \
+# RUN:   --link-facts=ok.facts -o ok.elf 2> ok.err
+# RUN: test -s ok.elf && test -s ok.facts
+# CFG-PATH: publication path conflict: link facts conflicts with the --isr-preemption-config input file
+# CFG-INTACT: preempt _irq1 _irq2
+
+# --- (z9) ROUND-5 finding 4: a preemption pair that names the SAME ISR
+# --- entry twice is REJECTED explicitly in every severity mode and with
+# --- facts requested -- never silently accepted and then dropped by the
+# --- (distinct-root) analysis.  No conclusion about hardware self-preemption
+# --- is drawn either way.
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-self.txt \
+# RUN:   -o q1.elf 2> q1.err
+# RUN: FileCheck %s --check-prefix=SELF-PAIR < q1.err
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-self.txt \
+# RUN:   --isr-reentrancy=warn -o q2.elf 2> q2.err
+# RUN: FileCheck %s --check-prefix=SELF-PAIR < q2.err
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-self.txt \
+# RUN:   --isr-reentrancy=off -o q3.elf 2> q3.err
+# RUN: FileCheck %s --check-prefix=SELF-PAIR < q3.err
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=%t-seed/preempt-self.txt \
+# RUN:   --link-facts=qf.facts -o q4.elf 2> q4.err
+# RUN: FileCheck %s --check-prefix=SELF-PAIR < q4.err
+# RUN: not test -e qf.facts
+# R5-r2: the diagnostic also names the contract file and PHYSICAL line, so a
+# multi-line contract points at the offending row (see (z10)).
+# SELF-PAIR: ISR preemption contract declares '_irq1' preempting itself at {{.*}}preempt-self.txt:1 (from '_irq1 _irq1'): a preemption pair must name two DISTINCT registered ISR entries
+
+# --- (z10) ROUND-5 finding 3: repeating --isr-preemption-config is REJECTED.
+# --- Before the fix the parser kept a single last-wins path while the PAIR
+# --- SET accumulated, so `--isr-preemption-config=A --isr-preemption-config=B
+# --- --link-facts=A` passed every mode's publication check and published the
+# --- facts file over A -- a contract that had already been READ and had
+# --- already contributed pairs to the analysis.  The regression pins:
+# ---   * the reject happens BEFORE any artifact is published, in plain,
+# ---     placement-report and verify modes alike -- so the ELF is absent and
+# ---     neither the placement report nor the facts file is created;
+# ---   * the contract file's bytes are unchanged (byte identity, not size);
+# ---   * the SAME outcome when the two options are swapped, so neither
+# ---     occurrence is privileged;
+# ---   * the same for a repeated PATH (both occurrences name A), and for an
+# ---     ALIAS of A with BOTH link shapes: a HARD link (a second name for
+# ---     the same inode, `ln` without -s) and a SYMBOLIC link (`ln -s`);
+# ---   * the exit status is EXACTLY 1 in every case, asserted with
+# ---     expect-rc.py rather than lit's `not` helper (which only requires a
+# ---     NON-ZERO status).  The rest of this file keeps `not`, so "the
+# ---     persistent suite pins a non-zero exit" and "rc=1 was measured
+# ---     here" are separate claims and must not be merged.
+# --- A is a VALID non-empty contract and B is a comment-only contract, the
+# --- exact pair of shapes from the finding.
+# RUN: rm -rf %t-z10 && mkdir %t-z10 && cd %t-z10
+# RUN: cp %t-seed/preempt-2.txt A.txt
+# RUN: printf '# B: comments only\n' > B.txt
+# RUN: cp A.txt A.orig
+# Plain mode: A first, facts pointed at A.
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.n2.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=A.txt --isr-preemption-config=B.txt \
+# RUN:   --link-facts=A.txt -o d1.elf > d1.err
+# RUN: FileCheck %s --check-prefix=DUP-CFG < d1.err
+# RUN: cmp A.txt A.orig
+# RUN: not test -e d1.elf
+# Order swapped: B first, A second.  Same reject, A still untouched.
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.n2.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=B.txt --isr-preemption-config=A.txt \
+# RUN:   --link-facts=A.txt -o d2.elf > d2.err
+# RUN: FileCheck %s --check-prefix=DUP-CFG < d2.err
+# RUN: cmp A.txt A.orig
+# RUN: not test -e d2.elf
+# The same PATH twice is the same error: one file is one contract.
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.n2.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=A.txt --isr-preemption-config=A.txt \
+# RUN:   -o d3.elf > d3.err
+# RUN: FileCheck %s --check-prefix=DUP-CFG < d3.err
+# RUN: cmp A.txt A.orig
+# RUN: not test -e d3.elf
+# A HARD LINK of A must not slip through either: the reject is on the
+# OPTION, so it fires before any path identity is even consulted.
+# RUN: ln A.txt A.hard
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.n2.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=A.txt --isr-preemption-config=A.hard \
+# RUN:   --link-facts=A.txt -o d4.elf > d4.err
+# RUN: FileCheck %s --check-prefix=DUP-CFG < d4.err
+# RUN: cmp A.txt A.orig
+# RUN: not test -e d4.elf
+# ... nor a SYMBOLIC link, which is a separate inode.
+# RUN: ln -s A.txt A.sym
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.n2.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=A.txt --isr-preemption-config=A.sym \
+# RUN:   --link-facts=A.txt -o d4s.elf > d4s.err
+# RUN: FileCheck %s --check-prefix=DUP-CFG < d4s.err
+# RUN: cmp A.txt A.orig
+# RUN: not test -e d4s.elf
+# Placement-report (audit) mode and verify mode: same reject, same intact A,
+# and neither the ELF nor the placement report may be published.
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.n2.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=A.txt --isr-preemption-config=B.txt \
+# RUN:   --placement-report=r.txt --link-facts=A.txt -o d5.elf > d5.err
+# RUN: FileCheck %s --check-prefix=DUP-CFG < d5.err
+# RUN: cmp A.txt A.orig
+# RUN: not test -e d5.elf
+# RUN: not test -e r.txt
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.n2.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=A.txt --isr-preemption-config=B.txt \
+# RUN:   --verify-placement --link-facts=A.txt -o d6.elf > d6.err
+# RUN: FileCheck %s --check-prefix=DUP-CFG < d6.err
+# RUN: cmp A.txt A.orig
+# RUN: not test -e d6.elf
+# Severity is irrelevant: the contract is an INPUT, so the reject is
+# unconditional (the same rule as the distinct-name check).
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.n2.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-reentrancy=off --isr-preemption-config=A.txt \
+# RUN:   --isr-preemption-config=B.txt -o d7.elf > d7.err
+# RUN: FileCheck %s --check-prefix=DUP-CFG < d7.err
+# RUN: cmp A.txt A.orig
+# RUN: not test -e d7.elf
+# Success control in the same directory: ONE occurrence, a distinct facts
+# path, A untouched -- the reject targets repetition, not the option.
+# RUN: mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=A.txt \
+# RUN:   --link-facts=ok.facts -o d8.elf
+# RUN: test -s d8.elf
+# RUN: cmp A.txt A.orig
+# Three further alias spellings, each in all four output modes (plain, audit,
+# verify, off): an absolute occurrence against a lexically different RELATIVE
+# spelling of the same file, a spelling reached through a SYMLINKED DIRECTORY,
+# and an INHERITED FILE DESCRIPTOR (/proc/self/fd/<n>).  The reject is on the
+# OPTION, so it must fire before any path identity is consulted -- these
+# spellings have nothing in common to compare.  The helper asserts rc==1, the
+# duplicate diagnostic, byte-identical A and no ELF/report for every
+# combination; it exits 3 when the descriptor spelling had to be skipped
+# (non-Linux), which lit reports as a failure so the gap is visible rather
+# than silently read as a pass.
+# RUN: %python %S/Inputs/config-alias-check.py mcs251-lld %t.crt.o %t.n2.o %t-z10-alias
+# DUP-CFG: duplicate --isr-preemption-config: the preemption contract is a single input file, so repeated occurrences are rejected (the declared pairs are not merged across files)
+# The name-validation diagnostic also carries the contract line, so a
+# multi-line contract points at the offending row instead of only naming
+# the two symbols.
+# RUN: printf '# board: two rows\npreempt _irq1 _irq2\npreempt _irq1 no_such_isr\n' > multi.txt
+# RUN: not mcs251-lld %t.crt.o %t.n2.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-preemption-config=multi.txt \
+# RUN:   -o d9.elf 2> d9.err
+# RUN: FileCheck %s --check-prefix=CFG-LINE < d9.err
+# RUN: not test -e d9.elf
+# CFG-LINE: ISR preemption contract names 'no_such_isr', which is not a registered ISR entry of this link (at {{.*}}multi.txt:3 (from '_irq1 no_such_isr'))
+
+# --- (z11) ROUND-6 item (7): the candidate EVALUATION ORDER, not the input
+# --- object ORDER, decides which proven candidate is serialized.  Two input
+# --- objects each carry two registered ISRs whose leaves own separate OSEG
+# --- slots overlaid on one address, so the same-slot group has six ordered
+# --- (writer root, user root) candidates.  The contract declares
+# --- `_irq2/_irq3` and `_irq2/_irq4`, which in the A-B order in force are
+# --- the 4th and 5th of the six candidates; the 6th (`_irq3/_irq4`) is NOT
+# --- declared, and the first three are not either.  So several candidates
+# --- that do NOT establish the group precede the ones that do.  With the
+# --- objects in one order the FIRST established candidate is
+# --- (_irq2,_irq3) -- the 4th candidate, with three established-as-missing
+# --- candidates before it; swapped, it is (_irq3,_irq2), the 3rd.
+# --- What is pinned here is NOT that both orders pick the same pair (they do
+# --- not and need not).  It is, for EACH order:
+# ---   * the COMPLETE candidate sequence is asserted as ONE CONTIGUOUS BLOCK
+# ---     of `CHECK-NEXT' lines: the group record, then exactly six
+# ---     `conflict_pair' records, each required to be on the line
+# ---     immediately after the previous match, each with its own `proven'
+# ---     value.  `CHECK-NEXT' is what makes "nothing else sits between two
+# ---     of these" part of the check -- a plain ordered `CHECK' list does
+# ---     not constrain what appears between two matches, so a REPEATED or
+# ---     extra candidate still satisfied it.  A LEADING `-NOT' asserts that
+# ---     no `conflict_pair' record precedes the group record and a TRAILING
+# ---     `-NOT' asserts that none follows the sixth, so the block is closed
+# ---     at both ends.  The six-record total is pinned by the parser's
+# ---     `--expect-sequence' below, NOT by a FileCheck `COUNT' directive:
+# ---     `COUNT' is a lower bound counted from its position, not an
+# ---     exactness test, so no `COUNT' line appears here;
+# ---   * the group's `slots=' equals the a=/b= of the FIRST proven pair
+# ---     (tied by the FileCheck variable [[SA]]/[[SB]]);
+# ---   * that `roots_a='/`roots_b=' are EXACTLY the first proven pair's root
+# ---     lists, checked with `{{$}}' end-of-line anchors and by
+# ---     `Inputs/facts-deciding-pair.py --expect-roots-a/--expect-roots-b',
+# ---     which compares whole comma-separated TOKEN LISTS -- so an appended
+# ---     root (`_irq3,_irq4' for `_irq3') is REJECTED rather than prefix-
+# ---     matched;
+# ---   * `Inputs/facts-deciding-pair.py --expect-sequence' re-derives the
+# ---     SAME six-candidate sequence from the parsed records, comparing the
+# ---     count, the order, each candidate's root lists as token lists and
+# ---     each candidate's `proven' state -- so the assertion does not rest
+# ---     on the FileCheck pattern list alone.
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %S/Inputs/reentrancy-order-a.ll -o %t.oa.o
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %S/Inputs/reentrancy-order-b.ll -o %t.ob.o
+# RUN: mcs251-lld %t.crt.o %t.oa.o %t.ob.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn \
+# RUN:   --isr-preemption-config=%t-seed/preempt-order.txt \
+# RUN:   --link-facts=%t.ordab.facts -o %t.ordab.elf 2> %t.ordab.err
+# The complete candidate sequence of the A-B order, as ONE CONTIGUOUS BLOCK:
+# three candidates that do NOT establish the group, then the deciding pair,
+# then the second declared pair, then the undeclared 6th.  Every line after
+# the first is `-NEXT', so each record must be the very next input line: the
+# six records are pinned as the block, with nothing interleaved.  Each
+# `proven' value is asserted at its own position.
+# No `conflict_pair' record sits before the group record, and none follows
+# the sixth candidate: the block is exactly the group's six candidates.
+# ORDER-AB-NOT: conflict_pair
+# ORDER-AB: conflict kind=1 proven=1 same_slot=0 range={{[^ ]*}} exact=1 slots=[[SA:[0-9]+:[0-9]+:[0-9]+]],[[SB:[0-9]+:[0-9]+:[0-9]+]] members=4 roots_a=_irq2 roots_b=_irq3{{$}}
+# ORDER-AB-NEXT: conflict_pair group={{[^ ]*}} a={{[0-9]+:[0-9]+:[0-9]+}} b={{[0-9]+:[0-9]+:[0-9]+}} proven=0 roots_a=_irq1 roots_b=_irq2 missing={{.*}}{{$}}
+# ORDER-AB-NEXT: conflict_pair group={{[^ ]*}} a={{[0-9]+:[0-9]+:[0-9]+}} b={{[0-9]+:[0-9]+:[0-9]+}} proven=0 roots_a=_irq1 roots_b=_irq3 missing={{.*}}{{$}}
+# ORDER-AB-NEXT: conflict_pair group={{[^ ]*}} a={{[0-9]+:[0-9]+:[0-9]+}} b={{[0-9]+:[0-9]+:[0-9]+}} proven=0 roots_a=_irq1 roots_b=_irq4 missing={{.*}}{{$}}
+# ORDER-AB-NEXT: conflict_pair group={{[^ ]*}} a=[[SA]] b=[[SB]] proven=1 roots_a=_irq2 roots_b=_irq3{{$}}
+# ORDER-AB-NEXT: conflict_pair group={{[^ ]*}} a={{[0-9]+:[0-9]+:[0-9]+}} b={{[0-9]+:[0-9]+:[0-9]+}} proven=1 roots_a=_irq2 roots_b=_irq4{{$}}
+# ORDER-AB-NEXT: conflict_pair group={{[^ ]*}} a={{[0-9]+:[0-9]+:[0-9]+}} b={{[0-9]+:[0-9]+:[0-9]+}} proven=0 roots_a=_irq3 roots_b=_irq4 missing={{.*}}{{$}}
+# No seventh candidate follows the block.  (FileCheck's `COUNT' directive is
+# a lower bound counted from its position, not an exactness test, so the
+# six-record total is pinned by the parser's `--expect-sequence' below
+# rather than by a COUNT line here.)
+# ORDER-AB-NOT: conflict_pair
+# RUN: FileCheck %s --check-prefix=ORDER-AB < %t.ordab.facts
+# The same invariant, re-derived from the parsed facts rather than from a
+# pattern list: the group's candidate list is EXACTLY the six-candidate
+# sequence above (count, order, each candidate's root token lists and its
+# `proven' state), the candidate identities are pairwise distinct, the first
+# `proven=1' candidate is the group's deciding pair with at least three
+# explicitly `proven=0' candidates before it, and the root lists are EXACTLY
+# one token each -- `_irq3' and not `_irq3,<anything>'.
+# RUN: %python %S/Inputs/facts-deciding-pair.py --min-before 3 \
+# RUN:   --expect-roots-a _irq2 --expect-roots-b _irq3 \
+# RUN:   --expect-sequence '_irq1|_irq2|0;_irq1|_irq3|0;_irq1|_irq4|0;_irq2|_irq3|1;_irq2|_irq4|1;_irq3|_irq4|0' \
+# RUN:   %t.ordab.facts
+# NEGATIVE HALF.  An ordered `CHECK' list admits a REPEATED candidate in the
+# middle of the sequence -- the expected records still appear in order, only
+# with one duplicated.  Both layers must reject that input: the FileCheck
+# block above because every line after the first is `-NEXT' (a duplicate
+# makes the following record no longer the immediately next line), and the
+# parser because `--expect-sequence' pins the candidate COUNT and every
+# position.  The file is derived here from the real output, so the negative
+# case is regenerated with the facts rather than frozen by hand.
+# RUN: %python %S/Inputs/facts-deciding-pair.py --inject-repeat %t.ordab.facts %t.ordab-dup.facts
+# RUN: not FileCheck %s --check-prefix=ORDER-AB < %t.ordab-dup.facts
+# RUN: not %python %S/Inputs/facts-deciding-pair.py --min-before 3 \
+# RUN:   --expect-roots-a _irq2 --expect-roots-b _irq3 \
+# RUN:   --expect-sequence '_irq1|_irq2|0;_irq1|_irq3|0;_irq1|_irq4|0;_irq2|_irq3|1;_irq2|_irq4|1;_irq3|_irq4|0' \
+# RUN:   %t.ordab-dup.facts
+# Round 9 item (6), second negative: a candidate record placed BEFORE the
+# group record.  The block asserts "the group record, then exactly these six
+# candidates, contiguous"; a candidate ahead of the group record is outside
+# that block, so it is caught only if the block is closed at its FRONT too.
+# Both layers must reject it independently -- the leading `-NOT' because a
+# `conflict_pair' record now precedes the first match, and the parser because
+# it scans every `conflict_pair' record of the group in file order.
+# RUN: %python %S/Inputs/facts-deciding-pair.py --inject-before-group %t.ordab.facts %t.ordab-pre.facts
+# RUN: not FileCheck %s --check-prefix=ORDER-AB < %t.ordab-pre.facts
+# RUN: not %python %S/Inputs/facts-deciding-pair.py --min-before 3 \
+# RUN:   --expect-roots-a _irq2 --expect-roots-b _irq3 \
+# RUN:   --expect-sequence '_irq1|_irq2|0;_irq1|_irq3|0;_irq1|_irq4|0;_irq2|_irq3|1;_irq2|_irq4|1;_irq3|_irq4|0' \
+# RUN:   %t.ordab-pre.facts
+# The A side/B side diagnostic lines name the SAME deciding pair.
+# RUN: FileCheck %s --check-prefix=ORDER-AB-ERR < %t.ordab.err
+# ORDER-AB-ERR: proven pair: {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}} / {{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}:{{0x[0-9a-f]+}}
+# ORDER-AB-ERR: A side ISR roots: _irq2{{$}}
+# ORDER-AB-ERR: B side ISR roots: _irq3{{$}}
+# The SAME objects, the other order: the first established candidate of the
+# new order is (_irq3,_irq2), the 3rd of the six.  The pair itself is
+# deliberately NOT asserted to be order-independent.
+# RUN: mcs251-lld %t.crt.o %t.ob.o %t.oa.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn \
+# RUN:   --isr-preemption-config=%t-seed/preempt-order.txt \
+# RUN:   --link-facts=%t.ordba.facts -o %t.ordba.elf 2> %t.ordba.err
+# Both ends of this block are closed, exactly as for the A-B order above: no
+# `conflict_pair` record sits BEFORE the group record and none follows the
+# sixth candidate.  (Round 9 item (6): this side previously carried only the
+# trailing `-NOT`, so a candidate inserted before the group record was
+# rejected by the parser layer alone -- the claim "each of the two orders is
+# closed at both ends and rejected by both layers" was not yet true here.)
+# ORDER-BA-NOT: conflict_pair
+# ORDER-BA: conflict kind=1 proven=1 same_slot=0 range={{[^ ]*}} exact=1 slots=[[SA2:[0-9]+:[0-9]+:[0-9]+]],[[SB2:[0-9]+:[0-9]+:[0-9]+]] members=4 roots_a=_irq3 roots_b=_irq2{{$}}
+# ORDER-BA-NEXT: conflict_pair group={{[^ ]*}} a={{[0-9]+:[0-9]+:[0-9]+}} b={{[0-9]+:[0-9]+:[0-9]+}} proven=0 roots_a=_irq3 roots_b=_irq4 missing={{.*}}{{$}}
+# ORDER-BA-NEXT: conflict_pair group={{[^ ]*}} a={{[0-9]+:[0-9]+:[0-9]+}} b={{[0-9]+:[0-9]+:[0-9]+}} proven=0 roots_a=_irq3 roots_b=_irq1 missing={{.*}}{{$}}
+# ORDER-BA-NEXT: conflict_pair group={{[^ ]*}} a=[[SA2]] b=[[SB2]] proven=1 roots_a=_irq3 roots_b=_irq2{{$}}
+# ORDER-BA-NEXT: conflict_pair group={{[^ ]*}} a={{[0-9]+:[0-9]+:[0-9]+}} b={{[0-9]+:[0-9]+:[0-9]+}} proven=0 roots_a=_irq4 roots_b=_irq1 missing={{.*}}{{$}}
+# ORDER-BA-NEXT: conflict_pair group={{[^ ]*}} a={{[0-9]+:[0-9]+:[0-9]+}} b={{[0-9]+:[0-9]+:[0-9]+}} proven=1 roots_a=_irq4 roots_b=_irq2{{$}}
+# ORDER-BA-NEXT: conflict_pair group={{[^ ]*}} a={{[0-9]+:[0-9]+:[0-9]+}} b={{[0-9]+:[0-9]+:[0-9]+}} proven=0 roots_a=_irq1 roots_b=_irq2 missing={{.*}}{{$}}
+# ORDER-BA-NOT: conflict_pair
+# RUN: FileCheck %s --check-prefix=ORDER-BA < %t.ordba.facts
+# RUN: %python %S/Inputs/facts-deciding-pair.py --min-before 2 \
+# RUN:   --expect-roots-a _irq3 --expect-roots-b _irq2 \
+# RUN:   --expect-sequence '_irq3|_irq4|0;_irq3|_irq1|0;_irq3|_irq2|1;_irq4|_irq1|0;_irq4|_irq2|1;_irq1|_irq2|0' \
+# RUN:   %t.ordba.facts
+# The same negative half for the B-A order.
+# RUN: %python %S/Inputs/facts-deciding-pair.py --inject-repeat %t.ordba.facts %t.ordba-dup.facts
+# RUN: not FileCheck %s --check-prefix=ORDER-BA < %t.ordba-dup.facts
+# RUN: not %python %S/Inputs/facts-deciding-pair.py --min-before 2 \
+# RUN:   --expect-roots-a _irq3 --expect-roots-b _irq2 \
+# RUN:   --expect-sequence '_irq3|_irq4|0;_irq3|_irq1|0;_irq3|_irq2|1;_irq4|_irq1|0;_irq4|_irq2|1;_irq1|_irq2|0' \
+# RUN:   %t.ordba-dup.facts
+# Round 9 item (6), same second negative on the B-A side, so that BOTH
+# orders are demonstrably closed at both ends and rejected by BOTH layers.
+# RUN: %python %S/Inputs/facts-deciding-pair.py --inject-before-group %t.ordba.facts %t.ordba-pre.facts
+# RUN: not FileCheck %s --check-prefix=ORDER-BA < %t.ordba-pre.facts
+# RUN: not %python %S/Inputs/facts-deciding-pair.py --min-before 2 \
+# RUN:   --expect-roots-a _irq3 --expect-roots-b _irq2 \
+# RUN:   --expect-sequence '_irq3|_irq4|0;_irq3|_irq1|0;_irq3|_irq2|1;_irq4|_irq1|0;_irq4|_irq2|1;_irq1|_irq2|0' \
+# RUN:   %t.ordba-pre.facts
+# RUN: FileCheck %s --check-prefix=ORDER-BA-ERR < %t.ordba.err
+# ORDER-BA-ERR: A side ISR roots: _irq3{{$}}
+# ORDER-BA-ERR: B side ISR roots: _irq2{{$}}
+# Repeats of one fixed order must be byte-stable: the choice is a selection
+# from the order in force, not a nondeterministic pick.
+# RUN: mcs251-lld %t.crt.o %t.oa.o %t.ob.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn \
+# RUN:   --isr-preemption-config=%t-seed/preempt-order.txt \
+# RUN:   --link-facts=%t.ordab2.facts -o %t.ordab2.elf 2> %t.ordab2.err
+# RUN: cmp %t.ordab.facts %t.ordab2.facts
+# RUN: cmp %t.ordab.err %t.ordab2.err
+# Default severity on the same input is the same verdict as an rc=1 failure
+# with no artifact, so the regression is not an artifact of warn mode.
+# RUN: not mcs251-lld %t.crt.o %t.oa.o %t.ob.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 \
+# RUN:   --isr-preemption-config=%t-seed/preempt-order.txt -o %t.ordab3.elf
+# RUN: not test -e %t.ordab3.elf
+
+# --- (z12) ROUND-6 item (7), second half: the ISR REGISTRATION RECORD order
+# --- must not be read as the candidate evaluation order either.  The same
+# --- object is emitted twice: once as compiled, once with ONLY its
+# --- `.mcs251.isr` section body permuted in units of the ENTRY+REGISTER pair
+# --- and the type9 association relocations remapped to the moved records --
+# --- the code sections, symbol table, string table and every other section
+# --- stay byte-identical.  Both must produce the same ISR table, the same
+# --- deciding candidate and the same facts records: registration order is
+# --- not evidence.
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %S/Inputs/reentrancy-three-isr.ll -o %t.ordobj.o
+# RUN: %python %S/Inputs/isr-record-reverse.py %t.ordobj.o %t.ordobj-rev.o
+# The helper rewrote ONLY the metadata section and its association offsets:
+# the two objects must still differ somewhere (the permutation happened) and
+# the original must be untouched.
+# RUN: not cmp %t.ordobj.o %t.ordobj-rev.o
+# A difference SOMEWHERE is not the same claim as "the difference is confined
+# to the metadata section and the association r_offset fields".  The audit
+# recomputes the two allowed regions from the object layout and fails if any
+# differing byte falls outside them, so "only the metadata section changed"
+# is checked rather than assumed.
+# RUN: %python %S/Inputs/isr-record-reverse.py --audit %t.ordobj.o %t.ordobj-rev.o > %t.rev.audit
+# Every numeric assertion is anchored to end of line, so a value with the
+# expected text as a PREFIX (8 accepting 80, 0 accepting 0x...) does not
+# satisfy the check.
+# REV-BYTES: AUDIT total_bytes_differ=8{{$}}
+# REV-BYTES: AUDIT region isr_body differing_bytes=4 {{.*}}{{$}}
+# REV-BYTES: AUDIT region rela_r_offset differing_bytes=4 {{.*}}{{$}}
+# The r_offset changes sit in the field's byte 3 (zero-based), i.e. its
+# LOWEST byte -- the record index only ever shifts the low byte for these
+# small sections.
+# REV-BYTES: AUDIT rela_r_offset field_internal_bytes=3{{$}}
+# REV-BYTES: AUDIT outside_allowed=0{{$}}
+# RUN: FileCheck %s --check-prefix=REV-BYTES < %t.rev.audit
+# RUN: mcs251-lld %t.crt.o %t.ordobj.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn \
+# RUN:   --isr-preemption-config=%t-seed/preempt-123.txt \
+# RUN:   --link-facts=%t.reg.facts -o %t.reg.elf 2> %t.reg.err
+# RUN: mcs251-lld %t.crt.o %t.ordobj-rev.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn \
+# RUN:   --isr-preemption-config=%t-seed/preempt-123.txt \
+# RUN:   --link-facts=%t.regrev.facts -o %t.regrev.elf 2> %t.regrev.err
+# The ISR table is keyed by SLOT, so it is identical; the conflict records
+# are identical too.  (The whole files cannot be compared: the `obj ...
+# sha256=' line legitimately differs between the two objects.)
+# RUN: grep '^isr ' %t.reg.facts > %t.reg.isrs
+# RUN: grep '^isr ' %t.regrev.facts > %t.regrev.isrs
+# RUN: cmp %t.reg.isrs %t.regrev.isrs
+# RUN: grep '^conflict' %t.reg.facts > %t.reg.conf
+# RUN: grep '^conflict' %t.regrev.facts > %t.regrev.conf
+# RUN: cmp %t.reg.conf %t.regrev.conf
+# RUN: FileCheck %s --check-prefix=REV-ISRS < %t.reg.isrs
+# REV-ISRS: isr slot=1 {{.*}} name _irq1
+# REV-ISRS: isr slot=2 {{.*}} name _irq2
+# REV-ISRS: isr slot=3 {{.*}} name _irq3
+# The baseline is the shape already pinned in (z7): the same-slot group of
+# three roots proves via the first established candidate, never by the
+# metadata record order.
+# RUN: FileCheck %s --check-prefix=REV-CONF < %t.reg.conf
+# REV-CONF: conflict kind=1 proven=1 same_slot=1 {{.*}} roots_a=_irq1 roots_b=_irq2
+# --- A3.3 tells TWO shapes apart here, and both are pinned.
+# --- (i) LEGAL PHYSICAL REORDER.  The contract
+# --- (validation/mcs251-models/proposals/ISR-TASK-BREAKDOWN.md, A3.3) pairs
+# --- an ENTRY with its REGISTER by "the same exact function symbol and the
+# --- same slot"; it does NOT require the two records to be physically
+# --- ADJACENT.  The linker pairs them by slot in two per-slot maps
+# --- (LinkerCore.cpp, EntryBySlot/RegBySlot), then compares the symbol.  So
+# --- interleaving the records (E1,E2,E3,R1,R2,R3 instead of E1,R1,E2,R2,E3,
+# --- R3) while remapping each record's association relocation to where that
+# --- record moved is a LEGAL object and must LINK SUCCESSFULLY with the same
+# --- ISR table and the same conflict records.
+# RUN: %python %S/Inputs/isr-record-reverse.py --permute 0,2,4,1,3,5 %t.ordobj.o %t.ordobj-il.o
+# RUN: mcs251-lld %t.crt.o %t.ordobj-il.o --area-start=HOME=0xff0000 \
+# RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
+# RUN:   --area-start=XINIT=0xff8000 --isr-reentrancy=warn \
+# RUN:   --isr-preemption-config=%t-seed/preempt-123.txt \
+# RUN:   --link-facts=%t.regil.facts -o %t.regil.elf 2> %t.regil.err
+# RUN: grep '^isr ' %t.regil.facts > %t.regil.isrs
+# RUN: grep '^conflict' %t.regil.facts > %t.regil.conf
+# RUN: cmp %t.reg.isrs %t.regil.isrs
+# RUN: cmp %t.reg.conf %t.regil.conf
+# The permute is still confined to the metadata section and its association
+# offsets, so it is the record ORDER and nothing else that changed.
+# RUN: %python %S/Inputs/isr-record-reverse.py --audit %t.ordobj.o %t.ordobj-il.o > %t.revil.audit
+# REV-IL-BYTES: AUDIT outside_allowed=0
+# RUN: FileCheck %s --check-prefix=REV-IL-BYTES < %t.revil.audit
+# --- (ii) IDENTITY MISMATCH.  The SAME interleaving but WITHOUT remapping
+# --- the associations leaves each record's symbol where it was, so slot 1's
+# --- ENTRY and REGISTER now name different functions.  That is what A3.3
+# --- rejects, and the reject is the exact-symbol rule -- not adjacency.
+# RUN: %python %S/Inputs/isr-record-reverse.py --permute 0,3,2,1,4,5 --no-remap %t.ordobj.o %t.ordobj-un.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.ordobj-un.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-reentrancy=warn \
+# RUN:   --isr-preemption-config=%t-seed/preempt-123.txt \
+# RUN:   -o %t.regun.elf > %t.regun.err
+# RUN: FileCheck %s --check-prefix=REV-UNMAPPED < %t.regun.err
+# REV-UNMAPPED: MCS251 ISR: ENTRY and REGISTER must reference the same exact function for slot 1
+# RUN: not test -e %t.regun.elf
+# --- (iii) DUPLICATE-SLOT SHAPE.  `--set-all-slots 1' moves every
+# --- ENTRY/REGISTER record of the six onto slot 1 without touching the
+# --- symbol associations, so the section carries three ENTRY and three
+# --- REGISTER records on one slot.  The LINKER refuses that shape (two
+# --- ENTRY records for slot 1).  The fixture's own premise validation must
+# --- refuse it too: a `dict[slot][kind] = i' assignment would silently keep
+# --- only the LAST record per (slot, kind), leaving the
+# --- one-ENTRY-one-REGISTER check satisfied and letting the helper hand on
+# --- an object the linker then rejects.  Both sides are pinned here.
+# RUN: %python %S/Inputs/isr-record-reverse.py --set-all-slots 1 %t.ordobj.o %t.ordobj-dup.o
+# RUN: not %python %S/Inputs/isr-record-reverse.py %t.ordobj-dup.o %t.ordobj-dup-out.o
+# RUN: %python %S/Inputs/expect-rc.py 1 mcs251-lld %t.crt.o %t.ordobj-dup.o \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   --isr-reentrancy=warn \
+# RUN:   --isr-preemption-config=%t-seed/preempt-123.txt \
+# RUN:   -o %t.regdup.elf > %t.regdup.err
+# RUN: FileCheck %s --check-prefix=REV-DUP-SLOT < %t.regdup.err
+# REV-DUP-SLOT: MCS251 ISR: two ENTRY records for slot 1
+# RUN: not test -e %t.regdup.elf
+
+
+#--- preempt.txt
+preempt _irq1 _irq2
+
+#--- preempt-2.txt
+preempt _irq1 _irq2
+
+#--- preempt-order.txt
+# ROUND-6 (z11) / ROUND-7 corrected: this contract declares two of the six
+# ordered (writer root, user root) candidates of the four-ISR same-slot
+# shape, so candidates that do NOT establish the group precede the ones that
+# do.  In the A-B input order the six candidates are
+#   (_irq1,_irq2) (_irq1,_irq3) (_irq1,_irq4) (_irq2,_irq3) (_irq2,_irq4)
+#   (_irq3,_irq4);
+# the declared pairs are the 4th and 5th, and the 6th does NOT establish.
+# The first established candidate is therefore the 4th -- with three
+# candidates before it that establish nothing, which is what makes the
+# "first established candidate" claim non-vacuous.  (Round-6 wording said
+# only "the LAST two", which read as if the declared pairs were the two
+# final candidates; the last one is in fact undeclared.)
+preempt _irq2 _irq3
+preempt _irq2 _irq4
+
+#--- preempt-123.txt
+# ROUND-6 (z12): the three-ISR single-slot shape.  `_irq1`/`_irq2` and
+# `_irq2`/`_irq3` are declared, so the first established candidate is
+# (`_irq1`,`_irq2`) while (`_irq1`,`_irq3`) is not declared.
+preempt _irq1 _irq2
+preempt _irq2 _irq3
+
+#--- bad-preempt.txt
+preempt _irq1 no_such_isr
+
+#--- conflict.yaml
+# The repro/case.o shape, reconstructed as a self-contained fixture: two
+# DIFFERENT leaf functions, each with a 2-byte static parameter slot in its own
+# OSEG section (overlaid on one another by the linker), one reached only from a
+# registered ISR and one only from the foreground.  `_irq1` and `_fg_scale` are
+# small decodable bodies whose slot accesses are section-symbol relocations
+# (the producer's real encoding), and the calls are ordinary R_MCS251_24
+# control relocations.
+#
+# .text layout (0x24 bytes):
+#   0x00 _irq1 (size 0x0B): LO8/MID8/HI8 relocs to .mcs251.OSEGEG + 0 at
+#        0x01/0x03/0x05; ecall _isr_scale at 0x06; reti at 0x0A.
+#   0x0B _isr_scale (size 0x07): LO8/MID8/HI8 to .mcs251.OSEG.1 + 0 at
+#        0x0C/0x0E/0x10; ret at 0x11.
+#   0x12 _main (size 0x0B): LO8/MID8/HI8 to .mcs251.OSEG.3 + 0 at
+#        0x13/0x15/0x17; ecall _fg_scale at 0x18; ret at 0x1C.
+#   0x1D _fg_scale (size 0x07): LO8/MID8/HI8 to .mcs251.OSEG.3 + 0 at
+#        0x1E/0x20/0x22; ret at 0x23.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A000000AA7E1800007A1C0000AAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: _isr_scale
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x14
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x19
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1F
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0x25
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x26
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x2A
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: _isr_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xD
+    Size: 0x9
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x16
+    Size: 0xD
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x23
+    Size: 0x9
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x2C
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _isr_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+#--- nocase.yaml
+# Only the foreground side touches a slot: _irq1 calls a slotless helper.
+#
+# .text layout (0x1D bytes):
+#   0x00 _irq1 (size 5): ecall _isr_leaf (reloc @0x01); reti.
+#   0x05 _isr_leaf (size 1): ret.
+#   0x06 _main (size 0x0C): LO8/MID8/HI8 to .mcs251.OSEG.3 + 0 at
+#        0x07/0x09/0x0B; ecall _fg_scale at 0x0D; ret at 0x11.
+#   0x12 _fg_scale (size 0xA): LO8/MID8/HI8 to .mcs251.OSEG.3 + 0 at
+#        0x13/0x15/0x17; ret at 0x1B... (trailing imm carrier for the
+#        address-taken relocation).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '9A00000032AA7E1800007A1C00009A000000AA7E1800007A1C0000AAAA'
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: _isr_leaf
+        Addend: 0
+      - Offset: 0x8
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0xD
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0x15
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x16
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1A
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0x5
+  - Name: _isr_leaf
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 0x1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x6
+    Size: 0xD
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x13
+    Size: 0x9
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x1C
+    Size: 0x1
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+#--- nocase2.yaml
+# ROUND-5: the two-ISR SLOTLESS contrast.  Two registered ISRs call 0-arg
+# leaves and _main only loops: no static parameter slot exists anywhere, so
+# a VALID contract of two DISTINCT ISR names links successfully (rc=0) --
+# the success control for the path regressions, which must not lean on the
+# rejected same-name pair handling.
+#
+# .text layout (0x0D bytes):
+#   0x00 _irq1 (size 5): ecall _isr_leaf (reloc @0x01); reti.
+#   0x05 _isr_leaf (size 1): eret.
+#   0x06 _irq2 (size 5): ecall _isr_leaf (reloc @0x07); reti.
+#   0x0B _main (size 1): eret.
+#   0x0C helper (size 1): eret (signature-protocol name).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '9A00000032AA9A00000032AAAA'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000000200180101010100020001000000000000000000000000000200180201010100020001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: _isr_leaf
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_24
+        Symbol: _isr_leaf
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x54
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0x5
+  - Name: _isr_leaf
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 0x1
+  - Name: _irq2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x6
+    Size: 0x5
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0xB
+    Size: 0x1
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xC
+    Size: 0x1
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+#--- icall.yaml
+# nocase.yaml plus a real `ecall r` (0x99 0x10) inside _main.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '9A00000032AA7E1800007A1C000099109A000000AA7E1800007A1C0000AAAA'
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: _isr_leaf
+        Addend: 0
+      - Offset: 0x8
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0xD
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x11
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0x17
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1C
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0x5
+  - Name: _isr_leaf
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 0x1
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x6
+    Size: 0xF
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x15
+    Size: 0x9
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x1E
+    Size: 0x1
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+#--- addend-alias.yaml
+# Section symbol + addend (offset 2) slot references and a same-address OBJECT
+# alias.  Each OSEG section holds two 2-byte slots; the ISR side writes
+# `.mcs251.OSEG.1 + 2` and the foreground side `.mcs251.OSEG.3 + 2`, so the
+# conflict is the _PARM_3 pair.  z_isr_alias aliases _isr_scale_PARM_3.
+#
+# .text layout: _irq1@0 size 0xB, _isr_scale@0xB size 7, _main@0x12 size 0xB,
+# _fg_scale@0x1D size 7 (same instruction shapes as conflict.yaml; only the
+# relocated addends and slot sizes differ).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A000000AA7E1800007A1C0000AAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 2
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 2
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 2
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: _isr_scale
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 2
+      - Offset: 0x10
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 2
+      - Offset: 0x14
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 2
+      - Offset: 0x18
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 2
+      - Offset: 0x19
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 2
+      - Offset: 0x1D
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 2
+      - Offset: 0x1F
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0x25
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 2
+      - Offset: 0x26
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 2
+      - Offset: 0x2A
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 2
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: _isr_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xD
+    Size: 0x9
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x16
+    Size: 0xD
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x23
+    Size: 0x9
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x2C
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _isr_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+  - Name: _isr_scale_PARM_3
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 2
+    Size: 2
+  - Name: z_isr_alias
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 2
+    Size: 2
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+  - Name: _fg_scale_PARM_3
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 2
+    Size: 2
+#--- edata.yaml
+# EDATA-region slot indexed by final address.  The ISR-side leaf slot lives in
+# an explicit `.mcs251.edata` slice (EDATA window >= 0x100); the foreground
+# OSEG slot overlays the low window, so the ranges cannot intersect.
+#
+# .text layout: _irq1@0 size 5 (ecall _isr_scale; reti), _isr_scale@5 size 7
+# (LO8/MID8/HI8 to .mcs251.edata + 0; ret), _main@0xC size 0xB (LO8/MID8/HI8 to
+# .mcs251.OSEG.3 + 0; ecall _fg_scale; ret), _fg_scale@0x17 size 7.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '9A000000327E1800007A1C0000AA7E1800007A1C00009A000000AA7E1800007A1C0000AAAA'
+  - Name: .mcs251.edata
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: _isr_scale
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.edata
+        Addend: 0
+      - Offset: 0x8
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.edata
+        Addend: 0
+      - Offset: 0xC
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.edata
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x11
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x15
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x17
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1E
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x22
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0x5
+  - Name: _isr_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 0x9
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0xE
+    Size: 0xD
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x1B
+    Size: 0x9
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x24
+    Size: 0x1
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: .mcs251.edata
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.edata
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _isr_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.edata
+    Value: 0
+    Size: 2
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+#--- two-isr.yaml
+# Two registered ISRs whose leaf functions hold slots in two OSEG sections
+# overlaid on each other (ISR-vs-ISR preemption is the open condition).
+# _irq1@0 size 5 (ecall _isr_a; reti), _isr_a@5 size 7 (slot A access; ret),
+# _irq2@0xC size 5 (ecall _isr_b; reti), _isr_b@0x11 size 7 (slot B access;
+# ret), _main@0x18 size 5 (ecall _fg; reti), _fg@0x1D size 1 (ret).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A000000327E1800007A1C0000AA9A000000AAAAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.5
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000000200180101010100020001000000000000000000000000000200180201010100020001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: _isr_a
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x14
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x19
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x1F
+        Type: R_MCS251_24
+        Symbol: _isr_b
+        Addend: 0
+      - Offset: 0x25
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x26
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x2A
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x2D
+        Type: R_MCS251_24
+        Symbol: _fg
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x54
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: _isr_a
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xD
+    Size: 0x9
+  - Name: _irq2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x16
+    Size: 0xD
+  - Name: _isr_b
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x23
+    Size: 0x9
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x2C
+    Size: 0x5
+  - Name: _fg
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x31
+    Size: 0x1
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x32
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.5
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.5
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _isr_a_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+  - Name: _isr_b_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.5
+    Value: 0
+    Size: 2
+#--- nosize.yaml
+# conflict.yaml with the ISR-side slot symbol carrying no st_size: the address
+# hit is established, the extent is not.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A000000AA7E1800007A1C0000AAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 4
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: _isr_scale
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x14
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x19
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1F
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0x25
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x26
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x2A
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: _isr_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xD
+    Size: 0x9
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x16
+    Size: 0xD
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x23
+    Size: 0x9
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x2C
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _isr_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 0
+  - Name: _isr_scale_PARM_3
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 2
+    Size: 2
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+#--- xa.yaml
+# Cross-object fixture, ISR side: a registered ISR in this object writes a
+# parameter slot and calls a leaf that are BOTH defined in xb.o, through
+# undefined global symbols (the Globals-resolution path).
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A00000032'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: helper_PARM_2
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: helper_PARM_2
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: helper_PARM_2
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000C24D43533235310001000000B7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C84140100010000000000020000020168656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: helper_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+#--- xb.yaml
+# Cross-object fixture, definition side: the two overlaid OSEG slots, their
+# owner leaves, the cross-object callee and the foreground writer all live
+# here; the slot symbol the ISR side references is GLOBAL.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A000000AA7E1800007A1C0000AA7E1800007A1C0000AA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x14
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x19
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xD
+    Size: 0x9
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x16
+    Size: 0x9
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+  - Name: helper_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_GLOBAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+#--- multis.yaml
+# Three different ISR-side leaf slots plus one foreground slot, all overlaid on
+# one address: the conflict record must carry the COMPLETE participating set
+# and the per-slot access evidence, not just the first/last pair.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A000000AA7E1800007A1C0000AAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.5
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.7
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000000200180101010100020001000000000000000000000000000200180201010100020001000000000000000000000000000200180101010100030001000000000000000000000000000200180201010100030001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: _s1
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x14
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x19
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1F
+        Type: R_MCS251_24
+        Symbol: _s2
+        Addend: 0
+      - Offset: 0x25
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x26
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x2A
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x2E
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x2F
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x33
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x35
+        Type: R_MCS251_24
+        Symbol: _s3
+        Addend: 0
+      - Offset: 0x3B
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x40
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x44
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.7
+        Addend: 0
+      - Offset: 0x45
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.7
+        Addend: 0
+      - Offset: 0x49
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.7
+        Addend: 0
+      - Offset: 0x4B
+        Type: R_MCS251_24
+        Symbol: _fg
+        Addend: 0
+      - Offset: 0x51
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.7
+        Addend: 0
+      - Offset: 0x52
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.7
+        Addend: 0
+      - Offset: 0x56
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.7
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x54
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x6C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq3
+        Addend: 0
+      - Offset: 0x84
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq3
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: _s1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xD
+    Size: 0x9
+  - Name: _irq2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x16
+    Size: 0xD
+  - Name: _s2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x23
+    Size: 0x9
+  - Name: _irq3
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x2C
+    Size: 0xD
+  - Name: _s3
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x39
+    Size: 0x9
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x42
+    Size: 0xD
+  - Name: _fg
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x4F
+    Size: 0x9
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x58
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: .mcs251.OSEG.5
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.5
+    Value: 0
+  - Name: .mcs251.OSEG.7
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.7
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _s1_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+  - Name: _s2_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+  - Name: _s3_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.5
+    Value: 0
+    Size: 2
+  - Name: _fg_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.7
+    Value: 0
+    Size: 2
+#--- unowned.yaml
+# A verified `ecall` whose R_MCS251_24 target lies INSIDE .text but outside
+# every known function interval (offset 7 of an 8-byte section).  The call
+# site must be recorded as an unresolved control target, never dereferenced.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '9A00000032AAAAAA'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: .text
+        Addend: 7
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0x5
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x5
+    Size: 0x1
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x6
+    Size: 0x1
+  - Name: .text
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+#--- noncall.yaml
+# The ISR-side 'call' is an R_MCS251_24 on a mov-immediate instruction, not a
+# control opcode: no call evidence, so the ISR-side leaf keeps no ISR context
+# even though its slot accesses are real.  The link must stay non-proven.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '79000000327E1800007A1C0000AA7E1800007A1C00009A000000AA7E1800007A1C0000AAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: _isr_scale
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x8
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0xC
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x11
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x15
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x17
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1E
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x22
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0x5
+  - Name: _isr_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 0x9
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0xE
+    Size: 0xD
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x1B
+    Size: 0x9
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x24
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _isr_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+#--- twoshared.yaml
+# ROUND-3 shape: ONE two-argument function called from two registered ISRs.
+# Its single static slot is written by both ISR-context callers: with the
+# preemption pair declared this must be a PROVEN default failure.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A00000032AAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000000200180101010100020001000000000000000000000000000200180201010100020001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: _shared
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x14
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x19
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x1F
+        Type: R_MCS251_24
+        Symbol: _shared
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x54
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: _shared
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xD
+    Size: 0x9
+  - Name: _irq2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x16
+    Size: 0xD
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x23
+    Size: 0x1
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x24
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _shared_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+#--- merge3.yaml
+# ROUND-3 shape: three ISR-side slots overlaid on ONE address and no
+# foreground participant.  The (_s1,_s2) pair is proven when only
+# `_irq1/_irq2` are declared: a group is proven when ANY pair is.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A000000327E1800007A1C0000AAAAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.5
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000000200180101010100020001000000000000000000000000000200180201010100020001000000000000000000000000000200180101010100030001000000000000000000000000000200180201010100030001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: _s1
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x14
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x19
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1F
+        Type: R_MCS251_24
+        Symbol: _s2
+        Addend: 0
+      - Offset: 0x25
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x26
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x2A
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x2E
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x2F
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x33
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x35
+        Type: R_MCS251_24
+        Symbol: _s3
+        Addend: 0
+      - Offset: 0x3B
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x40
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x54
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x6C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq3
+        Addend: 0
+      - Offset: 0x84
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq3
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: _s1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xD
+    Size: 0x9
+  - Name: _irq2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x16
+    Size: 0xD
+  - Name: _s2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x23
+    Size: 0x9
+  - Name: _irq3
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x2C
+    Size: 0xD
+  - Name: _s3
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x39
+    Size: 0x9
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x42
+    Size: 0x1
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x43
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: .mcs251.OSEG.5
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.5
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _s1_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+  - Name: _s2_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+  - Name: _s3_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.5
+    Value: 0
+    Size: 2
+#--- partial.yaml
+# ROUND-3 shape: the high half of the address materialization replaced by
+# a NOP and the HI8 relocations removed.  A half sequence is NOT an access
+# and must leave the link non-proven with an explicit unknown.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E180000009A000000327E18000000AA7E180000009A000000AA7E18000000AAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x6
+        Type: R_MCS251_24
+        Symbol: _isr_scale
+        Addend: 0
+      - Offset: 0xC
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0xD
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x12
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x13
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x16
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0x1C
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xA
+  - Name: _isr_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xA
+    Size: 0x6
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x10
+    Size: 0xA
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x1A
+    Size: 0x6
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x20
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _isr_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+#--- weakrefs.yaml
+# ROUND-3 shape: a non-control R_MCS251_24 'call' plus slot-storage
+# references on mov-immediate instructions: neither is evidence.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7900000032740074007400AA7400740074009A000000AA740074007400AAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: _isr_scale
+        Addend: 0
+      - Offset: 0x6
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x8
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0xA
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0xD
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x11
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x13
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1A
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1C
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0x5
+  - Name: _isr_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x5
+    Size: 0x7
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0xC
+    Size: 0xB
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x17
+    Size: 0x7
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x1E
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _isr_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+#--- legacy.yaml
+# Support-domain contrast: a callee body carrying the CLASSIC 8051 RET
+# byte 0x22 stays outside the trusted length table, so the section is an
+# unknown - the fixture-wide 0x22 -> 0xAA replacement does not widen the
+# support domain.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A000000327E1800007A1C0000227E1800007A1C00009A000000AA7E1800007A1C0000AAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.3
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: _isr_scale
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x14
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x19
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x1F
+        Type: R_MCS251_24
+        Symbol: _fg_scale
+        Addend: 0
+      - Offset: 0x25
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x26
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+      - Offset: 0x2A
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.3
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: _isr_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xD
+    Size: 0x9
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x16
+    Size: 0xD
+  - Name: _fg_scale
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x23
+    Size: 0x9
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x2C
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.3
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _isr_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+  - Name: _fg_scale_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.3
+    Value: 0
+    Size: 2
+#--- unownedsym.yaml
+# ROUND-3 shape: a control relocation to a normal symbol PLUS a nonzero
+# addend that lands outside every function interval: unknown, no edge.
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '9A00000032AAAAAA'
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x1
+        Type: R_MCS251_24
+        Symbol: helper
+        Addend: 1
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: 0x70000003
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0x5
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x5
+    Size: 0x1
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x6
+    Size: 0x1
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+
+#--- preempt-self.txt
+preempt _irq1 _irq1
+
+#--- preempt-23.txt
+preempt _irq2 _irq3
+
+#--- preempt-34.txt
+preempt _irq3 _irq4
+
+#--- preempt-1223.txt
+preempt _irq1 _irq2
+preempt _irq2 _irq3
+
+#--- preempt-empty.txt
+# round-4 (z4): a contract file with comments only -- the OPTION was given,
+# so the --print-input combination must still be rejected.
