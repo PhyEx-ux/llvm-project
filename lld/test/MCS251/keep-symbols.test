@@ -24,7 +24,19 @@
 # RUN: mcs251-lld %t.crt.o %t.isr.o --area-start=HOME=0xff0000 \
 # RUN:   --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 \
 # RUN:   --area-start=XINIT=0xff8000 --map=%t.def.map -o %t.def.elf
-# RUN: not grep -q 'FUNC' %t.def.map
+# Matches the map's FUNCTION ROW in full -- `FUNC <hex addr> +<hex size>
+# <symbol>` to end of line, see the MAP checks below -- and nothing else.
+# A bare `grep 'FUNC'` also matches the INPUT PATH recorded in the
+# object/section rows, so a build directory whose name merely CONTAINS the
+# letters F-U-N-C (e.g. `FUNCTIONAL-GAPS`) made this negative check fail on an
+# otherwise correct map; anchoring only the first word still matches a
+# RELATIVE input path that happens to begin with `FUNC `.  This is the row-form
+# check for this test's fixed inputs, not a general map parser: a file name
+# containing a newline can still inject a physical line, and nothing here
+# claims to prove a row's origin.  The pattern is exercised both ways below --
+# it stays silent for this map and fires on the --keep-symbols map that must
+# carry function rows.
+# RUN: not grep -Eq '^FUNC 0x[[:xdigit:]]+ \+0x[[:xdigit:]]+ [^[:space:]]+$' %t.def.map
 # RUN: llvm-readobj --symbols %t.def.elf > %t.def.syms
 # RUN: not grep -q '_irq1' %t.def.syms
 
@@ -70,6 +82,10 @@
 # MAP: FUNC 0xff0000 +0x3 __mcs251_reset
 # MAP: FUNC 0xff0602 +0x4 __mcs251_isr_unhandled
 # MAP: FUNC 0xff0729 +0x2 _main
+# Positive control for the full function-row pattern used above: it MUST fire
+# on a map that really carries function rows, so the negative check on the
+# default map is a real assertion rather than a pattern that can never match.
+# RUN: grep -Eq '^FUNC 0x[[:xdigit:]]+ \+0x[[:xdigit:]]+ [^[:space:]]+$' %t.ks.map
 
 # --- NOBITS (direct-addr RAM) symbols have no loadable section: ABS ---
 # RUN: yaml2obj %t/abs.yaml -o %t.abs.o
