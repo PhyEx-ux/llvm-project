@@ -234,7 +234,7 @@ class MCS251RELObjectWriter final : public MCObjectWriter {
       else if (Rel.Fixup.getKind() == MCS251::fixup_mcs251_hi8)
         Mode = 0x381;
       else
-        report_fatal_error("MCS251 REL writer: unsupported relocation kind");
+        reportFatalUsageError("MCS251 REL writer: unsupported relocation kind");
 
       const MCSymbol *Target = Rel.Target.getAddSym();
       // A symbol that is defined in this module is represented by its area
@@ -245,13 +245,13 @@ class MCS251RELObjectWriter final : public MCObjectWriter {
         Mode |= 0x02;
         auto It = SymbolRefs.find(Target);
         if (It == SymbolRefs.end())
-          report_fatal_error("MCS251 REL writer: missing symbol reference");
+          reportFatalInternalError("MCS251 REL writer: missing symbol reference");
         Ref = It->second;
       } else {
         const SectionData *TargetSec = Target && Target->isInSection()
             ? findSection(Sections, &Target->getSection()) : nullptr;
         if (!TargetSec)
-          report_fatal_error("MCS251 REL writer: missing relocation section");
+          reportFatalInternalError("MCS251 REL writer: missing relocation section");
         Ref = TargetSec->AreaIndex;
       }
       emitRMode(Mode);
@@ -276,21 +276,21 @@ public:
     if (Fixup.getKind() != FK_Data_2 &&
         (Fixup.getKind() < MCS251::fixup_mcs251_16 ||
          Fixup.getKind() >= MCS251::NumTargetFixupKinds))
-      report_fatal_error("MCS251 REL writer: unsupported relocation kind "
+      reportFatalUsageError("MCS251 REL writer: unsupported relocation kind "
                          "(expected a word/address or byte-of24 ASxxxx relocation)");
     if (Target.getSubSym())
-      report_fatal_error("MCS251 REL writer: symbol-difference fixups are "
+      reportFatalUsageError("MCS251 REL writer: symbol-difference fixups are "
                          "not supported");
     if (const MCSymbol *Add = Target.getAddSym())
       if (Add->isAbsolute() && !Add->isUndefined())
-        report_fatal_error("MCS251 REL writer: absolute-symbol fixups are "
+        reportFatalUsageError("MCS251 REL writer: absolute-symbol fixups are "
                            "not supported");
     Relocations.push_back({&F, Fixup, Target, FixedValue});
   }
 
   uint64_t writeObject() override {
     if (!Asm)
-      report_fatal_error("MCS251 REL writer has no assembler");
+      reportFatalUsageError("MCS251 REL writer has no assembler");
 
     std::vector<SectionData> Sections;
     uint64_t TotalSize = 0;
@@ -312,7 +312,7 @@ public:
         continue;
       }
       if (Section.isBssSection())
-        report_fatal_error("MCS251 REL writer: unsupported BSS section");
+        reportFatalUsageError("MCS251 REL writer: unsupported BSS section");
       SmallString<256> Storage;
       raw_svector_ostream DataOS(Storage);
       Asm->writeSectionData(DataOS, &Section);
@@ -337,7 +337,7 @@ public:
     if (llvm::count_if(Sections, [](const SectionData &S) {
           return !S.NoLoad && S.AreaName == "CSEG";
         }) > 1)
-      report_fatal_error("MCS251 REL writer: multiple CSEG sections are "
+      reportFatalUsageError("MCS251 REL writer: multiple CSEG sections are "
                          "not supported yet");
     // CSEG stays index 1 for compatibility. XINIT and every parameter/global
     // reservation receive independent A records; same-named DSEG records
@@ -364,7 +364,7 @@ public:
       else {
         // Validate even a single definition; a sort comparator need not run.
         if (!S->isInSection() || !findSection(Sections, &S->getSection()))
-          report_fatal_error("MCS251 REL writer: unsupported symbol section");
+          reportFatalUsageError("MCS251 REL writer: unsupported symbol section");
         Defined.push_back(S);
       }
     }
@@ -506,7 +506,7 @@ public:
           End += Width;
         }
         if (End == Pos)
-          report_fatal_error("MCS251 REL writer: relocation chunk overflow");
+          reportFatalUsageError("MCS251 REL writer: relocation chunk overflow");
         OS << "T";
         addr24(OS, Pos + Sec.Base);
         for (uint8_t B : Payload)

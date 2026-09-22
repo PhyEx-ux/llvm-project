@@ -85,8 +85,8 @@
 ; ELF: Section: .mcu.fixed.al
 ;
 ; REL objects and assembly text are not placement carriers.
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOELF
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=asm %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOELF
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOELF
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=asm %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOELF
 ; NOELF: fixed placement requires ELF object output
 
 target triple = "mcs251-unknown-none"

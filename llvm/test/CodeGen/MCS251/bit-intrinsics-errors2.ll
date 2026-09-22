@@ -1,4 +1,4 @@
-; RUN: not --crash llc -mtriple=mcs251 -O2 < %s -o /dev/null 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -O2 < %s -o /dev/null 2>&1 | FileCheck %s
 ;
 ; BT03 negative: an immarg constant outside the bit-address space [0, 255]
 ; passes the IR verifier but must be rejected loudly by the backend lowering

@@ -1,10 +1,10 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 %t/ptrtbl.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj %t/ptrtbl.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
-; RUN: not --crash llc -mtriple=mcs251 %t/mutalign.ll -o - 2>&1 | FileCheck %s --check-prefix=MUT
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj %t/mutalign.ll -o - 2>&1 | FileCheck %s --check-prefix=MUT
-; RUN: not --crash llc -mtriple=mcs251 %t/sect.ll -o - 2>&1 | FileCheck %s --check-prefix=RO
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj %t/sect.ll -o - 2>&1 | FileCheck %s --check-prefix=RO
+; RUN: not llc -mtriple=mcs251 %t/ptrtbl.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
+; RUN: not llc -mtriple=mcs251 -filetype=obj %t/ptrtbl.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
+; RUN: not llc -mtriple=mcs251 %t/mutalign.ll -o - 2>&1 | FileCheck %s --check-prefix=MUT
+; RUN: not llc -mtriple=mcs251 -filetype=obj %t/mutalign.ll -o - 2>&1 | FileCheck %s --check-prefix=MUT
+; RUN: not llc -mtriple=mcs251 %t/sect.ll -o - 2>&1 | FileCheck %s --check-prefix=RO
+; RUN: not llc -mtriple=mcs251 -filetype=obj %t/sect.ll -o - 2>&1 | FileCheck %s --check-prefix=RO
 ;
 ; The ro-align relaxation covers integer arrays only.  Policy boundaries
 ; stay loud: mutable aligned storage (byte-alignment is still required in

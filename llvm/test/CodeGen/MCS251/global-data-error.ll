@@ -1,8 +1,8 @@
 ; RUN: split-file %s %t
 ; RUN: not llc -mtriple=mcs251 %t/algebra.ll -o - 2>&1 | FileCheck %s --check-prefix=ALG
 ; RUN: not llc -mtriple=mcs251 -filetype=obj %t/algebra.ll -o - 2>&1 | FileCheck %s --check-prefix=ALG
-; RUN: not --crash llc -mtriple=mcs251 %t/symleaf.ll -o - 2>&1 | FileCheck %s --check-prefix=SYMLEAF
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj %t/symleaf.ll -o - 2>&1 | FileCheck %s --check-prefix=SYMLEAF
+; RUN: not llc -mtriple=mcs251 %t/symleaf.ll -o - 2>&1 | FileCheck %s --check-prefix=SYMLEAF
+; RUN: not llc -mtriple=mcs251 -filetype=obj %t/symleaf.ll -o - 2>&1 | FileCheck %s --check-prefix=SYMLEAF
 ;
 ; Mutable integer scalars/arrays/structs are supported by global-data.ll.
 ; X3 added the pointer initializer leaf (&global + constant addend, or null)

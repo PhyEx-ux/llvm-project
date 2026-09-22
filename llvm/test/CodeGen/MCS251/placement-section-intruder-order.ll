@@ -9,9 +9,9 @@
 ; (or instead of) any placed entity.
 ;
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/fn-first.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FNFIRST
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/obj-intruder.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OBJ
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/obj-only.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OBJ
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/fn-first.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=FNFIRST
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/obj-intruder.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OBJ
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/obj-only.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OBJ
 ;
 ; The lone intruder (no placed entity in the module at all) is rejected too:
 ; the guard is a namespace rule, not a collision rule.

@@ -1,5 +1,5 @@
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 %s -o - 2>&1 | FileCheck %s
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,8,1 %s -o - 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 %s -o - 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,8,1 %s -o - 2>&1 | FileCheck %s
 ;
 ; Ordinary C const remains AS0. Placing it in CSEG and materializing its symbol
 ; through a 16-bit RAM pointer truncates a high-bank ROM address. Until the v2

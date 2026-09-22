@@ -5,7 +5,7 @@
 //
 // Target-owned successor of the old lib/CodeGen MCS251ContractVerifier: the
 // checking half only. Everything below reads the module; a violation is a
-// report_fatal_error and nothing is ever written back to the IR. The IR
+// a fatal error report and nothing is ever written back to the IR. The IR
 // rewrites the old verifier performed ("constantPropAndFold", which ignored
 // optnone) now live exclusively in MCS251LoweringPrep; when a -O0/optnone
 // shape needs folding to be judged, this check evaluates it locally through
@@ -17,7 +17,7 @@
 //
 // WP4 exit policy (FUNCTIONAL-GAPS-PLAN-Alice.md section 4.2): a contract
 // violation is a *predictable capability rejection*, so the error is routed
-// through report_fatal_error(..., GenCrashDiag=false), which exits with
+// through reportFatalUsageError(..., GenCrashDiag=false), which exits with
 // status 1 and prints the plain "LLVM ERROR:" line -- no bug-report request,
 // no stack dump, no core. Both pass exits (legacy and new PM) must stay in
 // sync. Genuine internal invariant corruption elsewhere keeps the crash
@@ -75,13 +75,12 @@ public:
     return "MCS-251 contract check (read-only)";
   }
 
-  // Read-only by construction: report_fatal_error on violation, never a
+  // Read-only by construction: a fatal error report on violation, never a
   // rewrite. Every analysis is preserved. WP4: the capability rejection is
   // a normal failure -- exit(1), no crash diagnostics (see header comment).
   bool runOnModule(Module &M) override {
     if (Error Err = verifyModuleContract(M, Contract, CheckArithmetic))
-      report_fatal_error(Twine(toString(std::move(Err))),
-                         /*GenCrashDiag=*/false);
+      reportFatalUsageError(Twine(toString(std::move(Err))));
     return false;
   }
 
@@ -102,8 +101,7 @@ ModulePass *llvm::MCS251::createMCS251ContractCheckPass(
 PreservedAnalyses llvm::MCS251::MCS251ContractCheckPass::run(
     Module &M, ModuleAnalysisManager &) {
   if (Error Err = verifyModuleContract(M, Contract, CheckArithmetic))
-    report_fatal_error(Twine(toString(std::move(Err))),
-                       /*GenCrashDiag=*/false);
+    reportFatalUsageError(Twine(toString(std::move(Err))));
   return PreservedAnalyses::all();
 }
 
@@ -1073,7 +1071,7 @@ static Error verifyMCS251ISRStructure(const Module &M) {
 // change the verdict), and again post-optimization for defense in depth.
 // On the direct-llc path this pass is the only gate. All of them are
 // predictable capability rejections: the pass exits route them through
-// report_fatal_error(..., /*GenCrashDiag=*/false) so the process fails
+// reportFatalUsageError(...) so the process fails
 // with status 1 and no crash diagnostics.
 //===----------------------------------------------------------------------===//
 

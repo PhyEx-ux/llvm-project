@@ -531,7 +531,7 @@ static SDValue tryLowerDirectBitBranch(SDValue Op, SelectionDAG &DAG,
 SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
                                              SelectionDAG &DAG) const {
   // DF0 task 2: f32/f64/i64 arithmetic, comparison and conversion ops are
-  // not yet implemented. Route them to a loud report_fatal_error instead of
+  // not yet implemented. Route them to a loud fatal usage error instead of
   // letting the legalizer silently produce wrong code (i64 add collapses to
   // 32-bit) or hit a generic late "no libcall" error.
   // TODO(mcs251-runtime): once the soft-float runtime is wired up, replace
@@ -543,7 +543,7 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     const char *VTName = VT == MVT::f32 ? "f32" : VT == MVT::f64 ? "f64" : "i64";
     const char *Runtime =
         VT == MVT::i64 ? "wide-integer runtime" : "soft-float runtime";
-    report_fatal_error(Twine("MCS251: ") + VTName +
+    reportFatalUsageError(Twine("MCS251: ") + VTName +
                        " operations are not yet implemented; " + Runtime +
                        " is not connected");
   }
@@ -554,17 +554,17 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     break;
   case ISD::SINT_TO_FP:
   case ISD::UINT_TO_FP:
-    report_fatal_error("MCS251: integer-to-float conversion is not yet "
+    reportFatalUsageError("MCS251: integer-to-float conversion is not yet "
                        "implemented; soft-float runtime is not connected");
   case ISD::FP_TO_SINT:
   case ISD::FP_TO_UINT:
-    report_fatal_error("MCS251: float-to-integer conversion is not yet "
+    reportFatalUsageError("MCS251: float-to-integer conversion is not yet "
                        "implemented; soft-float runtime is not connected");
   case ISD::FP_EXTEND:
-    report_fatal_error("MCS251: float widening (fp_extend) is not yet "
+    reportFatalUsageError("MCS251: float widening (fp_extend) is not yet "
                        "implemented; soft-float runtime is not connected");
   case ISD::FP_ROUND:
-    report_fatal_error("MCS251: float narrowing (fp_round) is not yet "
+    reportFatalUsageError("MCS251: float narrowing (fp_round) is not yet "
                        "implemented; soft-float runtime is not connected");
   }
   switch (Op.getOpcode()) {
@@ -577,7 +577,7 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     // needs to reach the backend.  A node that does is a hand-written-IR or
     // stale-compiler leak and fails closed here instead of the generic
     // "Cannot select".
-    report_fatal_error("MCS251: llvm.va_arg is not supported; va_arg is "
+    reportFatalUsageError("MCS251: llvm.va_arg is not supported; va_arg is "
                        "lowered by clang CodeGen (MCS251ABIInfo::EmitVAArg)");
   case ISD::VASTART:
     return LowerVASTART(Op, DAG);
@@ -685,8 +685,7 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     // WP4: predictable capability rejection -- clean exit(1), no crash
     // diagnostics. Normally unreachable: the structural contract check
     // rejects atomic IR first; this is the MIR-entry defense.
-    report_fatal_error("MCS251: atomic memory operations are not supported",
-                       /*GenCrashDiag=*/false);
+    reportFatalUsageError("MCS251: atomic memory operations are not supported");
   case ISD::INTRINSIC_VOID:
   case ISD::INTRINSIC_W_CHAIN: {
     // Both node shapes carry the intrinsic ID as operand 1 (operand 0 is the
@@ -726,7 +725,7 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
       // DR4. All welded with Glue into one scheduling unit.
       return LowerTFPUIntrinsic(Op, DAG);
     default:
-      report_fatal_error("MCS251: unsupported target intrinsic");
+      reportFatalUsageError("MCS251: unsupported target intrinsic");
     }
   }
   }
@@ -737,13 +736,13 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
 // as Custom, it calls ReplaceNodeResults instead of LowerOperation. The
 // default implementation hits llvm_unreachable (SIGABRT), and vector i64 ops
 // that bypass type legalization entirely hit a null TLI pointer (SIGSEGV).
-// Route both cases to the same loud report_fatal_error as LowerOperation.
+// Route both cases to the same loud fatal usage error as LowerOperation.
 //
 // RC-4 fix: Leaving Results empty only falls back to the generic LegalizeTypes
 // path, which does NOT request DAGCombiner folding. Instead, actively attempt
 // to constant-fold the node here. If all operands are constants and folding
 // succeeds, replace the result with the folded constant. If folding fails or
-// operands are not all constants, reject loudly with report_fatal_error.
+// operands are not all constants, reject loudly with reportFatalUsageError.
 //
 // P1-2 optnone consumers. MCS251LoweringPrep folds constants and erases dead
 // wide/float computations for every function EXCEPT optnone ones, whose IR
@@ -1077,7 +1076,7 @@ void MCS251TargetLowering::ReplaceNodeResults(
   // LowerOperation; reject it with the same frozen message E so every
   // llvm.va_arg shape fails closed identically.
   if (N->getOpcode() == ISD::VAARG)
-    report_fatal_error("MCS251: llvm.va_arg is not supported; va_arg is "
+    reportFatalUsageError("MCS251: llvm.va_arg is not supported; va_arg is "
                        "lowered by clang CodeGen (MCS251ABIInfo::EmitVAArg)");
   if (VT == MVT::f32 || VT == MVT::f64 || VT == MVT::i64) {
     // Attempt to constant-fold this node. FoldConstantArithmetic handles
@@ -1136,12 +1135,12 @@ void MCS251TargetLowering::ReplaceNodeResults(
     const char *VTName = VT == MVT::f32 ? "f32" : VT == MVT::f64 ? "f64" : "i64";
     const char *Runtime =
         VT == MVT::i64 ? "wide-integer runtime" : "soft-float runtime";
-    report_fatal_error(Twine("MCS251: ") + VTName +
+    reportFatalUsageError(Twine("MCS251: ") + VTName +
                        " operations are not yet implemented; " + Runtime +
                        " is not connected");
   }
   // Any other node reaching here is a bug in the operation table.
-  report_fatal_error("MCS251: unhandled custom type legalization for opcode " +
+  reportFatalInternalError("MCS251: unhandled custom type legalization for opcode " +
                      Twine(N->getOpcode()));
 }
 
@@ -1325,8 +1324,7 @@ SDValue MCS251TargetLowering::LowerAddrSpaceCast(SDValue Op,
   // rejected in this slice. The message names CODE so this can never be
   // mistaken for an unassigned-space failure.
   if (IsCode(SrcAS) || IsCode(DstAS))
-    report_fatal_error(
-        "MCS251: unsupported address-space cast involving CODE (address "
+    reportFatalUsageError("MCS251: unsupported address-space cast involving CODE (address "
         "space 4); only the equal-width 32-bit AS4<->AS0 conversion is "
         "permitted");
   // RC-2: AS1 is strict direct RAM with range [0,0x80). A cast from a wider
@@ -1338,8 +1336,7 @@ SDValue MCS251TargetLowering::LowerAddrSpaceCast(SDValue Op,
     // Representation width and address-space membership are different checks.
     // AS1 is strict direct RAM, not an arbitrary region-00 i16 address.
     if (DstAS == 1 && Address >= 0x80)
-      report_fatal_error(
-          "MCS251: constant address is outside destination address space 1 "
+      reportFatalUsageError("MCS251: constant address is outside destination address space 1 "
           "range [0,0x80)");
   };
   if (SrcVT == DstVT &&
@@ -1354,8 +1351,7 @@ SDValue MCS251TargetLowering::LowerAddrSpaceCast(SDValue Op,
       if (auto *C = dyn_cast<ConstantSDNode>(Src))
         CheckKnownDestinationRange(C->getZExtValue());
       else
-        report_fatal_error(
-            "MCS251: dynamic address-space cast to a range-limited "
+        reportFatalUsageError("MCS251: dynamic address-space cast to a range-limited "
             "destination requires a compile-time-provable source");
     }
     return Src;
@@ -1369,15 +1365,15 @@ SDValue MCS251TargetLowering::LowerAddrSpaceCast(SDValue Op,
     if (auto *C = dyn_cast<ConstantSDNode>(Src)) {
       uint64_t Address = C->getZExtValue();
       if (Address > 0xffff)
-        report_fatal_error("MCS251: far-to-near constant address does not fit "
+        reportFatalUsageError("MCS251: far-to-near constant address does not fit "
                            "16 bits");
       CheckKnownDestinationRange(Address);
       return materializeImm(DAG.getConstant(Address, DL, MVT::i16), DL, DAG);
     }
-    report_fatal_error("MCS251: dynamic far-to-near address-space cast requires "
+    reportFatalUsageError("MCS251: dynamic far-to-near address-space cast requires "
                        "an explicit checked conversion");
   }
-  report_fatal_error("MCS251: unsupported address-space cast");
+  reportFatalUsageError("MCS251: unsupported address-space cast");
 }
 
 //===----------------------------------------------------------------------===//
@@ -1421,11 +1417,11 @@ SDValue MCS251TargetLowering::LowerAddrSpaceCast(SDValue Op,
 static unsigned getBitIntrinsicAddr(const SDNode *N, unsigned OpNo) {
   const ConstantSDNode *C = dyn_cast<ConstantSDNode>(N->getOperand(OpNo));
   if (!C)
-    report_fatal_error("MCS251: bit intrinsic address must be a constant "
+    reportFatalUsageError("MCS251: bit intrinsic address must be a constant "
                        "immediate (dynamic bit addresses are not supported)");
   int64_t V = C->getZExtValue();
   if (V < 0 || V > 0xff)
-    report_fatal_error("MCS251: bit intrinsic address " + Twine(V) +
+    reportFatalUsageError("MCS251: bit intrinsic address " + Twine(V) +
                        " is out of range [0, 255]");
   return unsigned(V);
 }
@@ -1448,17 +1444,17 @@ static BitAccessOperand getBitIntrinsicOperand(SDNode *N, unsigned OpNo,
   SDValue Op = N->getOperand(OpNo);
   if (auto *GA = dyn_cast<GlobalAddressSDNode>(Op.getNode())) {
     if (Op.getResNo() != 0)
-      report_fatal_error("MCS251: symbolic bit intrinsic operand must be the "
+      reportFatalUsageError("MCS251: symbolic bit intrinsic operand must be the "
                          "bit-object global itself");
     auto *GV = dyn_cast<GlobalVariable>(GA->getGlobal());
     // The IR contract verifier (MCS251ContractCheck) already guarantees the
     // direct marked-handle form; this is the backend's own loud guard, and it
     // also covers the MIR entry path that skips the IR verifier.
     if (!GV || GV->getAddressSpace() != 0 || !MCS251::isBitObjectGlobal(*GV))
-      report_fatal_error("MCS251: symbolic bit intrinsic operand must be a "
+      reportFatalUsageError("MCS251: symbolic bit intrinsic operand must be a "
                          "direct AS0 bit-object global");
     if (GA->getOffset() != 0)
-      report_fatal_error("MCS251: bit object '" + GV->getName() +
+      reportFatalUsageError("MCS251: bit object '" + GV->getName() +
                          "' bit-address operand must have no addend");
     SDLoc DL(Op);
     BitAccessOperand Res;
@@ -2554,7 +2550,7 @@ struct MCS251Address {
 static SDValue materializeFrameIndex(int FrameIdx, int64_t Off, EVT PtrVT,
                                      const SDLoc &DL, SelectionDAG &DAG) {
   if (DAG.getMachineFunction().getFrameInfo().hasVarSizedObjects())
-    report_fatal_error("MCS251: taking the address of a frame object in a "
+    reportFatalUsageError("MCS251: taking the address of a frame object in a "
                        "function with dynamic allocas is not supported "
                        "(needs an anchor read, not yet implemented)");
   SDValue TFI = DAG.getTargetFrameIndex(FrameIdx, MVT::i16);
@@ -2617,14 +2613,14 @@ static SDValue foldDispIntoBase(SDValue Base, int64_t Disp, const SDLoc &DL,
 // Shizuku Tiny/XTiny lowering and is NOT a blanket "number allocated" pass.
 static void checkDataAddressSpace(unsigned AS, bool IsStore) {
   if (AS == 4 && IsStore)
-    report_fatal_error("MCS251: store to CODE (address space 4) is not "
+    reportFatalUsageError("MCS251: store to CODE (address space 4) is not "
                        "permitted; CODE is read-only");
   if (AS == 5)
-    report_fatal_error("MCS251: address space 5 (bit space) data access is not "
+    reportFatalUsageError("MCS251: address space 5 (bit space) data access is not "
                        "supported; use the controlled-bit lvalue mechanism "
                        "instead");
   if (AS == 7)
-    report_fatal_error("MCS251: address space 7 is reserved and its data "
+    reportFatalUsageError("MCS251: address space 7 is reserved and its data "
                        "access is not yet implemented");
   // AS0/1/2/6/8/9 are the generic data-access set, AS3 the XDATA (MOVX)
   // channel and AS4 the CODE (DR read) channel; anything else is unassigned
@@ -2633,7 +2629,7 @@ static void checkDataAddressSpace(unsigned AS, bool IsStore) {
   for (unsigned A : Implemented)
     if (AS == A)
       return;
-  report_fatal_error("MCS251: address space " + Twine(AS) +
+  reportFatalUsageError("MCS251: address space " + Twine(AS) +
                      " is not allocated for data access; refusing to fall "
                      "back to the default address space");
 }
@@ -2652,10 +2648,10 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
   if (A.IsNear) {
     if (AddressSpace == 6) {
       if (AccessSize != 1)
-        report_fatal_error("MCS251: SFR address space supports only byte access");
+        reportFatalUsageError("MCS251: SFR address space supports only byte access");
     } else if (AddressSpace != 0 && AddressSpace != 1 && AddressSpace != 2 &&
                AddressSpace != 8) {
-      report_fatal_error("MCS251: 16-bit generic RAM access requires address "
+      reportFatalUsageError("MCS251: 16-bit generic RAM access requires address "
                          "space 0, 1, 2 or 8");
     }
   } else if (PtrVT != MVT::i32 ||
@@ -2669,7 +2665,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
     // (XDATA) is deliberately NOT classified here -- it has its own MOVX
     // @DPTR builder (buildXDATAAddress below) with its per-byte DPXL
     // re-pointing discipline; reaching the generic far path would bypass it.
-    report_fatal_error("MCS251: unsupported address space for generic RAM access");
+    reportFatalUsageError("MCS251: unsupported address space for generic RAM access");
   }
 
   // Peel signed GEP offsets in the index width selected by the DataLayout.
@@ -2707,7 +2703,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
   }
 
   if (AddressSpace == 6 && !isa<ConstantSDNode>(Ptr))
-    report_fatal_error("MCS251: SFR access requires a constant direct-byte "
+    reportFatalUsageError("MCS251: SFR access requires a constant direct-byte "
                        "address");
 
   // A stack object used directly as the access base: stay frame-relative
@@ -2717,7 +2713,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
     A.IsStack = true;
     A.StackFI = FIN->getIndex();
     if (Off < 0 || Off > 0xfffe)
-      report_fatal_error("MCS251: frame object access offset out of the "
+      reportFatalUsageError("MCS251: frame object access offset out of the "
                          "16-bit displacement range");
     A.Disp = Off;
     return A;
@@ -2755,8 +2751,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
   } else if (isa<ConstantPoolSDNode>(Ptr)) {
     // The MC layer has no MO_ConstantPoolIndex lowering; rejecting here is
     // honest instead of failing later with a misleading operand error.
-    report_fatal_error(
-        "MCS251: constant-pool addresses are not supported (constant "
+    reportFatalUsageError("MCS251: constant-pool addresses are not supported (constant "
         "islands arrive with a later phase)");
   } else if (auto *C = dyn_cast<ConstantSDNode>(Ptr)) {
     // Preserve the direct/SFR convention only for absolute byte addresses.
@@ -2764,9 +2759,9 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
                  (PtrVT == MVT::i16 ? 0xffffULL : 0xffffffffULL);
     if (AddressSpace == 6) {
       if (K == 0xff)
-        report_fatal_error("MCS251: SFR address 0xff is permanently forbidden");
+        reportFatalUsageError("MCS251: SFR address 0xff is permanently forbidden");
       if (K < 0x80 || K > 0xfe)
-        report_fatal_error("MCS251: SFR byte address must be in 0x80..0xfe");
+        reportFatalUsageError("MCS251: SFR byte address must be in 0x80..0xfe");
       A.IsDirect = true;
       A.DirectAddr = K;
       A.IsNear = false;
@@ -2782,8 +2777,7 @@ static MCS251Address parseAddress(SDValue Ptr, const SDLoc &DL,
     A.Base = materializeImm(DAG.getConstant(K, DL, PtrVT), DL, DAG);
     return A;
   } else if (isa<JumpTableSDNode>(Ptr) || isa<BlockAddressSDNode>(Ptr)) {
-    report_fatal_error(
-        "MCS251: jump-table/block-address data addresses are not supported");
+    reportFatalUsageError("MCS251: jump-table/block-address data addresses are not supported");
   } else {
     A.Base = Ptr;
     int64_t Last = Off + AccessSize - 1;
@@ -2877,7 +2871,7 @@ static void buildXDATAAddress(SDValue Ptr, int64_t ByteOff, const SDLoc &DL,
                               SelectionDAG &DAG, SDValue &Bank,
                               SDValue &Addr16) {
   if (Ptr.getValueType() != MVT::i32)
-    report_fatal_error("MCS251: XDATA (address space 3) pointers are 32-bit");
+    reportFatalUsageError("MCS251: XDATA (address space 3) pointers are 32-bit");
   int64_t Off = ByteOff;
   // Peel constant GEP offsets; a register+register add stays in the 32-bit
   // pointer value and keeps its carry into the bank byte.
@@ -2896,7 +2890,7 @@ static void buildXDATAAddress(SDValue Ptr, int64_t ByteOff, const SDLoc &DL,
     break;
   }
   if (isa<FrameIndexSDNode>(Ptr))
-    report_fatal_error("MCS251: XDATA access through a frame object is not "
+    reportFatalUsageError("MCS251: XDATA access through a frame object is not "
                        "supported (allocas live in address space 0)");
   if (auto *GA = dyn_cast<GlobalAddressSDNode>(Ptr)) {
     // Full canonical address through the byte-of-24 relocation channel --
@@ -2923,8 +2917,7 @@ static void buildXDATAAddress(SDValue Ptr, int64_t ByteOff, const SDLoc &DL,
   }
   if (isa<ConstantPoolSDNode>(Ptr) || isa<JumpTableSDNode>(Ptr) ||
       isa<BlockAddressSDNode>(Ptr))
-    report_fatal_error(
-        "MCS251: XDATA constant-pool/jump-table addresses are not supported");
+    reportFatalUsageError("MCS251: XDATA constant-pool/jump-table addresses are not supported");
   if (auto *C = dyn_cast<ConstantSDNode>(Ptr)) {
     // Constant canonical address: bank and window both fold at compile
     // time.  The i32 container wraps at 2^32; bits [23:0] are the address.
@@ -3068,10 +3061,9 @@ SDValue MCS251TargetLowering::LowerLoad(SDValue Op, SelectionDAG &DAG) const {
   EVT ValVT = LD->getValueType(0);
 
   if (LD->isAtomic())
-    report_fatal_error("MCS251: atomic memory operations are not supported",
-                       /*GenCrashDiag=*/false);
+    reportFatalUsageError("MCS251: atomic memory operations are not supported");
   if (MemVT != MVT::i8 && MemVT != MVT::i16 && MemVT != MVT::i32)
-    report_fatal_error("MCS251: only i8/i16/i32 memory objects are supported (load)");
+    reportFatalUsageError("MCS251: only i8/i16/i32 memory objects are supported (load)");
 
   // DF0 P0-B (narrowed by X2): reject the still-unimplemented data-load AS
   // set (AS5/AS7/unassigned; AS4 loads are now served by the DR channel)
@@ -3201,10 +3193,9 @@ SDValue MCS251TargetLowering::LowerStore(SDValue Op, SelectionDAG &DAG) const {
   SDValue Val = ST->getValue();
 
   if (ST->isAtomic())
-    report_fatal_error("MCS251: atomic memory operations are not supported",
-                       /*GenCrashDiag=*/false);
+    reportFatalUsageError("MCS251: atomic memory operations are not supported");
   if (MemVT != MVT::i8 && MemVT != MVT::i16 && MemVT != MVT::i32)
-    report_fatal_error("MCS251: only i8/i16/i32 memory objects are supported (store)");
+    reportFatalUsageError("MCS251: only i8/i16/i32 memory objects are supported (store)");
 
   // DF0 P0-A (narrowed by X2): CODE (AS4) stores stay forbidden and the
   // remaining unimplemented non-zero AS data stores are still rejected,
@@ -3519,7 +3510,7 @@ SDValue MCS251TargetLowering::LowerSTACKRESTORE(SDValue Op,
   // would pop object bytes as the interrupt frame. Capability rejection.
   if (DAG.getMachineFunction().getFunction().getCallingConv() ==
       CallingConv::MCS251_INTR)
-    report_fatal_error("MCS251 ISR: llvm.stackrestore is not supported in an "
+    reportFatalUsageError("MCS251 ISR: llvm.stackrestore is not supported in an "
                        "interrupt entry");
 
   if (SavedSPX.getValueType() == MVT::i32)
@@ -3556,7 +3547,7 @@ SDValue MCS251TargetLowering::LowerDynamicStackAlloc(SDValue Op,
   // is a backend capability rejection, not a restored A/B safety check.
   if (DAG.getMachineFunction().getFunction().getCallingConv() ==
       CallingConv::MCS251_INTR)
-    report_fatal_error("MCS251 ISR: dynamic stack allocation is not supported "
+    reportFatalUsageError("MCS251 ISR: dynamic stack allocation is not supported "
                        "in an interrupt entry");
 
   // SPX arithmetic remains 16-bit. Objects must fit the physical stack;
@@ -3569,7 +3560,7 @@ SDValue MCS251TargetLowering::LowerDynamicStackAlloc(SDValue Op,
   }
   if (auto *C = dyn_cast<ConstantSDNode>(Op.getOperand(2))) {
     if (C->getZExtValue() > 1)
-      report_fatal_error("MCS251: dynamic alloca alignment > 1 is not "
+      reportFatalUsageError("MCS251: dynamic alloca alignment > 1 is not "
                          "supported (the stack is byte-aligned, no padding "
                          "is ever emitted)");
   } else {
@@ -3626,10 +3617,10 @@ static void checkParameterType(Type *Ty, unsigned Index,
                                bool AllowStaticPointers) {
   if (Ty->isPointerTy()) {
     if (!hasOrdinaryPointerABI(Ty))
-      report_fatal_error("MCS251: pointer parameter address space has no "
+      reportFatalUsageError("MCS251: pointer parameter address space has no "
                          "ordinary register/static-slot ABI");
     if (Index && !AllowStaticPointers)
-      report_fatal_error("MCS251: static pointer parameters are not supported "
+      reportFatalUsageError("MCS251: static pointer parameters are not supported "
                          "by the compatibility ABI");
     return;
   }
@@ -3644,7 +3635,7 @@ static void checkParameterType(Type *Ty, unsigned Index,
   // width is admitted.
   if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) && !Ty->isIntegerTy(32) &&
       !Ty->isFloatTy() && !Ty->isIntegerTy(1))
-    report_fatal_error("MCS251: arguments must be unsplit i8/i16/i32 scalars");
+    reportFatalUsageError("MCS251: arguments must be unsplit i8/i16/i32 scalars");
 }
 
 template <typename ArgT>
@@ -3665,9 +3656,9 @@ static void checkParameter(const ArgT &Arg, unsigned Index,
       Arg.PartOffset || Arg.Flags.isSplit() || Arg.Flags.isByVal() ||
       Arg.Flags.isByRef() || Arg.Flags.isSRet() || Arg.Flags.isInAlloca() ||
       Arg.Flags.isNest())
-    report_fatal_error("MCS251: arguments must be unsplit i8/i16/i32 scalars");
+    reportFatalUsageError("MCS251: arguments must be unsplit i8/i16/i32 scalars");
   if (Index && Arg.Flags.isPointer() && !AllowStaticPointers)
-    report_fatal_error("MCS251: static pointer parameters are not supported "
+    reportFatalUsageError("MCS251: static pointer parameters are not supported "
                        "by the compatibility ABI");
 }
 
@@ -3726,7 +3717,7 @@ static void reportVAListPairShape(Type *ValTy, const DataLayout &DL,
     std::string TyStr;
     raw_string_ostream OS(TyStr);
     ValTy->print(OS);
-    report_fatal_error(Twine("MCS251: ") + What +
+    reportFatalUsageError(Twine("MCS251: ") + What +
                        " requires the frozen 8-byte va_list pair {ptr, i32}; "
                        "got a " +
                        Twine(Bytes) + "-byte object (" + TyStr + ")");
@@ -3798,7 +3789,7 @@ static void reportVAListShape(Type *ValTy, const DataLayout &DL,
     std::string TyStr;
     raw_string_ostream OS(TyStr);
     ValTy->print(OS);
-    report_fatal_error(Twine("MCS251: ") + What +
+    reportFatalUsageError(Twine("MCS251: ") + What +
                        " requires the frozen 8-byte va_list pair {ptr, i32}; "
                        "got a " +
                        Twine(Size) + "-byte object (" + OS.str() + ")");
@@ -3875,7 +3866,7 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
     SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals) const {
   switch (CallConv) {
   default:
-    report_fatal_error("Unsupported calling convention");
+    reportFatalUsageError("Unsupported calling convention");
   case CallingConv::C:
   case CallingConv::Fast:
     // IPO can select fastcc for local functions. MCS251 deliberately uses
@@ -3902,7 +3893,7 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
   // and read an unwritten slot.  The shape is compiler-countable, so it is
   // a hard error, not a silent-corruption path (§4.3.6 design stance).
   if (IsVarArg && Ins.empty())
-    report_fatal_error("MCS251: a variadic definition must have at least one "
+    reportFatalUsageError("MCS251: a variadic definition must have at least one "
                        "fixed parameter (the first source argument uses the "
                        "register channel, which va_arg cannot read)");
 
@@ -3914,14 +3905,14 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
   unsigned FnAS = MF.getFunction().getAddressSpace();
   unsigned ProgAS = DAG.getDataLayout().getProgramAddressSpace();
   if (FnAS != ProgAS)
-    report_fatal_error("MCS251: functions must reside in the program address "
+    reportFatalUsageError("MCS251: functions must reside in the program address "
                        "space (" +
                        Twine(ProgAS) + "); address space " + Twine(FnAS) +
                        " is not a valid function placement");
 
   if (CallConv == CallingConv::MCS251_INTR) {
     if (!Ins.empty())
-      report_fatal_error("MCS251 ISR: interrupt entry must take no arguments");
+      reportFatalUsageError("MCS251 ISR: interrupt entry must take no arguments");
     return Chain;
   }
 
@@ -3935,7 +3926,7 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
   for (unsigned I = 0; I < Ins.size(); ++I) {
     checkParameter(Ins[I], I, AllowStaticPointers);
     if (Ins[I].OrigArgIndex != I)
-      report_fatal_error("MCS251: aggregate parameters are not supported");
+      reportFatalUsageError("MCS251: aggregate parameters are not supported");
   }
 
   // The argument arrives in a reserved SFR (DPL/DPH/DPTR, and A/B for i32).
@@ -4028,7 +4019,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   switch (CallConv) {
   default:
-    report_fatal_error("Unsupported calling convention");
+    reportFatalUsageError("Unsupported calling convention");
   case CallingConv::C:
   case CallingConv::Fast:
     // IPO can select fastcc for local functions. MCS251 deliberately uses
@@ -4041,8 +4032,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     // its calling convention -- including a call written inside an ISR
     // itself. The Verifier rejects this at IR level; this is the backend
     // boundary.
-    report_fatal_error("MCS251 ISR: interrupt entry may not be called",
-                       /*gen_crash_diag=*/false);
+    reportFatalUsageError("MCS251 ISR: interrupt entry may not be called");
   }
 
   // G2 B-S2: the blanket variadic rejection that stood here was REMOVED.
@@ -4050,8 +4040,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // IsDirect has been computed (G2-VARIADIC-DESIGN-draft.md §4.5 row 3).
 
   if (CLI.CB && CLI.CB->isMustTailCall())
-    report_fatal_error("MCS251: musttail calls are not supported",
-                       /*gen_crash_diag=*/false);
+    reportFatalUsageError("MCS251: musttail calls are not supported");
   // Ordinary tail hints, including calls without an IR CallBase, are optional.
   // From an ISR this is mandatory: a tail call would place the helper's ERET
   // where the fixed frame needs RETI (T05 step 6).
@@ -4070,17 +4059,15 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   if (auto *GA = dyn_cast<GlobalAddressSDNode>(Callee)) {
     const GlobalValue *GV = GA->getGlobal();
     if (!isa<Function>(GV))
-      report_fatal_error("MCS251: direct call target is not a function");
+      reportFatalUsageError("MCS251: direct call target is not a function");
     if (GA->getAddressSpace() != ProgramAS)
-      report_fatal_error(
-          "MCS251: direct call target is not in the configured CODE "
+      reportFatalUsageError("MCS251: direct call target is not in the configured CODE "
           "address space");
     // A call with an ordinary CC aimed at a known interrupt entry in this
     // module is rejected here as well (T05 step 5); an unrecognized target
     // stays the domain of the Verifier and the linker.
     if (cast<Function>(GV)->getCallingConv() == CallingConv::MCS251_INTR)
-      report_fatal_error("MCS251 ISR: interrupt entry may not be called",
-                         /*gen_crash_diag=*/false);
+      reportFatalUsageError("MCS251 ISR: interrupt entry may not be called");
   }
   const bool IsDirect = isa<GlobalAddressSDNode>(Callee) ||
                         isa<ExternalSymbolSDNode>(Callee);
@@ -4090,7 +4077,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   if (IsVarArg && !IsDirect)
     // C2, frozen: a function-pointer call has no named callee to derive the
     // `_PARM_n` continuation-slot symbols from.
-    report_fatal_error("MCS251 variadic call form 'indirect' is not supported "
+    reportFatalUsageError("MCS251 variadic call form 'indirect' is not supported "
                        "(static slots require a named callee)");
   if (IsVarArg) {
     // Message F, frozen: the six continuation slots are all the ABI has.
@@ -4101,7 +4088,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     if (NumFixed == static_cast<unsigned>(-1))
       NumFixed = 0; // no call-site type survived: fail towards the gate
     if (Outs.size() > NumFixed && Outs.size() - NumFixed > 6)
-      report_fatal_error("MCS251: variadic call passes more than 6 variadic "
+      reportFatalUsageError("MCS251: variadic call passes more than 6 variadic "
                          "arguments (Sema cap gate missed this call; "
                          "recompile the caller with a current compiler)");
   }
@@ -4110,13 +4097,11 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
       auto *CalleeTy = cast<PointerType>(CLI.CB->getCalledOperand()->getType());
       unsigned CalleeAS = CalleeTy->getAddressSpace();
       if (CalleeAS != ProgramAS)
-        report_fatal_error(
-            "MCS251: indirect call target is not in the configured CODE "
+        reportFatalUsageError("MCS251: indirect call target is not in the configured CODE "
             "address space");
     }
     if (Callee.getValueType() != MVT::i32)
-      report_fatal_error(
-          "MCS251: indirect call target must be a 32-bit CODE pointer");
+      reportFatalUsageError("MCS251: indirect call target must be a 32-bit CODE pointer");
     // ECALLr consumes the complete region-qualified address (not a WR offset).
     if (isa<ConstantSDNode>(Callee))
       Callee = materializeImm(Callee, DL, DAG);
@@ -4125,7 +4110,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   bool AllowStaticPointers = ProgramAS == 4;
   if (CLI.CB) {
     if (!hasOrdinaryPointerABI(CLI.CB->getType()))
-      report_fatal_error("MCS251: pointer return address space has no ordinary ABI");
+      reportFatalUsageError("MCS251: pointer return address space has no ordinary ABI");
     for (unsigned I = 0; I < CLI.CB->arg_size(); ++I)
       checkParameterType(CLI.CB->getArgOperand(I)->getType(), I,
                          AllowStaticPointers);
@@ -4134,7 +4119,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   for (unsigned I = 0; I < Outs.size(); ++I) {
     checkParameter(Outs[I], I, AllowStaticPointers);
     if (CLI.CB && Outs[I].OrigArgIndex != I)
-      report_fatal_error("MCS251: aggregate parameters are not supported");
+      reportFatalUsageError("MCS251: aggregate parameters are not supported");
   }
 
   Chain = DAG.getCALLSEQ_START(Chain, 0, 0, DL);
@@ -4143,7 +4128,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   if (Outs.size() > 1) {
     if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee)) {
       if (G->getOffset() || !isa<Function>(G->getGlobal()))
-        report_fatal_error("MCS251: static parameters require a named function");
+        reportFatalUsageError("MCS251: static parameters require a named function");
       SlotCallee = DAG.getTarget().getSymbol(G->getGlobal())->getName().str();
     } else if (auto *S = dyn_cast<ExternalSymbolSDNode>(Callee)) {
       SmallString<128> Name;
@@ -4153,9 +4138,8 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
       // WP4: predictable capability rejection -- clean exit(1). Normally
       // unreachable: the structural contract check rejects the multi-argument
       // indirect call shape first; this is the MIR-entry defense.
-      report_fatal_error("MCS251: multi-argument indirect calls are not supported "
-                         "(static parameter slots require a named callee)",
-                         /*GenCrashDiag=*/false);
+      reportFatalUsageError("MCS251: multi-argument indirect calls are not supported "
+                         "(static parameter slots require a named callee)");
     }
     // Finish every slot store before setting up the first argument registers.
     // Memory objects use the same measured big-endian layout as SDCC.
@@ -4199,7 +4183,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // in particular this must stay i32 when AS0 is the 16-bit Tiny pointer ABI.
   constexpr MVT CodePtrVT = MVT::i32;
   if (getPointerTy(DAG.getDataLayout(), ProgramAS) != CodePtrVT)
-    report_fatal_error("MCS251: CODE call target must use a 32-bit pointer");
+    reportFatalUsageError("MCS251: CODE call target must use a 32-bit pointer");
   if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee))
     Callee = DAG.getTargetGlobalAddress(G->getGlobal(), DL, CodePtrVT,
                                         G->getOffset());
@@ -4243,8 +4227,7 @@ SDValue MCS251TargetLowering::LowerCallResult(
   if (Ins.size() > 1 ||
       (!Ins.empty() && Ins[0].VT != MVT::i8 && Ins[0].VT != MVT::i16 &&
        Ins[0].VT != MVT::i32 && Ins[0].VT != MVT::f32))
-    report_fatal_error(
-        "minimal MCS251 backend only supports i8/i16/i32/f32/void return values");
+    reportFatalUsageError("minimal MCS251 backend only supports i8/i16/i32/f32/void return values");
 
   if (!Ins.empty() && usesI32ABI(Ins[0].VT)) {
     SmallVector<SDValue, 4> Parts;
@@ -4293,10 +4276,10 @@ bool MCS251TargetLowering::CanLowerReturn(
     // ISR; G2 §4.5/§4.6 keep this branch loud while the ordinary variadic
     // rejection below it was removed).
     if (IsVarArg)
-      report_fatal_error("minimal MCS251 backend does not support variadic "
+      reportFatalUsageError("minimal MCS251 backend does not support variadic "
                          "functions");
     if (!Outs.empty() || !RetTy->isVoidTy())
-      report_fatal_error("MCS251 ISR: interrupt entry must return void");
+      reportFatalUsageError("MCS251 ISR: interrupt entry must return void");
     return true;
   }
   // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md §4.5): the ordinary-definition
@@ -4306,16 +4289,15 @@ bool MCS251TargetLowering::CanLowerReturn(
   // LowerCall indirect/count gates (C2 / message F) and the residual
   // llvm.va_arg reject (message E).
   if (Outs.size() > 1)
-    report_fatal_error("minimal MCS251 backend only supports zero or one "
+    reportFatalUsageError("minimal MCS251 backend only supports zero or one "
                        "i8/i16/i32 return value; multi-value returns are not "
                        "supported");
   if (!hasOrdinaryPointerABI(RetTy))
-    report_fatal_error("MCS251: pointer return address space has no ordinary ABI");
+    reportFatalUsageError("MCS251: pointer return address space has no ordinary ABI");
   SmallVector<CCValAssign, 16> RVLocs;
   CCState CCInfo(CallConv, IsVarArg, MF, RVLocs, Context);
   if (!CCInfo.CheckReturn(Outs, RetCC_MCS251))
-    report_fatal_error(
-        "minimal MCS251 backend only supports i8/i16/i32/f32/void return values");
+    reportFatalUsageError("minimal MCS251 backend only supports i8/i16/i32/f32/void return values");
   return true;
 }
 
@@ -4334,7 +4316,7 @@ SDValue MCS251TargetLowering::LowerReturn(
     // return against a CC that has no ABI location for one.
     if (IsVarArg || !Outs.empty() ||
         !DAG.getMachineFunction().getFunction().getReturnType()->isVoidTy())
-      report_fatal_error("MCS251 ISR: interrupt entry must return void");
+      reportFatalUsageError("MCS251 ISR: interrupt entry must return void");
     return DAG.getNode(MCS251ISD::RETI, DL, MVT::Other, Chain);
   }
   // Assign the return values to the ABI locations: dpl for i8, dpl:dph for

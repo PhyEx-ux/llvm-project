@@ -239,7 +239,7 @@ void MCS251BranchRelaxation::relaxConditional(
   if (!HasFarEjmp) {
     MachineBasicBlock *Fall = MBB.getNextNode();
     if (!Fall || !MBB.isSuccessor(Fall))
-      report_fatal_error("MCS251: out-of-range conditional branch without an "
+      reportFatalUsageError("MCS251: out-of-range conditional branch without an "
                          "explicit far edge cannot be relaxed");
     BuildMI(MBB, MBB.end(), DL, TII->get(MCS251::EJMP)).addMBB(Fall);
   }
@@ -282,7 +282,7 @@ void MCS251BranchRelaxation::verify(MachineFunction &MF) const {
         continue;
       const MachineBasicBlock &Dest = *MI.getOperand(0).getMBB();
       if (!isInRange(MI, Dest))
-        report_fatal_error("MCS251: rel8 branch still out of range after "
+        reportFatalUsageError("MCS251: rel8 branch still out of range after "
                            "relaxation");
     }
   }

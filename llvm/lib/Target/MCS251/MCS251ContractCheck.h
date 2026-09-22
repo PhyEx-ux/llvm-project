@@ -6,7 +6,7 @@
 // The MCS-251 target contract is stricter than generic LLVM IR validity (an
 // addrspace(5) pointer, an f64 operation or an unregistered interrupt entry
 // are all legal IR but outside the contract). This pass only reads the
-// module: a violation is a report_fatal_error, and nothing is ever written
+// module: a violation is a fatal error report, and nothing is ever written
 // back to the IR. Any -O0 shape that needs folding to be judged is evaluated
 // locally through MCS251LocalInterp instead.
 //
@@ -52,7 +52,7 @@ Error verifyModuleCapabilities(const Module &M);
 
 /// WP4: the clang backend (BackendUtil) has a DiagnosticsEngine and runs the
 /// checks itself before/after the optimization pipeline, so a deliberate
-/// capability rejection must not travel through report_fatal_error there --
+/// capability rejection must not travel through the fatal error path there --
 /// that would re-enter clang's in-process crash-recovery path and print a
 /// bug-report request / stack dump even though the failure is expected. When
 /// the check is deferred, the target's pipeline mounts no contract-check

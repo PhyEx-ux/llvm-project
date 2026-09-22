@@ -114,7 +114,7 @@ static bool getMCS251ContractFeature(
   bool Seen = false;
   for (StringRef Entry : llvm::split(FS, ',')) {
     if (Entry.starts_with("-mcs251-memory-contract"))
-      report_fatal_error("MCS251: the memory contract feature cannot be "
+      reportFatalUsageError("MCS251: the memory contract feature cannot be "
                             "disabled");
     if (!Entry.starts_with(MCS251::getMCS251ContractFeaturePrefix()))
       continue;
@@ -141,8 +141,7 @@ static std::optional<MCS251::MemoryContract>
 resolveMCS251MemoryContract(StringRef FS) {
   std::optional<MCS251::MemoryContract> Contract;
   if (!getMCS251ContractFeature(FS, Contract)) {
-    report_fatal_error(
-        "MCS251: invalid '+mcs251-memory-contract=' target feature");
+    reportFatalUsageError("MCS251: invalid '+mcs251-memory-contract=' target feature");
   }
   if (Contract) {
     // The feature transport (clang) and the command-line transport (llc)
@@ -150,8 +149,7 @@ resolveMCS251MemoryContract(StringRef FS) {
     // frontend/backend layout disagreement.
     if (MCS251MemoryModel.getNumOccurrences() != 0 ||
         MCS251MemoryContract.getNumOccurrences() != 0)
-      report_fatal_error(
-          "-mcs251-memory-model/-mcs251-memory-contract conflict with the "
+      reportFatalUsageError("-mcs251-memory-model/-mcs251-memory-contract conflict with the "
           "'+mcs251-memory-contract=' target feature");
     return Contract;
   }
@@ -160,21 +158,21 @@ resolveMCS251MemoryContract(StringRef FS) {
   const bool HasContractOpt =
       MCS251MemoryContract.getNumOccurrences() != 0;
   if (HasModel && HasContractOpt)
-    report_fatal_error("-mcs251-memory-model and -mcs251-memory-contract "
+    reportFatalUsageError("-mcs251-memory-model and -mcs251-memory-contract "
                           "are mutually exclusive");
   if (HasModel) {
     MCS251::MemoryContract MC;
     // Presence and value are distinct: an explicitly empty model name is
     // malformed, like an explicitly empty wire contract.
     if (!translateMCS251MemoryModel(MCS251MemoryModel, MC))
-      report_fatal_error("invalid -mcs251-memory-model");
+      reportFatalUsageError("invalid -mcs251-memory-model");
     return MC;
   }
   if (HasContractOpt) {
     MCS251::MemoryContract MC;
     if (!MCS251::parseMemoryContract(MCS251MemoryContract, MC) ||
         !MCS251::isValidMemoryContract(MC))
-      report_fatal_error("invalid -mcs251-memory-contract");
+      reportFatalUsageError("invalid -mcs251-memory-contract");
     return MC;
   }
   // No user selection: materialize the same xsmall contract the clang cc1
@@ -189,7 +187,7 @@ getMCS251DataLayout(const std::optional<MCS251::MemoryContract> &Contract) {
     return MCS251::getCompatibilityDataLayout();
 
   if (!MCS251::isValidMemoryContract(*Contract))
-    report_fatal_error("MCS251: invalid numeric memory contract");
+    reportFatalUsageError("MCS251: invalid numeric memory contract");
 
   const auto Version =
       static_cast<MCS251::ASLayoutVersion>(Contract->ASLayoutVersion);
@@ -197,8 +195,7 @@ getMCS251DataLayout(const std::optional<MCS251::MemoryContract> &Contract) {
       static_cast<MCS251::AS0PointerBits>(Contract->AS0PointerBits);
   auto Desc = MCS251::getLayoutDesc(Version, AS0Bits);
   if (!Desc)
-    report_fatal_error(
-        "MCS251: numeric memory contract has no data layout");
+    reportFatalUsageError("MCS251: numeric memory contract has no data layout");
   return Desc->DataLayout;
 }
 
@@ -306,7 +303,7 @@ public:
     // The check itself is read-only: it never folds or erases IR.
     //
     // WP4: when the clang backend owns the verdict (it reports through its
-    // DiagnosticsEngine instead of report_fatal_error, avoiding the
+    // DiagnosticsEngine instead of the fatal error path, avoiding the
     // in-process crash-recovery path), the pass is not mounted here.
     if (!MCS251::isContractCheckDeferred())
       addPass(MCS251::createMCS251ContractCheckPass(

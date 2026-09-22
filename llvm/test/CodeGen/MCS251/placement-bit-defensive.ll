@@ -21,8 +21,8 @@
 ; as a byte object would be the wrong fix.
 ;
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/owned.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OWNED
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bind.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BIND
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/owned.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OWNED
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bind.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BIND
 ;
 ; OWNED: LLVM ERROR: MCS251: bit object 'bit' also carries the mcs251-place attribute: a bit entity is object identity without a byte storage class and cannot be placed or bound
 ; BIND: LLVM ERROR: MCS251: bit object 'y' also carries the mcs251-place attribute: a bit entity is object identity without a byte storage class and cannot be placed or bound

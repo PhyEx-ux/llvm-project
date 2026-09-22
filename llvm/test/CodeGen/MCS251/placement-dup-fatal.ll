@@ -10,7 +10,7 @@
 ; malformed producer or a hand-edited IR can build this; Sema's
 ; cross-TU/stable-symbol rules reject it at the source level).
 
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %s -o /dev/null 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %s -o /dev/null 2>&1 | FileCheck %s
 ; CHECK: LLVM ERROR: MCS251: section .mcu.fixed.clash disagrees with placement NOTE for _b
 
 target triple = "mcs251-unknown-none"

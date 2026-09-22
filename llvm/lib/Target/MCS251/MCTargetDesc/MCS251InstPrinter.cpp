@@ -116,7 +116,7 @@ void MCS251InstPrinter::printBitAddr(const MCInst *MI, unsigned OpNo,
   if (Op.isExpr()) {
     const MCExpr *Sym = nullptr;
     if (MCS251::isSymbolicBitAddr(Op, Sym))
-      report_fatal_error("MCS251 bit object requires ELF object output");
+      reportFatalUsageError("MCS251 bit object requires ELF object output");
   }
   O << format("0x%02x", MCS251::getBitAddr(Op));
 }

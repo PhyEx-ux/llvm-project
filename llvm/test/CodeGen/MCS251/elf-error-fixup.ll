@@ -1,4 +1,4 @@
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %s -o %t 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %s -o %t 2>&1 | FileCheck %s
 ;
 ; A raw i32 symbolic prefix needs a relocation outside ABI v1. Do not emit
 ; R_NONE, truncate it to 24 bits, or accidentally pass through the REL writer.

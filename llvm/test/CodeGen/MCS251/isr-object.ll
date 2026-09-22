@@ -30,7 +30,7 @@
 ; RUN: llvm-objcopy --dump-section=.mcs251.isr=%t.meta %t.o
 ; RUN: %python -c "import pathlib,struct,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert len(b)==48; a=[struct.unpack('>HHBBBBHHIII',b[i:i+24]) for i in (0,24)]; assert a==[(2,24,1,1,1,1,1,1,0,0,0),(2,24,2,1,1,1,1,1,0,0,0)],a" %t.meta
 ; RUN: llvm-readobj --symbols %t.o | FileCheck %s --check-prefix=SYM
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj %t/object.ll -o %t.rel 2>&1 | FileCheck %s --check-prefix=REL
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj %t/object.ll -o %t.rel 2>&1 | FileCheck %s --check-prefix=REL
 
 ; G1-1: high-slot persistence. Slot 126 (the new upper bound) and slot 31
 ; (reclassified Legal) pass ContractCheck and the AsmPrinter object boundary
@@ -65,7 +65,7 @@
 ; corresponding RUN pass an invalid slot through and fail.
 ; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob.mir > %t/ap-oob.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ;
 ; G1-3a review B2: the same two harnesses carry the completed slot matrix.
 ; In-profile Reserved 81 (HeaderOnly), 100 (NoSource) and 13
@@ -92,31 +92,31 @@
 ; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-alpha.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
 ; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/cc-oob-overflow40.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=CCOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-res81.mir > %t/ap-oob-res81.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-res81.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-res81.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-res100.mir > %t/ap-oob-res100.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-res100.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-res100.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-res13.mir > %t/ap-oob-res13.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-res13.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-res13.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-sys14.mir > %t/ap-oob-sys14.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-sys14.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-sys14.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-empty.mir > %t/ap-oob-empty.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-empty.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-empty.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-leadzero.mir > %t/ap-oob-leadzero.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-leadzero.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-leadzero.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-plus45.mir > %t/ap-oob-plus45.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-plus45.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-plus45.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-minus0.mir > %t/ap-oob-minus0.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-minus0.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-minus0.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-leadspace.mir > %t/ap-oob-leadspace.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-leadspace.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-leadspace.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-trailspace.mir > %t/ap-oob-trailspace.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-trailspace.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-trailspace.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-junk4x5.mir > %t/ap-oob-junk4x5.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-junk4x5.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-junk4x5.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-alpha.mir > %t/ap-oob-alpha.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-alpha.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-alpha.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ap-oob-overflow40.mir > %t/ap-oob-overflow40.gen.mir
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-overflow40.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ap-oob-overflow40.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=APOOB
 
 ; Rework R1: the minimal ISR object must not reserve REG_BANK_0 storage and
 ; must not carry DSEG/XINIT data sections (the keepalive root is metadata).
@@ -127,8 +127,8 @@
 ; standard AS4-cast root over ordinary functions is hard-rejected by the v1
 ; object gate; the V1 AS0 root is hard-rejected by the global-data emission
 ; path. Both are crashes on the pre-T06 toolchain (probe: exit -6).
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/ordinary-used-v2.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/ordinary-used-v1.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=V1USED
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/ordinary-used-v2.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/ordinary-used-v1.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=V1USED
 
 ; Rework R2: legal mixed members inside ISR modules keep working -- an ISR
 ; member next to an ordinary AS4 function member, the AS4-direct root form,
@@ -142,15 +142,15 @@
 ; Shared-constant dual path: the same cast constant inside the verified
 ; keepalive root and inside an ordinary escaped global must still be
 ; rejected, independent of the global ordering in the module.
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/as4-escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/shared-dual.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/shared-aggregate.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/shared-aggregate-reverse.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/as4-escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/shared-dual.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/shared-aggregate.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/shared-aggregate-reverse.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
 ; With an ISR definition, sharing the entire keepalive aggregate also escapes
 ; the ISR itself, so the structural verifier must reject both global orders.
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/shared-isr-aggregate.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOTUSED
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/shared-isr-aggregate-reverse.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOTUSED
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/mixed-member.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/mixed-member.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/compiler-used.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOTUSED
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf %t/bad-root.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=NOTUSED
 
@@ -162,9 +162,9 @@
 ; emitter as the pipeline start so no expansion pass can fix the function
 ; before the check (same harness as the review probes).
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/isr-eret.mir > %t/isr-eret.gen.mir
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/isr-eret.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ISRERET
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/isr-eret.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ISRERET
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/ordinary-reti.mir > %t/ordinary-reti.gen.mir
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ordinary-reti.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ORDRETI
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/ordinary-reti.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ORDRETI
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/target-pseudo.mir > %t/target-pseudo.gen.mir
 ; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -start-before=mcs251-asm-printer %t/target-pseudo.gen.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=TPSEUDO
 ; RUN: sed -e 's/^;MIRHEADER$/--- |/' %t/generic-pseudo.mir > %t/generic-pseudo.gen.mir

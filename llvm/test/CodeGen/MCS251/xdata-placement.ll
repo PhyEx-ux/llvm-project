@@ -11,12 +11,12 @@
 ; (SHF_MCS251_XSEG_SPLIT, no record); a v1 object keeps the frozen gate.
 ; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/huge.ll -o %t/huge.o
 ; RUN: llvm-readobj --sections %t/huge.o | FileCheck %s --check-prefix=SPLIT
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/huge.ll -o %t/huge-v1.o 2>&1 | FileCheck %s --check-prefix=HUGE
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/align.ll -o %t/align.o 2>&1 | FileCheck %s --check-prefix=ALIGN
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/gepnull.ll -o %t/gepnull.o 2>&1 | FileCheck %s --check-prefix=ALG
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/huge.ll -o %t/huge-v1.o 2>&1 | FileCheck %s --check-prefix=HUGE
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/align.ll -o %t/align.o 2>&1 | FileCheck %s --check-prefix=ALIGN
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/gepnull.ll -o %t/gepnull.o 2>&1 | FileCheck %s --check-prefix=ALG
 ; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/inttoptr.ll -o %t/inttoptr.o 2>&1 | FileCheck %s --check-prefix=INTPTR
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/ascast.ll -o %t/ascast.o 2>&1 | FileCheck %s --check-prefix=ALG
-; RUN: not --crash llc -mtriple=mcs251 %t/defs.ll -o - 2>&1 | FileCheck %s --check-prefix=TEXT
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/ascast.ll -o %t/ascast.o 2>&1 | FileCheck %s --check-prefix=ALG
+; RUN: not llc -mtriple=mcs251 %t/defs.ll -o - 2>&1 | FileCheck %s --check-prefix=TEXT
 ;
 ; X3 placement: an AS3 (__xdata) definition becomes ONE per-object NOBITS
 ; section `.mcs251.XSEG.<sym>` plus one `.mcs251.xdata_init` record

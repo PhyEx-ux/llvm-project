@@ -19,9 +19,9 @@
 ;
 ; Named and numeric selections are mutually exclusive; unknown names and an
 ; explicitly empty value are malformed.
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-model=tiny -mcs251-memory-contract=1,2,16,1,1 %t/tiny.ll -filetype=null 2>&1 | FileCheck %s --check-prefix=EXCLUSIVE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-model=compact %t/tiny.ll -filetype=null 2>&1 | FileCheck %s --check-prefix=INVALID
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-model= %t/tiny.ll -filetype=null 2>&1 | FileCheck %s --check-prefix=INVALID
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-model=tiny -mcs251-memory-contract=1,2,16,1,1 %t/tiny.ll -filetype=null 2>&1 | FileCheck %s --check-prefix=EXCLUSIVE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-model=compact %t/tiny.ll -filetype=null 2>&1 | FileCheck %s --check-prefix=INVALID
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-model= %t/tiny.ll -filetype=null 2>&1 | FileCheck %s --check-prefix=INVALID
 ;
 ; CONFLICT: error: {{.*}}input MCS251 data layout conflicts with the selected memory contract
 ; EXCLUSIVE: LLVM ERROR: -mcs251-memory-model and -mcs251-memory-contract are mutually exclusive

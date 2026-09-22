@@ -63,9 +63,9 @@
 ;RUN: llvm-readobj --sections %t/def.o | FileCheck %s --check-prefix=NOSTORE --implicit-check-not=.mcs251.dseg --implicit-check-not=.mcs251.xinit
 
 ; Negative: the placeholder must be an i8 global with initializer 0 or 1.
-;RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/bad-init.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BADINIT
-;RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/bad-type.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BADTYPE
-;RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/bad-tls.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BADPLACE
+;RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/bad-init.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BADINIT
+;RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/bad-type.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BADTYPE
+;RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/bad-tls.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BADPLACE
 
 ; An extern-only TU (every marked global is a declaration) emits no
 ; `.mcs251.bit` at all: the linker rejects an empty record section and a
@@ -83,7 +83,7 @@
 ;KEEP-NEXT:   0x4 R_MCS251_BIT_REF _flag 0x0
 
 ; A keepalive root that also escapes an ordinary global is not exempted.
-;RUN: not --crash llc -mtriple=mcs251 -O2 -filetype=obj -mcs251-object-format=elf %t/keepalive-mixed.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=KEEPMIX
+;RUN: not llc -mtriple=mcs251 -O2 -filetype=obj -mcs251-object-format=elf %t/keepalive-mixed.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=KEEPMIX
 ;KEEPMIX: MCS251: defined global data requires
 
 ; Escape through a shared constant aggregate: the SAME uniqued aggregate is
@@ -113,8 +113,8 @@
 ;CALL: MCS251 contract violation: MCS251 bit object 'flag': handle must not be used by a non-whitelisted call or operand bundle
 
 ; The bit-object protocol is ELF-only: REL objects and asm text reject it.
-;RUN: not --crash llc -mtriple=mcs251 -filetype=obj %t/def.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
-;RUN: not --crash llc -mtriple=mcs251 -filetype=asm %t/def.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
+;RUN: not llc -mtriple=mcs251 -filetype=obj %t/def.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
+;RUN: not llc -mtriple=mcs251 -filetype=asm %t/def.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
 ;REL: MCS251 bit object requires ELF object output
 
 ; The definition record's association relocation must keep the exact named

@@ -1,6 +1,6 @@
 ; RUN: split-file %s %t
 ; RUN: llc -mtriple=mcs251 -O0 -mcs251-jump-tables %t/neg.ll -o - | FileCheck %s --check-prefix=NONEG
-; RUN: not --crash llc -mtriple=mcs251 -O0 -mcs251-jump-tables %t/i64.ll -o - 2>&1 | FileCheck %s --check-prefix=I64
+; RUN: not llc -mtriple=mcs251 -O0 -mcs251-jump-tables %t/i64.ll -o - 2>&1 | FileCheck %s --check-prefix=I64
 ; RUN: not --crash llc -mtriple=mcs251 -O0 -mcs251-jump-tables %t/i64int.ll -o /dev/null
 ; RUN: not --crash llc -mtriple=mcs251 -O0 %t/i64int.ll -o /dev/null
 ; RUN: llc -mtriple=mcs251 -O0 -mcs251-jump-tables %t/i1.ll -o - | FileCheck %s --check-prefix=I1

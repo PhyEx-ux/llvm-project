@@ -105,12 +105,12 @@ module asm "nop"
     # `!mcs251.signatures` requirement -- identical to the ordinary entry, not
     # a property of the exemption.
     "truly_empty": ("""
-""", {"O0.ir": 0, "O0.obj": 70, "O2.ir": 0, "O2.obj": 70}),
+""", {"O0.ir": 0, "O0.obj": 1, "O2.ir": 0, "O2.obj": 1}),
 }
 
 # The fabricated-empty control runs through the ThinLTO entry only (the
 # ordinary entry has no index to consume); no legal object path is claimed.
-FABRICATED_EMPTY_EXPECT = {"O0.ir": 0, "O0.obj": 70}
+FABRICATED_EMPTY_EXPECT = {"O0.ir": 0, "O0.obj": 1}
 
 EXPORTED = {
     "zero_mul": "_f", "constant_select": "_f", "live_i64arg": "_f",

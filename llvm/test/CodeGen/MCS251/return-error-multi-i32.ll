@@ -1,5 +1,5 @@
-; RUN: sed -n '/^define { i32, i32 }/,/^}/p' %s | not --crash llc -mtriple=mcs251 2>&1 | FileCheck %s --check-prefix=TWO-I32
-; RUN: sed -n '/^define { i8, i32 }/,/^}/p' %s | not --crash llc -mtriple=mcs251 2>&1 | FileCheck %s --check-prefix=I8-I32
+; RUN: sed -n '/^define { i32, i32 }/,/^}/p' %s | not llc -mtriple=mcs251 2>&1 | FileCheck %s --check-prefix=TWO-I32
+; RUN: sed -n '/^define { i8, i32 }/,/^}/p' %s | not llc -mtriple=mcs251 2>&1 | FileCheck %s --check-prefix=I8-I32
 
 ; Multiple return values must fail before CCState can assign independent values
 ; to separate candidates in the i32 gatekeeper entry. Otherwise LowerReturn

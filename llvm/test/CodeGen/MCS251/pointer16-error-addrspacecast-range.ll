@@ -1,6 +1,6 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -filetype=null %t/near.ll 2>&1 | FileCheck %s
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -filetype=null %t/far.ll 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -filetype=null %t/near.ll 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -filetype=null %t/far.ll 2>&1 | FileCheck %s
 ;
 ; A value fitting the 16-bit representation may still be outside the target
 ; address space. AS1 accepts only strict direct RAM [0,0x80), whether the source

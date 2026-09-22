@@ -37,11 +37,11 @@ const float ro_two_five = 2.5f;
 //
 // True f64 must not become reachable through this change.
 // RUN: printf 'target triple = "mcs251"\n@d = global double 1.500000e+00, align 1\n' > %t.double.ll
-// RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -o /dev/null %t.double.ll 2>&1 | FileCheck %s --check-prefix=F64
+// RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -o /dev/null %t.double.ll 2>&1 | FileCheck %s --check-prefix=F64
 // F64: LLVM ERROR: MCS251: defined global data requires byte-aligned default-address-space i8/i16/i32 scalar
 //
 // An i1 global remains outside the storage whitelist (A1 covers parameters
 // only, not ordinary i1 globals).
 // RUN: printf 'target triple = "mcs251"\n@g = global i1 true, align 1\n' > %t.bool.ll
-// RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -o /dev/null %t.bool.ll 2>&1 | FileCheck %s --check-prefix=I1
+// RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -o /dev/null %t.bool.ll 2>&1 | FileCheck %s --check-prefix=I1
 // I1: LLVM ERROR: MCS251: defined global data requires byte-aligned default-address-space i8/i16/i32 scalar

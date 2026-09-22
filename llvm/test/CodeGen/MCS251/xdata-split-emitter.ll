@@ -9,9 +9,9 @@
 ; RUN: llvm-readobj --sections --section-data --relocations %t/sizes.o | FileCheck %s --check-prefix=SIZES
 ; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/constbig.ll -o %t/constbig.o
 ; RUN: llvm-readobj --sections %t/constbig.o | FileCheck %s --check-prefix=CONSTBIG
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/payload.ll -o %t/payload.o 2>&1 | FileCheck %s --check-prefix=PAYLOAD
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/payload.ll -o %t/payload-v1.o 2>&1 | FileCheck %s --check-prefix=PAYLOAD
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/zero65537.ll -o %t/zero65537-v1.o 2>&1 | FileCheck %s --check-prefix=V1ZERO
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/payload.ll -o %t/payload.o 2>&1 | FileCheck %s --check-prefix=PAYLOAD
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/payload.ll -o %t/payload-v1.o 2>&1 | FileCheck %s --check-prefix=PAYLOAD
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/zero65537.ll -o %t/zero65537-v1.o 2>&1 | FileCheck %s --check-prefix=V1ZERO
 
 ; 65535 (boundary, fits): unchanged path -- flags without the split bit and
 ; the clear-only v1 record with its HI8/MID8/LO8 destination associations.

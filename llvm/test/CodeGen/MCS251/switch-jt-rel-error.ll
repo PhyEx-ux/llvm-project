@@ -9,7 +9,7 @@
 ; support). Assembly text stays legal: it spells the same table bytes
 ; literally.
 ;
-; RUN: not --crash llc -mtriple=mcs251 -O0 -mcs251-jump-tables -filetype=obj %t/jt.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=RELOBJ
+; RUN: not llc -mtriple=mcs251 -O0 -mcs251-jump-tables -filetype=obj %t/jt.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=RELOBJ
 ; RUN: llc -mtriple=mcs251 -O0 -mcs251-jump-tables -mcs251-object-format=elf -filetype=obj %t/jt.ll -o /dev/null
 ; RUN: llc -mtriple=mcs251 -O0 -mcs251-jump-tables %t/jt.ll -o - | FileCheck %s --check-prefix=ASMTEXT
 

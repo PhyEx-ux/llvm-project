@@ -12,7 +12,7 @@
 ; accept the object (both exited 0 with _other at offset 1 of a 2-byte
 ; .mcu.fixed.fixed and NOTE.size=1 for _fixed).
 ;
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %s -o /dev/null 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %s -o /dev/null 2>&1 | FileCheck %s
 ; CHECK: LLVM ERROR: MCS251: function 'other' explicitly assigns fixed placement section '.mcu.fixed.fixed': .mcu.fixed.* sections are reserved for mcs251-place entities
 
 target triple = "mcs251-unknown-none"

@@ -29,7 +29,7 @@ public:
     // after the generic writer has folded any local section-symbol offset.
     for (const ELFRelocationEntry &Rel : Relocs)
       if (!isInt<32>(static_cast<int64_t>(Rel.Addend)))
-        report_fatal_error("MCS251 ELF: RELA addend does not fit signed 32 bits");
+        reportFatalUsageError("MCS251 ELF: RELA addend does not fit signed 32 bits");
     MCELFObjectTargetWriter::sortRelocs(Relocs);
   }
 
@@ -38,7 +38,7 @@ public:
     if (IsPCRel) {
       if (Fixup.getKind() == FK_Data_1)
         return ELF::R_MCS251_PC8;
-      report_fatal_error("MCS251 ELF: unsupported PC-relative fixup");
+      reportFatalUsageError("MCS251 ELF: unsupported PC-relative fixup");
     }
     switch (Fixup.getKind()) {
     case FK_Data_2:
@@ -62,7 +62,7 @@ public:
       // channel with the per-field same-bank check); no new reloc number.
       return ELF::R_MCS251_J16;
     default:
-      report_fatal_error("MCS251 ELF: unsupported relocation fixup");
+      reportFatalUsageError("MCS251 ELF: unsupported relocation fixup");
     }
   }
 

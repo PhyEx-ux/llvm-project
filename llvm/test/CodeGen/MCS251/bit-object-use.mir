@@ -48,7 +48,7 @@
 
 ; Negative: a bare symbol that is NOT a marked bit object stays rejected (no
 ; BITADDR8 is invented for an arbitrary symbol).
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/plain-sym.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=PLAIN
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/plain-sym.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=PLAIN
 
 ;PLAIN: LLVM ERROR: MCS251: bit address must be a constant immediate
 
@@ -81,8 +81,8 @@
 ; bit-address operand must fail with the frozen diagnostic, whether or not the
 ; TU also defines a record (the record-emission check is not an asm consumption
 ; point). This covers an extern-only TU, where no `.mcs251.bit` is emitted.
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/use.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ASM
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/extern-only.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ASM
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/use.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ASM
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/extern-only.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ASM
 ;ASM: LLVM ERROR: MCS251 bit object requires ELF object output
 
 ; A bit-object handle in a non-bit operand position is an illegal consumption:
@@ -91,16 +91,16 @@
 ; ordinary 16/24-bit relocation) sees it. MIR reaches this path without passing
 ; the IR contract verifier, so the guard is positional. Both output kinds, and
 ; -verify-machineinstrs, must reject.
-;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=asm %t/nonbit-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
-;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/nonbit-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
-;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=asm %t/nonbit-addr32.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
-;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/nonbit-addr32.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
-;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=asm %t/nonbit-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
-;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/nonbit-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=asm %t/nonbit-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/nonbit-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=asm %t/nonbit-addr32.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/nonbit-addr32.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=asm %t/nonbit-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not llc -mtriple=mcs251 -verify-machineinstrs -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/nonbit-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
 ;NONBIT: LLVM ERROR: MCS251: bit object 'flag' may only be used as the bit-address operand of a bit instruction
 
 ; A bit-address operand with an addend violates the frozen r_addend == 0 rule.
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/bit-addend.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ADDEND
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/bit-addend.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ADDEND
 ;ADDEND: LLVM ERROR: MCS251: bit object 'flag' bit-address operand must have no addend
 
 ; Generic inline asm bypasses the target instruction emitter entirely: its
@@ -109,10 +109,10 @@
 ; and must be rejected by the whole-function machine boundary, on both the asm
 ; and object paths (extern-only: no record is emitted, so only the position
 ; guard can catch it).
-;RUN: not --crash llc -mtriple=mcs251 -filetype=asm -start-after=prolog-epilog %t/inlineasm-c.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
-;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -filetype=asm -start-after=prolog-epilog %t/inlineasm-c.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
-;RUN: not --crash llc -mtriple=mcs251 -filetype=asm -start-after=prolog-epilog %t/inlineasm-a.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
-;RUN: not --crash llc -mtriple=mcs251 -verify-machineinstrs -filetype=asm -start-after=prolog-epilog %t/inlineasm-a.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
+;RUN: not llc -mtriple=mcs251 -filetype=asm -start-after=prolog-epilog %t/inlineasm-c.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
+;RUN: not llc -mtriple=mcs251 -verify-machineinstrs -filetype=asm -start-after=prolog-epilog %t/inlineasm-c.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
+;RUN: not llc -mtriple=mcs251 -filetype=asm -start-after=prolog-epilog %t/inlineasm-a.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
+;RUN: not llc -mtriple=mcs251 -verify-machineinstrs -filetype=asm -start-after=prolog-epilog %t/inlineasm-a.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=INLINEASM
 ;INLINEASM: LLVM ERROR: MCS251: bit object 'flag' may only be used as the bit-address operand of a bit instruction
 
 ; The `&name` MIR spelling is a MO_ExternalSymbol, not a MO_GlobalAddress: it
@@ -120,10 +120,10 @@
 ; resolves every symbol reference back to the underlying GlobalValue, so
 ; `&flag` (which the mangler maps onto the same MCContext symbol as `@flag`)
 ; is the same handle. Both output kinds reject.
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/external-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/external-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/external-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/external-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/external-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/external-imm16.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/external-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/external-call.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=NONBIT
 
 ; A machine constant-pool entry is emitted through emitConstantPool /
 ; emitGlobalConstant without ever passing through a machine operand, so a
@@ -131,10 +131,10 @@
 ; (.rela.data.rel.ro R_MCS251_16). A constant pool has no bit-address operand
 ; position at all, so both the direct and the nested spelling are escapes, on
 ; both output kinds.
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/cp16-direct.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/cp16-direct.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/cp16-nested.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
-;RUN: not --crash llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/cp16-nested.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/cp16-direct.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/cp16-direct.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=asm %t/cp16-nested.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
+;RUN: not llc -mtriple=mcs251 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/cp16-nested.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=CONSTPOOL
 ;CONSTPOOL: LLVM ERROR: MCS251: bit object 'flag' may not appear in a constant pool entry
 
 ; A GlobalAlias resolving to a bit object is a second name for a handle, which
@@ -143,12 +143,12 @@
 ; alias -- `@alias`, `&alias`, a call target -- in one place. The runs use an
 ; EXPLICIT v1 memory contract: under the default v2 contract the alias would
 ; be rejected by the v1-object gate first, masking this layer.
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-global.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-external.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-call-global.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-call-external.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-global.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-external.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-global.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-external.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-call-global.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-call-external.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-global.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-external.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
 ;ALIAS: LLVM ERROR: MCS251: bit object 'flag' must not be aliased (alias 'alias')
 
 ; The alias rejection must scan the aliasee CONSTANT EXPRESSION for a
@@ -161,13 +161,13 @@
 ; placeholders. The unused form has no use in the body at all, proving the
 ; rejection is module-level, not use-driven. All four operand spellings and
 ; both output kinds, under an EXPLICIT v1 contract.
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-cancel.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-expr-cancel.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-cancel-ecall-g.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-cancel-ecall-e.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-diff.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-expr-diff.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
-;RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-unused.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-cancel.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-expr-cancel.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-cancel-ecall-g.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-cancel-ecall-e.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-diff.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=asm %t/alias-expr-diff.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
+;RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -start-after=prolog-epilog -filetype=obj -mcs251-object-format=elf %t/alias-expr-unused.mir -o /dev/null 2>&1 | FileCheck %s --check-prefix=ALIAS
 
 ;--- alias-expr-cancel.mir
 --- |

@@ -131,7 +131,7 @@ void MCS251FrameLowering::emitPrologue(MachineFunction &MF,
            "ISR fixed frame has no variable-sized objects (dynamic allocas "
            "are rejected at lowering)");
     if (FramePtr)
-      report_fatal_error("MCS251 ISR: variable-sized objects are not "
+      reportFatalUsageError("MCS251 ISR: variable-sized objects are not "
                          "supported in an interrupt entry");
 
     for (unsigned Opc : ISRPushSequence)

@@ -1,13 +1,13 @@
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 < %S/Inputs/as4-cast-to-as3.ll 2>&1 | FileCheck %s --check-prefix=CODE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 < %S/Inputs/as4-cast-to-as9.ll 2>&1 | FileCheck %s --check-prefix=CODE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 < %S/Inputs/as4-cast-to-as8.ll 2>&1 | FileCheck %s --check-prefix=CODE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 < %S/Inputs/as4-cast-from-as1.ll 2>&1 | FileCheck %s --check-prefix=CODE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 < %S/Inputs/as4-cast-to-as3.ll 2>&1 | FileCheck %s --check-prefix=CODE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 < %S/Inputs/as4-cast-to-as9.ll 2>&1 | FileCheck %s --check-prefix=CODE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 < %S/Inputs/as4-cast-to-as8.ll 2>&1 | FileCheck %s --check-prefix=CODE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 < %S/Inputs/as4-cast-from-as1.ll 2>&1 | FileCheck %s --check-prefix=CODE
 ;
 ; The 16-bit Tiny AND XTiny models must both refuse the narrowing conversion
 ; (Alice review R9: the old file had only the XTiny RUN, so Tiny's refusal was
 ; covered by the layout query but never by an actual compile).
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -O0 < %S/Inputs/as4-cast-16bit.ll 2>&1 | FileCheck %s --check-prefix=CODE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,8,1 -O0 < %S/Inputs/as4-cast-16bit.ll 2>&1 | FileCheck %s --check-prefix=CODE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -O0 < %S/Inputs/as4-cast-16bit.ll 2>&1 | FileCheck %s --check-prefix=CODE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,8,1 -O0 < %S/Inputs/as4-cast-16bit.ll 2>&1 | FileCheck %s --check-prefix=CODE
 ;
 ; A3 negative matrix (RUNTIME-AS-PTR-DESIGN-A.md §3-A3): only the equal-width
 ; 32-bit AS4 <-> AS0 conversion is opened. Every other cast involving AS4 is

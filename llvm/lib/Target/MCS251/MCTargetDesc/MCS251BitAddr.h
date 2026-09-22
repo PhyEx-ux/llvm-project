@@ -51,10 +51,10 @@ enum {
 // lvalue -- so an expression here is a backend bug.
 inline unsigned getBitAddr(const MCOperand &Op) {
   if (!Op.isImm())
-    report_fatal_error("MCS251: bit address must be a constant immediate");
+    reportFatalUsageError("MCS251: bit address must be a constant immediate");
   int64_t V = Op.getImm();
   if (V < 0 || V > 0xff)
-    report_fatal_error("MCS251: bit address " + Twine(V) +
+    reportFatalUsageError("MCS251: bit address " + Twine(V) +
                        " is out of range [0, 255]");
   return unsigned(V);
 }

@@ -1,6 +1,6 @@
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,1,1 -O0 -verify-machineinstrs < %s | FileCheck %s
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O2 -verify-machineinstrs < %s | FileCheck %s
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj < %s 2>&1 | FileCheck %s --check-prefix=REL-GATE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj < %s 2>&1 | FileCheck %s --check-prefix=REL-GATE
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj %s -o %t.o
 ; RUN: llvm-readobj --file-headers --sections --section-data %t.o | FileCheck %s --check-prefix=V2-ELF
 ;

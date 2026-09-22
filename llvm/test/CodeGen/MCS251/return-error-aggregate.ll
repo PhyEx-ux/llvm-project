@@ -1,4 +1,4 @@
-; RUN: not --crash llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
 
 ; Aggregate return values are not supported by the minimal backend.
 ; (report_fatal_error aborts, hence --crash; lit pipelines are pipefail.)

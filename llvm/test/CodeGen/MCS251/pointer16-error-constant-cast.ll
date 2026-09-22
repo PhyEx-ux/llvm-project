@@ -1,4 +1,4 @@
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -filetype=null < %s 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -filetype=null < %s 2>&1 | FileCheck %s
 ;
 ; A constant far-to-near cast is accepted only when the complete value fits in
 ; the 16-bit near representation; no bank truncation is permitted.

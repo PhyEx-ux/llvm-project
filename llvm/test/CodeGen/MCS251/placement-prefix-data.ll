@@ -9,7 +9,7 @@
 ; inputs without prefix/prologue data). Prologue data is rejected for the
 ; same reason family (emitter-fed bytes with no placement ruling).
 ;
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=PFX
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %s -o /dev/null 2>&1 | FileCheck %s --check-prefix=PFX
 ; PFX: LLVM ERROR: MCS251: fixed function 'fixed': prefix/prologue data is not supported on a fixed placement function
 
 target triple = "mcs251-unknown-none"

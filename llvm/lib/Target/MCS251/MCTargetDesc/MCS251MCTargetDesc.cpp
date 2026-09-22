@@ -141,7 +141,7 @@ public:
   }
 
   void emitCommonSymbol(MCSymbol *, uint64_t, Align) override {
-    report_fatal_error("MCS251 REL writer: common symbols are not supported");
+    reportFatalUsageError("MCS251 REL writer: common symbols are not supported");
   }
 };
 

@@ -501,8 +501,7 @@ class MCS251AsmPrinter final : public AsmPrinter {
     // no "mcs251-place".)
     if (const auto *GV = dyn_cast<GlobalVariable>(GO))
       if (MCS251::isBitObjectGlobal(*GV))
-        report_fatal_error(
-            "MCS251: bit object '" + Twine(GV->getName()) +
+        reportFatalUsageError("MCS251: bit object '" + Twine(GV->getName()) +
             "' also carries the mcs251-place attribute: a bit entity is "
             "object identity without a byte storage class and cannot be "
             "placed or bound");
@@ -510,7 +509,7 @@ class MCS251AsmPrinter final : public AsmPrinter {
     SmallVector<StringRef, 5> Fields;
     SplitString(Place.getValueAsString(), Fields, ",");
     auto Bad = [GO]() -> std::optional<MCS251PlacementSpec> {
-      report_fatal_error("MCS251: malformed mcs251-place attribute on '" +
+      reportFatalUsageError("MCS251: malformed mcs251-place attribute on '" +
                          Twine(GO->getName()) + "'");
       return std::nullopt;
     };
@@ -1106,7 +1105,7 @@ class MCS251AsmPrinter final : public AsmPrinter {
     if ((getMCS251TM().emitsObjectFile() && usesELFObjects()) ||
         !hasSymbolPointerLeaf(Init, DL))
       return;
-    report_fatal_error("MCS251: global '" + GV->getName() +
+    reportFatalUsageError("MCS251: global '" + GV->getName() +
                        "': a pointer initializer requires ELF object output "
                        "(-filetype=obj -mcs251-object-format=elf)");
   }
@@ -1214,8 +1213,7 @@ public:
     // emitted before (or without) any placed entity.
     if (const Function &F = MF.getFunction();
         F.hasSection() && isMCS251FixedSectionName(F.getSection()))
-      report_fatal_error(
-          "MCS251: function '" + Twine(F.getName()) +
+      reportFatalUsageError("MCS251: function '" + Twine(F.getName()) +
           "' explicitly assigns fixed placement section '" + F.getSection() +
           "': .mcu.fixed.* sections are reserved for mcs251-place entities");
     // T06 card steps 8/9: the final machine boundary is validated before any
@@ -1248,7 +1246,7 @@ public:
   // constant pool / linkage directives it emits carry no bytes).
   void beginPlacedFunction(MachineFunction &MF, const MCS251PlacementSpec &P) {
     auto Bad = [&](const Twine &What) {
-      report_fatal_error("MCS251: fixed function '" + Twine(MF.getName()) +
+      reportFatalUsageError("MCS251: fixed function '" + Twine(MF.getName()) +
                          "': " + What);
     };
     if (!getMCS251TM().emitsObjectFile() || !usesELFObjects())
@@ -1390,8 +1388,7 @@ public:
       if (!Entry.MBBs.empty())
         AnyTable = true;
     if (AnyTable && getMCS251TM().emitsObjectFile() && !usesELFObjects())
-      report_fatal_error(
-          "MCS251 jump tables require ELF object output; the REL object "
+      reportFatalUsageError("MCS251 jump tables require ELF object output; the REL object "
           "writer has no J16 code-address relocation "
           "(-filetype=obj -mcs251-object-format=elf)");
     for (unsigned JTI = 0, E = JT.size(); JTI != E; ++JTI) {
@@ -1400,8 +1397,7 @@ public:
         continue;
       uint64_t TableBytes = uint64_t(MBBs.size()) * 3;
       if (TableBytes > 0x10000)
-        report_fatal_error(
-            "MCS251: jump table " + Twine(JTI) + " of function '" +
+        reportFatalUsageError("MCS251: jump table " + Twine(JTI) + " of function '" +
             Twine(MF->getName()) + "' spans " + Twine(TableBytes) +
             " bytes and cannot fit one 64K bank as a single ljmp column "
             "(BRJT design §3.2.4 L1)");
@@ -1532,13 +1528,11 @@ public:
             continue;
           if (!MCS251InstrInfo::isBitAddrOperand(MI.getOpcode(),
                                                  MO.getOperandNo()))
-            report_fatal_error(
-                "MCS251: bit object '" + Handle->getName() +
+            reportFatalUsageError("MCS251: bit object '" + Handle->getName() +
                 "' may only be used as the bit-address operand of a bit "
                 "instruction");
           if (MO.getOffset())
-            report_fatal_error(
-                "MCS251: bit object '" + Handle->getName() +
+            reportFatalUsageError("MCS251: bit object '" + Handle->getName() +
                 "' bit-address operand must have no addend");
         }
         // Target opcodes begin right after the generic opcode range; a
@@ -1547,17 +1541,16 @@ public:
             MI.getOpcode() > (unsigned)TargetOpcode::GENERIC_OP_END) {
           StringRef Name =
               MF.getSubtarget().getInstrInfo()->getName(MI.getOpcode());
-          report_fatal_error("MCS251: unexpanded target pseudo instruction '" +
+          reportFatalInternalError("MCS251: unexpanded target pseudo instruction '" +
                              Twine(Name) + "' reached the instruction emitter");
         }
         if (MI.getOpcode() == MCS251::RETI) {
           if (!IsISR)
-            report_fatal_error(
-                "MCS251: RETI is only valid inside an interrupt service "
+            reportFatalUsageError("MCS251: RETI is only valid inside an interrupt service "
                 "routine; function '" +
                 Twine(F.getName()) + "' is an ordinary function");
         } else if (IsISR && MI.isReturn()) {
-          report_fatal_error("MCS251: interrupt service routine '" +
+          reportFatalUsageError("MCS251: interrupt service routine '" +
                              Twine(F.getName()) +
                              "' must return with RETI");
         }
@@ -1574,13 +1567,12 @@ public:
         if (E.isMachineConstantPoolEntry())
           // This target never creates MachineConstantPoolValues; refusing the
           // shape outright keeps the layer closed if one ever appears.
-          report_fatal_error(
-              "MCS251: unsupported machine constant pool value in function '" +
+          reportFatalInternalError("MCS251: unsupported machine constant pool value in function '" +
               Twine(F.getName()) + "'");
         SmallPtrSet<const Constant *, 32> Seen;
         if (const GlobalVariable *GV =
                 findBitObjectInConstant(E.Val.ConstVal, Seen))
-          report_fatal_error("MCS251: bit object '" + GV->getName() +
+          reportFatalUsageError("MCS251: bit object '" + GV->getName() +
                              "' may not appear in a constant pool entry");
       }
   }
@@ -1603,20 +1595,19 @@ public:
     if (!usesELFObjects())
       // REL objects do not gain type-9 support; ISR object output on the REL
       // path is hard-rejected before any record is emitted.
-      report_fatal_error("MCS251 ISR requires ELF object output");
+      reportFatalUsageError("MCS251 ISR requires ELF object output");
 
     // A3.5 step 1: re-validate the ISR identity (CC, canonical slot) here at
     // the object boundary; the return-opcode boundary was checked in
     // verifyFinalMachineBoundary.
     Attribute VecAttr = F.getFnAttribute("mcs251-isr-vector");
     if (F.getCallingConv() != CallingConv::MCS251_INTR || !VecAttr.isValid())
-      report_fatal_error("MCS251 ISR: calling convention and vector attribute "
+      reportFatalUsageError("MCS251 ISR: calling convention and vector attribute "
                          "must appear together");
     uint64_t Slot = 0;
     if (!MCS251ISR::parseCanonicalSlot(VecAttr.getValueAsString(), Slot) ||
         !MCS251ISR::isLegalISRSlot(Slot))
-      report_fatal_error(
-          Twine("MCS251 ISR: vector is not a legal slot in profile 0-") +
+      reportFatalUsageError(Twine("MCS251 ISR: vector is not a legal slot in profile 0-") +
           Twine(MCS251ISR::ISRVectorMaxSlot));
 
     MCSection *Saved = OutStreamer->getCurrentSectionOnly();
@@ -1669,16 +1660,16 @@ public:
         GV.getVisibility() != GlobalValue::DefaultVisibility ||
         GV.getDLLStorageClass() != GlobalValue::DefaultStorageClass ||
         GV.hasCommonLinkage())
-      report_fatal_error("MCS251 bit object '" + GV.getName() +
+      reportFatalUsageError("MCS251 bit object '" + GV.getName() +
                          "': unsupported placement or linkage");
     if (!GV.getValueType()->isIntegerTy(8))
-      report_fatal_error("MCS251 bit object '" + GV.getName() +
+      reportFatalUsageError("MCS251 bit object '" + GV.getName() +
                          "': placeholder must be an i8 global");
     if (!GV.isDeclaration()) {
       const Constant *Init = GV.getInitializer();
       const auto *CI = dyn_cast_or_null<ConstantInt>(Init);
       if (!CI || CI->getValue().ugt(1))
-        report_fatal_error("MCS251 bit object '" + GV.getName() +
+        reportFatalUsageError("MCS251 bit object '" + GV.getName() +
                            "': initializer must be the constant 0 or 1");
     }
   }
@@ -1717,7 +1708,7 @@ public:
     if (!getMCS251TM().emitsObjectFile() || !usesELFObjects())
       // The bit-object protocol exists only in the ELF object format; REL
       // objects and assembly text carry no record.
-      report_fatal_error("MCS251 bit object requires ELF object output");
+      reportFatalUsageError("MCS251 bit object requires ELF object output");
 
     MCSection *Saved = OutStreamer->getCurrentSectionOnly();
     // Contract §3: SHT_PROGBITS, sh_flags = 0, sh_addralign = 4, sh_entsize 0.
@@ -1760,9 +1751,8 @@ public:
       // WP4: predictable capability rejection (A8 weak definitions are
       // rejected earlier by the structural contract check) -- clean exit(1),
       // no crash diagnostics. This stays as the emitter-side defense.
-      report_fatal_error("MCS251: static parameter slots require local or "
-                         "external function linkage",
-                         /*GenCrashDiag=*/false);
+      reportFatalUsageError("MCS251: static parameter slots require local or "
+                         "external function linkage");
     // SDCC overlays leaf functions only. Non-leaf slots must survive nested
     // calls, including calls into independently compiled SDCC modules.
     bool Leaf = true;
@@ -1798,7 +1788,7 @@ public:
       if (auto *PT = dyn_cast<PointerType>(Ty)) {
         unsigned AS = PT->getAddressSpace();
         if (AS == 5 || AS == 6 || AS == 7 || AS > 9)
-          report_fatal_error("MCS251: pointer parameter address space has no "
+          reportFatalUsageError("MCS251: pointer parameter address space has no "
                              "ordinary static-slot ABI");
       } else if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) &&
                  !Ty->isIntegerTy(32) && !Ty->isFloatTy() &&
@@ -1809,7 +1799,7 @@ public:
         // same 1-byte static slot as i8 (getTypeStoreSize(i1) == 1). Exactly
         // i1 joins the accepted widths here, mirroring checkParameterType in
         // MCS251ISelLowering.cpp; no other sub-byte width is admitted.
-        report_fatal_error("MCS251: static parameters require i8/i16/i32/f32 "
+        reportFatalUsageError("MCS251: static parameters require i8/i16/i32/f32 "
                            "or an ordinary data/CODE pointer");
       }
       uint64_t SlotSize = F.getDataLayout().getTypeStoreSize(Ty).getFixedValue();
@@ -1974,8 +1964,7 @@ public:
       // ELF object output under a v2 contract: v2 identity, content-agnostic,
       // gated only by the registered-capability walk.
       if (!scanObjectIdentity(M, /*V2Whitelist=*/true))
-        report_fatal_error(
-            "MCS251: module uses an ABI capability outside the registered "
+        reportFatalUsageError("MCS251: module uses an ABI capability outside the registered "
             "A4 v2 object identity (32-bit AS0 XSmall/Small modules with "
             "the D.5 pointer address spaces 0/1/2/3/4/8/9 in static slots, "
             "signatures and function bodies; alias/ifunc, 16-bit objects, "
@@ -1994,8 +1983,7 @@ public:
       // enterV2ObjectMode, whose REL carrier check is the historical fatal;
       // any other v2-only shape fails the capability walk here.
       if (!scanObjectIdentity(M, /*V2Whitelist=*/true))
-        report_fatal_error(
-            "MCS251: module uses an ABI capability that cannot be represented "
+        reportFatalUsageError("MCS251: module uses an ABI capability that cannot be represented "
             "by the v1 relocatable-object identity; v2 object output is not "
             "implemented for this unregistered capability (outside the A4 "
             "whitelist: 32-bit AS0 modules whose v2-only capabilities are "
@@ -2120,23 +2108,22 @@ public:
 
     NamedMDNode *MD = M.getNamedMetadata(MCS251Signatures::MetadataName);
     if (!MD)
-      report_fatal_error(
-          "MCS251: a v2 object requires `!mcs251.signatures` metadata; a "
+      reportFatalUsageError("MCS251: a v2 object requires `!mcs251.signatures` metadata; a "
           "module without it cannot produce a legal v2 identity (hand-written "
           "IR authors must provide it explicitly)");
 
     for (unsigned I = 0, E = MD->getNumOperands(); I != E; ++I) {
       const MDNode *N = MD->getOperand(I);
       if (!N)
-        report_fatal_error("MCS251: `!mcs251.signatures` operand " + Twine(I) +
+        reportFatalUsageError("MCS251: `!mcs251.signatures` operand " + Twine(I) +
                            " is null");
       MCS251Signatures::Record R;
       std::string Err = decodeMetadataNode(*N, R);
       if (!Err.empty())
-        report_fatal_error("MCS251: `!mcs251.signatures` node " + Twine(I) +
+        reportFatalUsageError("MCS251: `!mcs251.signatures` node " + Twine(I) +
                            " is malformed: " + Err);
       if (!FunctionSignatureNames.insert(R.Name).second)
-        report_fatal_error(Twine("MCS251: `!mcs251.signatures` carries "
+        reportFatalUsageError(Twine("MCS251: `!mcs251.signatures` carries "
                                  "duplicate function '") +
                            R.Name + "'");
       FunctionSignatures.Records.push_back(std::move(R));
@@ -2154,7 +2141,7 @@ public:
         continue; // local/internal functions are outside the signature domain
       std::string Final = getSymbolName(&F);
       if (!FunctionSignatureNames.contains(Final))
-        report_fatal_error("MCS251: external function '" + F.getName() +
+        reportFatalUsageError("MCS251: external function '" + F.getName() +
                            "' (ELF symbol '" + Final +
                            "') is missing from `!mcs251.signatures`; every "
                            "source external declaration and definition must "
@@ -2170,8 +2157,7 @@ public:
       return; // already carried by the source metadata (or a previous helper).
     const MCS251::HelperABI *H = MCS251::lookupHelperABI(FinalSymbol);
     if (!H)
-      report_fatal_error(
-          "MCS251: backend-generated external libcall '" + FinalSymbol +
+      reportFatalUsageError("MCS251: backend-generated external libcall '" + FinalSymbol +
           "' has no registered helper ABI; refusing to emit a v2 object "
           "with an unregistered external helper signature");
     MCS251Signatures::Record R = MCS251Signatures::makeRecord(
@@ -2213,8 +2199,7 @@ public:
   // v1 note is suppressed and the header flags are already EFlagsV2.
   void enterV2ObjectMode() {
     if (!usesELFObjects())
-      report_fatal_error(
-          "MCS251: the v2 object identity (pointer static slots) requires "
+      reportFatalUsageError("MCS251: the v2 object identity (pointer static slots) requires "
           "ELF object output (-mcs251-object-format=elf -filetype=obj); the "
           "ASxxxx REL format has no v2 identity carrier");
     // Safe downcast: usesELFObjects() + object output is exactly the
@@ -2276,7 +2261,7 @@ public:
         const GlobalVariable *GV =
             findBitObjectInConstant(GA.getAliasee(), Seen);
         if (GV)
-          report_fatal_error("MCS251: bit object '" + GV->getName() +
+          reportFatalUsageError("MCS251: bit object '" + GV->getName() +
                              "' must not be aliased (alias '" +
                              GA.getName() + "')");
       }
@@ -2495,30 +2480,28 @@ public:
       const MCS251PlacementNoteEntry &Entry = Entries[I];
       const MCS251PlacementSpec &P = Entry.Spec;
       if (!Entry.ELFSym)
-        report_fatal_error("MCS251: placement record " + Twine(I) +
+        reportFatalUsageError("MCS251: placement record " + Twine(I) +
                            " (stable '" + P.Stable +
                            "') has no ELF association symbol");
       StringRef Name = Entry.ELFSym->getName();
       if (Name.empty())
-        report_fatal_error("MCS251: placement association for record " +
+        reportFatalUsageError("MCS251: placement association for record " +
                            Twine(I) + " (stable '" + P.Stable +
                            "') is empty");
       if (Name.contains('\0'))
-        report_fatal_error("MCS251: placement association for record " +
+        reportFatalUsageError("MCS251: placement association for record " +
                            Twine(I) + " (stable '" + P.Stable +
                            "') contains an embedded NUL");
       if (P.Ownership == 0) {
         std::string Expected = getMCS251FixedSectionName(P);
         if (!Entry.ELFSym->isInSection() ||
             Entry.ELFSym->getSection().getName() != Expected)
-          report_fatal_error(
-              "MCS251: owned placement record " + Twine(I) + " (stable '" +
+          reportFatalUsageError("MCS251: owned placement record " + Twine(I) + " (stable '" +
               P.Stable + "') associates ELF symbol '" + Name +
               "' which is not the unique principal symbol of fixed section '" +
               Expected + "'");
       } else if (!Entry.ELFSym->isUndefined()) {
-        report_fatal_error(
-            "MCS251: bind placement record " + Twine(I) + " (stable '" +
+        reportFatalUsageError("MCS251: bind placement record " + Twine(I) + " (stable '" +
             P.Stable + "') associates ELF symbol '" + Name +
             "' which is not an undefined external symbol of this input");
       }
@@ -2558,7 +2541,7 @@ public:
       if (!P || P->Ownership != 1)
         continue;
       if (!GV.isDeclaration() || !GV.hasExternalLinkage())
-        report_fatal_error("MCS251: bind placement carrier '" +
+        reportFatalUsageError("MCS251: bind placement carrier '" +
                            Twine(GV.getName()) +
                            "' must be an external declaration");
       MCS251PlacementNoteEntry Entry;
@@ -2570,7 +2553,7 @@ public:
         // the writer re-validates fail-closed).
         uint64_t Size = DL.getTypeAllocSize(GV.getValueType());
         if (!Size)
-          report_fatal_error("MCS251: malformed placement NOTE: bind "
+          reportFatalUsageError("MCS251: malformed placement NOTE: bind "
                              "object '" +
                              Twine(GV.getName()) + "' has size 0");
         Entry.Size = uint32_t(Size);
@@ -2589,7 +2572,7 @@ public:
       if (!P || P->Ownership != 1)
         continue;
       if (!F.isDeclaration() || !F.hasExternalLinkage())
-        report_fatal_error("MCS251: bind placement carrier '" +
+        reportFatalUsageError("MCS251: bind placement carrier '" +
                            Twine(F.getName()) +
                            "' must be an external declaration");
       MCS251PlacementNoteEntry Entry;
@@ -2604,8 +2587,7 @@ public:
       return; // no placed entity in this TU: no section, byte-for-byte
               // unchanged output for placement-free modules.
     if (!getMCS251TM().emitsObjectFile() || !usesELFObjects())
-      report_fatal_error(
-          "MCS251 placement requires ELF object output "
+      reportFatalUsageError("MCS251 placement requires ELF object output "
           "(-filetype=obj -mcs251-object-format=elf)");
 
     SmallVector<uint32_t, 8> RecordSizes;
@@ -2678,7 +2660,7 @@ public:
     const std::optional<MCS251::MemoryContract> &Contract =
         getMCS251TM().getMemoryContract();
     if (!Contract || !Contract->isSpecified())
-      report_fatal_error("MCS251: the v2 object identity requires a "
+      reportFatalUsageError("MCS251: the v2 object identity requires a "
                          "specified v2 memory contract");
     // P-4: fold in the registered-helper records for any backend-generated
     // external libcall seen in the machine stream; an unregistered helper ABI
@@ -2691,7 +2673,7 @@ public:
     if (llvm::Error E = MCS251Attributes::decode(SectionBytes,
                                                  /*IsBigEndian=*/true, Decoded)) {
       std::string Msg = toString(std::move(E));
-      report_fatal_error(Twine("MCS251: refusing to emit an unregistered v2 "
+      reportFatalUsageError(Twine("MCS251: refusing to emit an unregistered v2 "
                                "object identity: ") +
                          Msg);
     }
@@ -2726,8 +2708,7 @@ public:
     // pipeline-start pass has already judged. The arithmetic half stays in
     // the passes (it must run post-optimization).
     if (Error Err = MCS251::verifyModuleCapabilities(M))
-      report_fatal_error(Twine(toString(std::move(Err))),
-                         /*GenCrashDiag=*/false);
+      reportFatalUsageError(Twine(toString(std::move(Err))));
     // Run the identity classification *before* the base implementation: an
     // ELF object under a v2 contract must be armed for the v2 identity
     // (EFlagsV2 installed on the ELF writer) before any section or identity
@@ -2748,8 +2729,7 @@ public:
     // placement contract check and historically let the wording obscure the
     // real problem); order-independent by construction.
     if (GV->hasSection() && isMCS251FixedSectionName(GV->getSection()))
-      report_fatal_error(
-          "MCS251: global '" + Twine(GV->getName()) +
+      reportFatalUsageError("MCS251: global '" + Twine(GV->getName()) +
           "' explicitly assigns fixed placement section '" + GV->getSection() +
           "': .mcu.fixed.* sections are reserved for mcs251-place entities");
     // BT12: a persistent bit object is identity, not storage. It was already
@@ -2809,7 +2789,7 @@ public:
     if (std::optional<MCS251PlacementSpec> Placement = getMCS251Placement(GV)) {
       if (Placement->Ownership == 1) {
         if (!GV->isDeclaration())
-          report_fatal_error("MCS251: bind placement carrier '" +
+          reportFatalUsageError("MCS251: bind placement carrier '" +
                              Twine(GV->getName()) +
                              "' must be an external declaration");
         return; // no storage, no section, no init records
@@ -2829,22 +2809,19 @@ public:
 
     auto Reject = [GV]() {
       if (GV->isConstant())
-        report_fatal_error(
-            "MCS251: defined global data requires a byte-aligned read-only "
+        reportFatalUsageError("MCS251: defined global data requires a byte-aligned read-only "
             "CSEG i8/i16/i32 scalar or nonempty initialized integer array "
             "of any alignment (emitted byte-aligned); mutable data, "
             "zeroinitializers, custom sections, TLS, weak/COMDAT, "
             "aggregates and initializer relocations are not supported");
-      report_fatal_error(
-          "MCS251: defined global data requires byte-aligned default-address-"
+      reportFatalUsageError("MCS251: defined global data requires byte-aligned default-address-"
           "space i8/i16/i32 scalar, array, or struct storage with a fully "
           "defined integer initializer; custom sections, TLS, weak/COMDAT, "
           "empty aggregates and initializer relocations are not supported");
     };
     if (GV->isConstant() && GV->getAddressSpace() == 0 &&
         DL.getPointerSizeInBits(0) == 16)
-      report_fatal_error(
-          "MCS251: ordinary AS0 constants are not supported by the 16-bit "
+      reportFatalUsageError("MCS251: ordinary AS0 constants are not supported by the 16-bit "
           "memory contract until RAM runtime-copy initialization is "
           "implemented; use an explicit CODE object when that ABI is available");
     // Read-only integer arrays accept any declared alignment: the CSEG byte
@@ -2879,7 +2856,7 @@ public:
         Reject();
       uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
       if (!Size || Size > UINT16_MAX)
-        report_fatal_error("MCS251: mutable global size must fit in 16 bits");
+        reportFatalUsageError("MCS251: mutable global size must fit in 16 bits");
 
       const auto &TLOF =
           static_cast<const MCS251TargetObjectFile &>(getObjFileLowering());
@@ -2965,7 +2942,7 @@ public:
                                const GlobalObject *GO) {
     std::string Name = getMCS251FixedSectionName(P);
     if (!EmittedFixedSections.insert(Name).second)
-      report_fatal_error(Twine("MCS251: section " + Name +
+      reportFatalUsageError(Twine("MCS251: section " + Name +
                                " disagrees with placement NOTE for ") +
                          getSymbolName(GO));
   }
@@ -2988,7 +2965,7 @@ public:
                      : StorageClass == 2 ? "__code"
                                          : "data";
     auto Bad = [&](const Twine &What) {
-      report_fatal_error("MCS251: fixed " + Qual + " global '" +
+      reportFatalUsageError("MCS251: fixed " + Qual + " global '" +
                          GV->getName() + "': " + What);
     };
     // The fixed-section protocol and the NOTE exist only in ELF objects.
@@ -3041,7 +3018,7 @@ public:
     // sits before the `if (!NoInit)` gate so both shapes are rejected
     // identically.
     if (StorageClass == 0 && Size > UINT16_MAX)
-      report_fatal_error("MCS251: mutable global size must fit in 16 bits");
+      reportFatalUsageError("MCS251: mutable global size must fit in 16 bits");
 
     claimMCS251FixedSection(P, GV);
     const uint32_t Align = GV->getAlign().valueOrOne().value();
@@ -3153,7 +3130,7 @@ public:
     assert((GAS == 3 || GAS == 4) && "placement address space");
     StringRef Qual = GAS == 3 ? "__xdata" : "__code";
     auto Bad = [&](const Twine &What) {
-      report_fatal_error("MCS251: " + Qual + " global '" + GV->getName() +
+      reportFatalUsageError("MCS251: " + Qual + " global '" + GV->getName() +
                          "': " + What);
     };
     // The record format, the per-object XSEG sections and the 24-bit pointer

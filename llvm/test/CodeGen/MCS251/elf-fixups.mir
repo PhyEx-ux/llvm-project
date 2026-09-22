@@ -2,7 +2,7 @@
 # RUN: llc -mtriple=mcs251 -start-after=finalize-isel -filetype=obj -mcs251-object-format=elf %t/pc8.mir -o %t/pc8.o
 # RUN: llvm-readobj -r --sections --section-data %t/pc8.o | FileCheck %s --check-prefix=PC8
 # RUN: %python %S/Inputs/check-elf-rela.py %t/pc8.o
-# RUN: not --crash llc -mtriple=mcs251 -start-after=finalize-isel -filetype=obj -mcs251-object-format=elf %t/overflow.mir -o %t/overflow.o 2>&1 | FileCheck %s --check-prefix=OVERFLOW
+# RUN: not llc -mtriple=mcs251 -start-after=finalize-isel -filetype=obj -mcs251-object-format=elf %t/overflow.mir -o %t/overflow.o 2>&1 | FileCheck %s --check-prefix=OVERFLOW
 # RUN: llc -mtriple=mcs251 -start-after=finalize-isel -filetype=obj -mcs251-object-format=elf %t/word.mir -o %t/word.o
 # RUN: llvm-readobj -r --sections --section-data %t/word.o | FileCheck %s --check-prefix=WORD
 # RUN: %python %S/Inputs/check-elf-rela.py %t/word.o

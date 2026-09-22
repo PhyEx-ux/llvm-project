@@ -1,11 +1,11 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/pointer-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/pointer-call.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/aggregate-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/aggregate-call.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/empty.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/i64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/f64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/pointer-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/pointer-call.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/aggregate-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/aggregate-call.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/empty.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/i64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/f64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/indirect.ll -o - 2>&1 | FileCheck %s --check-prefix=INDIRECT
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/weak.ll -o - 2>&1 | FileCheck %s --check-prefix=LINKAGE
 ;

@@ -141,7 +141,7 @@
 ; declaration: a bind record must associate an UNDEFINED EXTERNAL symbol, so a
 ; definition carrying the bind spec cannot be expressed (rather than silently
 ; pairing it with whatever symbol happens to be there).
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/binddef.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BINDDEF
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/binddef.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BINDDEF
 ; BINDDEF: LLVM ERROR: MCS251: bind placement carrier 'bb' must be an external declaration
 
 ;--- main.ll
@@ -196,7 +196,7 @@ attributes #0 = { "mcs251-place"="0x2A,data,object,bind,0" "mcs251-stable-symbol
 ; association would have to name the same symbol as an owned definition --
 ; the carrier must reject that instead of emitting a contradictory pair.
 ; (G11-B2 review S2: retracts the earlier "unreachable for legal IR" claim.)
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/collide.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=COLLIDE
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/collide.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=COLLIDE
 ; COLLIDE: LLVM ERROR: MCS251: bind placement record 1 (stable 'two') associates ELF symbol '_x' which is not an undefined external symbol of this input
 
 ;--- collide.ll

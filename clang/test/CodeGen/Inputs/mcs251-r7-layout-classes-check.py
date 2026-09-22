@@ -157,7 +157,7 @@ def main():
             sys.exit("FAIL: could not build the legal-layout index")
         for opt_level in ("O0", "O2"):
             for mode in ("ir", "obj"):
-                expected = 0 if mode == "ir" else 70
+                expected = 0 if mode == "ir" else 1
                 for entry, inp, index in (
                         ("ordinary", legal_sum, None),
                         ("ThinLTO", legal_sum, legal_index)):
@@ -226,7 +226,7 @@ def main():
 
         # ---- class 3: bare fabricated (no ThinLTO summary) -------------------
         bare_bc, _ = assemble("bare", TRIPLE, summarise=False)
-        for mode, expected in (("ir", 0), ("obj", 70)):
+        for mode, expected in (("ir", 0), ("obj", 1)):
             # The index is taken from the legal-layout module so the ThinLTO
             # dispatch is actually entered; the INPUT bitcode carries no
             # summary, which is what makes upstream fabricate the module.

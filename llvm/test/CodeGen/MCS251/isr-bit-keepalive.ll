@@ -65,12 +65,12 @@
 ; The rejection face: an unmarked data member (AS0 or AS4) or a function
 ; outside the program address space still fails the capability walk
 ; fail-closed, exactly like the pre-fix all-function rule.
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-data.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-as4data.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-func-as.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-data.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-as4data.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-func-as.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
 ; The malformed-chain member never reaches the generic verifier's acceptance;
 ; it fails the target capability walk with the same fatal.
-; RUN: not --crash llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-chain.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
+; RUN: not llc -disable-verify -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-chain.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
 ; UNREGISTERED: LLVM ERROR: MCS251: module uses an ABI capability outside the registered A4 v2 object identity
 
 ; The v2 identity itself is unchanged by the fix: the mixed module is a

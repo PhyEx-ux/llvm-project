@@ -1,9 +1,9 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/vaarg-i32.ll -o %t/a.o 2>&1 | FileCheck %s --check-prefix=E
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/vaarg-f32.ll -o %t/b.o 2>&1 | FileCheck %s --check-prefix=E
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/seven.ll -o %t/c.o 2>&1 | FileCheck %s --check-prefix=F
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/vaarg-i32.ll -o %t/a.o 2>&1 | FileCheck %s --check-prefix=E
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/vaarg-f32.ll -o %t/b.o 2>&1 | FileCheck %s --check-prefix=E
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/seven.ll -o %t/c.o 2>&1 | FileCheck %s --check-prefix=F
 ; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/indirect.ll -o %t/d.o 2>&1 | FileCheck %s --check-prefix=C2
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/nofixed.ll -o %t/e.o 2>&1 | FileCheck %s --check-prefix=F0
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/nofixed.ll -o %t/e.o 2>&1 | FileCheck %s --check-prefix=F0
 ;
 ; G2 B-S2 (G2-VARIADIC-DESIGN-draft.md R3 §4.3.5/§4.3.6/§4.4.3): ordinary
 ; variadic definitions and direct variadic calls now lower through the

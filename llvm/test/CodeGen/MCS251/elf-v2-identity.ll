@@ -3,7 +3,7 @@
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,1,1 -mcs251-object-format=elf -filetype=obj %s -o %t.small.o
 ; RUN: llvm-readobj --file-headers --sections --section-data %t.small.o | FileCheck %s --check-prefix=SMALL --check-prefix=COMMON
 ; RUN: llvm-readobj --arch-specific %t.xsmall.o | FileCheck %s --check-prefix=TAGS
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,3,1 -mcs251-object-format=elf -filetype=obj %s -o %t.large.o 2>&1 | FileCheck %s --check-prefix=LARGE-GATE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,3,1 -mcs251-object-format=elf -filetype=obj %s -o %t.large.o 2>&1 | FileCheck %s --check-prefix=LARGE-GATE
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -mcs251-object-format=elf -filetype=obj %s -o %t.tiny.o 2>&1 | FileCheck %s --check-prefix=TINY-GATE
 ;
 ; The A4 v2 object identity (design §3.1/§3.2, PM ruling 2026-09-13, re-ruled

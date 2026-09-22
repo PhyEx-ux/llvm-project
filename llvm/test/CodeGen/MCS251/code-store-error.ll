@@ -1,4 +1,4 @@
-; RUN: not --crash llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
+; RUN: not llc -mtriple=mcs251 < %s 2>&1 | FileCheck %s
 ;
 ; X2: AS4 (CODE) stores stay fail-closed. CODE is read-only by the space's
 ; definition (DESIGN B.1); the 24-bit DR channel implemented for AS4 loads is

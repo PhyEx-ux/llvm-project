@@ -5,7 +5,7 @@
 ; RUN: llvm-as %t/far.ll -o %t/far.bc
 ; RUN: not llc -mtriple=mcs251 %t/near.bc -filetype=null 2>&1 | FileCheck %s --check-prefix=CONFLICT
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 %t/far.bc -filetype=null 2>&1 | FileCheck %s --check-prefix=CONFLICT
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract= %t/no-layout.ll -filetype=null 2>&1 | FileCheck %s --check-prefix=EMPTY
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract= %t/no-layout.ll -filetype=null 2>&1 | FileCheck %s --check-prefix=EMPTY
 ;
 ; An input layout is an ABI contract, not a hint. llc may supply a layout only
 ; when the input omitted it; it must not silently replace a conflicting text-IR

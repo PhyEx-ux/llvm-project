@@ -1,14 +1,14 @@
 ; RUN: split-file %s %t
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/narrow-pair.ll -o %t/a.o 2>&1 | FileCheck %s --check-prefix=N6
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/wide-offset.ll -o %t/b.o 2>&1 | FileCheck %s --check-prefix=W12
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/three-fields.ll -o %t/c.o 2>&1 | FileCheck %s --check-prefix=T9
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/bare-i8.ll -o %t/d.o 2>&1 | FileCheck %s --check-prefix=B1
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/wrong-shape-8.ll -o %t/e.o 2>&1 | FileCheck %s --check-prefix=S8
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/global-narrow.ll -o %t/f.o 2>&1 | FileCheck %s --check-prefix=G6
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/vacopy-dst.ll -o %t/g.o 2>&1 | FileCheck %s --check-prefix=CD6
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/vacopy-src.ll -o %t/h.o 2>&1 | FileCheck %s --check-prefix=CS6
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/gep-subfield.ll -o %t/i.o 2>&1 | FileCheck %s --check-prefix=GS6
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/zero-alloca.ll -o %t/j.o 2>&1 | FileCheck %s --check-prefix=ZA0
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/narrow-pair.ll -o %t/a.o 2>&1 | FileCheck %s --check-prefix=N6
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/wide-offset.ll -o %t/b.o 2>&1 | FileCheck %s --check-prefix=W12
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/three-fields.ll -o %t/c.o 2>&1 | FileCheck %s --check-prefix=T9
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/bare-i8.ll -o %t/d.o 2>&1 | FileCheck %s --check-prefix=B1
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/wrong-shape-8.ll -o %t/e.o 2>&1 | FileCheck %s --check-prefix=S8
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/global-narrow.ll -o %t/f.o 2>&1 | FileCheck %s --check-prefix=G6
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/vacopy-dst.ll -o %t/g.o 2>&1 | FileCheck %s --check-prefix=CD6
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/vacopy-src.ll -o %t/h.o 2>&1 | FileCheck %s --check-prefix=CS6
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/gep-subfield.ll -o %t/i.o 2>&1 | FileCheck %s --check-prefix=GS6
+; RUN: not llc -mtriple=mcs251 -mcs251-object-format=elf -filetype=obj %t/zero-alloca.ll -o %t/j.o 2>&1 | FileCheck %s --check-prefix=ZA0
 ; RUN: llc -mtriple=mcs251 < %t/frozen-ok.ll | FileCheck %s --check-prefix=OK
 ; RUN: llc -mtriple=mcs251 < %t/opaque-ok.ll | FileCheck %s --check-prefix=OP
 ;

@@ -3,8 +3,8 @@
 ; RUN: llvm-readobj --file-headers --sections %t/as4-constant-expr.o | FileCheck %s --check-prefix=AS4-CE
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj %t/as4-explicit.ll -o %t/as4-explicit.o
 ; RUN: llvm-readobj --file-headers --sections %t/as4-explicit.o | FileCheck %s --check-prefix=AS4-EXPLICIT
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj %t/as6-constant-expr.ll -o %t/as6-constant-expr.o 2>&1 | FileCheck %s --check-prefix=AS6-CE
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj %t/as6-explicit.ll -o %t/as6-explicit.o 2>&1 | FileCheck %s --check-prefix=AS6-EXPLICIT
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj %t/as6-constant-expr.ll -o %t/as6-constant-expr.o 2>&1 | FileCheck %s --check-prefix=AS6-CE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj %t/as6-explicit.ll -o %t/as6-explicit.o 2>&1 | FileCheck %s --check-prefix=AS6-EXPLICIT
 ;
 ; W3b (PM ruling 2026-09-13 #2): the identity is the contract generation, so
 ; an XSmall/v2 ELF object is v2 whatever its content. A CODE (AS4) pointer

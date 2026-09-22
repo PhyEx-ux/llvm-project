@@ -93,17 +93,17 @@
 ;
 ; Negatives: each mixed container with ONE Unmarked member -- the census
 ; rejects the whole container fail-closed (old :619-equivalent verdict).
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-isr-bit.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-isr-place.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-bit-place.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-isr-bit-place.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-four-cell.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-isr-bit.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-isr-place.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-bit-place.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-isr-bit-place.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-four-cell.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD
 ; BAD: MCS251: module uses an ABI capability outside the registered A4 v2 object identity
 ;
 ; Negative: the un-engaged shape keeps its historical position -- an
 ; ordinary (unplaced) AS4 cast root in a NON-ISR module is rejected by the
 ; ordinary walk, exactly as before G11 (probe 2[A2] invariant).
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-plain-as4.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD2
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/bad-plain-as4.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=BAD2
 ; BAD2: MCS251: module uses an ABI capability outside the registered A4 v2 object identity
 
 ;--- four-cell.ll

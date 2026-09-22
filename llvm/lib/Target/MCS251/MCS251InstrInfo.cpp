@@ -55,7 +55,7 @@ bool MCS251InstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
 // instruction pair, never as byte lanes.
 [[noreturn]] void
 MCS251InstrInfo::reportBadSpillClass(const TargetRegisterClass *RC) const {
-  report_fatal_error(Twine("MCS251: cannot spill a value of register class ") +
+  reportFatalUsageError(Twine("MCS251: cannot spill a value of register class ") +
                      RI.getRegClassName(RC));
 }
 
@@ -331,7 +331,7 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   if (MI.isPseudo()) {
     if (MI.getParent()->getParent()->getProperties().hasProperty(
             MachineFunctionProperties::Property::NoVRegs))
-      report_fatal_error("MCS251: cannot size unexpanded pseudo '" +
+      reportFatalUsageError("MCS251: cannot size unexpanded pseudo '" +
                          Twine(getName(Opc)) + "' after register allocation");
     return 0;
   }
@@ -520,7 +520,7 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   default:
     // A fully expanded target opcode that this table does not know would
     // corrupt the relaxation arithmetic -- fail loudly instead of guessing.
-    report_fatal_error("MCS251: cannot size instruction '" +
+    reportFatalUsageError("MCS251: cannot size instruction '" +
                        Twine(getName(Opc)) + "' for branch relaxation");
   }
 }

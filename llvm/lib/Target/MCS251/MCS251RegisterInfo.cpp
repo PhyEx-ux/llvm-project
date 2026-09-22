@@ -41,7 +41,7 @@ const uint32_t *MCS251RegisterInfo::getCallPreservedMask(
     const MachineFunction &MF, CallingConv::ID CC) const {
   switch (CC) {
   default:
-    report_fatal_error("Unsupported calling convention");
+    reportFatalUsageError("Unsupported calling convention");
   case CallingConv::C:
   case CallingConv::Fast:
     // Fast deliberately shares the C physical ABI, including its clobbers.
@@ -119,19 +119,19 @@ bool MCS251RegisterInfo::eliminateFrameIndex(
   Register FrameReg;
   int64_t Dis = TFL->getFrameIndexReference(MF, FI, FrameReg).getFixed() + Off;
   if (!isInt<16>(Dis))
-    report_fatal_error("MCS251: frame offset out of the signed 16-bit "
+    reportFatalUsageError("MCS251: frame offset out of the signed 16-bit "
                        "displacement range (large frames need a dpx-based "
                        "addressing scheme, not yet supported)");
 
   switch (MI.getOpcode()) {
   default:
-    report_fatal_error("MCS251: unknown instruction with a frame index");
+    reportFatalInternalError("MCS251: unknown instruction with a frame index");
   case MCS251::MOV32rmF:
   case MCS251::MOV32mrF: {
     // Keep a full DR definition/use throughout allocation. Only now, with
     // physical registers and final offsets, expose the native WR lanes.
     if (!isInt<16>(Dis + 2))
-      report_fatal_error("MCS251: i32 spill exceeds signed16 frame displacement");
+      reportFatalUsageError("MCS251: i32 spill exceeds signed16 frame displacement");
     bool Load = MI.getOpcode() == MCS251::MOV32rmF;
     const MachineOperand &Value = MI.getOperand(Load ? 0 : 3);
     Register DR = Value.getReg();
@@ -181,7 +181,7 @@ bool MCS251RegisterInfo::eliminateFrameIndex(
     // reference -- a var-sized function would need to materialise the dr16
     // anchor (not yet implemented).
     if (MF.getFrameInfo().hasVarSizedObjects())
-      report_fatal_error("MCS251: taking the address of a frame object in a "
+      reportFatalUsageError("MCS251: taking the address of a frame object in a "
                          "function with dynamic allocas is not supported "
                          "(needs an anchor read, not yet implemented)");
     MI.setDesc(

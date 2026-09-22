@@ -131,7 +131,7 @@ static void putExpr16(const MCOperand &Op, unsigned Offset,
     return;
   }
   if (!Op.isImm())
-    report_fatal_error("MCS251: expected a 16-bit immediate or expression");
+    reportFatalInternalError("MCS251: expected a 16-bit immediate or expression");
   put16(unsigned(Op.getImm()), CB);
 }
 
@@ -146,7 +146,7 @@ static void putExpr24(const MCOperand &Op, unsigned Offset,
     return;
   }
   if (!Op.isImm())
-    report_fatal_error("MCS251: expected a 24-bit immediate or expression");
+    reportFatalInternalError("MCS251: expected a 24-bit immediate or expression");
   unsigned V = unsigned(Op.getImm());
   put8(V >> 16, CB);
   put16(V, CB);
@@ -166,7 +166,7 @@ static void putExprJ16(const MCOperand &Op, unsigned Offset,
     return;
   }
   if (!Op.isImm())
-    report_fatal_error("MCS251: expected a jump-table address or immediate");
+    reportFatalInternalError("MCS251: expected a jump-table address or immediate");
   put16(unsigned(Op.getImm()), CB);
 }
 
@@ -175,7 +175,7 @@ static void putImm8(const MCOperand &Op, SmallVectorImpl<char> &CB) {
   // (0x103/0x183/0x383), which are deliberately not part of the first object
   // writer version.  Error loudly instead of truncating the symbol value.
   if (!Op.isImm())
-    report_fatal_error("MCS251: symbolic 8-bit immediate is not supported; "
+    reportFatalUsageError("MCS251: symbolic 8-bit immediate is not supported; "
                        "use a 16-bit or 24-bit operand");
   put8(unsigned(Op.getImm()), CB);
 }
@@ -209,7 +209,7 @@ static void putBitAddr(const MCOperand &Op, unsigned Offset,
 // non-immediate in release builds must not silently mis-encode either.
 static void putDisp16(const MCOperand &Op, SmallVectorImpl<char> &CB) {
   if (!Op.isImm())
-    report_fatal_error("MCS251: symbolic @wr+dis16 displacement reached the "
+    reportFatalUsageError("MCS251: symbolic @wr+dis16 displacement reached the "
                        "MC emitter; ASxxxx has no dis16 relocation (the base "
                        "register carries the symbol)");
   put16(unsigned(Op.getImm()) & 0xffff, CB);
@@ -229,13 +229,13 @@ static void putBranch(const MCOperand &Op, unsigned Offset,
     return;
   }
   if (!Op.isImm())
-    report_fatal_error("MCS251: expected a branch expression or immediate");
+    reportFatalInternalError("MCS251: expected a branch expression or immediate");
   put8(unsigned(Op.getImm()), CB);
 }
 
 static MCRegister getReg(const MCInst &MI, unsigned I) {
   if (!MI.getOperand(I).isReg())
-    report_fatal_error("MCS251: expected register operand in MC emitter");
+    reportFatalInternalError("MCS251: expected register operand in MC emitter");
   return MI.getOperand(I).getReg();
 }
 static unsigned R(const MCInst &MI, unsigned I) {
@@ -246,7 +246,7 @@ static unsigned RR(const MCInst &MI, unsigned D, unsigned S) {
 }
 static unsigned Imm(const MCInst &MI, unsigned I) {
   if (!MI.getOperand(I).isImm())
-    report_fatal_error("MCS251: expected immediate operand in MC emitter");
+    reportFatalInternalError("MCS251: expected immediate operand in MC emitter");
   return unsigned(MI.getOperand(I).getImm());
 }
 
@@ -300,7 +300,7 @@ static void rejectPseudo(const MCInst &MI) {
     // ADD16fi keeps its frame index only until PEI, which retargets it to
     // ADD16ri (see MCS251RegisterInfo::eliminateFrameIndex).
     MCS251_PSEUDO(ADD16fi)
-      report_fatal_error("MCS251: pseudo instruction reached the MC code "
+      reportFatalInternalError("MCS251: pseudo instruction reached the MC code "
                          "emitter (custom-inserter expansion missing)");
 #undef MCS251_PSEUDO
   default:
@@ -678,7 +678,7 @@ void MCS251MCCodeEmitter::encodeInstruction(
     }
     break;
   default:
-    report_fatal_error("MCS251: unsupported instruction in MC emitter: " +
+    reportFatalInternalError("MCS251: unsupported instruction in MC emitter: " +
                        MCII.getName(Op));
   }
 }

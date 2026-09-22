@@ -11,12 +11,12 @@
 ; RUN: llvm-readobj --sections --section-data --relocations --symbols %t/f5.o | FileCheck %s --check-prefix=F5
 ; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/zok.ll -o %t/zok.o
 ; RUN: llvm-readobj --sections --section-data --symbols %t/zok.o | FileCheck %s --check-prefix=ZOK
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/nempty.ll -o %t/nempty.o 2>&1 | FileCheck %s --check-prefix=NEMPTY
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/nnested.ll -o %t/nnested.o 2>&1 | FileCheck %s --check-prefix=NNESTED
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/nnestednz.ll -o %t/nnestednz.o 2>&1 | FileCheck %s --check-prefix=NNESTEDNZ
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/nundef.ll -o %t/nundef.o 2>&1 | FileCheck %s --check-prefix=NUNDEF
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/nas0.ll -o %t/nas0.o 2>&1 | FileCheck %s --check-prefix=NAS0
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/nalign.ll -o %t/nalign.o 2>&1 | FileCheck %s --check-prefix=NALIGN
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/nempty.ll -o %t/nempty.o 2>&1 | FileCheck %s --check-prefix=NEMPTY
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/nnested.ll -o %t/nnested.o 2>&1 | FileCheck %s --check-prefix=NNESTED
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/nnestednz.ll -o %t/nnestednz.o 2>&1 | FileCheck %s --check-prefix=NNESTEDNZ
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/nundef.ll -o %t/nundef.o 2>&1 | FileCheck %s --check-prefix=NUNDEF
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/nas0.ll -o %t/nas0.o 2>&1 | FileCheck %s --check-prefix=NAS0
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/nalign.ll -o %t/nalign.o 2>&1 | FileCheck %s --check-prefix=NALIGN
 ;
 ; AS4-AGGREGATE (design AS4-AGGREGATE-INIT-DESIGN 6A/7-S2): read-only __code
 ; initializers accept nonempty non-opaque structs of i8/i16/i32, nested arrays

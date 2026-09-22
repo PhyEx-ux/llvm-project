@@ -124,8 +124,8 @@
 ; assembly text reject a bit module before any layout question, so no layout
 ; change can be observed there (the frozen single-CSEG shape is unreachable
 ; for a bit module on those paths by construction).
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj %t/bit.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=asm %t/bit.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj %t/bit.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=asm %t/bit.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
 ;REL: MCS251 bit object requires ELF object output
 
 ;--- bit.ll

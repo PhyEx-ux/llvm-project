@@ -23,14 +23,14 @@
 ; RUN: split-file %s %t
 ;
 ; AS0, zero-initialized (the XINIT record would carry size=0/payload=0).
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/as0-big.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AS0
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/as0-big.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AS0
 ; AS0->AS3 xdata: the dedicated XDATA record half of the same fixed path.
 ; XDATA has its own frozen wording; the guard order keeps it.
 ; AS0 with a non-zero initializer (payload appended after the zeroed length).
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/as0-big-init.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AS0
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/as0-big-init.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AS0
 ; noinit: no initialization record at all, still rejected.
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/as0-big-noinit.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AS0
-; RUN: not --crash llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/xdata-big.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=XDATA
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/as0-big-noinit.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=AS0
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %t/xdata-big.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=XDATA
 ;
 ; AS0: LLVM ERROR: MCS251: mutable global size must fit in 16 bits
 ; XDATA: LLVM ERROR: MCS251: fixed __xdata global 'x': object size 65536 does not fit the 16-bit XDATA record limit (65535 bytes; fixed objects are never split)

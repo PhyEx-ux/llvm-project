@@ -60,12 +60,11 @@ MCOperand MCS251MCInstLower::LowerSymbolOperand(const MachineOperand &MO,
   if (IsBitObject) {
     const auto *GV = cast<GlobalVariable>(MO.getGlobal());
     if (!IsBitAddrPos)
-      report_fatal_error(
-          "MCS251: bit object '" + GV->getName() +
+      reportFatalUsageError("MCS251: bit object '" + GV->getName() +
           "' may only be used as the bit-address operand of a bit instruction");
     if (MO.getOffset())
       // The frozen protocol requires r_addend 0 (BIT-OBJECT-CONTRACT.md §4.2).
-      report_fatal_error("MCS251: bit object '" + GV->getName() +
+      reportFatalUsageError("MCS251: bit object '" + GV->getName() +
                          "' bit-address operand must have no addend");
     return MCOperand::createExpr(
         MCSymbolRefExpr::create(Sym, MCS251::S_BITADDR, Ctx));

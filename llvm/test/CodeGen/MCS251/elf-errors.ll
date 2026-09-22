@@ -1,7 +1,7 @@
 ; RUN: split-file %s %t
 ; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/difference.ll -o %t/diff.o 2>&1 | FileCheck %s --check-prefix=DIFF
 ; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/mutable.ll -o %t/data.o 2>&1 | FileCheck %s --check-prefix=MUTABLE
-; RUN: not --crash llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/align.ll -o %t/align.o 2>&1 | FileCheck %s --check-prefix=ALIGN
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/align.ll -o %t/align.o 2>&1 | FileCheck %s --check-prefix=ALIGN
 ;
 ; A new container does not silently widen the supported data/expression ABI.
 ; (X3 widened the pointer INITIALIZER leaf -- &global + addend and null --

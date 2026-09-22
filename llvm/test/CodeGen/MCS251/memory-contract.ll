@@ -1,8 +1,8 @@
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -verify-machineinstrs < %s | FileCheck %s --check-prefix=NEAR
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,8,1 -verify-machineinstrs < %s | FileCheck %s --check-prefix=NEAR
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,3,1 -filetype=null < %s 2>&1 | FileCheck %s --check-prefix=INVALID-NEAR
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,3,16,8,1 -filetype=null < %s 2>&1 | FileCheck %s --check-prefix=INVALID-VERSION
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,1,1 -filetype=null < %s 2>&1 | FileCheck %s --check-prefix=INVALID-COMPAT
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,3,1 -filetype=null < %s 2>&1 | FileCheck %s --check-prefix=INVALID-NEAR
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,3,16,8,1 -filetype=null < %s 2>&1 | FileCheck %s --check-prefix=INVALID-VERSION
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,1,1 -filetype=null < %s 2>&1 | FileCheck %s --check-prefix=INVALID-COMPAT
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,16,1,1 -filetype=obj < %s -o %t.rel 2>&1 | FileCheck %s --check-prefix=OBJECT-GATE
 ; RUN: test ! -s %t.rel
 ;

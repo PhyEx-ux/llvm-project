@@ -1,4 +1,4 @@
-; RUN: not --crash llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 \
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -O0 \
 ; RUN:   -mcs251-object-format=elf -filetype=obj < %s 2>&1 | FileCheck %s
 ;
 ; CP-A stage boundary (RUNTIME-AS-PTR-DESIGN-A.md §3-A5, DESIGN.md CP-A
