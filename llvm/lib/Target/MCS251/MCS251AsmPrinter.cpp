@@ -973,6 +973,18 @@ class MCS251AsmPrinter final : public AsmPrinter {
                                DL.getTypeStoreSize(Ty));
       return;
     }
+    if (auto *FP = dyn_cast<ConstantFP>(C)) {
+      // WP5 A3: a binary32 leaf is written as its IEEE-754 bit pattern in the
+      // same 4-byte container the i32 arm above uses. The byte order is NOT
+      // hand-written here: emitIntValue already lays the value down in the
+      // target (big-endian) order, exactly like the integer path, so 1.5f
+      // serializes as 3f c0 00 00. Every bit pattern -- signed zero, Inf, NaN
+      // payloads, subnormals -- survives unchanged because the APFloat is
+      // reinterpreted, never converted.
+      OutStreamer->emitIntValue(FP->getValueAPF().bitcastToAPInt().getZExtValue(),
+                                DL.getTypeStoreSize(Ty));
+      return;
+    }
     if (isa<PointerType>(Ty)) {
       // X3: pointer leaf -- the 24-bit relocation channel.
       const GlobalValue *Base;
@@ -1138,6 +1150,14 @@ class MCS251AsmPrinter final : public AsmPrinter {
   void emitROInitializer(const DataLayout &DL, const Constant *C) {
     if (auto *CI = dyn_cast<ConstantInt>(C)) {
       OutStreamer->emitIntValue(CI->getZExtValue(),
+                                DL.getTypeStoreSize(C->getType()));
+      return;
+    }
+    if (auto *FP = dyn_cast<ConstantFP>(C)) {
+      // WP5 A3: read-only mirror of the mutable ConstantFP arm -- identical
+      // bit-pattern write through emitIntValue, so a const/CODE-space float
+      // table is byte-for-byte consistent with the DSEG one (IC-002).
+      OutStreamer->emitIntValue(FP->getValueAPF().bitcastToAPInt().getZExtValue(),
                                 DL.getTypeStoreSize(C->getType()));
       return;
     }
@@ -1781,9 +1801,14 @@ public:
           report_fatal_error("MCS251: pointer parameter address space has no "
                              "ordinary static-slot ABI");
       } else if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) &&
-                 !Ty->isIntegerTy(32) && !Ty->isFloatTy()) {
+                 !Ty->isIntegerTy(32) && !Ty->isFloatTy() &&
+                 !Ty->isIntegerTy(1)) {
         // f32 binary32 payloads use the i32 static-slot layout, matching the
         // DPL:DPH:B:A first-argument/return ABI.
+        // WP5 A1: an i1 (`_Bool`) continuation parameter is emitted in the
+        // same 1-byte static slot as i8 (getTypeStoreSize(i1) == 1). Exactly
+        // i1 joins the accepted widths here, mirroring checkParameterType in
+        // MCS251ISelLowering.cpp; no other sub-byte width is admitted.
         report_fatal_error("MCS251: static parameters require i8/i16/i32/f32 "
                            "or an ordinary data/CODE pointer");
       }

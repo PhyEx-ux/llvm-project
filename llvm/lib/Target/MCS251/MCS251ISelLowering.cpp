@@ -3636,8 +3636,14 @@ static void checkParameterType(Type *Ty, unsigned Index,
   // Float softening presents f32 as its IEEE-754 i32 bit pattern at this ABI
   // boundary. True f64 is rejected by the MCS251 contract verifier before
   // lowering and must never arrive here.
+  //
+  // WP5 A1: C `_Bool` parameters reach this boundary as `i1`, carried in the
+  // same 1-byte slot family as i8 (first argument DPL, continuation argument
+  // the named _<callee>_PARM_n static slot). This is a deliberately narrow
+  // widening: exactly i1 joins the whitelist, no other non-{8,16,32} integer
+  // width is admitted.
   if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) && !Ty->isIntegerTy(32) &&
-      !Ty->isFloatTy())
+      !Ty->isFloatTy() && !Ty->isIntegerTy(1))
     report_fatal_error("MCS251: arguments must be unsplit i8/i16/i32 scalars");
 }
 
@@ -3647,10 +3653,18 @@ static void checkParameter(const ArgT &Arg, unsigned Index,
   // f32 libcalls are softened to i32 but retain f32 as ArgVT for ABI metadata.
   // It is the sole non-identical ArgVT/VT pair accepted by this backend.
   const bool IsSoftenedF32 = Arg.ArgVT == MVT::f32 && Arg.VT == MVT::i32;
+  // WP5 A1: a C `_Bool` parameter is i1 in IR and legalizes to the i8
+  // register channel (RegisterTypeForVT[i1] == i8), so it arrives here as the
+  // deliberately narrow non-identical pair (VT = i8, ArgVT = i1). Exactly i1
+  // joins the accepted set: no other sub-byte width and no other ArgVT/VT
+  // mismatch is admitted, and every PartOffset/Split/ByVal/... marker check
+  // below still applies unchanged.
+  const bool IsBool1Byte = Arg.ArgVT == MVT::i1 && Arg.VT == MVT::i8;
   if ((Arg.VT != MVT::i8 && Arg.VT != MVT::i16 && Arg.VT != MVT::i32) ||
-      (!IsSoftenedF32 && Arg.ArgVT != Arg.VT) || Arg.PartOffset ||
-      Arg.Flags.isSplit() || Arg.Flags.isByVal() || Arg.Flags.isByRef() ||
-      Arg.Flags.isSRet() || Arg.Flags.isInAlloca() || Arg.Flags.isNest())
+      (!IsSoftenedF32 && !IsBool1Byte && Arg.ArgVT != Arg.VT) ||
+      Arg.PartOffset || Arg.Flags.isSplit() || Arg.Flags.isByVal() ||
+      Arg.Flags.isByRef() || Arg.Flags.isSRet() || Arg.Flags.isInAlloca() ||
+      Arg.Flags.isNest())
     report_fatal_error("MCS251: arguments must be unsplit i8/i16/i32 scalars");
   if (Index && Arg.Flags.isPointer() && !AllowStaticPointers)
     report_fatal_error("MCS251: static pointer parameters are not supported "

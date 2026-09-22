@@ -118,6 +118,12 @@ bool llvm::MCS251::GlobalInit::isSupportedMutableType(Type *Ty,
                                                       const DataLayout &DL) {
   if (Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32))
     return true;
+  // WP5 A3: binary32 storage joins the integer scalars as a 4-byte leaf. The
+  // bit pattern is written through the same initializer channel, so the
+  // emitter (and the ContractCheck caller that shares this predicate) stays
+  // byte-identical for every other shape. True f64 is deliberately absent.
+  if (Ty->isFloatTy())
+    return true;
   if (auto *PT = dyn_cast<PointerType>(Ty))
     // X3: pointer leaves are supported in 4-byte containers only -- the
     // initializer channel writes a big-endian 32-bit container whose low 24
@@ -149,6 +155,11 @@ bool llvm::MCS251::GlobalInit::isSupportedMutableInitializer(const Constant *C,
     return true;
   if (isa<ConstantInt>(C))
     return true;
+  // WP5 A3: a binary32 leaf initializes its 4-byte container from the
+  // IEEE-754 bit pattern. This is the mutable (DSEG/XINIT) twin of the
+  // ConstantInt arm; the type check above already confined it to `float`.
+  if (isa<ConstantFP>(C))
+    return true;
   if (isa<PointerType>(Ty)) {
     const GlobalValue *Base;
     int64_t Addend;
@@ -178,6 +189,12 @@ bool llvm::MCS251::GlobalInit::isSupportedROType(Type *Ty, const DataLayout &DL,
                                                  bool AllowStructs) {
   if (Ty->isIntegerTy(8) || Ty->isIntegerTy(16) || Ty->isIntegerTy(32))
     return true;
+  // WP5 A3: the read-only (CSEG/CODE) table accepts the same binary32 leaf as
+  // the mutable one -- IC-002 requires one shared leaf treatment, so const or
+  // CODE-space `float` objects mirror the DSEG decision exactly. True f64
+  // stays outside this whitelist.
+  if (Ty->isFloatTy())
+    return true;
   if (auto *PT = dyn_cast<PointerType>(Ty))
     return DL.getTypeStoreSize(PT) == 4;
   if (auto *AT = dyn_cast<ArrayType>(Ty))
@@ -204,6 +221,12 @@ bool llvm::MCS251::GlobalInit::isSupportedROInitializer(
   if (!isSupportedROType(Ty, DL, AllowStructs))
     return false;
   if (isa<ConstantInt>(C))
+    return true;
+  // WP5 A3: the read-only twin of the mutable ConstantFP arm. The
+  // AllowZeroImage gate below is unaffected: a `float 0.0` is a ConstantFP,
+  // never a ConstantAggregateZero, so it is admitted by its bit pattern alone
+  // and never needs (or receives) the zero-image exemption.
+  if (isa<ConstantFP>(C))
     return true;
   if (isa<ConstantAggregateZero>(C))
     return AllowZeroImage;
