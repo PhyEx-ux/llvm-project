@@ -281,6 +281,10 @@ bool llvm::MCS251::GlobalInit::hasV1PlacementInitializerImpl(
     return true;
   if (isa<ConstantAggregateZero>(C) || isa<ConstantInt>(C))
     return true;
+  // An AS3/AS4 pointer aggregate reaches this fallback, so its binary32
+  // sibling must be admitted exactly like float storage support; f64 is not.
+  if (auto *FP = dyn_cast<ConstantFP>(C))
+    return FP->getType()->isFloatTy();
   Type *Ty = C->getType();
   if (isa<PointerType>(Ty)) {
     const GlobalValue *Base;

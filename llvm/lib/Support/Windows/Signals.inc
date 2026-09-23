@@ -557,15 +557,18 @@ void llvm::sys::AddSignalHandler(sys::SignalHandlerCallback FnPtr, void *Cookie,
   LeaveCriticalSection(&CriticalSection);
 }
 
-static void Cleanup(bool ExecuteSignalHandlers) {
+static void Cleanup(bool ExecuteSignalHandlers,
+                    bool ProcessTerminating = true) {
   if (CleanupExecuted)
     return;
 
   EnterCriticalSection(&CriticalSection);
 
   // Prevent other thread from registering new files and directories for
-  // removal, should we be executing because of the console handler callback.
-  CleanupExecuted = true;
+  // removal when the process is terminating. A nonterminal cleanup (expected
+  // frontend failure) must leave future compilations able to register files.
+  if (ProcessTerminating)
+    CleanupExecuted = true;
 
   // FIXME: open files cannot be deleted.
   if (FilesToRemove != NULL)
@@ -580,7 +583,9 @@ static void Cleanup(bool ExecuteSignalHandlers) {
   LeaveCriticalSection(&CriticalSection);
 }
 
-void llvm::sys::RunInterruptHandlers() {
+void llvm::sys::RunInterruptHandlers() { RunInterruptHandlers(true); }
+
+void llvm::sys::RunInterruptHandlers(bool ExecuteSignalHandlers) {
   // Let's not interfere with stack trace symbolication and friends.
   auto BypassSandbox = sandbox::scopedDisable();
 
@@ -589,7 +594,10 @@ void llvm::sys::RunInterruptHandlers() {
   // error handler). We must ensure that the critical section is properly
   // initialized.
   InitializeThreading();
-  Cleanup(true);
+  // A cleanup-only call is used for an expected frontend failure. Remove the
+  // current temporary files without making later in-process compilations
+  // unable to register files or run their own cleanup.
+  Cleanup(ExecuteSignalHandlers, /*ProcessTerminating=*/ExecuteSignalHandlers);
 }
 
 /// Find the Windows Registry Key for a given location.

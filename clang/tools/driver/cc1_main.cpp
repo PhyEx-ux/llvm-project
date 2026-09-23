@@ -38,6 +38,7 @@
 #include "llvm/Option/OptTable.h"
 #include "llvm/Support/BuryPointer.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/CrashRecoveryContext.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/IOSandbox.h"
 #include "llvm/Support/ManagedStatic.h"
@@ -72,9 +73,16 @@ static void LLVMErrorHandler(void *UserData, const char *Message,
 
   Diags.Report(diag::err_fe_error_backend) << Message;
 
-  // Run the interrupt handlers to make sure any special cleanups get done, in
-  // particular that we remove files registered with RemoveFileOnSignal.
-  llvm::sys::RunInterruptHandlers();
+  // Run cleanup handlers, in particular to remove files registered with
+  // RemoveFileOnSignal. A usage error is an expected failure, not an internal
+  // crash: on Windows, the full interrupt-handler path also runs the pretty
+  // stack crash callbacks. Keep file cleanup but skip those callbacks here;
+  // real crashes still use CrashRecoveryContext's original exception context.
+  llvm::sys::RunInterruptHandlers(GenCrashDiag);
+  if (!GenCrashDiag) {
+    if (auto *CRC = llvm::CrashRecoveryContext::GetCurrent())
+      CRC->DumpStackAndCleanupOnFailure = false;
+  }
 
   // We cannot recover from llvm errors.  When reporting a fatal error, exit
   // with status 70 to generate crash diagnostics.  For BSD systems this is

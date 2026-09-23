@@ -331,8 +331,9 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   if (MI.isPseudo()) {
     if (MI.getParent()->getParent()->getProperties().hasProperty(
             MachineFunctionProperties::Property::NoVRegs))
-      reportFatalUsageError("MCS251: cannot size unexpanded pseudo '" +
-                         Twine(getName(Opc)) + "' after register allocation");
+      reportFatalInternalError(
+          "MCS251: cannot size unexpanded pseudo '" + Twine(getName(Opc)) +
+          "' after register allocation");
     return 0;
   }
   switch (Opc) {
@@ -520,8 +521,8 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   default:
     // A fully expanded target opcode that this table does not know would
     // corrupt the relaxation arithmetic -- fail loudly instead of guessing.
-    reportFatalUsageError("MCS251: cannot size instruction '" +
-                       Twine(getName(Opc)) + "' for branch relaxation");
+    reportFatalInternalError("MCS251: cannot size instruction '" +
+                             Twine(getName(Opc)) + "' for branch relaxation");
   }
 }
 

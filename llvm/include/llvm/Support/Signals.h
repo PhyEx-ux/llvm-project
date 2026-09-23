@@ -38,8 +38,11 @@ class raw_ostream;
 namespace sys {
 
 /// This function runs all the registered interrupt handlers, including the
-/// removal of files registered by RemoveFileOnSignal.
+/// removal of files registered by RemoveFileOnSignal. The overload taking
+/// \p ExecuteSignalHandlers can skip registered signal handlers while still
+/// removing temporary files.
 LLVM_ABI void RunInterruptHandlers();
+LLVM_ABI void RunInterruptHandlers(bool ExecuteSignalHandlers);
 
 /// This function registers signal handlers to ensure that if a signal gets
 /// delivered that the named file is removed.

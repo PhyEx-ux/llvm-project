@@ -1,0 +1,28 @@
+# RUN: split-file %s %t
+# RUN: not --crash llc -mtriple=mcs251 -run-pass=mcs251-branch-relaxation -filetype=null %t/unexpanded-pseudo.mir 2>&1 | FileCheck %s --check-prefix=CHECK
+#
+# A NoVRegs function retaining a post-RA pseudo violates the backend's
+# compilation invariant. `not --crash` distinguishes reportFatalInternalError
+# (abort with a crash diagnostic) from reportFatalUsageError (normal exit).
+# CHECK: MCS251: cannot size unexpanded pseudo 'SRL32one' after register allocation
+# CHECK: PLEASE submit a bug report
+
+#--- unexpanded-pseudo.mir
+--- |
+  target triple = "mcs251"
+  define void @f() { ret void }
+  !mcs251.signatures = !{!10000}
+  !10000 = !{!"_f", i32 1, i32 0}
+...
+---
+name: f
+alignment: 1
+tracksRegLiveness: true
+noVRegs: true
+body: |
+  bb.0:
+    liveins: $dr0
+    $dr0 = SRL32one $dr0, implicit-def $a, implicit-def $psw
+    ERET
+...
+

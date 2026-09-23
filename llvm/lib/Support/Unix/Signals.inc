@@ -530,10 +530,16 @@ static void InfoSignalHandlerTerminate(int Sig) {
   }
 }
 
-void sys::RunInterruptHandlers() {
+void sys::RunInterruptHandlers() { RunInterruptHandlers(true); }
+
+void sys::RunInterruptHandlers(bool ExecuteSignalHandlers) {
+  // This option is used on Windows, where interrupt cleanup normally runs the
+  // registered signal handlers as well. Keep the existing Unix behavior, which
+  // only removes temporary files.
+  (void)ExecuteSignalHandlers;
+
   // Let's not interfere with stack trace symbolication and friends.
   auto BypassSandbox = sandbox::scopedDisable();
-
   RemoveFilesToRemove();
 }
 

@@ -83,10 +83,12 @@ public:
   ///    names, all of which are lowered from the call itself and never reach
   ///    BuildAtomicExpr;
   ///  - a read of an _Atomic subobject (an lvalue-to-rvalue conversion whose
-  ///    operand type transitively contains an _Atomic subobject);
+  ///    operand type transitively contains an _Atomic subobject), or a trivial
+  ///    C++ copy/move construction from a glvalue of a type containing one (the
+  ///    generated memberwise copy receives its source by reference);
   ///  - a write to an _Atomic subobject (a plain/compound assignment or an
   ///    increment/decrement whose target type contains one -- which is also
-  ///    how a whole-struct copy over an atomic member is covered).
+  ///    how a whole-struct assignment over an atomic member is covered).
   ///
   /// The walk skips unevaluated operands (sizeof/_Alignof/typeof/type traits/
   /// offsetof/noexcept), the unselected _Generic associations and controlling

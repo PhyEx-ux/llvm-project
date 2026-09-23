@@ -4,15 +4,18 @@
 // RUN: FileCheck %s --check-prefix=WEAK < %t/weak.Oz.err
 // RUN: FileCheck %s --check-prefix=I64 --implicit-check-not='PLEASE submit' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' --implicit-check-not='crash backtrace' < %t/i64.O0.err
 // RUN: FileCheck %s --check-prefix=I64 --implicit-check-not='PLEASE submit' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' --implicit-check-not='crash backtrace' < %t/i64.O2.err
+// RUN: FileCheck %s --check-prefix=BITINT --implicit-check-not='PLEASE submit' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' --implicit-check-not='crash backtrace' < %t/bitint.O0.err
+// RUN: FileCheck %s --check-prefix=BITINT --implicit-check-not='PLEASE submit' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' --implicit-check-not='crash backtrace' < %t/bitint.O2.err
+// RUN: FileCheck %s --check-prefix=INTERNAL < %t/internal.err
 //
 // WP4: the clang C path must fail with EXACTLY status 1, a complete and clean
 // stderr (no bug-report request, no stack dump, no crash-reproducer block,
 // no "frontend command failed" crash summary) and no leftover output file --
-// for both the source-structure rejections (A8 weak definition, at every
-// optimization level) and the backend arithmetic rejection (B1 runtime i64).
-// The clang backend reports these through its DiagnosticsEngine instead of
-// report_fatal_error, precisely so an expected failure never enters clang's
-// in-process crash-recovery path. A plain `not` only asserts "nonzero", so
+// for the source-structure rejections (A8 weak definition), backend arithmetic
+// rejections (B1 runtime i64), and a backend usage-fatal regression (_BitInt(2)
+// parameter). The latter still crosses the in-process CrashRecoveryContext via
+// Process::Exit, but must not be treated as a crash. A plain `not` only asserts
+// "nonzero", so
 // the assertions live in check.sh, which returns 0 only if every case has
 // exact status 1 (or 0 for the positive control), no artifact, and no crash
 // text in the captured stderr.
@@ -27,6 +30,13 @@
 // I64-NOT: PLEASE submit
 // I64-NOT: Stack dump
 // I64-NOT: PLEASE ATTACH
+// BITINT-COUNT-1: fatal error: error in backend: MCS251: arguments must be unsplit i8/i16/i32 scalars
+// BITINT-NOT: PLEASE submit
+// BITINT-NOT: Stack dump
+// BITINT-NOT: PLEASE ATTACH
+// INTERNAL: fatal error: error in backend: #pragma clang __debug llvm_fatal_error
+// INTERNAL: PLEASE submit a bug report
+// INTERNAL: Stack dump:
 
 //--- check.sh
 #!/usr/bin/env bash
@@ -65,7 +75,30 @@ for opt in O0 O1 O2 Os Oz; do
 done
 for opt in O0 O2; do
   expect_reject "i64.$opt" "$T/i64.c" "-$opt"
+  expect_reject "bitint.$opt" "$T/bitint.c" "-$opt" "-ffreestanding" \
+    "-mllvm" "-mcs251-object-format=elf"
 done
+
+# An internal fatal error must retain the crash diagnostics. This also guards
+# the distinction from reportFatalUsageError in the in-process driver path.
+rm -f "$T/internal.o"
+"$CLANG" --target=mcs251-unknown-none -O0 -c "$T/internal.c" \
+  -o "$T/internal.o" 2>"$T/internal.err"
+code=$?
+if [ "$code" -ne 1 ]; then
+  echo "FAIL internal: expected driver status 1, got $code"
+  rc=1
+fi
+if [ -e "$T/internal.o" ]; then
+  echo "FAIL internal: output artifact left behind"
+  rc=1
+fi
+if ! grep -q 'exit code 70' "$T/internal.err" || \
+   ! grep -q 'PLEASE submit a bug report' "$T/internal.err" || \
+   ! grep -q 'Stack dump:' "$T/internal.err"; then
+  echo "FAIL internal: expected crash diagnostic was not present"
+  rc=1
+fi
 
 # Positive control: a supported module compiles (the target's clang object
 # output is ASxxxx REL text) and the artifact is produced.
@@ -85,6 +118,13 @@ __attribute__((weak)) int wf(void) { return 1; }
 volatile unsigned long long a = 2, b = 3;
 volatile unsigned long long sink;
 void f(void) { sink = a * b; }
+
+//--- bitint.c
+int f(_BitInt(2) x) { return x; }
+
+//--- internal.c
+#pragma clang __debug llvm_fatal_error
+int f(void) { return 0; }
 
 //--- ok.c
 extern volatile unsigned char port;

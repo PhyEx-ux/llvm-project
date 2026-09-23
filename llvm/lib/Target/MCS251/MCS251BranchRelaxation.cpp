@@ -45,7 +45,7 @@
 // nothing changes.  Each rewrite moves its own branch into a permanently
 // in-range form (the trampoline is by construction 4 bytes from its branch,
 // and ejmp reaches anywhere), so the loop terminates.  A debug-only final
-// check asserts every rel8 branch is in range; the MC assembler backend
+// check verifies every rel8 branch is in range; the MC assembler backend
 // remains the loud backstop for anything that slips through.
 //
 // Only the three terminator shapes this backend emits are recognized
@@ -282,8 +282,8 @@ void MCS251BranchRelaxation::verify(MachineFunction &MF) const {
         continue;
       const MachineBasicBlock &Dest = *MI.getOperand(0).getMBB();
       if (!isInRange(MI, Dest))
-        reportFatalUsageError("MCS251: rel8 branch still out of range after "
-                           "relaxation");
+        reportFatalInternalError("MCS251: rel8 branch still out of range after "
+                                 "relaxation");
     }
   }
 }

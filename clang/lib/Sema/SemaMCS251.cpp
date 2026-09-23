@@ -13,7 +13,9 @@
 #include "clang/Sema/SemaMCS251.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/OpenACCClause.h"
 #include "clang/AST/ExprOpenMP.h"
 #include "clang/AST/Mangle.h"
@@ -251,8 +253,9 @@ bool SemaMCS251::CheckCodeStore(Expr *LHS, SourceLocation Loc) {
 //===----------------------------------------------------------------------===//
 
 // Recursive containment test with a per-Sema memo. A record is inspected
-// member by member; arrays recurse into their element type. Pointers are NOT
-// traversed (a pointer to an atomic object is an ordinary value here).
+// member by member, and C++ records also include their base subobjects; arrays
+// recurse into their element type. Pointers are NOT traversed (a pointer to an
+// atomic object is an ordinary value here).
 bool SemaMCS251::containsAtomicSubobject(QualType T) {
   T = T.getCanonicalType();
   if (T.isNull())
@@ -266,15 +269,28 @@ bool SemaMCS251::containsAtomicSubobject(QualType T) {
     if (It != AtomicSubobjectCache.end())
       return It->second;
   }
+
   bool Found = false;
   if (const auto *AT = dyn_cast<ArrayType>(T.getTypePtr())) {
     Found = containsAtomicSubobject(AT->getElementType());
   } else if (const auto *RT = dyn_cast<RecordType>(T.getTypePtr())) {
-    for (const FieldDecl *FD : RT->getDecl()->fields())
-      if (containsAtomicSubobject(FD->getType())) {
-        Found = true;
-        break;
-      }
+    const RecordDecl *RD = RT->getDecl()->getDefinition();
+    // Do not cache an incomplete declaration as not containing atomics: its
+    // definition may be completed later in this translation unit.
+    if (!RD)
+      return false;
+    if (const auto *CXXRD = dyn_cast<CXXRecordDecl>(RD))
+      for (const CXXBaseSpecifier &Base : CXXRD->bases())
+        if (containsAtomicSubobject(Base.getType())) {
+          Found = true;
+          break;
+        }
+    if (!Found)
+      for (const FieldDecl *FD : RD->fields())
+        if (containsAtomicSubobject(FD->getType())) {
+          Found = true;
+          break;
+        }
   }
   AtomicSubobjectCache[T.getTypePtr()] = Found;
   return Found;
@@ -384,7 +400,10 @@ bool SemaMCS251::isMCS251AtomicOperationCallee(const CallExpr *CE) {
   if (!CE)
     return false;
   const FunctionDecl *FD = CE->getDirectCallee();
-  if (!FD)
+  // getName() requires an identifier-backed name. Operators, conversion
+  // functions and constructors have other DeclarationName kinds and are not
+  // members of the atomic operation spelling set.
+  if (!FD || !FD->getIdentifier())
     return false;
   return isMCS251AtomicOperationName(FD->getName());
 }
@@ -538,6 +557,23 @@ const Expr *SemaMCS251::findEvaluatedAtomicUse(const Expr *E, QualType &Type) {
       Type = QualType();
       return E;
     }
+
+  // A trivial implicit/defaulted C++ copy/move constructor performs a
+  // memberwise copy even though its source parameter is a reference (so there
+  // is no CK_LValueToRValue node for the aggregate). Treat this as an access
+  // only for the actual source glvalue and only when the selected constructor
+  // has compiler-generated memberwise semantics. User-provided constructors
+  // may copy only ordinary members and must remain governed by their body.
+  if (const auto *CCE = dyn_cast<CXXConstructExpr>(E)) {
+    const CXXConstructorDecl *Ctor = CCE->getConstructor();
+    QualType CtorType = CCE->getType();
+    if (Ctor && Ctor->isCopyOrMoveConstructor() && Ctor->isTrivial() &&
+        CCE->getNumArgs() == 1 && CCE->getArg(0)->isGLValue() &&
+        containsAtomicSubobject(CtorType)) {
+      Type = CtorType;
+      return E;
+    }
+  }
 
   // ---- reads and writes of an _Atomic subobject --------------------------
   // A READ is an lvalue-to-rvalue conversion of a type that transitively
@@ -859,6 +895,21 @@ bool SemaMCS251::CheckMCS251AtomicType(QualType Underlying,
   return true;
 }
 
+// A2-only constant-condition fold. Unlike getFoldedCondition and
+// isConstantCondition, this accepts any side-effect-free expression whose
+// boolean value is constant (including pointer and floating conditions). Keep
+// it local to A2: the atomic and controlled-bit dead-arm policies intentionally
+// use their language-specific integer-constant rules.
+static std::optional<bool>
+getMCS251FoldedA2Condition(const Expr *E, ASTContext &Ctx) {
+  if (!E || E->isValueDependent() || E->HasSideEffects(Ctx))
+    return std::nullopt;
+  bool Value = false;
+  if (!E->EvaluateAsBooleanCondition(Value, Ctx))
+    return std::nullopt;
+  return Value;
+}
+
 // A2: an integer-to-pointer cast in a static-storage initializer denotes an
 // absolute address; the emitter's pointer-leaf whitelist deliberately
 // excludes it. The supported static pointer forms are the SAME ones the IR
@@ -889,12 +940,10 @@ static const Expr *findMCS251IntegralToPointerCast(const Expr *E,
   if (const auto *GSE = dyn_cast<GenericSelectionExpr>(E))
     return findMCS251IntegralToPointerCast(GSE->getResultExpr(), Ctx);
   if (const auto *CO = dyn_cast<ConditionalOperator>(E)) {
-    if (!CO->getCond()->isValueDependent())
-      if (std::optional<llvm::APSInt> C =
-              CO->getCond()->IgnoreParenImpCasts()->getIntegerConstantExpr(
-                  Ctx))
-        return findMCS251IntegralToPointerCast(
-            C->isZero() ? CO->getFalseExpr() : CO->getTrueExpr(), Ctx);
+    if (std::optional<bool> C =
+            getMCS251FoldedA2Condition(CO->getCond(), Ctx))
+      return findMCS251IntegralToPointerCast(
+          *C ? CO->getTrueExpr() : CO->getFalseExpr(), Ctx);
     if (const Expr *Found = findMCS251IntegralToPointerCast(CO->getTrueExpr(), Ctx))
       return Found;
     return findMCS251IntegralToPointerCast(CO->getFalseExpr(), Ctx);
@@ -1042,12 +1091,10 @@ static const Expr *findMCS251AbsolutePointerLeaf(const Expr *Init, QualType Ty,
   // does not reach here; the walk is written to agree with the pointer rule
   // regardless, so the two do not diverge if that gate ever moves.)
   if (const auto *CO = dyn_cast<ConditionalOperator>(Init)) {
-    if (!CO->getCond()->isValueDependent())
-      if (std::optional<llvm::APSInt> C =
-              CO->getCond()->IgnoreParenImpCasts()->getIntegerConstantExpr(
-                  Ctx))
-        return findMCS251AbsolutePointerLeaf(
-            C->isZero() ? CO->getFalseExpr() : CO->getTrueExpr(), Ty, Ctx);
+    if (std::optional<bool> C =
+            getMCS251FoldedA2Condition(CO->getCond(), Ctx))
+      return findMCS251AbsolutePointerLeaf(
+          *C ? CO->getTrueExpr() : CO->getFalseExpr(), Ty, Ctx);
     if (const Expr *Found =
             findMCS251AbsolutePointerLeaf(CO->getTrueExpr(), Ty, Ctx))
       return Found;
@@ -1203,7 +1250,7 @@ static const Expr *findMCS251EvaluatedStaticCompoundLiteral(const Expr *E,
     if (const Expr *Found =
             findMCS251EvaluatedStaticCompoundLiteral(Cond, Ctx))
       return Found;
-    if (std::optional<bool> C = getFoldedCondition(Cond, Ctx))
+    if (std::optional<bool> C = getMCS251FoldedA2Condition(Cond, Ctx))
       return findMCS251EvaluatedStaticCompoundLiteral(
           *C ? CO->getTrueExpr() : CO->getFalseExpr(), Ctx);
     if (const Expr *Found =
@@ -1216,7 +1263,8 @@ static const Expr *findMCS251EvaluatedStaticCompoundLiteral(const Expr *E,
       if (const Expr *Found =
               findMCS251EvaluatedStaticCompoundLiteral(BO->getLHS(), Ctx))
         return Found;
-      if (std::optional<bool> C = getFoldedCondition(BO->getLHS(), Ctx))
+      if (std::optional<bool> C =
+              getMCS251FoldedA2Condition(BO->getLHS(), Ctx))
         if (BO->getOpcode() == BO_LAnd ? !*C : *C)
           return nullptr;
       return findMCS251EvaluatedStaticCompoundLiteral(BO->getRHS(), Ctx);
@@ -1262,27 +1310,19 @@ bool SemaMCS251::CheckMCS251AbsolutePointerInit(const Expr *Init,
   if (!Ty->isPointerType() && !Ty->isArrayType() && !Ty->isRecordType())
     return false;
   // Walk the initializer itself: IgnoreParenImpCasts() must NOT be applied at
-  // the top level, because it strips the explicit cast being looked for.
-  const Expr *Found =
-      findMCS251AbsolutePointerLeaf(Init, Ty, getASTContext());
+  // the top level, because it strips the explicit cast being looked for. The
+  // A2-local side-effect-safe condition folder selects constant bool arms here;
+  // it does not broaden the atomic/bit scanner policies.
+  ASTContext &Ctx = getASTContext();
+  const Expr *Found = findMCS251AbsolutePointerLeaf(Init, Ty, Ctx);
   // A record or array whose initializer is not an initializer list but a
-  // constructor call or a constant function return (`X x{(int*)0x1234};`,
-  // `X x = mk();`) has no initializer-list element to pair with a member, so
-  // the shape walk above cannot see the value it carries. The object's own
-  // folded value names the pointer leaves directly, and judging THAT is both
-  // the most faithful reading of "the value the object is initialized with"
-  // and what the IR/object layers already do (they walk the emitted
-  // initializer's constant, not the source syntax). The fallback is
-  // conservative in the only direction that matters here: it can add a
-  // rejection only when the folded value genuinely contains a pointer leaf
-  // with no object base and a non-zero offset, i.e. an integer cast image.
-  // Null and '&symbol[+offset]' leaves -- including string literals, function
-  // pointers, and every other member of the existing positive set -- fold to
-  // a supported leaf and are left accepted, and a value that does not fold
-  // (a dynamic initializer) is skipped rather than guessed at.
+  // constructor call or a constant function return has no initializer-list
+  // element to pair with a member. Its folded value is the fallback only when
+  // the shape walk did not already identify an offending leaf. The separate C
+  // compound-literal traversal above checks actually evaluated object creation
+  // paths before this aggregate-value fallback.
   if (!Found && (Ty->isRecordType() || Ty->isArrayType()) &&
       !Init->isValueDependent()) {
-    ASTContext &Ctx = getASTContext();
     Expr::EvalResult R;
     if (Init->EvaluateAsRValue(R, Ctx) &&
         mcs251FoldedValueHasAbsolutePointerLeaf(R.Val)) {

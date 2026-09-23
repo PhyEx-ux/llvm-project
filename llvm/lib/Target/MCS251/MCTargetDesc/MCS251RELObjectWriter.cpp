@@ -290,7 +290,7 @@ public:
 
   uint64_t writeObject() override {
     if (!Asm)
-      reportFatalUsageError("MCS251 REL writer has no assembler");
+      reportFatalInternalError("MCS251 REL writer has no assembler");
 
     std::vector<SectionData> Sections;
     uint64_t TotalSize = 0;
