@@ -172,6 +172,14 @@ public:
 
 } // namespace
 
+MCS251ToolChain::MCS251ToolChain(const Driver &D, const llvm::Triple &Triple,
+                                 const llvm::opt::ArgList &Args)
+    : ToolChain(D, Triple, Args) {
+  // Search sibling tools (lld, mcs251-lld, llvm-ar, llvm-mc) alongside clang
+  // so relocatable Linux/Windows toolchains work without PATH setup.
+  getProgramPaths().push_back(D.Dir);
+}
+
 void MCS251ToolChain::AddClangSystemIncludeArgs(
     const llvm::opt::ArgList &Args, llvm::opt::ArgStringList &CC1Args) const {
   if (Args.hasArg(options::OPT_nostdinc, options::OPT_nobuiltininc))

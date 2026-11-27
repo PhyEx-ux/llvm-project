@@ -59,7 +59,7 @@
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=rel -O0 %t/module-asm-blank.ll -o %t/module-asm-blank.rel 2>&1 | FileCheck %s --check-prefix=A9BLANK
 ; A9BLANK: module-level inline assembly requires ELF object output
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj -O0 %t/module-asm.ll -o %t/module-asm.o && test -s %t/module-asm.o
-; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-address-taken.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -O0 %t/atomic-address-taken.ll -o /dev/null
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-fence-name.ll -o /dev/null
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-lockfree-query.ll -o /dev/null
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/debug-location-tracking.ll -o /dev/null

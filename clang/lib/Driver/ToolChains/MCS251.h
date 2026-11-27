@@ -20,8 +20,7 @@ namespace clang::driver::toolchains {
 class LLVM_LIBRARY_VISIBILITY MCS251ToolChain final : public ToolChain {
 public:
   MCS251ToolChain(const Driver &D, const llvm::Triple &Triple,
-                 const llvm::opt::ArgList &Args)
-      : ToolChain(D, Triple, Args) {}
+                 const llvm::opt::ArgList &Args);
 
   bool isBareMetal() const override { return true; }
   bool isCrossCompiling() const override { return true; }
