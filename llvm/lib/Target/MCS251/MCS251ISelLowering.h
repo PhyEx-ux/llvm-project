@@ -19,7 +19,9 @@ enum NodeType : unsigned {
   // (MCS251InstrInfo.td). Never substitute ERET for it or vice versa: RETI
   // restores the saved status register (PSW1) and pops the interrupt
   // controller in-service state, which ERET must not do.
-  RETI
+  RETI,
+  // Direct tail call (lowers to TCRETURNdi / `ejmp addr24` after epilogue).
+  TC_RETURN
 };
 } // namespace MCS251ISD
 
@@ -125,6 +127,11 @@ public:
                       const SmallVectorImpl<ISD::OutputArg> &Outs,
                       const SmallVectorImpl<SDValue> &OutVals,
                       const SDLoc &DL, SelectionDAG &DAG) const override;
+
+  ConstraintType getConstraintType(StringRef Constraint) const override;
+  std::pair<unsigned, const TargetRegisterClass *>
+  getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
+                               StringRef Constraint, MVT VT) const override;
 
 private:
   MachineBasicBlock *emitVariableShift(MachineInstr &MI,

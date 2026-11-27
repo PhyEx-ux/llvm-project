@@ -969,7 +969,11 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
   CharUnits MaxInlineWidth =
       getContext().toCharUnitsFromBits(MaxInlineWidthInBits);
   DiagnosticsEngine &Diags = CGM.getDiags();
-  bool Misaligned = !Ptr.getAlignment().isMultipleOf(TInfo.Width);
+  // MCS-251 has native 1-byte ABI alignment and lowers 1/2/4-byte atomics via
+  // single-core EA interrupt-disable critical sections, so natural alignment
+  // is neither required nor faster.
+  bool IsMCS251 = getTarget().getTriple().getArch() == llvm::Triple::mcs251;
+  bool Misaligned = !IsMCS251 && !Ptr.getAlignment().isMultipleOf(TInfo.Width);
   bool Oversized = getContext().toBits(TInfo.Width) > MaxInlineWidthInBits;
   if (Misaligned) {
     Diags.Report(E->getBeginLoc(), diag::warn_atomic_op_misaligned)
@@ -1168,6 +1172,40 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
 
   bool PowerOf2Size = (Size & (Size - 1)) == 0;
   bool UseLibcall = !PowerOf2Size || (Size > 16);
+  // MCS-251 does not support >32-bit integer arithmetic in IR (e.g., i64/i128
+  // created by SROA/InstCombine on load/store/cmpxchg i64). Route >4-byte
+  // load/store/exchange/compare_exchange directly to generic __atomic_*
+  // libcalls in the frontend so mid-level optimizations never synthesize i64.
+  if (!UseLibcall && IsMCS251 &&
+      Size > static_cast<uint64_t>(MaxInlineWidth.getQuantity())) {
+    switch (E->getOp()) {
+    case AtomicExpr::AO__atomic_load:
+    case AtomicExpr::AO__atomic_load_n:
+    case AtomicExpr::AO__c11_atomic_load:
+    case AtomicExpr::AO__scoped_atomic_load:
+    case AtomicExpr::AO__scoped_atomic_load_n:
+    case AtomicExpr::AO__atomic_store:
+    case AtomicExpr::AO__atomic_store_n:
+    case AtomicExpr::AO__c11_atomic_store:
+    case AtomicExpr::AO__scoped_atomic_store:
+    case AtomicExpr::AO__scoped_atomic_store_n:
+    case AtomicExpr::AO__atomic_exchange:
+    case AtomicExpr::AO__atomic_exchange_n:
+    case AtomicExpr::AO__c11_atomic_exchange:
+    case AtomicExpr::AO__scoped_atomic_exchange:
+    case AtomicExpr::AO__scoped_atomic_exchange_n:
+    case AtomicExpr::AO__atomic_compare_exchange:
+    case AtomicExpr::AO__atomic_compare_exchange_n:
+    case AtomicExpr::AO__c11_atomic_compare_exchange_weak:
+    case AtomicExpr::AO__c11_atomic_compare_exchange_strong:
+    case AtomicExpr::AO__scoped_atomic_compare_exchange:
+    case AtomicExpr::AO__scoped_atomic_compare_exchange_n:
+      UseLibcall = true;
+      break;
+    default:
+      break;
+    }
+  }
 
   // For atomics larger than 16 bytes, emit a libcall from the frontend. This
   // avoids the overhead of dealing with excessively-large value types in IR.
@@ -1186,8 +1224,15 @@ RValue CodeGenFunction::EmitAtomicExpr(AtomicExpr *E) {
 
     // The atomic address is the second parameter.
     // The OpenCL atomic library functions only accept pointer arguments to
-    // generic address space.
+    // generic address space; MCS-251 generic __atomic_* helpers also take AS0
+    // generic pointers.
     auto CastToGenericAddrSpace = [&](llvm::Value *V, QualType PT) {
+      if (IsMCS251) {
+        if (V->getType()->getPointerAddressSpace() != 0)
+          return performAddrSpaceCast(
+              V, llvm::PointerType::get(getLLVMContext(), 0));
+        return V;
+      }
       if (!E->isOpenCL())
         return V;
       auto AS = PT->castAs<PointerType>()->getPointeeType().getAddressSpace();

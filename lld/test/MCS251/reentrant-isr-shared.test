@@ -1,0 +1,66 @@
+# End-to-end Route B reentrancy test: an ISR and foreground `main` share a
+# multi-argument function compiled with the stack-argument default ABI.
+# Because no static `_PARM_` / `OSEG` / `DSEG` parameter slots are emitted,
+# `mcs251-lld --isr-reentrancy=error` links cleanly with zero slot conflicts.
+#
+# RUN: rm -rf %t-dir && split-file %s %t-dir
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml -o %t.crt.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t.crt.o
+# RUN: llc -mtriple=mcs251-unknown-none -mcs251-memory-contract=1,2,32,8,1 -O2 \
+# RUN:   -verify-machineinstrs -mcs251-object-format=elf -filetype=obj \
+# RUN:   %t-dir/app.ll -o %t.app.o
+# RUN: llvm-readelf -S %t.app.o | FileCheck %s --check-prefix=SECS
+# RUN: mcs251-lld %t.crt.o %t.app.o --keep-symbols --isr-reentrancy=error \
+# RUN:   --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 \
+# RUN:   --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 \
+# RUN:   -o %t.elf 2> %t.err
+# RUN: FileCheck %s --check-prefix=LINKERR < %t.err
+# RUN: llvm-objdump -d %t.elf | FileCheck %s --check-prefix=DIS
+
+# SECS-NOT: .mcs251.OSEG
+# SECS-NOT: .mcs251.DSEG
+
+# LINKERR-NOT: error:
+# LINKERR-NOT: proven static parameter-slot
+# LINKERR: warning: ISR reentrancy: coverage status: {{.*}} 0 slot(s), 0 address conflict group(s)
+
+# DIS-LABEL: <_shared_add>:
+# DIS: mov {{r[0-9]+}}, @dr60-0x0006
+# DIS: eret
+# DIS-LABEL: <_irq1>:
+# DIS: push psw
+# DIS: ecall
+# DIS: pop psw
+# DIS: reti
+
+#--- app.ll
+target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
+target triple = "mcs251-unknown-none"
+
+@sink = dso_local global i32 0, align 1
+@llvm.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(4) @irq1 to ptr)], section "llvm.metadata"
+
+define dso_local i32 @shared_add(i32 %a, i32 %b, i32 %c) addrspace(4) noinline {
+  %ab = add i32 %a, %b
+  %abc = add i32 %ab, %c
+  ret i32 %abc
+}
+
+define dso_local mcs251_intrcc void @irq1() addrspace(4) #0 {
+  %v = call addrspace(4) i32 @shared_add(i32 1, i32 2, i32 3)
+  store volatile i32 %v, ptr @sink, align 1
+  ret void
+}
+
+define dso_local i32 @main() addrspace(4) {
+  %v = call addrspace(4) i32 @shared_add(i32 10, i32 20, i32 30)
+  store volatile i32 %v, ptr @sink, align 1
+  ret i32 0
+}
+
+attributes #0 = { noinline "mcs251-isr-vector"="1" }
+
+!mcs251.signatures = !{!0, !1, !2}
+!0 = !{!"_shared_add", i32 1, i32 0, i32 0, i32 0, i32 0}
+!1 = !{!"_irq1", i32 1, i32 0}
+!2 = !{!"_main", i32 1, i32 0}

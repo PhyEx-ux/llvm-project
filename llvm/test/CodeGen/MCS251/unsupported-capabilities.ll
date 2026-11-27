@@ -16,25 +16,18 @@
 ; and the dialect spellings in clang/test/Parser/mcs251-unsupported-dialects.c.
 
 ; ---------------------------------------------------------------- A4/A5/A6 --
-; The three historical exits (Cannot generate unaligned atomic load /
-; Cannot select: AtomicLoadAdd / Cannot select: AtomicFence) were inconsistent
-; and aborted; one family sentence now names the operation.
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-load.ll 2>&1 | FileCheck %s --check-prefix=ALOAD --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
-; ALOAD: LLVM ERROR: MCS251 contract violation: C11/GNU atomic operations are not supported on this target (atomic load)
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-store.ll 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=ASTORE
-; ASTORE: LLVM ERROR: MCS251 contract violation: C11/GNU atomic operations are not supported on this target (atomic store)
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-rmw.ll 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=ARMW
-; ARMW: LLVM ERROR: MCS251 contract violation: C11/GNU atomic operations are not supported on this target (atomic read-modify-write)
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-cmpxchg.ll 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=ACMPXCHG
-; ACMPXCHG: LLVM ERROR: MCS251 contract violation: C11/GNU atomic operations are not supported on this target (atomic compare-exchange)
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-fence.ll 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=AFENCE
-; AFENCE: LLVM ERROR: MCS251 contract violation: C11/GNU atomic operations are not supported on this target (atomic fence)
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-libcall.ll 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=ALIBCALL
-; ALIBCALL: LLVM ERROR: MCS251 contract violation: C11/GNU atomic operations are not supported on this target (atomic builtin '__atomic_load_2' lowered to a runtime call)
+; C11/GNU atomic operations and fences are now supported on MCS251 via EA
+; (IE.7) critical sections (1/2/4-byte inline; >4-byte generic libcalls).
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-load.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-store.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-rmw.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-cmpxchg.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-fence.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-libcall.ll -o /dev/null
 
 ; -------------------------------------------------------------------- A7 --
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/multiarg-indirect.ll 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=A7
-; A7: LLVM ERROR: MCS251 contract violation: multi-argument indirect calls are not supported (static parameter slots require a named callee)
+; Multi-argument indirect calls are now supported under the stack-based ABI.
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/multiarg-indirect.ll -o /dev/null
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/indirect-supported.ll -o /dev/null
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/direct-supported.ll -o /dev/null
 ; Real object generation for the supported shapes (v2 ELF objects, with the
@@ -46,28 +39,29 @@
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -O0 %t/weak-decl-supported.ll -o %t/weakdecl.o && test -s %t/weakdecl.o
 
 ; -------------------------------------------------------------------- A8 --
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/weak-def.ll 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=A8
-; A8: LLVM ERROR: MCS251 contract violation: weak function definitions are not supported
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/weak-global.ll 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=A8G
-; A8G: LLVM ERROR: MCS251 contract violation: weak global definitions are not supported
+; Weak function and global definitions are supported in ELF object output and
+; rejected cleanly when emitting legacy REL objects. Weak aliases stay rejected.
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -O0 %t/weak-def.ll -o %t/weak-def.o && test -s %t/weak-def.o
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=elf -O0 %t/weak-global.ll -o %t/weak-global.o && test -s %t/weak-global.o
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=rel -O0 %t/weak-def.ll -o /dev/null 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=A8
+; A8: LLVM ERROR: MCS251: weak/COMDAT function 'wf' requires ELF object output
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=rel -O0 %t/weak-global.ll -o /dev/null 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=A8G
+; A8G: LLVM ERROR: MCS251: weak/COMDAT global 'wg' requires ELF object output
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/weak-decl-supported.ll -o /dev/null
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/weak-alias.ll 2>&1 | FileCheck %s --check-prefix=A8A --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
 ; A8A: LLVM ERROR: MCS251 contract violation: weak alias definitions are not supported
 
 ; -------------------------------------------------------------------- A9 --
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/module-asm.ll 2>&1 | FileCheck --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' %s --check-prefix=A9
-; A9: LLVM ERROR: MCS251 contract violation: module-level inline assembly is not supported
-; Whitespace-only text is still TEXT the streamer would receive, so it is a
-; module-asm request like any other; only a truly empty string is not. The
-; fixture is refused by the same gate and must not print crash text either.
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/module-asm-blank.ll 2>&1 | FileCheck %s --check-prefix=A9BLANK --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
-; A9BLANK: LLVM ERROR: MCS251 contract violation: module-level inline assembly is not supported
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-address-taken.ll 2>&1 | FileCheck %s --check-prefix=ATAKEN --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
-; ATAKEN: LLVM ERROR: MCS251 contract violation: C11/GNU atomic operations are not supported on this target
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-fence-name.ll 2>&1 | FileCheck %s --check-prefix=AFNAME --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
-; AFNAME: LLVM ERROR: MCS251 contract violation: C11/GNU atomic operations are not supported on this target
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-lockfree-query.ll 2>&1 | FileCheck %s --check-prefix=ALFQ --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
-; ALFQ: LLVM ERROR: MCS251 contract violation: C11/GNU atomic operations are not supported on this target
+; Module-level inline assembly is supported for ELF object output via
+; MCS251AsmParser, and remains rejected fail-closed for legacy REL objects.
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=rel -O0 %t/module-asm.ll -o %t/module-asm.rel 2>&1 | FileCheck %s --check-prefix=A9
+; A9: module-level inline assembly requires ELF object output
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=rel -O0 %t/module-asm-blank.ll -o %t/module-asm-blank.rel 2>&1 | FileCheck %s --check-prefix=A9BLANK
+; A9BLANK: module-level inline assembly requires ELF object output
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj -O0 %t/module-asm.ll -o %t/module-asm.o && test -s %t/module-asm.o
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-address-taken.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-fence-name.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/atomic-lockfree-query.ll -o /dev/null
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/debug-location-tracking.ll -o /dev/null
 
 ; -------------------------------------------------------------------- D1 --
@@ -98,11 +92,11 @@
 ; (The subprogram/location rejection branches are only reachable without a
 ; compile unit, a shape the IR parser refuses to build from text -- see the
 ; comment on verifyNoDebugInfo; they stay fail-closed for other inputs.)
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/debug-cu-full.ll 2>&1 | FileCheck %s --check-prefix=C1CU --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/debug-cu-linetables.ll 2>&1 | FileCheck %s --check-prefix=C1CU --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/debug-record.ll 2>&1 | FileCheck %s --check-prefix=C1REC --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/debug-legacy.ll 2>&1 | FileCheck %s --check-prefix=C1REC --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
-; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=null -O0 %t/debug-location-tracking.ll -o /dev/null
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=rel -filetype=null -O0 %t/debug-cu-full.ll 2>&1 | FileCheck %s --check-prefix=C1CU --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=rel -filetype=null -O0 %t/debug-cu-linetables.ll 2>&1 | FileCheck %s --check-prefix=C1CU --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=rel -filetype=null -O0 %t/debug-record.ll 2>&1 | FileCheck %s --check-prefix=C1REC --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=rel -filetype=null -O0 %t/debug-legacy.ll 2>&1 | FileCheck %s --check-prefix=C1REC --implicit-check-not='PLEASE submit a bug report' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH'
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=rel -filetype=null -O0 %t/debug-location-tracking.ll -o /dev/null
 ; (The textual llvm.dbg.value intrinsic is migrated to a debug record by the
 ; IR parser, so both spellings are pinned by C1REC; the intrinsic branch stays
 ; as a fail-closed backstop for other inputs.)
@@ -195,10 +189,13 @@ define void @f() {
 ;--- weak-def.ll
 target triple = "mcs251-unknown-none"
 define weak void @wf() { ret void }
+!mcs251.signatures = !{!10000}
+!10000 = !{!"_wf", i32 1, i32 0}
 
 ;--- weak-global.ll
 target triple = "mcs251-unknown-none"
 @wg = weak global i16 1
+!mcs251.signatures = !{}
 
 ;--- weak-alias.ll
 ; A weak alias is a weak definition of the alias symbol (the linker has no
@@ -280,6 +277,8 @@ define void @f() {
 target triple = "mcs251-unknown-none"
 module asm ".globl myasm"
 define void @f() { ret void }
+!mcs251.signatures = !{!0}
+!0 = !{!"_f", i32 1, i32 0}
 
 ;--- computed-goto-init.ll
 target triple = "mcs251-unknown-none"

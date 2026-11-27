@@ -46,6 +46,56 @@ namespace MCS251ISR {
 inline constexpr StringRef MetaSectionName = ".mcs251.isr";
 inline constexpr uint64_t MetaSectionAlignment = 4;
 
+// Optional non-ALLOC ISR hardware priority metadata section emitted only when
+// one or more ISRs carry `__attribute__((mcs251_isr_priority(P)))`.
+// Layout: sequence of 4-byte big-endian records {u16 slot, u8 priority, u8 0}.
+inline constexpr StringRef PrioritySectionName = ".mcs251.isr.priority";
+inline constexpr uint64_t PrioritySectionAlignment = 4;
+inline constexpr uint16_t PriorityRecordSize = 4;
+inline constexpr uint8_t MaxISRPriority = 3;
+
+struct ISRPrioritySFRDesc {
+  uint16_t Slot;
+  uint8_t LowSFR;
+  uint8_t HighSFR;
+  uint8_t BitMask;
+  const char *LowName;
+  const char *HighName;
+};
+
+// STC32G hardware 4-level (2-bit) interrupt priority SFR bit mapping:
+//   priority bit 0 -> LowSFR (IP/IP2/IP3), priority bit 1 -> HighSFR (IPH/IP2H/IP3H).
+static constexpr ISRPrioritySFRDesc ISRPrioritySFRMap[] = {
+    {0,  0xB8, 0xB7, 0x01, "IP",  "IPH"},  // INT0
+    {1,  0xB8, 0xB7, 0x02, "IP",  "IPH"},  // TMR0
+    {2,  0xB8, 0xB7, 0x04, "IP",  "IPH"},  // INT1
+    {3,  0xB8, 0xB7, 0x08, "IP",  "IPH"},  // TMR1
+    {4,  0xB8, 0xB7, 0x10, "IP",  "IPH"},  // UART1
+    {5,  0xB8, 0xB7, 0x20, "IP",  "IPH"},  // ADC
+    {6,  0xB8, 0xB7, 0x40, "IP",  "IPH"},  // LVD
+    {8,  0xB5, 0xB6, 0x01, "IP2", "IP2H"}, // UART2
+    {9,  0xB5, 0xB6, 0x02, "IP2", "IP2H"}, // SPI
+    {16, 0xB5, 0xB6, 0x10, "IP2", "IP2H"}, // INT4
+    {21, 0xB5, 0xB6, 0x20, "IP2", "IP2H"}, // CMP
+    {24, 0xB5, 0xB6, 0x40, "IP2", "IP2H"}, // I2C
+    {25, 0xB5, 0xB6, 0x80, "IP2", "IP2H"}, // USB
+    {26, 0xB5, 0xB6, 0x04, "IP2", "IP2H"}, // PWMA
+    {27, 0xB5, 0xB6, 0x08, "IP2", "IP2H"}, // PWMB
+    {17, 0xDF, 0xEE, 0x01, "IP3", "IP3H"}, // UART3
+    {18, 0xDF, 0xEE, 0x02, "IP3", "IP3H"}, // UART4
+    {28, 0xDF, 0xEE, 0x08, "IP3", "IP3H"}, // CAN1
+    {29, 0xDF, 0xEE, 0x10, "IP3", "IP3H"}, // CAN2
+    {30, 0xDF, 0xEE, 0x20, "IP3", "IP3H"}, // LIN1
+    {36, 0xDF, 0xEE, 0x04, "IP3", "IP3H"}, // RTC
+};
+
+inline const ISRPrioritySFRDesc *lookupISRPrioritySFR(uint32_t Slot) {
+  for (const ISRPrioritySFRDesc &D : ISRPrioritySFRMap)
+    if (D.Slot == Slot)
+      return &D;
+  return nullptr;
+}
+
 /// protocol_version of this revision.  G1 raised it 1 -> 2: the field width
 /// and the 24-byte layout are unchanged, but the topology, the default vector
 /// coverage and the link layout all changed, so a reader must reject the old

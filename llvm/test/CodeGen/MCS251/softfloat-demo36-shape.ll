@@ -21,28 +21,36 @@
 ; RUN: llvm-readobj --symbols --arch-specific %t.o | FileCheck %s --check-prefix=SIG
 
 ; O0-LABEL: _read_neg:
+; O0-NOT: _PARM_
 ; O0: ecall __floatunsisf
-; O0: __mulsf3_PARM_2
+; O0: inc spx, #0x4
 ; O0: ecall __mulsf3
+; O0: dec spx, #0x4
 ; O0: ecall __fixunssfsi
 ; O0: eret
 ; O0-LABEL: _read_pos:
+; O0-NOT: _PARM_
 ; O0: ecall __floatsisf
-; O0: __mulsf3_PARM_2
+; O0: inc spx, #0x4
 ; O0: ecall __mulsf3
+; O0: dec spx, #0x4
 ; O0: ecall __fixunssfsi
 ; O0: eret
 
 ; O2-LABEL: _read_neg:
+; O2-NOT: _PARM_
 ; O2: ecall __floatunsisf
-; O2: __mulsf3_PARM_2
+; O2: inc spx, #0x4
 ; O2: ecall __mulsf3
+; O2: dec spx, #0x4
 ; O2: ecall __fixunssfsi
 ; O2: eret
 ; O2-LABEL: _read_pos:
+; O2-NOT: _PARM_
 ; O2: ecall __floatsisf
-; O2: __mulsf3_PARM_2
+; O2: inc spx, #0x4
 ; O2: ecall __mulsf3
+; O2: dec spx, #0x4
 ; O2: ecall __fixunssfsi
 ; O2: eret
 

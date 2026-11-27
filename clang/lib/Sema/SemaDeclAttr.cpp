@@ -6815,6 +6815,40 @@ static void handleMCS251InterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   FD->addAttr(::new (S.Context) MCS251InterruptAttr(S.Context, AL, Slot));
 }
 
+static void handleMCS251ISRPriorityAttr(Sema &S, Decl *D,
+                                        const ParsedAttr &AL) {
+  auto *FD = dyn_cast<FunctionDecl>(D);
+  if (!FD)
+    return;
+  if (!AL.checkExactlyNumArgs(S, 1)) {
+    FD->setInvalidDecl();
+    return;
+  }
+  Expr *PriExpr = AL.getArgAsExpr(0);
+  std::optional<llvm::APSInt> Pri = PriExpr->getIntegerConstantExpr(S.Context);
+  if (!Pri) {
+    S.Diag(AL.getLoc(), diag::err_expr_not_ice)
+        << /*IsInteger=*/false << PriExpr->getSourceRange();
+    FD->setInvalidDecl();
+    return;
+  }
+  if (Pri->isNegative() || Pri->ugt(llvm::MCS251ISR::MaxISRPriority)) {
+    S.Diag(AL.getLoc(), diag::err_mcs251_isr_priority_range)
+        << unsigned(llvm::MCS251ISR::MaxISRPriority);
+    FD->setInvalidDecl();
+    return;
+  }
+  unsigned Val = static_cast<unsigned>(Pri->getZExtValue());
+  if (const auto *Existing = FD->getAttr<MCS251ISRPriorityAttr>()) {
+    if (Existing->getPriority() != Val) {
+      S.Diag(AL.getLoc(), diag::err_mcs251_isr_priority_conflict);
+      FD->setInvalidDecl();
+    }
+    return;
+  }
+  FD->addAttr(::new (S.Context) MCS251ISRPriorityAttr(S.Context, AL, Val));
+}
+
 //===----------------------------------------------------------------------===//
 // G11 fixed placement (`mcu_place_at` / `mcu_bind_at` / `mcu_retain`),
 // G11-PLACEMENT-DESIGN.md revision 7 §2.2 / §8 (clang rows).
@@ -8017,6 +8051,9 @@ ProcessDeclAttribute(Sema &S, Decl *D, const ParsedAttr &AL,
     break;
   // G11 fixed placement (mcu_place_at / mcu_bind_at / mcu_retain); see the
   // comment block above the handlers for the check scheduling.
+  case ParsedAttr::AT_MCS251ISRPriority:
+    handleMCS251ISRPriorityAttr(S, D, AL);
+    break;
   case ParsedAttr::AT_MCS251PlaceAt:
     handleMCS251PlaceAtAttr(S, D, AL);
     break;

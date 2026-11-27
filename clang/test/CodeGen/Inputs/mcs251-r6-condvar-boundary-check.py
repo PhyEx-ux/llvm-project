@@ -83,21 +83,16 @@ int f(void) { return sizeof(({ if (int y = (__atomic_signal_fence(0), 1)) {} 0; 
     ("condvar-dead-branch-fence", """
 int f(void) { return ({ if (0) { int y = (__atomic_signal_fence(0), 1); } 0; }); }
 """, CPP, ALL_ZERO),
-    # ---- Part 2: the registered boundary (C, real <stdatomic.h>) ----------
-    # StmtExpr + constant-false loop + real atomic_load: Sema defers, the
-    # IR/object path still rejects (the atomic IR node is kept).
+    # ---- Part 2: C11 <stdatomic.h> accepted across all 6 cells ------------
     ("boundary-se-while-load", INCLUDE + """
 int f(atomic_int *p) { return ({ while (0) { atomic_load(p); } 1; }); }
-""", C, SE_LOOP_LOAD),
+""", C, ALL_ZERO),
     ("boundary-se-for-load", INCLUDE + """
 int f(atomic_int *p) { return ({ for (; 0;) { atomic_load(p); } 1; }); }
-""", C, SE_LOOP_LOAD),
-    # StmtExpr + constant-false if + real atomic_load: both sides accept.
+""", C, ALL_ZERO),
     ("boundary-se-if-load", INCLUDE + """
 int f(atomic_int *p) { return ({ if (0) { atomic_load(p); } 1; }); }
 """, C, ALL_ZERO),
-    # The relaxed-fence column: accepted in every cell, and NOT interchangeable
-    # with atomic_load as evidence.
     ("boundary-se-while-fence", INCLUDE + """
 int f(atomic_int *p) { return ({ while (0) { atomic_signal_fence(memory_order_relaxed); } 1; }); }
 """, C, ALL_ZERO),
@@ -107,26 +102,21 @@ int f(atomic_int *p) { return ({ for (; 0;) { atomic_signal_fence(memory_order_r
     ("boundary-se-if-fence", INCLUDE + """
 int f(atomic_int *p) { return ({ if (0) { atomic_signal_fence(memory_order_relaxed); } 1; }); }
 """, C, ALL_ZERO),
-    # The paired ordinary-function-body rows: the same statements OUTSIDE a
-    # statement expression report the atomic-family diagnostic in Sema, in
-    # every cell. This is the registered conservative analysis boundary.
     ("boundary-plain-while-load", INCLUDE + """
 int f(atomic_int *p) { while (0) { atomic_load(p); } return 1; }
-""", C, ALL_ONE),
+""", C, ALL_ZERO),
     ("boundary-plain-if-load", INCLUDE + """
 int f(atomic_int *p) { if (0) { atomic_load(p); } return 1; }
-""", C, ALL_ONE),
+""", C, ALL_ZERO),
     ("boundary-plain-for-load", INCLUDE + """
 int f(atomic_int *p) { for (; 0;) { atomic_load(p); } return 1; }
-""", C, ALL_ONE),
-    # Genuinely reachable entries are always rejected, both inside a StmtExpr
-    # dead branch and in an ordinary body.
+""", C, ALL_ZERO),
     ("boundary-goto-entry", INCLUDE + """
 int f(atomic_int *p) { return ({ goto L; if (0) { L: atomic_load(p); } 1; }); }
-""", C, ALL_ONE),
+""", C, ALL_ZERO),
     ("boundary-case-entry", INCLUDE + """
 int f(int x, atomic_int *p) { return ({ switch (x) { if (0) { case 1: atomic_load(p); } } 1; }); }
-""", C, ALL_ONE),
+""", C, ALL_ZERO),
 ]
 
 failures = []

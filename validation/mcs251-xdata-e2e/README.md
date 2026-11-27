@@ -17,11 +17,12 @@ python3 check-bytes.py build/                          # 146 项字节断言（X
 qemu-system-mcs251 -M stc32g144k246 -bios fw.hex ...   # 串口哨兵收尾
 ```
 
-`1,1,32,8,1` 是 uartdemo-33m 验证过的**兼容布局数值契约**（TransportVersion 1 /
-ASLayoutVersion 1 / AS0 32 位 / InternalExtended / ExecutionContract 1）。在该契约
-下 AS3/AS4 访问函数、逐对象 XSEG 放置与 xdata_init 记录全部经 v1 ELF 对象身份发
-射；无契约默认（v2 形布局）下 AS3/AS4 指针操作数会在 ELF 对象输出处被 X3-R1 门禁
-拒绝（见"边界"）。
+`1,1,32,8,1` 是 uartdemo-33m 验证过的**v1 兼容布局数值契约**（TransportVersion 1 /
+ASLayoutVersion 1 / AS0 32 位 / InternalExtended / ExecutionContract 1）。本 X4
+历史验证包保留该 v1 契约基线，以验证 v1 ELF 路径下的 XSEG 放置与 xdata_init 字节链；
+**注：现行 HEAD 已实现 v2 对象身份（`e_flags=0x102` + `.mcs251.attributes`）与
+v2 静态指针参数槽 ABI，生产编译默认使用 v2 `xsmall`（`1,2,32,8,1`），详见
+`docs/mcs251/01-architecture-and-abi.md`。**
 
 链接窗口（rt-acceptance 板参数 + X4 两个新区）：
 
@@ -138,10 +139,9 @@ MOVX 的 implicit uses 计入 UsedRegs，车道写的 implicit def 发射为**�
 
 ## 边界
 
-- **AS3/AS4 指针值能力**（签名/局部指针变量/指针算术）在 ELF 对象路径上被 X3-R1
-  v1 身份门禁拒绝（"v2 object output is not implemented"）——官方形态的
-  `BYTE xdata *pdat` 运行期操作不在本切片链内；对象放置 + 直接下标 + 存储指针叶子
-  （X3 ptrleaf 形态）已覆盖。v2 对象身份获批前这是硬边界。
+- **v1 契约下的 AS3/AS4 指针参数边界**：本包主体 `build.sh` 固定使用 v1 兼容契约
+  `1,1,32,8,1`，该契约下第 2+ 静态指针参数槽仍被拒收；生产环境使用默认 v2 契约
+  （`1,2,32,8,1`，已在 A4 落地）即可完整支持 AS3/AS4 指针形参与 v2 ELF 对象输出。
 - **中断/USB**：明确不做（任务书裁定）。
 - **QEMU 外设依赖**：无——本固件只用 UART1（SBUF 直写，QEMU test-port 模型）与
   XRAM（stc32g 模型 0x010000 起）。CODE 常量表读走 DR 统一读，无外设依赖。

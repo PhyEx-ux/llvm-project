@@ -300,22 +300,15 @@ let CopyCost = -1, isAllocatable = 0 in {
 }
 
 //===----------------------------------------------------------------------===//
-//  Call-preserved registers (caller side)
+//  Call-preserved registers (caller/callee contract)
 //===----------------------------------------------------------------------===//
 //
-// The SDCC MCS-251 ABI (measurement-verified, QEMU stc32g144k246): everything
-// is caller-saved across an ecall -- the callee may freely clobber r0-r9 /
-// r12-r15, acc/b, dpl/dph (dptr), dpx (dr56), the dr0..dr28 file and psw.
-// Hence the callee-saved list is EMPTY. The stack pointer dr60 (spx) must of
-// course hold a valid sp when ecall returns; OtherPreserved marks it as
-// preserved-by-the-call-machinery (the bit is set in CSR_MCS251_RegMask)
-// without making it a callee-saved register that prologue/epilogue insertion
-// would try to push/pop -- it is reserved and never allocated.
-//
-// The mask derived from this def is what LowerCall attaches to the
-// MCS251ISD::CALL node (getCallPreservedMask); DPL/DPH/DPTR deliberately
-// have no preserved bits: call results are read out via CopyFromReg, never
-// assumed live across the call.
-def CSR_MCS251 : CalleeSavedRegs<(add)> {
-  let OtherPreserved = (add DR60);
+// Route B stack-argument ABI: DR12 (WR12/WR14/R12..R15) and WR8 (R8/R9) are
+// callee-saved across ordinary calls (6 bytes total: one 32-bit GPR outside
+// the R0..R7 TFPU/shift window plus one 16-bit GPR). R0..R7 (DR0/DR4, WR0..WR6),
+// A/B, DPL/DPH/DPTR/DPXL and PSW remain caller-saved so simple leaf functions
+// pay zero save/restore overhead. DR60 (SPX) and DR16 (frame anchor) are
+// reserved and preserved via OtherPreserved.
+def CSR_MCS251 : CalleeSavedRegs<(add DR12, WR8)> {
+  let OtherPreserved = (add DR60, DR16);
 }

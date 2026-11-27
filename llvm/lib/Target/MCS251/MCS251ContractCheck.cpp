@@ -28,6 +28,7 @@
 #include "MCS251ContractCheck.h"
 #include "MCS251GlobalInit.h"
 #include "MCS251LocalInterp.h"
+#include "MCTargetDesc/MCS251MCTargetDesc.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -1061,202 +1062,29 @@ static Error verifyMCS251ISRStructure(const Module &M) {
 }
 
 //===----------------------------------------------------------------------===//
-// WP4 default correct-failure capabilities (FUNCTIONAL-GAPS-PLAN-Alice.md
-// section 3 / section 4.1): the atomic family (A4/A5/A6), multi-argument
-// indirect calls (A7), weak definitions (A8), module asm (A9),
-// absolute-address static pointer initialization (A2), computed goto (D1)
-// and effective debug-information requests (C1) are rejected here in the
-// STRUCTURAL phase, before any optimization can erase the evidence (a
-// devirtualized indirect call or an optimized-away indirectbr must not
-// change the verdict), and again post-optimization for defense in depth.
-// On the direct-llc path this pass is the only gate. All of them are
-// predictable capability rejections: the pass exits route them through
-// reportFatalUsageError(...) so the process fails
-// with status 1 and no crash diagnostics.
+// WP4 default correct-failure capabilities: weak aliases, computed goto (D1),
+// absolute-address static pointer initialization (A2), and effective
+// debug-information requests in legacy REL mode (C1) are rejected here in the
+// STRUCTURAL phase, before any optimization can erase the evidence.
 //===----------------------------------------------------------------------===//
 
-// A4/A5/A6: one unified diagnostic family for every atomic form. The three
-// historical exits ("Cannot generate unaligned atomic load" from the DAG
-// legalizer, "Cannot select: AtomicLoadAdd" and "Cannot select:
-// AtomicFence" from ISel) aborted with a bug-report request; the family
-// replaces all of them with one sentence, the operation named, and the same
-// alternative every time. No lock-free capability is claimed.
-static Error verifyNoAtomics(const Module &M) {
-  auto AtomicReject = [](StringRef What) {
-    return reject(
-        ("C11/GNU atomic operations are not supported on this target (" +
-         Twine(What) +
-         "); volatile does not provide atomicity and no lock-free operation "
-         "is claimed; shared access must go through an independently "
-         "verified IRQ critical-section protocol")
-            .str());
-  };
-  // Known atomic-operation and atomic-query spellings. Two families:
-  //  * the compiler builtin/libcall spellings (__atomic_*, __c11_atomic_*,
-  //    __scoped_atomic_*, __sync_*), including the fence and lock-free-query
-  //    names; the queries are rejected too -- the target cannot implement
-  //    them (a lock-free answer of "false" would be a runtime libcall the
-  //    target does not provide), and no lock-free claim is made;
-  //  * the <stdatomic.h> FUNCTION names (atomic_thread_fence, ...), which are
-  //    real external declarations that a program can take the address of,
-  //    call directly, or reach with parentheses that suppress the macro.
-  // A declaration with no use is not an atomic operation (that is how the
-  // header itself is includable); a *use* is.
-  auto IsAtomicSpelling = [](StringRef N) {
-    if (N.starts_with("__sync_"))
-      return true; // every __sync_* is an operation
-    if (N.starts_with("__scoped_atomic_"))
-      return true;
-    if (N.starts_with("__atomic_"))
-      return true; // includes __atomic_fence and the lock-free queries
-    if (N.starts_with("__c11_atomic_"))
-      return true;
-    return N == "atomic_thread_fence" || N == "atomic_signal_fence" ||
-           N == "atomic_load" || N == "atomic_load_explicit" ||
-           N == "atomic_store" || N == "atomic_store_explicit" ||
-           N == "atomic_exchange" || N == "atomic_exchange_explicit" ||
-           N == "atomic_compare_exchange_strong" ||
-           N == "atomic_compare_exchange_strong_explicit" ||
-           N == "atomic_compare_exchange_weak" ||
-           N == "atomic_compare_exchange_weak_explicit" ||
-           N == "atomic_fetch_add" || N == "atomic_fetch_add_explicit" ||
-           N == "atomic_fetch_sub" || N == "atomic_fetch_sub_explicit" ||
-           N == "atomic_fetch_or" || N == "atomic_fetch_or_explicit" ||
-           N == "atomic_fetch_xor" || N == "atomic_fetch_xor_explicit" ||
-           N == "atomic_fetch_and" || N == "atomic_fetch_and_explicit" ||
-           N == "atomic_fetch_max" || N == "atomic_fetch_max_explicit" ||
-           N == "atomic_fetch_min" || N == "atomic_fetch_min_explicit" ||
-           N == "atomic_flag_test_and_set" ||
-           N == "atomic_flag_test_and_set_explicit" ||
-           N == "atomic_flag_clear" || N == "atomic_flag_clear_explicit";
-  };
-  for (const Function &F : M) {
-    if (F.isDeclaration())
-      continue;
-    for (const BasicBlock &BB : F)
-      for (const Instruction &I : BB) {
-        if (const auto *LI = dyn_cast<LoadInst>(&I)) {
-          if (LI->isAtomic())
-            return AtomicReject("atomic load");
-        } else if (const auto *SI = dyn_cast<StoreInst>(&I)) {
-          if (SI->isAtomic())
-            return AtomicReject("atomic store");
-        } else if (isa<AtomicRMWInst>(I)) {
-          return AtomicReject("atomic read-modify-write");
-        } else if (isa<AtomicCmpXchgInst>(I)) {
-          return AtomicReject("atomic compare-exchange");
-        } else if (isa<FenceInst>(&I)) {
-          return AtomicReject("atomic fence");
-        } else if (const auto *CB = dyn_cast<CallBase>(&I)) {
-          // Atomic builtins that would become runtime calls never
-          // materialize an atomic IR opcode; catch the spellings by name so
-          // the family cannot be bypassed through the library form.
-          const Function *Callee = dyn_cast<Function>(
-              CB->getCalledOperand()->stripPointerCasts());
-          if (Callee && IsAtomicSpelling(Callee->getName()))
-            return AtomicReject(("atomic builtin '" + Twine(Callee->getName()) +
-                                 "' lowered to a runtime call")
-                                    .str());
-        }
-      }
-  }
-
-  // A known atomic spelling that is merely DECLARED is not an operation (that
-  // is how <stdatomic.h> stays includable), but any real reference to it is:
-  // this catches `p = atomic_thread_fence; p(...)`, parenthesized spellings
-  // that suppress the macro, and hand-written IR that calls or exports the
-  // name indirectly, where the call site itself has no resolvable callee.
-  auto IsRegistrationUse = [](const User *U) -> bool {
-    if (isa<MetadataAsValue>(U))
-      return true; // llvm.dbg.* / debug records only
-    if (const auto *GV = dyn_cast<GlobalVariable>(U))
-      return GV->getName() == "llvm.used" ||
-             GV->getName() == "llvm.compiler.used";
-    if (isa<ConstantExpr>(U) || isa<ConstantAggregate>(U))
-      return false; // flows somewhere real: treat as a use
-    if (isa<GlobalAlias>(U) || isa<GlobalIFunc>(U))
-      return false;
-    return false; // an instruction use
-  };
-  for (const Function &F : M) {
-    if (!IsAtomicSpelling(F.getName()))
-      continue;
-    for (const User *U : F.users())
-      if (!IsRegistrationUse(U))
-        return AtomicReject(("atomic builtin '" + Twine(F.getName()) +
-                             "' referenced by code (direct call, address "
-                             "taken, or exported)")
-                                .str());
-  }
-  return Error::success();
-}
-
-// A7 (EC1): the static parameter slots that carry arguments 2..N are named
-// after the callee symbol; an indirect callee owns no symbol, so a
-// multi-argument indirect call has no ABI. Zero/one-argument indirect calls
-// use the register channel only and stay supported. This runs structurally
-// (pre-optimization): whether the optimizer devirtualizes a particular call
-// site must not decide whether the source-level construct is accepted.
-static Error verifyNoMultiArgIndirectCalls(const Module &M) {
-  for (const Function &F : M) {
-    if (F.isDeclaration())
-      continue;
-    for (const BasicBlock &BB : F)
-      for (const Instruction &I : BB) {
-        const auto *CB = dyn_cast<CallBase>(&I);
-        if (!CB || CB->arg_size() < 2)
-          continue;
-        const Value *Callee = CB->getCalledOperand()->stripPointerCasts();
-        if (isa<Function>(Callee))
-          continue;
-        return reject("multi-argument indirect calls are not supported "
-                      "(static parameter slots require a named callee); call "
-                      "the function directly, or pass at most one argument "
-                      "through the function pointer");
-      }
-  }
-  return Error::success();
-}
-
-// A8: unsupported weak DEFINITIONS are rejected at compile time instead of
-// aborting in the AsmPrinter's parameter-slot walk. An unused weak
-// declaration is not a definition and stays accepted. (The linker keeps its
-// own defensive weak/common rejection; this is not a removal of that.)
+// Weak aliases remain unsupported (aliases are unregistered in MCS251 object
+// identity). Ordinary weak function and global definitions are supported on
+// ELF object output (and rejected fail-closed on legacy REL output in the
+// AsmPrinter).
 static Error verifyNoWeakDefinitions(const Module &M) {
-  for (const GlobalValue &GV : M.global_values()) {
-    if (!GV.hasWeakAnyLinkage() && !GV.hasWeakODRLinkage())
+  for (const GlobalAlias &A : M.aliases()) {
+    if (!A.hasWeakAnyLinkage() && !A.hasWeakODRLinkage())
       continue;
-    if (const auto *F = dyn_cast<Function>(&GV)) {
-      if (!F->isDeclaration())
-        return reject("weak function definitions are not supported: the "
-                      "current linking model implements no weak resolution "
-                      "and static parameter slots require a local/external "
-                      "owner; provide one strong definition (an unused weak "
-                      "declaration is accepted)");
-    } else if (const auto *G = dyn_cast<GlobalVariable>(&GV)) {
-      if (G->hasInitializer())
-        return reject("weak global definitions are not supported: the "
-                      "current linking model implements no weak resolution; "
-                      "provide one strong definition (an unused weak "
-                      "declaration is accepted)");
-    } else if (const auto *A = dyn_cast<GlobalAlias>(&GV)) {
-      // A weak alias is a weak DEFINITION of the alias symbol: it publishes a
-      // second name with weak resolution semantics, which the current linking
-      // model does not implement (the alias itself is also unregistered in
-      // the object identity). Reject it here instead of letting the emitter's
-      // identity gate abort.
-      const GlobalValue *Aliasee = A->getAliaseeObject();
-      bool AliaseeDefined =
-          Aliasee && (isa<GlobalAlias>(Aliasee) ||
-                      (isa<Function>(Aliasee) && !Aliasee->isDeclaration()) ||
-                      (isa<GlobalVariable>(Aliasee) &&
-                       cast<GlobalVariable>(Aliasee)->hasInitializer()));
-      if (AliaseeDefined)
-        return reject("weak alias definitions are not supported: the current "
-                      "linking model implements no weak resolution; provide "
-                      "one strong definition (an unused weak declaration is "
-                      "accepted)");
-    }
+    const GlobalValue *Aliasee = A.getAliaseeObject();
+    bool AliaseeDefined =
+        Aliasee && (isa<GlobalAlias>(Aliasee) ||
+                    (isa<Function>(Aliasee) && !Aliasee->isDeclaration()) ||
+                    (isa<GlobalVariable>(Aliasee) &&
+                     cast<GlobalVariable>(Aliasee)->hasInitializer()));
+    if (AliaseeDefined)
+      return reject("weak alias definitions are not supported: aliases are "
+                    "not registered in the MCS251 object identity");
   }
   return Error::success();
 }
@@ -1401,6 +1229,11 @@ static Error verifyNoAbsolutePointerInit(const Module &M) {
 // not a shape clang produces, so it is treated as a request (conservative;
 // reachable only through -disable-verify hand-written IR).
 static Error verifyNoDebugInfo(const Module &M) {
+  // ELF object output emits full DWARF .debug_* sections via R_MCS251_32.
+  // Legacy REL and ASxxxx text assembly cannot carry DWARF, so they stay
+  // fail-closed here.
+  if (MCS251::getObjectFormat() == MCS251::ObjectFormat::ELF)
+    return Error::success();
   auto DebugReject = [](StringRef What) {
     return reject(
         ("a debug information request is not supported on this target (" +
@@ -1479,13 +1312,7 @@ Error llvm::MCS251::verifyModuleCapabilities(const Module &M) {
   Triple TT(M.getTargetTriple());
   if (TT.getArch() != Triple::mcs251)
     return Error::success();
-  if (Error Err = verifyNoAtomics(M))
-    return Err;
-  if (Error Err = verifyNoMultiArgIndirectCalls(M))
-    return Err;
   if (Error Err = verifyNoWeakDefinitions(M))
-    return Err;
-  if (Error Err = verifyNoModuleAsm(M))
     return Err;
   if (Error Err = verifyNoComputedGoto(M))
     return Err;

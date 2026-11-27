@@ -1,0 +1,309 @@
+# RUN: rm -rf %t && split-file %s %t
+
+# 1. Weak function + weak parameter slots + weak mutable DSEG + weak __xdata
+#    overridden by strong definitions (both link orders: weak-first and strong-first).
+# RUN: llc -mtriple=mcs251 -O1 -filetype=obj -mcs251-object-format=elf %t/weak_tu.ll -o %t/weak_tu.o
+# RUN: llc -mtriple=mcs251 -O1 -filetype=obj -mcs251-object-format=elf %t/strong_tu.ll -o %t/strong_tu.o
+# RUN: llc -mtriple=mcs251 -O1 -filetype=obj -mcs251-object-format=elf %t/weak_tu2.ll -o %t/weak_tu2.o
+
+# Check weak symbols emitted with STB_WEAK and per-symbol data/xinit sections.
+# RUN: llvm-readelf -s -S %t/weak_tu.o | FileCheck %s --check-prefix=OBJWEAK
+# OBJWEAK: .mcs251.dseg._wg
+# OBJWEAK: .mcs251.xinit._wg
+# OBJWEAK: .mcs251.XSEG._wxg
+# OBJWEAK: .mcs251.xdata_init._wxg
+# OBJWEAK-DAG: FUNC WEAK DEFAULT {{[0-9]+}} _hook
+# OBJWEAK-DAG: OBJECT WEAK DEFAULT {{[0-9]+}} _wg
+# OBJWEAK-DAG: OBJECT WEAK DEFAULT {{[0-9]+}} _wxg
+# OBJWEAK-NOT: _hook_PARM_2
+
+# Link weak_tu.o + strong_tu.o: strong wins; losing weak xinit/dseg/xdata_init/XSEG discarded.
+# RUN: lld -flavor mcs251 --keep-symbols --area-start=CSEG=0xff0100 --area-start=XINIT=0xff0800 --area-start=XDATA_INIT=0xff0a00 --area-start=XSEG=0x010000 %t/weak_tu.o %t/strong_tu.o -o %t/ws.elf --map=%t/ws.map
+# RUN: FileCheck %s --check-prefix=MAPWS < %t/ws.map
+# MAPWS-NOT: weak_tu.o:.mcs251.dseg._wg
+# MAPWS-NOT: weak_tu.o:.mcs251.xinit._wg
+# MAPWS-NOT: weak_tu.o:.mcs251.XSEG._wxg
+# MAPWS-NOT: weak_tu.o:.mcs251.xdata_init._wxg
+# MAPWS: strong_tu.o:.mcs251.dseg
+# MAPWS: strong_tu.o:.mcs251.xinit
+# MAPWS: strong_tu.o:.mcs251.XSEG._wxg
+# RUN: llvm-readelf -s %t/ws.elf | FileCheck %s --check-prefix=SYMWS
+# SYMWS-DAG: 00ff01d5 {{[0-9]+}} FUNC GLOBAL DEFAULT {{[0-9]+}} _hook
+# SYMWS-DAG: OBJECT GLOBAL DEFAULT ABS _wg
+# SYMWS-DAG: OBJECT GLOBAL DEFAULT ABS _wxg
+# SYMWS-NOT: _hook_PARM_2
+# Verify intra-TU ecall from _caller in weak_tu.o redirects to strong _hook (0xff01d5 -> 9a ff 01 d5),
+# NOT weak _hook (0xff0100 -> 9a ff 01 00), XINIT carries only strong _wg = 99 (0x0063),
+# and XDATA_INIT carries only strong _wxg = 88 (0x0058).
+# RUN: llvm-objdump -s -j .mcs251.load.0 %t/ws.elf | FileCheck %s --check-prefix=DUMPWS
+# DUMPWS: 9aff01d5
+# RUN: llvm-objdump -s -j .mcs251.load.1 %t/ws.elf | FileCheck %s --check-prefix=XINITWS
+# XINITWS: 00080002 00020063
+# XINITWS-NOT: 002a
+# RUN: llvm-objdump -s -j .mcs251.load.2 %t/ws.elf | FileCheck %s --check-prefix=XDATAWS
+# XDATAWS: 01000000 02000200 58
+# XDATAWS-NOT: 0007
+
+# Link strong_tu.o + weak_tu.o (reverse order): strong still wins.
+# RUN: lld -flavor mcs251 --keep-symbols --area-start=CSEG=0xff0100 --area-start=XINIT=0xff0800 --area-start=XDATA_INIT=0xff0a00 --area-start=XSEG=0x010000 %t/strong_tu.o %t/weak_tu.o -o %t/sw.elf --map=%t/sw.map
+# RUN: FileCheck %s --check-prefix=MAPSW < %t/sw.map
+# MAPSW-NOT: weak_tu.o:.mcs251.dseg._wg
+# MAPSW-NOT: weak_tu.o:.mcs251.xinit._wg
+# MAPSW-NOT: weak_tu.o:.mcs251.XSEG._wxg
+# MAPSW-NOT: weak_tu.o:.mcs251.xdata_init._wxg
+
+# 2. Standalone weak definition (no strong override) + unresolved extern_weak -> 0.
+# RUN: lld -flavor mcs251 --keep-symbols --area-start=CSEG=0xff0100 --area-start=XINIT=0xff0800 --area-start=XDATA_INIT=0xff0a00 --area-start=XSEG=0x010000 %t/weak_tu.o -o %t/weak_only.elf --map=%t/weak_only.map
+# RUN: FileCheck %s --check-prefix=MAPONLY < %t/weak_only.map
+# MAPONLY: weak_tu.o:.mcs251.dseg._wg
+# MAPONLY: weak_tu.o:.mcs251.xinit._wg
+# MAPONLY: weak_tu.o:.mcs251.XSEG._wxg
+# MAPONLY: weak_tu.o:.mcs251.xdata_init._wxg
+# RUN: llvm-readelf -s %t/weak_only.elf | FileCheck %s --check-prefix=SYMONLY
+# SYMONLY-DAG: FUNC WEAK DEFAULT {{[0-9]+}} _hook
+# SYMONLY-DAG: OBJECT WEAK DEFAULT ABS _wg
+# SYMONLY-DAG: OBJECT WEAK DEFAULT ABS _wxg
+
+# 3. Weak + Weak: first-seen weak wins without duplicate error; second weak's init discarded.
+# RUN: lld -flavor mcs251 --keep-symbols --area-start=CSEG=0xff0100 --area-start=XINIT=0xff0800 --area-start=XDATA_INIT=0xff0a00 --area-start=XSEG=0x010000 %t/weak_tu.o %t/weak_tu2.o -o %t/ww.elf --map=%t/ww.map
+# RUN: FileCheck %s --check-prefix=MAPWW < %t/ww.map
+# MAPWW: weak_tu.o:.mcs251.dseg._wg
+# MAPWW: weak_tu.o:.mcs251.xinit._wg
+# MAPWW-NOT: weak_tu2.o:.mcs251.dseg._wg
+# MAPWW-NOT: weak_tu2.o:.mcs251.xinit._wg
+
+# 4. COMDAT (SHT_GROUP / GRP_COMDAT) deduplication across two objects (code + OSEG + DSEG + XINIT).
+# RUN: llc -mtriple=mcs251 -O1 -filetype=obj -mcs251-object-format=elf %t/comdat_a.ll -o %t/comdat_a.o
+# RUN: llc -mtriple=mcs251 -O1 -filetype=obj -mcs251-object-format=elf %t/comdat_b.ll -o %t/comdat_b.o
+# RUN: llvm-readelf -g %t/comdat_a.o | FileCheck %s --check-prefix=GRP
+# GRP: COMDAT group section
+# GRP: inline_add
+# GRP: shared_val
+# RUN: lld -flavor mcs251 --keep-symbols --area-start=CSEG=0xff0100 --area-start=XINIT=0xff0800 %t/comdat_a.o %t/comdat_b.o -o %t/comdat.elf --map=%t/comdat.map
+# RUN: FileCheck %s --check-prefix=MAPCOMDAT < %t/comdat.map
+# MAPCOMDAT: comdat_a.o:.text._inline_add
+# MAPCOMDAT: comdat_a.o:.mcs251.dseg._shared_val
+# MAPCOMDAT: comdat_a.o:.mcs251.xinit._shared_val
+# MAPCOMDAT-NOT: comdat_b.o:.text._inline_add
+# MAPCOMDAT-NOT: comdat_b.o:.mcs251.dseg._shared_val
+# MAPCOMDAT-NOT: comdat_b.o:.mcs251.xinit._shared_val
+
+# 5. Fail-closed: weak ISR and weak bit definitions rejected by lld.
+# RUN: yaml2obj %t/bad_weak_isr.yaml -o %t/bad_weak_isr.o
+# RUN: not lld -flavor mcs251 --area-start=CSEG=0xff0100 %t/bad_weak_isr.o -o %t/bad1.elf 2>&1 | FileCheck %s --check-prefix=ERRISR
+# ERRISR: MCS251 ISR: interrupt service routine _my_isr must not have weak binding
+
+# RUN: yaml2obj %t/bad_weak_bit.yaml -o %t/bad_weak_bit.o
+# RUN: not lld -flavor mcs251 --area-start=CSEG=0xff0100 %t/bad_weak_bit.o -o %t/bad2.elf 2>&1 | FileCheck %s --check-prefix=ERRBIT
+# ERRBIT: MCS251 bit: bit object _my_bit must not have weak binding
+
+# RUN: yaml2obj %t/bad_fixed_group.yaml -o %t/bad_fixed_group.o
+# RUN: not lld -flavor mcs251 --area-start=CSEG=0xff0100 %t/bad_fixed_group.o -o %t/bad3.elf 2>&1 | FileCheck %s --check-prefix=ERRFIX
+# ERRFIX: fixed placement section must not belong to a COMDAT group
+
+#--- weak_tu.ll
+target triple = "mcs251-unknown-none"
+
+@wg = weak global i16 42, align 1
+@wxg = weak addrspace(3) global i16 7, align 1
+@opt_ext = extern_weak global i16
+
+declare extern_weak i16 @opt_cb(i16)
+
+define weak i16 @hook(i16 %a, i16 %b) {
+  %s = add i16 %a, %b
+  ret i16 %s
+}
+
+define i16 @caller(i16 %x) {
+  %r = call i16 @hook(i16 %x, i16 3)
+  %g = load i16, ptr @wg, align 1
+  %xg = load i16, ptr addrspace(3) @wxg, align 1
+  %s1 = add i16 %r, %g
+  %s2 = add i16 %s1, %xg
+  %has_ext = icmp ne ptr @opt_ext, null
+  br i1 %has_ext, label %use_ext, label %done
+use_ext:
+  %ev = load i16, ptr @opt_ext, align 1
+  %s3 = add i16 %s2, %ev
+  ret i16 %s3
+done:
+  ret i16 %s2
+}
+
+define i16 @main() {
+  %v = call i16 @caller(i16 5)
+  ret i16 %v
+}
+
+!mcs251.signatures = !{!0, !1, !2, !3}
+!0 = !{!"_opt_cb", i32 2, i32 0, i32 0}
+!1 = !{!"_hook", i32 1, i32 0, i32 0, i32 0}
+!2 = !{!"_caller", i32 1, i32 0, i32 0}
+!3 = !{!"_main", i32 1, i32 0}
+
+#--- strong_tu.ll
+target triple = "mcs251-unknown-none"
+
+@wg = global i16 99, align 1
+@wxg = addrspace(3) global i16 88, align 1
+
+define i16 @hook(i16 %a, i16 %b) {
+  %d = sub i16 %a, %b
+  ret i16 %d
+}
+
+!mcs251.signatures = !{!0}
+!0 = !{!"_hook", i32 1, i32 0, i32 0, i32 0}
+
+#--- weak_tu2.ll
+target triple = "mcs251-unknown-none"
+
+@wg = weak global i16 77, align 1
+
+define weak i16 @hook(i16 %a, i16 %b) {
+  ret i16 %a
+}
+
+!mcs251.signatures = !{!0}
+!0 = !{!"_hook", i32 1, i32 0, i32 0, i32 0}
+
+#--- comdat_a.ll
+target triple = "mcs251-unknown-none"
+
+$inline_add = comdat any
+$shared_val = comdat any
+
+@shared_val = linkonce_odr global i16 123, comdat, align 1
+
+define linkonce_odr i16 @inline_add(i16 %a, i16 %b) comdat {
+  %s = add i16 %a, %b
+  ret i16 %s
+}
+
+define i16 @main() {
+  %v = load i16, ptr @shared_val, align 1
+  %r = call i16 @inline_add(i16 %v, i16 1)
+  ret i16 %r
+}
+
+!mcs251.signatures = !{!0, !1}
+!0 = !{!"_inline_add", i32 1, i32 0, i32 0, i32 0}
+!1 = !{!"_main", i32 1, i32 0}
+
+#--- comdat_b.ll
+target triple = "mcs251-unknown-none"
+
+$inline_add = comdat any
+$shared_val = comdat any
+
+@shared_val = linkonce_odr global i16 123, comdat, align 1
+
+define linkonce_odr i16 @inline_add(i16 %a, i16 %b) comdat {
+  %s = add i16 %a, %b
+  ret i16 %s
+}
+
+define i16 @other() {
+  %v = load i16, ptr @shared_val, align 1
+  %r = call i16 @inline_add(i16 %v, i16 2)
+  ret i16 %r
+}
+
+!mcs251.signatures = !{!0, !1}
+!0 = !{!"_inline_add", i32 1, i32 0, i32 0, i32 0}
+!1 = !{!"_other", i32 1, i32 0}
+
+#--- bad_weak_isr.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+  Flags:   [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name:         .note.mcs251.abi
+    Type:         SHT_NOTE
+    AddressAlign: 4
+    Content:      0000000700000020000000014d43533235310000000000010000000100000000000000020000f3ff000000070000000000000000
+  - Name:         .text
+    Type:         SHT_PROGBITS
+    Flags:        [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content:      32
+  - Name:         .mcs251.isr
+    Type:         SHT_PROGBITS
+    AddressAlign: 4
+    Content:      000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000
+  - Name:         .rela.mcs251.isr
+    Type:         SHT_RELA
+    Info:         .mcs251.isr
+    Relocations:
+      - Offset: 12
+        Symbol: _my_isr
+        Type:   R_MCS251_ISR_REF
+      - Offset: 36
+        Symbol: _my_isr
+        Type:   R_MCS251_ISR_REF
+Symbols:
+  - Name:    _my_isr
+    Type:    STT_FUNC
+    Section: .text
+    Binding: STB_WEAK
+    Size:    1
+...
+
+#--- bad_weak_bit.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+  Flags:   [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name:         .note.mcs251.abi
+    Type:         SHT_NOTE
+    AddressAlign: 4
+    Content:      0000000700000020000000014d43533235310000000000010000000100000000000000020000f3ff000000070000000000000000
+  - Name:         .mcs251.bit
+    Type:         SHT_PROGBITS
+    AddressAlign: 4
+    Content:      0101000100000000
+  - Name:         .rela.mcs251.bit
+    Type:         SHT_RELA
+    Info:         .mcs251.bit
+    Relocations:
+      - Offset: 4
+        Symbol: _my_bit
+        Type:   R_MCS251_BIT_REF
+Symbols:
+  - Name:    _my_bit
+    Type:    STT_OBJECT
+    Section: .mcs251.bit
+    Binding: STB_WEAK
+    Size:    1
+...
+
+#--- bad_fixed_group.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+  Flags:   [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name:         .mcu.fixed.my_reg
+    Type:         SHT_NOBITS
+    Flags:        [ SHF_ALLOC, SHF_WRITE, SHF_GROUP ]
+    AddressAlign: 1
+    Size:         2
+Symbols:
+  - Name:    _my_reg
+    Type:    STT_OBJECT
+    Section: .mcu.fixed.my_reg
+    Binding: STB_GLOBAL
+    Size:    2
+...

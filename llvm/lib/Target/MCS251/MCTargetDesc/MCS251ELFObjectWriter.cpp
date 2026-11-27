@@ -10,6 +10,7 @@
 #include "MCS251MCTargetDesc.h"
 #include "llvm/MC/MCELFObjectWriter.h"
 #include "llvm/MC/MCFixup.h"
+#include "llvm/MC/MCSymbolELF.h"
 #include "llvm/MC/MCValue.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
@@ -44,6 +45,8 @@ public:
     case FK_Data_2:
     case MCS251::fixup_mcs251_16:
       return ELF::R_MCS251_16;
+    case FK_Data_4:
+      return ELF::R_MCS251_32;
     case MCS251::fixup_mcs251_24:
       return ELF::R_MCS251_24;
     case MCS251::fixup_mcs251_lo8:
@@ -76,9 +79,18 @@ public:
   // R_MCS251_BITADDR8 field must name the defining bit object so the linker can
   // look its allocated bit address up in the ledger. A section-relative fold
   // would silently drop the identity entirely.
-  bool needsRelocateWithSymbol(const MCValue &, unsigned Type) const override {
-    return Type == ELF::R_MCS251_ISR_REF || Type == ELF::R_MCS251_BIT_REF ||
-           Type == ELF::R_MCS251_BITADDR8;
+  bool needsRelocateWithSymbol(const MCValue &Val,
+                               unsigned Type) const override {
+    if (Type == ELF::R_MCS251_ISR_REF || Type == ELF::R_MCS251_BIT_REF ||
+        Type == ELF::R_MCS251_BITADDR8)
+      return true;
+    // Keep references to weak symbols symbolic (never folded to section+offset)
+    // so link-time strong overrides and weak XINIT/XDATA_INIT pruning work
+    // accurately even for intra-TU references.
+    if (const auto *Sym = static_cast<const MCSymbolELF *>(Val.getAddSym()))
+      if (Sym->getBinding() == ELF::STB_WEAK)
+        return true;
+    return false;
   }
 };
 } // namespace

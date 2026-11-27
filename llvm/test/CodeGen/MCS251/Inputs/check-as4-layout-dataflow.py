@@ -388,7 +388,8 @@ def dr_lane_count(asm: str, label: str) -> int | None:
     m = re.search(rf"_{label}:.*?eret", asm, re.S)
     if not m:
         return None
-    return len(re.findall(r"@dr\d+(?:\+0x[0-9a-f]+)?", m.group(0)) or [])
+    # Exclude stack-pointer (@dr60) CSR/spill accesses; count pointer deref lanes only.
+    return len(re.findall(r"@dr(?!60\b)\d+(?:\+0x[0-9a-f]+)?", m.group(0)) or [])
 
 
 def check_lane_agreement(f: Findings, test_ll: str) -> None:

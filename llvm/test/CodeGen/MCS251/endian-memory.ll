@@ -1,4 +1,4 @@
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj %s -o %t.O0.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj -mcs251-object-format=rel %s -o %t.O0.rel
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 %s -o - | FileCheck %s
 ;
 ; No explicit DataLayout: exercise the target default, not a test override.

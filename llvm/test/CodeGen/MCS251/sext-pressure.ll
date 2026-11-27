@@ -46,21 +46,21 @@ declare i32 @f32c(i32)
 
 define i32 @sext_spill(ptr %p) {
 ; CHECK-LABEL: _sext_spill:
+; CHECK: mov @dr60{{[^,]*}}, wr12
 ; CHECK-DAG: xrl r{{[0-9]+}}, #0x80
 ; CHECK-DAG: mov r{{[0-9]+}}, #0x00
 ; CHECK: mov dr{{[0-9]+}}, #0xff80
 ; CHECK: movh dr{{[0-9]+}}, #0xffff
-; CHECK: add dr{{[0-9]+}}, dr{{[0-9]+}}
-; %v is consumed as a full i32 argument: all four ABI bytes, then the spill
-; (anywhere ahead of the call), then the call
-; CHECK-DAG: mov dpl, r{{[0-9]+}}
-; CHECK-DAG: mov dph, r{{[0-9]+}}
-; CHECK-DAG: mov b, r{{[0-9]+}}
-; CHECK-DAG: mov a, r{{[0-9]+}}
-; CHECK-DAG: mov @dr60{{[^,]*}}, wr{{[0-9]+$}}
+; CHECK: add dr12, dr{{[0-9]+}}
+; %v is consumed as a full i32 argument and kept live across the call in
+; callee-saved dr12 (saved in prologue, restored in epilogue).
+; CHECK-DAG: mov dpl, r15
+; CHECK-DAG: mov dph, r14
+; CHECK-DAG: mov b, r13
+; CHECK-DAG: mov a, r12
 ; CHECK: ecall _f32c
-; CHECK: mov wr{{[0-9]+}}, @dr60{{[^,]*}}{{$}}
-; CHECK: add dr{{[0-9]+}}, dr{{[0-9]+}}
+; CHECK: add dr12, dr{{[0-9]+}}
+; CHECK: mov wr12, @dr60{{[^,]*}}{{$}}
 ; CHECK: eret
 ; O0-LABEL: _sext_spill:
 ; O0: xrl r{{[0-9]+}}, #0x80
@@ -71,13 +71,10 @@ define i32 @sext_spill(ptr %p) {
 ; O0: ecall _f32c
 ; O0: mov wr{{[0-9]+}}, @dr60{{[^,]*}}{{$}}
 ; RA-LABEL: name: sext_spill
-; the bias ADD's result vreg is the value parked across the call...
-; RA: %[[V:[0-9]+]]:gpr32 = ADD32rr %{{[0-9]+}}, %{{[0-9]+}}
-; RA: MOV32mrF $dr60, %stack.[[S:[0-9]+]], 0, {{(killed )?}}%[[V]]
+; The bias ADD's result vreg survives across the call in callee-saved dr12.
+; RA: %[[V:[0-9]+]]:gpr32 = ADD32rr %[[V]], %{{[0-9]+}}
 ; RA: ECALL @f32c
-; ...and reloaded from the SAME slot into the post-call use
-; RA: %[[V2:[0-9]+]]:gpr32 = MOV32rmF $dr60, %stack.[[S]]
-; RA: ADD32rr {{.*}}%[[V2]]
+; RA: %[[V]]:gpr32 = ADD32rr %[[V]], %{{[0-9]+}}
 ; RA: ERET
 entry:
   %d = load i8, ptr %p

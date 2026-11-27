@@ -1,0 +1,111 @@
+# Test static archive (.a) support in mcs251-lld:
+#   - lazy extraction on demand (only members satisfying undefined symbols)
+#   - unused archive members are NOT extracted (even if invalid / mismatched)
+#   - transitive extraction across archive members (main -> a -> b)
+#   - --whole-archive / --no-whole-archive toggles
+#   - thin archives (llvm-ar rcsT)
+#   - archives without a symbol table (llvm-ar rcS)
+#   - malformed archive rejection
+#
+# RUN: rm -rf %t && split-file %s %t && cd %t
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf main.ll -o main.o
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf liba.ll -o liba.o
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf libb.ll -o libb.o
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf unused.ll -o unused.o
+# RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf -mcs251-memory-contract=1,1,32,8,1 v1bad.ll -o v1bad.o
+#
+# 1. Classic archive: lazy extraction pulls liba.o and transitively libb.o,
+#    skips unused.o AND skips v1bad.o (so no v1/v2 identity mismatch).
+# RUN: llvm-ar rcs libtest.a liba.o libb.o unused.o v1bad.o
+# RUN: mcs251-lld main.o libtest.a --area-start=CSEG=0xff0200 --keep-symbols --map=lazy.map -o lazy.elf
+# RUN: llvm-nm lazy.elf | FileCheck %s --check-prefix=LAZY
+# LAZY-DAG: _main
+# LAZY-DAG: _helper_a
+# LAZY-DAG: _helper_b
+# LAZY-NOT: _unused_fn
+# LAZY-NOT: _v1_only
+#
+# 2. --whole-archive forces unused.o to be extracted; --no-whole-archive turns
+#    it back off for subsequent archives.
+# RUN: llvm-ar rcs libunused.a unused.o
+# RUN: llvm-ar rcs libv1.a v1bad.o
+# RUN: mcs251-lld main.o libtest.a --whole-archive libunused.a --no-whole-archive libv1.a --area-start=CSEG=0xff0200 --keep-symbols -o whole.elf
+# RUN: llvm-nm whole.elf | FileCheck %s --check-prefix=WHOLE
+# WHOLE-DAG: _main
+# WHOLE-DAG: _helper_a
+# WHOLE-DAG: _helper_b
+# WHOLE-DAG: _unused_fn
+# WHOLE-NOT: _v1_only
+#
+# 3. Thin archive (llvm-ar rcsT).
+# RUN: llvm-ar rcsT libthin.a liba.o libb.o unused.o
+# RUN: mcs251-lld main.o libthin.a --area-start=CSEG=0xff0200 --keep-symbols -o thin.elf
+# RUN: llvm-nm thin.elf | FileCheck %s --check-prefix=LAZY
+#
+# 4. Archive without a symbol table (llvm-ar rcS) still resolves lazily.
+# RUN: llvm-ar rcS libnosym.a liba.o libb.o unused.o
+# RUN: mcs251-lld main.o libnosym.a --area-start=CSEG=0xff0200 --keep-symbols -o nosym.elf
+# RUN: llvm-nm nosym.elf | FileCheck %s --check-prefix=LAZY
+#
+# 5. Archive passed BEFORE the object referencing it resolves cleanly.
+# RUN: mcs251-lld libtest.a main.o --area-start=CSEG=0xff0200 --keep-symbols -o order.elf
+# RUN: llvm-nm order.elf | FileCheck %s --check-prefix=LAZY
+#
+# 6. Malformed archive is rejected cleanly.
+# RUN: printf '!<arch>\nCORRUPT' > bad.a
+# RUN: not mcs251-lld main.o bad.a --area-start=CSEG=0xff0200 -o bad.elf 2>&1 | FileCheck %s --check-prefix=BAD
+# BAD: bad.a: invalid archive
+#
+# 7. -L / -l library search (-ltest -> libtest.a, and -l:libtest.a exact name).
+# RUN: mkdir -p libdir && cp libtest.a libdir/libtest.a
+# RUN: mcs251-lld main.o -Llibdir -ltest --area-start=CSEG=0xff0200 --keep-symbols -o libsearch.elf
+# RUN: llvm-nm libsearch.elf | FileCheck %s --check-prefix=LAZY
+# RUN: mcs251-lld main.o -L libdir -l:libtest.a --area-start=CSEG=0xff0200 --keep-symbols -o libexact.elf
+# RUN: llvm-nm libexact.elf | FileCheck %s --check-prefix=LAZY
+# RUN: not mcs251-lld main.o -Llibdir -lnosuchlib --area-start=CSEG=0xff0200 -o missing.elf 2>&1 | FileCheck %s --check-prefix=MISSINGLIB
+# MISSINGLIB: unable to find library -lnosuchlib
+
+#--- main.ll
+target triple = "mcs251-unknown-none"
+declare i16 @helper_a(i16)
+define i16 @main() {
+  %r = call i16 @helper_a(i16 7)
+  ret i16 %r
+}
+!mcs251.signatures = !{!0, !1}
+!0 = !{!"_helper_a", i32 2, i32 0, i32 0}
+!1 = !{!"_main", i32 1, i32 0}
+
+#--- liba.ll
+target triple = "mcs251-unknown-none"
+declare i16 @helper_b(i16)
+define i16 @helper_a(i16 %x) {
+  %r = call i16 @helper_b(i16 %x)
+  ret i16 %r
+}
+!mcs251.signatures = !{!0, !1}
+!0 = !{!"_helper_b", i32 2, i32 0, i32 0}
+!1 = !{!"_helper_a", i32 1, i32 0, i32 0}
+
+#--- libb.ll
+target triple = "mcs251-unknown-none"
+define i16 @helper_b(i16 %x) {
+  %r = add i16 %x, 1
+  ret i16 %r
+}
+!mcs251.signatures = !{!0}
+!0 = !{!"_helper_b", i32 1, i32 0, i32 0}
+
+#--- unused.ll
+target triple = "mcs251-unknown-none"
+define i16 @unused_fn(i16 %x) {
+  ret i16 %x
+}
+!mcs251.signatures = !{!0}
+!0 = !{!"_unused_fn", i32 1, i32 0, i32 0}
+
+#--- v1bad.ll
+target triple = "mcs251-unknown-none"
+define i16 @v1_only(i16 %x) {
+  ret i16 %x
+}

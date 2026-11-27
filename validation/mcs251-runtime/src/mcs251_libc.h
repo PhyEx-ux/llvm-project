@@ -49,14 +49,10 @@
 
 #include <stdint.h>
 
-/* ---- memset：单指针 + int + size ---- */
+/* ---- memset / memcpy / memmove / strcpy ---- */
 void* memset(void* dst, int c, uint32_t n);
-
-/* ---- memcpy / strcpy：标准原型（同 memcmp 的 PM 裁定 2026-09-15，
- * 同一根因——demo TU 经宿主 string.h 声明的标准原型与私有 setter
- * ABI 的 P-4 记录冲突；v2 静态指针槽下第二指针直接走 PARM_2，
- * setter/全局槽 ABI 一并退役） ---- */
 void* memcpy(void* dst, const void* src, uint32_t n);
+void* memmove(void* dst, const void* src, uint32_t n);
 char* strcpy(char* dst, const char* src);
 
 /* ---- strlen：单指针 ---- */

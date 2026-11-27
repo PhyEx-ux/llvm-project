@@ -295,6 +295,18 @@ void CodeGenFunction::EmitToggleMCS251BitLValue(LValue Dst) {
 // ContractCheck ID whitelist + exact signature check.
 llvm::Value *CodeGenFunction::EmitMCS251BuiltinExpr(unsigned BuiltinID,
                                                     const CallExpr *E) {
+  if (BuiltinID == MCS251::BI__builtin_mcs251_ea_save_disable) {
+    llvm::Function *F =
+        CGM.getIntrinsic(llvm::Intrinsic::mcs251_ea_save_disable);
+    return Builder.CreateCall(F);
+  }
+  if (BuiltinID == MCS251::BI__builtin_mcs251_ea_restore) {
+    llvm::Function *F = CGM.getIntrinsic(llvm::Intrinsic::mcs251_ea_restore);
+    llvm::Value *Saved = EmitScalarExpr(E->getArg(0));
+    if (Saved->getType() != Int8Ty)
+      Saved = Builder.CreateIntCast(Saved, Int8Ty, /*isSigned=*/false);
+    return Builder.CreateCall(F, {Saved});
+  }
   llvm::Intrinsic::ID IID;
   switch (BuiltinID) {
   default:

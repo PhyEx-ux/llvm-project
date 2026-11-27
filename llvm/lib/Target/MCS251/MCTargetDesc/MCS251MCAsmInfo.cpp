@@ -40,15 +40,17 @@ using namespace llvm;
 MCS251MCAsmInfo::MCS251MCAsmInfo(const Triple &TT,
                                  const MCTargetOptions &Options)
     : MCAsmInfo(Options) {
-  CodePointerSize = 2;
   CalleeSaveStackSlotSize = 1;
+  MinInstAlignment = 1;
   CommentString = ";";
   SeparatorString = "\n";
-  HasDotTypeDotSizeDirective =
-      MCS251::getObjectFormat() == MCS251::ObjectFormat::ELF;
   HasSingleParameterDotFile = false;
-  SupportsDebugInformation = false;
   ExceptionsType = ExceptionHandling::None;
+  // Keep UseIntegratedAssembler false so TargetLoweringObjectFileELF does not
+  // emit SHF_GNU_RETAIN / unique sections on @llvm.used ISRs or bit objects.
+  // ELF object emission still routes inline assembly through MCS251AsmParser
+  // because MCELFStreamer::isIntegratedAssemblerRequired() is true, and
+  // llvm-mc / clang -cc1as invoke the registered MCAsmParser directly.
   UseIntegratedAssembler = false;
 
   // Local labels keep the ELF-ish ".L" prefix used throughout the backend's
@@ -61,12 +63,22 @@ MCS251MCAsmInfo::MCS251MCAsmInfo(const Triple &TT,
   HasFunctionAlignment = false;
 
   // Match the big-endian data layout and sdas251's MSB-first .word.
-  // ASxxxx has no .long/.quad: let MCAsmStreamer split wider constants
-  // into supported directives, most-significant piece first. This also
-  // applies to function prefix/prologue data, not just future globals.
+  // ASxxxx has no .long/.quad: keep Data32bitsDirective null outside ELF mode
+  // so legacy ASxxxx assembly continues splitting wider constants.
   IsLittleEndian = false;
   Data16bitsDirective = "\t.word\t";
-  Data32bitsDirective = nullptr;
   Data64bitsDirective = nullptr;
   ZeroDirective = "\t.ds\t";
+
+  setELFObjectMode(MCS251::getObjectFormat() == MCS251::ObjectFormat::ELF);
+}
+
+void MCS251MCAsmInfo::setELFObjectMode(bool IsELF) {
+  // ELF objects carry 24-bit CODE addresses (e.g. 0xFF0000) in 4-byte DWARF
+  // address fields via R_MCS251_32; legacy ASxxxx text/REL keeps 2.
+  CodePointerSize = IsELF ? 4 : 2;
+  HasDotTypeDotSizeDirective = IsELF;
+  WeakRefDirective = IsELF ? "\t.weak\t" : nullptr;
+  SupportsDebugInformation = IsELF;
+  Data32bitsDirective = IsELF ? "\t.long\t" : nullptr;
 }

@@ -428,6 +428,8 @@ void ScalarBitSetTraits<ELFYAML::ELF_EF>::bitset(IO &IO,
   switch (Object->getMachine()) {
   case ELF::EM_MCS251:
     BCaseMask(EF_MCS251_ABI_V1, EF_MCS251_ABI_VERSION_MASK);
+    BCaseMask(EF_MCS251_ABI_V2, EF_MCS251_ABI_VERSION_MASK);
+    BCase(EF_MCS251_BACKEND_NATIVE);
     break;
   case ELF::EM_ARM:
     BCase(EF_ARM_SOFT_FLOAT);
@@ -718,6 +720,9 @@ void ScalarEnumerationTraits<ELFYAML::ELF_SHT>::enumeration(
     break;
   case ELF::EM_MSP430:
     ECase(SHT_MSP430_ATTRIBUTES);
+    break;
+  case ELF::EM_MCS251:
+    ECase(SHT_MCS251_ATTRIBUTES);
     break;
   case ELF::EM_AARCH64:
     ECase(SHT_AARCH64_AUTH_RELR);

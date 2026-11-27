@@ -1,8 +1,10 @@
 // RUN: %clang --target=mcs251-unknown-none -### -c %s 2>&1 | FileCheck %s --check-prefix=COMPILE
 // RUN: %clang --target=mcs251-unknown-none -### -S %s 2>&1 | FileCheck %s --check-prefix=ASSEMBLY
 // RUN: %clang --target=mcs251-unknown-none -### -c -fhosted %s 2>&1 | FileCheck %s --check-prefix=HOSTED
-// RUN: not %clang --target=mcs251-unknown-none -### %s 2>&1 | FileCheck %s --check-prefix=LINK
-// RUN: not %clang --target=mcs251-unknown-none -### -c -fno-integrated-as %s 2>&1 | FileCheck %s --check-prefix=EXTERNAL-AS
+// RUN: %clang --target=mcs251-unknown-none -### %s -o fw.elf 2>&1 | FileCheck %s --check-prefix=LINK --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -### -c -fno-integrated-as %s 2>&1 | FileCheck %s --check-prefix=EXTERNAL-AS --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -### --emit-static-lib %s -o libfw.a 2>&1 | FileCheck %s --check-prefix=STATIC-LIB --implicit-check-not=error:
+// RUN: %clang --target=mcs251-unknown-none -### -c -x assembler /dev/null 2>&1 | FileCheck %s --check-prefix=INT-AS --implicit-check-not=error:
 // RUN: %clang --target=mcs251-unknown-none -dM -E %s | FileCheck %s --check-prefix=MACROS
 // RUN: %clang --target=mcs251-unknown-none -fsyntax-only %s
 // RUN: %clang --target=mcs251-unknown-none -### -c %s 2>&1 | FileCheck %s --check-prefix=ADDRSIG --implicit-check-not=error:
@@ -50,8 +52,11 @@
 // ASSEMBLY: "-ffreestanding"
 // HOSTED: "-cc1"
 // HOSTED-NOT: "-ffreestanding"
-// LINK: error: {{.*}}MCS251 driver linking; use mcs251_ld.py
-// EXTERNAL-AS: error: {{.*}}MCS251 assembly input; use sdas251
+// LINK: lld{{(.exe)?}}" "-flavor" "mcs251"
+// LINK-SAME: "-o" "fw.elf"
+// EXTERNAL-AS: llvm-mc{{(.exe)?}}" "-triple=mcs251-unknown-none" "-filetype=obj"
+// STATIC-LIB: llvm-ar{{(.exe)?}}" "rcsD" "libfw.a"
+// INT-AS: "-cc1as" "-triple" "mcs251-unknown-none"
 // MACROS-DAG: #define __MCS251__ 1
 // MACROS-DAG: #define __mcs251__ 1
 // MACROS-DAG: #define __STDC_HOSTED__ 0

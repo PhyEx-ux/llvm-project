@@ -12643,6 +12643,24 @@ static void checkMCS251ISRDeclaration(Sema &S, FunctionDecl *NewFD) {
   FunctionDecl *First = NewFD->getFirstDecl();
   auto *IA = NewFD->getAttr<MCS251InterruptAttr>();
   const auto *Identity = First->getAttr<MCS251InterruptAttr>();
+  auto *PA = NewFD->getAttr<MCS251ISRPriorityAttr>();
+  const auto *FirstPA = First->getAttr<MCS251ISRPriorityAttr>();
+
+  if (PA && !IA && !Identity) {
+    S.Diag(PA->getLocation(), diag::err_mcs251_isr_priority_requires_interrupt);
+    NewFD->dropAttr<MCS251ISRPriorityAttr>();
+    NewFD->setInvalidDecl();
+    return;
+  }
+  if (PA && FirstPA && PA->getPriority() != FirstPA->getPriority()) {
+    S.Diag(PA->getLocation(), diag::err_mcs251_isr_priority_conflict);
+    NewFD->dropAttr<MCS251ISRPriorityAttr>();
+    NewFD->setInvalidDecl();
+    return;
+  }
+  if (PA && !FirstPA && NewFD != First) {
+    First->addAttr(PA->clone(S.Context));
+  }
 
   if (NewFD == First) {
     if (!IA)
@@ -15533,11 +15551,13 @@ void Sema::CheckCompleteVariableDeclaration(VarDecl *var) {
       MCS251().CheckMCS251AbsolutePointerInit(Init, Init->getExprLoc());
   }
 
-  // WP4 A8: a weak VARIABLE definition is rejected with the actionable
-  // diagnostic; a weak declaration without storage in this TU stays
-  // accepted (matching the function rule above).
+  // Weak definitions are supported for ordinary variables on MCS251 ELF, but
+  // remain forbidden on persistent bit objects and G11 fixed-placement
+  // entities.
   if (var->hasAttr<WeakAttr>() && var->isFileVarDecl() &&
-      (var->hasInit() || var->isThisDeclarationADefinition()))
+      (var->hasInit() || var->isThisDeclarationADefinition()) &&
+      (var->getType()->isMCS251BitType() ||
+       var->hasAttr<MCS251PlaceAtAttr>() || var->hasAttr<MCS251BindAtAttr>()))
     MCS251().CheckMCS251WeakDefinition(/*IsFunction=*/false,
                                        var->getLocation(),
                                        var->getSourceRange());
@@ -17333,10 +17353,11 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body, bool IsInstantiation,
                         llvm::Triple::mcs251)
     checkMCS251ISRDefinition(*this, FD);
 
-  // WP4 A8: a weak function DEFINITION is rejected with the actionable
-  // diagnostic (an unused weak declaration is not a definition and stays
-  // accepted; the AsmPrinter and the linker keep their defensive checks).
-  if (FD && Body && FD->hasAttr<WeakAttr>() && !FD->isInvalidDecl())
+  // Weak definitions are supported for ordinary functions on MCS251 ELF, but
+  // remain forbidden on G11 fixed-placement functions (ISRs already reject
+  // WeakAttr in checkMCS251ISRDeclaration).
+  if (FD && Body && FD->hasAttr<WeakAttr>() && !FD->isInvalidDecl() &&
+      (FD->hasAttr<MCS251PlaceAtAttr>() || FD->hasAttr<MCS251BindAtAttr>()))
     MCS251().CheckMCS251WeakDefinition(/*IsFunction=*/true, FD->getLocation(),
                                        FD->getSourceRange());
 
@@ -21858,21 +21879,6 @@ void Sema::ActOnEnumBody(SourceLocation EnumLoc, SourceRange BraceRange,
 
 Decl *Sema::ActOnFileScopeAsmDecl(Expr *expr, SourceLocation StartLoc,
                                   SourceLocation EndLoc) {
-  // WP4 A9: module-level inline assembly has no assembly-text entry on this
-  // target. Reject a NON-EMPTY request at its source location; an empty
-  // string literal is not a request and keeps compiling. The IR-layer
-  // contract check rejects the module asm string as well, so direct IR
-  // input is covered too.
-  const Expr *AsmExpr = expr ? expr->IgnoreParenImpCasts() : nullptr;
-  bool Requested = true;
-  // Only a TRULY empty string literal is not a request: whitespace-only text
-  // is still text the (parser-less) streamer would receive, and the IR-layer
-  // check uses the same definition.
-  if (const auto *SL = dyn_cast_or_null<StringLiteral>(AsmExpr))
-    Requested = !SL->getString().empty();
-  if (Requested)
-    MCS251().CheckMCS251FileScopeAsm(StartLoc);
-
   FileScopeAsmDecl *New =
       FileScopeAsmDecl::Create(Context, CurContext, expr, StartLoc, EndLoc);
   CurContext->addDecl(New);

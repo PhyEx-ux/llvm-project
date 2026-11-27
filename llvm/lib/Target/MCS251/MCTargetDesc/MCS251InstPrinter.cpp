@@ -94,6 +94,39 @@ void MCS251InstPrinter::printDir8(const MCInst *MI, unsigned OpNo,
   O << format("0x%02x", MI->getOperand(OpNo).getImm() & 0xff);
 }
 
+void MCS251InstPrinter::printBranchTarget(const MCInst *MI, unsigned OpNo,
+                                          raw_ostream &O) {
+  const MCOperand &Op = MI->getOperand(OpNo);
+  if (Op.isExpr()) {
+    MAI.printExpr(O, *Op.getExpr());
+    return;
+  }
+  assert(Op.isImm() && "branch target must be an expression or immediate");
+  O << format("0x%06x", Op.getImm() & 0xffffff);
+}
+
+void MCS251InstPrinter::printCallTarget(const MCInst *MI, unsigned OpNo,
+                                        raw_ostream &O) {
+  const MCOperand &Op = MI->getOperand(OpNo);
+  if (Op.isExpr()) {
+    MAI.printExpr(O, *Op.getExpr());
+    return;
+  }
+  assert(Op.isImm() && "call target must be an expression or immediate");
+  O << format("0x%06x", Op.getImm() & 0xffffff);
+}
+
+void MCS251InstPrinter::printAddr16(const MCInst *MI, unsigned OpNo,
+                                    raw_ostream &O) {
+  const MCOperand &Op = MI->getOperand(OpNo);
+  if (Op.isExpr()) {
+    MAI.printExpr(O, *Op.getExpr());
+    return;
+  }
+  assert(Op.isImm() && "addr16 must be an expression or immediate");
+  O << format("0x%04x", Op.getImm() & 0xffff);
+}
+
 // Bit address (`setb 0x00`, `mov c, 0x2a`). Part of the address syntax, so
 // no '#' prefix.
 //

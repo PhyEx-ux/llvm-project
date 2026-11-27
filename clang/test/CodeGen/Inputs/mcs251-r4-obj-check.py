@@ -41,7 +41,9 @@ cc1 = sys.argv[split + 1:]
 if not objects or not cc1:
     sys.exit("usage: mcs251-r4-obj-check.py <obj>... -- <clang-cc1 argv...>")
 
-REJECTED = {
+# Atomic operations are now supported on MCS251 (via EA critical sections), so
+# these evaluated atomic shapes must compile cleanly to ELF objects at -O0/-O2.
+ACCEPTED_ATOMICS = {
     "gnu-cond-common": """
 int f(int x) { return (__atomic_signal_fence(0), x) ?: 7; }
 """,
@@ -54,6 +56,9 @@ int f(int i) {
     "stmt-expr-live": """
 int f(void) { return ({ __atomic_signal_fence(0); 0; }); }
 """,
+}
+
+REJECTED = {
     "a2-comma-rhs": """
 int *p = ((int *)0, (int *)0xFF00);
 """,
@@ -73,6 +78,35 @@ sizes = [expect_elf(p) for p in objects]
 print("accepted objects are ELF: " + ", ".join(str(s) for s in sizes))
 
 with tempfile.TemporaryDirectory() as tmp:
+    for name, text in ACCEPTED_ATOMICS.items():
+        src = Path(tmp) / (name + ".c")
+        obj = Path(tmp) / (name + ".o")
+        src.write_text(text)
+        for opt in ("-O0", "-O2"):
+            obj.unlink(missing_ok=True)
+            result = subprocess.run(
+                cc1 + [
+                    "-triple", "mcs251-unknown-none",
+                    "-std=gnu11",
+                    opt,
+                    "-emit-obj",
+                    str(src),
+                    "-o", str(obj),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            label = f"{name}{opt}"
+            if result.returncode != 0:
+                failures.append(
+                    f"{label}: expected status 0, got {result.returncode}: {result.stderr[:300]}"
+                )
+            else:
+                try:
+                    expect_elf(obj)
+                except SystemExit as exc:
+                    failures.append(f"{label}: {exc}")
+
     for name, text in REJECTED.items():
         src = Path(tmp) / (name + ".c")
         obj = Path(tmp) / (name + ".o")

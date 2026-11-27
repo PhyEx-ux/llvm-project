@@ -51,14 +51,14 @@
 ; no-op -- the pair lives in the owner's frame), so a narrow va_end alone
 ; cannot corrupt anything.
 
-; N6: LLVM ERROR: MCS251: va_start requires the frozen 8-byte va_list pair {ptr, i32}; got a 6-byte object ({ ptr, i16 })
-; W12: LLVM ERROR: MCS251: va_start requires the frozen 8-byte va_list pair {ptr, i32}; got a 12-byte object ({ ptr, i64 })
-; T9: LLVM ERROR: MCS251: va_start requires the frozen 8-byte va_list pair {ptr, i32}; got a 9-byte object ({ ptr, i32, i8 })
-; B1: LLVM ERROR: MCS251: va_start requires the frozen 8-byte va_list pair {ptr, i32}; got a 1-byte object (i8)
-; S8: LLVM ERROR: MCS251: va_start requires the frozen 8-byte va_list pair {ptr, i32}; got a 8-byte object ({ i32, i32 })
-; G6: LLVM ERROR: MCS251: va_start requires the frozen 8-byte va_list pair {ptr, i32}; got a 6-byte object ({ ptr, i16 })
-; CD6: LLVM ERROR: MCS251: va_copy destination requires the frozen 8-byte va_list pair {ptr, i32}; got a 6-byte object ({ ptr, i16 })
-; CS6: LLVM ERROR: MCS251: va_copy source requires the frozen 8-byte va_list pair {ptr, i32}; got a 6-byte object ({ ptr, i16 })
+; N6: LLVM ERROR: MCS251: va_start requires the va_list pair {ptr, i32}; got a 6-byte object ({ ptr, i16 })
+; W12: LLVM ERROR: MCS251: va_start requires the va_list pair {ptr, i32}; got a 12-byte object ({ ptr, i64 })
+; T9: LLVM ERROR: MCS251: va_start requires the va_list pair {ptr, i32}; got a 9-byte object ({ ptr, i32, i8 })
+; B1: LLVM ERROR: MCS251: va_start requires the va_list pair {ptr, i32}; got a 1-byte object (i8)
+; S8: LLVM ERROR: MCS251: va_start requires the va_list pair {ptr, i32}; got a 8-byte object ({ i32, i32 })
+; G6: LLVM ERROR: MCS251: va_start requires the va_list pair {ptr, i32}; got a 6-byte object ({ ptr, i16 })
+; CD6: LLVM ERROR: MCS251: va_copy destination requires the va_list pair {ptr, i32}; got a 6-byte object ({ ptr, i16 })
+; CS6: LLVM ERROR: MCS251: va_copy source requires the va_list pair {ptr, i32}; got a 6-byte object ({ ptr, i16 })
 
 ;--- narrow-pair.ll
 declare void @llvm.va_start.p0(ptr)
@@ -174,28 +174,14 @@ entry:
 }
 !mcs251.signatures = !{!0}
 !0 = !{!"_g", i32 9, i32 0, i32 0}
-; OK: .globl _g_PARM_2
-; OK: _g:
-; The va_start anchor plus its two 4-byte pair stores: the slot-symbol
-; base at +0 and the zeroed i32 offset at +4.
-; OK: .db 0x7e, 0x08, (_g_PARM_2) >> 8, (_g_PARM_2)
-; OK: .db 0x7a, 0x0c, 0x00, (_g_PARM_2) >> 16
-; OK: mov @dr60-0x000f, r0
-; OK: mov @dr60-0x000c, r3
-; OK: mov r4, #0x00
-; OK: mov @dr60-0x000b, r4
-; OK: mov @dr60-0x0008, r4
-; The live va_copy: both fields of the source pair reloaded, both stored
-; into the copy (bytes -0x0007..-0x0004 = the destination pair).
-; OK: mov r4, @dr60-0x000f
-; OK: mov r8, @dr60-0x000b
-; OK: mov r12, @dr60-0x0009
-; OK: mov @dr60-0x0007, r4
-; OK: mov @dr60-0x0004, r7
-; The slot read goes through the COPIED pair's base+off.
-; OK: mov r0, @dr60-0x0003
-; OK: add dr12, dr0
-; OK: mov r4, @dr12
+; OK-LABEL: _g:
+; OK-NOT: _g_PARM_
+; va_start materializes the stack frame anchor from SPX (0x81/0x85) and stores
+; the 8-byte {base, 0} pair, followed by va_copy into the second pair.
+; OK: mov r{{[0-9]+}}, 0x81
+; OK: mov r{{[0-9]+}}, 0x85
+; OK: add dr{{[0-9]+}}, dr{{[0-9]+}}
+; OK: eret
 
 ;--- opaque-ok.ll
 declare void @llvm.va_start.p0(ptr)
@@ -205,8 +191,11 @@ define void @f(ptr %external, i32 %n, ...) addrspace(4) {
 }
 !mcs251.signatures = !{!0}
 !0 = !{!"_f", i32 9, i32 0, i32 0}
-; OP: .globl _f_PARM_3
-; OP: _f:
+; OP-LABEL: _f:
+; OP-NOT: _f_PARM_
+; OP: mov r{{[0-9]+}}, 0x81
+; OP: mov r{{[0-9]+}}, 0x85
+; OP: eret
 
 ; A GEP that lands on a nested sub-object redirects the shape check to the
 ; sub-object: the 6-byte inner pair is judged, not the 12-byte container.
@@ -220,7 +209,7 @@ define void @f(i32 %n, ...) {
 }
 !mcs251.signatures = !{!0}
 !0 = !{!"_f", i32 1, i32 1}
-; GS6: va_start requires the frozen 8-byte va_list pair {ptr, i32}; got a 6-byte object ({ ptr, i16 })
+; GS6: va_start requires the va_list pair {ptr, i32}; got a 6-byte object ({ ptr, i16 })
 
 ; The array-size operand is honored: a zero-element alloca of the right
 ; element type allocates nothing and must not pass.
@@ -233,4 +222,4 @@ define void @f(i32 %n, ...) {
 }
 !mcs251.signatures = !{!0}
 !0 = !{!"_f", i32 1, i32 1}
-; ZA0: va_start requires the frozen 8-byte va_list pair {ptr, i32}; got a 0-byte object ({ ptr, i32 })
+; ZA0: va_start requires the va_list pair {ptr, i32}; got a 0-byte object ({ ptr, i32 })

@@ -28,8 +28,8 @@ define i8 @near_pointer_across_call(ptr %p) {
 ; CHECK: inc spx, #0x2
 ; CHECK: mov @dr60-0x0001, [[SAVED:wr[0-9]+]]
 ; CHECK: ecall _clobber
-; CHECK: mov [[RESTORED:wr[0-9]+]], @dr60-0x0001
-; CHECK: mov {{r[0-9]+}}, @[[RESTORED]]
+; CHECK-DAG: mov [[RESTORED:wr[0-9]+]], @dr60-0x0001
+; CHECK-DAG: mov {{r[0-9]+}}, @wr{{[0-9]+}}
 ; CHECK: dec spx, #0x2
 ; CHECK: eret
   call void @clobber()

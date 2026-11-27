@@ -25,6 +25,7 @@ using namespace clang;
 using namespace llvm;
 
 namespace {
+using clang::Module;
 
 class InclusionRewriter : public PPCallbacks {
   /// Information about which #includes were actually performed,
@@ -228,7 +229,7 @@ InclusionRewriter::FindIncludeAtLocation(SourceLocation Loc) const {
 
 /// Simple lookup for a SourceLocation (specifically one denoting the hash in
 /// an inclusion directive) in the map of module inclusion information.
-const Module *
+const clang::Module *
 InclusionRewriter::FindModuleAtLocation(SourceLocation Loc) const {
   const auto I = ModuleIncludes.find(Loc);
   if (I != ModuleIncludes.end())
@@ -238,7 +239,7 @@ InclusionRewriter::FindModuleAtLocation(SourceLocation Loc) const {
 
 /// Simple lookup for a SourceLocation (specifically one denoting the hash in
 /// an inclusion directive) in the map of module entry information.
-const Module *
+const clang::Module *
 InclusionRewriter::FindEnteredModule(SourceLocation Loc) const {
   const auto I = ModuleEntryIncludes.find(Loc);
   if (I != ModuleEntryIncludes.end())
@@ -433,10 +434,10 @@ void InclusionRewriter::Process(FileID FileId,
             if (FileId != PP.getPredefinesFileID())
               WriteLineInfo(FileName, Line - 1, FileType, "");
             StringRef LineInfoExtra;
-            if (const Module *Mod = FindModuleAtLocation(Loc))
+            if (const clang::Module *Mod = FindModuleAtLocation(Loc))
               WriteImplicitModuleImport(Mod);
             else if (Inc) {
-              const Module *Mod = FindEnteredModule(Loc);
+              const clang::Module *Mod = FindEnteredModule(Loc);
               if (Mod)
                 OS << "#pragma clang module begin "
                    << Mod->getFullModuleName(true) << "\n";

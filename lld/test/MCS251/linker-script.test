@@ -1,0 +1,99 @@
+# RUN: rm -rf %t && split-file %s %t
+# RUN: llc -mtriple=mcs251 -O1 -function-sections -data-sections -filetype=obj %t/app.ll -o %t/app.o
+# RUN: llc -mtriple=mcs251 -O1 -function-sections -data-sections -filetype=obj %t/extra.ll -o %t/extra.o
+# RUN: mkdir -p %t/libs
+# RUN: llvm-ar rcs %t/libs/libextra.a %t/extra.o
+
+# 1. Link using GNU-style -T script (MEMORY, SECTIONS, ENTRY, EXTERN, SEARCH_DIR,
+#    INPUT, KEEP, PROVIDE, symbol expressions, RESERVE_DATA, INCLUDE).
+# RUN: lld -flavor mcs251 -T %t/board.ld --gc-sections --keep-symbols %t/app.o -o %t/fw.elf --map=%t/fw.map --map-json=%t/fw.json
+# RUN: FileCheck %s --check-prefix=MAP < %t/fw.map
+# MAP-DAG: s_CSEG = 0xff0300
+# MAP-DAG: _script_addr = 0xff0040
+# MAP-DAG: _script_prov = 0x1234
+# MAP-DAG: .text._kept_fn 0xff0300
+# MAP-DAG: .text._main 0xff030b
+# MAP-DAG: .text._lib_fn
+# MAP-NOT: .text._dead_fn
+
+# RUN: llvm-readelf -h -s %t/fw.elf | FileCheck %s --check-prefix=ELF
+# ELF: Entry point address: 0xff030b
+# ELF-DAG: NOTYPE GLOBAL DEFAULT ABS _script_addr
+# ELF-DAG: NOTYPE GLOBAL DEFAULT ABS _script_prov
+
+# 2. Explicit CLI flags override linker script MEMORY/SECTIONS defaults.
+# RUN: lld -flavor mcs251 -T %t/board.ld --area-start=CSEG=0xff0500 %t/app.o -o %t/cli.elf --map=%t/cli.map
+# RUN: FileCheck %s --check-prefix=CLIOV < %t/cli.map
+# CLIOV: s_CSEG = 0xff0500
+
+# 3. Clang Driver forwards -T to mcs251-lld in a one-shot build.
+# RUN: clang --target=mcs251-unknown-none -O1 -T %t/simple.ld %t/driver.c -o %t/drv.elf
+# RUN: llvm-readelf -h %t/drv.elf | FileCheck %s --check-prefix=DRV
+# DRV: Type: EXEC
+# DRV: Machine: MCS251
+# DRV: Flags: 0x102
+
+#--- board.ld
+INCLUDE "inc.ld"
+MEMORY {
+  FLASH (rx)  : ORIGIN = 0xFF0000, LENGTH = 64K
+  IRAM  (rwx) : ORIGIN = 0x0000,   LENGTH = 128
+  EDATA (rw)  : ORIGIN = 0x0100,   LENGTH = 0x0F00
+  XDATA (rw)  : ORIGIN = 0x010000, LENGTH = 32K
+}
+ENTRY(_main)
+EXTERN(_lib_fn)
+RESERVE_DATA(0x40, 0x10)
+_script_addr = ORIGIN(FLASH) + 0x40;
+PROVIDE(_script_prov = 0x1234);
+SECTIONS {
+  .text 0xFF0300 : {
+    KEEP(*(.text._kept_fn))
+    *(.text*)
+  } > FLASH
+}
+
+#--- inc.ld
+SEARCH_DIR("libs")
+INPUT(-lextra)
+
+#--- simple.ld
+MEMORY {
+  FLASH (rx) : ORIGIN = 0xFF0000, LENGTH = 64K
+}
+SECTIONS {
+  .text 0xFF0200 : { *(.text*) } > FLASH
+}
+
+#--- app.ll
+target triple = "mcs251-unknown-none"
+@script_addr = external global i8
+@script_prov = external global i8
+define i16 @kept_fn() {
+  ret i16 11
+}
+define i16 @dead_fn() {
+  ret i16 22
+}
+define i16 @main() {
+  %a = ptrtoint ptr @script_addr to i32
+  %b = ptrtoint ptr @script_prov to i32
+  %s = add i32 %a, %b
+  %t = trunc i32 %s to i16
+  ret i16 %t
+}
+!mcs251.signatures = !{!0, !1, !2}
+!0 = !{!"_kept_fn", i32 1, i32 0}
+!1 = !{!"_dead_fn", i32 1, i32 0}
+!2 = !{!"_main", i32 1, i32 0}
+
+#--- extra.ll
+target triple = "mcs251-unknown-none"
+define i16 @lib_fn() {
+  ret i16 99
+}
+!mcs251.signatures = !{!0}
+!0 = !{!"_lib_fn", i32 1, i32 0}
+
+#--- driver.c
+int main(void) { return 42; }

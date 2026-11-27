@@ -30,6 +30,8 @@ def SDT_MCS251Call : SDTypeProfile<0, -1, [SDTCisVT<0, i32>]>;
 def MCS251call : SDNode<"MCS251ISD::CALL", SDT_MCS251Call,
                         [SDNPHasChain, SDNPOutGlue, SDNPOptInGlue,
                          SDNPVariadic]>;
+def MCS251tcreturn : SDNode<"MCS251ISD::TC_RETURN", SDT_MCS251Call,
+                            [SDNPHasChain, SDNPOptInGlue, SDNPVariadic]>;
 
 class MCS251Inst<dag Outs, dag Ins, string Asm, list<dag> Pat>
     : Instruction {
@@ -82,13 +84,16 @@ def mcs251_bitaddr : Operand<i8> { let PrintMethod = "printBitAddr"; }
 // Branch target: the operand is a MachineBasicBlock which MCS251MCInstLower
 // turns into an MCSymbolRefExpr and MCS251InstPrinter prints as a label
 // (same shape as upstream MSP430's jmptarget).
-def brtarget : Operand<OtherVT>;
+def brtarget : Operand<OtherVT> { let PrintMethod = "printBranchTarget"; }
 
 // Call target: a TargetGlobalAddress / TargetExternalSymbol that
 // MCS251MCInstLower turns into an MCSymbolRefExpr. The symbol is resolved to
 // a 24-bit address by the sdas251/linker (the 9A-prefix ecall encoding is
 // 4 bytes, addr24), so the compiler never truncates or splits it.
-def calltarget : Operand<i32>;
+def calltarget : Operand<i32> { let PrintMethod = "printCallTarget"; }
+
+// 16-bit CODE address for classic 8051 ljmp/lcall instructions (MC-only).
+def mcs251_addr16 : Operand<i16> { let PrintMethod = "printAddr16"; }
 
 //===----------------------------------------------------------------------===//
 //  Move instructions
@@ -791,7 +796,7 @@ def MCS251callseq_start : SDNode<"ISD::CALLSEQ_START",
 def MCS251callseq_end : SDNode<"ISD::CALLSEQ_END",
     SDCallSeqEnd<[SDTCisVT<0, i32>, SDTCisVT<1, i32>]>,
     [SDNPHasChain, SDNPOptInGlue, SDNPOutGlue]>;
-let isPseudo = 1, hasSideEffects = 1 in {
+let isPseudo = 1, hasSideEffects = 1, Uses = [DR60], Defs = [DR60, PSW] in {
   def ADJCALLSTACKDOWN : MCS251Inst<(outs), (ins i32imm:$amt, i32imm:$callee),
       "", [(MCS251callseq_start timm:$amt, timm:$callee)]>;
   def ADJCALLSTACKUP : MCS251Inst<(outs), (ins i32imm:$amt, i32imm:$callee),
@@ -820,6 +825,26 @@ def : Pat<(MCS251call GPR32:$addr), (ECALLr GPR32:$addr)>;
 // Direct calls retain full addr24 symbol relocations; registers use ECALLr.
 def : Pat<(MCS251call (i32 tglobaladdr:$dst)), (ECALL tglobaladdr:$dst)>;
 def : Pat<(MCS251call (i32 texternalsym:$dst)), (ECALL texternalsym:$dst)>;
+
+// Direct tail call: emitted after the epilogue tears down the caller's frame
+// and restores callee-saved registers, jumping straight to the 24-bit callee.
+let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1,
+    hasSideEffects = 1, Size = 4 in
+def TCRETURNdi : MCS251Inst<(outs), (ins calltarget:$addr), "ejmp $addr", []>;
+def : Pat<(MCS251tcreturn (i32 tglobaladdr:$dst)),
+          (TCRETURNdi tglobaladdr:$dst)>;
+def : Pat<(MCS251tcreturn (i32 texternalsym:$dst)),
+          (TCRETURNdi texternalsym:$dst)>;
+
+// Inline byte-copy loop for large byval aggregate stack arguments (>16B) inside
+// a call sequence without invoking a nested memcpy libcall.
+let usesCustomInserter = 1, isPseudo = 1, mayLoad = 1, mayStore = 1,
+    Uses = [DR60], Defs = [PSW] in {
+  def BYVAL_COPY32 : MCS251Inst<(outs),
+      (ins GPR32:$src, i16imm:$disp, i16imm:$size), "", []>;
+  def BYVAL_COPY16 : MCS251Inst<(outs),
+      (ins GPR16:$src, i16imm:$disp, i16imm:$size), "", []>;
+}
 
 //===----------------------------------------------------------------------===//
 //  Return instruction
@@ -1264,6 +1289,22 @@ let mayStore = 1, isPseudo = 1 in {
   def MOV16mrF : MCS251Inst<(outs), (ins mcs251_frame:$addr, GPR16:$src), "", []>;
 }
 
+// Single-core MCU atomic barrier & EA (IE.7, bit address 0xAF) critical
+// section pseudos.
+//   * ATOMIC_FENCE: zero-byte compiler scheduling barrier (erased post-RA).
+//   * EA_SAVE_DISABLE: custom-inserted `mov rN,#1; jbc 0xAF,done; mov rN,#0`.
+//   * EA_RESTORE: custom-inserted `cmp rN,#0; je done; setb 0xAF`.
+let isPseudo = 1, hasSideEffects = 1, mayLoad = 1, mayStore = 1, Size = 0 in
+def ATOMIC_FENCE : MCS251Inst<(outs), (ins), "", []>;
+
+let isPseudo = 1, usesCustomInserter = 1, hasSideEffects = 1,
+    mayLoad = 1, mayStore = 1 in
+def EA_SAVE_DISABLE : MCS251Inst<(outs GPR8:$dst), (ins), "", []>;
+
+let isPseudo = 1, usesCustomInserter = 1, hasSideEffects = 1,
+    mayLoad = 1, mayStore = 1, Defs = [PSW] in
+def EA_RESTORE : MCS251Inst<(outs), (ins GPR8:$saved), "", []>;
+
 // Frame-index pointer materialisation (`lea FI`). Selected by the
 // ISelDAGToDAG Select hook (AVR-style select<FrameIndex>): operand $src
 // carries the TargetFrameIndex until the custom inserter expands to
@@ -1285,7 +1326,16 @@ let mayStore = 1, isPseudo = 1 in {
 // a frame anchor: with variable-sized objects SPX has moved by the time the
 // sequence runs. Reading the DR16 anchor into an escaping address is not
 // implemented yet, so that mixed case is rejected explicitly.
-let usesCustomInserter = 1, hasSideEffects = 0 in
+// Pinned SFR reads of SP/SPH (ordered against DR60 updates in call sequences)
+// and anchor read of low 16 bits of DR16 (wr18) for hasFP() frame addresses.
+let Uses = [DR60], Size = 3 in {
+  def READSPLO : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, 0x81", []>;
+  def READSPHI : MCS251Inst<(outs GPR8:$dst), (ins), "mov $dst, 0x85", []>;
+}
+let Uses = [DR16], Size = 2 in
+def MOV16fromFP : MCS251Inst<(outs GPR16:$dst), (ins), "mov $dst, wr18", []>;
+
+let usesCustomInserter = 1, hasSideEffects = 0, Uses = [DR60] in
 def FIADDR : MCS251Inst<(outs GPR16:$dst), (ins i16imm:$src), "", []>;
 
 def mcs251_fioffset : Operand<i16> {
@@ -1297,7 +1347,7 @@ def mcs251_fioffset : Operand<i16> {
 // displacement and retargets the opcode to ADD16ri. add wr,#imm16 wraps
 // mod 2^16, which is the correct region-00 semantics for a negative
 // displacement (Phase 8 ruling).
-let Constraints = "$lhs = $dst", Defs = [PSW] in
+let Constraints = "$lhs = $dst", Uses = [DR60], Defs = [PSW] in
 def ADD16fi : MCS251Inst<(outs GPR16:$dst),
                          (ins GPR16:$lhs, mcs251_fioffset:$addr),
                          "add $dst, $addr", []>;
@@ -1321,3 +1371,50 @@ def ADD16fi : MCS251Inst<(outs GPR16:$dst),
 // the lowering (the stack is byte-aligned; no padding is ever emitted).
 let usesCustomInserter = 1, hasSideEffects = 1, Uses = [DR60], Defs = [DR60] in
 def DYNALLOCA : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$size), "", []>;
+
+//===----------------------------------------------------------------------===//
+// Classic 8051 / CRT and generic MCS-251 MC-only instructions
+//===----------------------------------------------------------------------===//
+//
+// Used by MCS251Disassembler and MCS251AsmParser so llvm-objdump / llvm-mc
+// decode and assemble classic CRT startup code, ljmp jump-table columns,
+// generic push/pop/inc/dec, and direct immediate writes without affecting
+// CodeGen instruction selection.
+
+let isBranch = 1, isTerminator = 1, isBarrier = 1, Size = 3 in
+  def LJMP : MCS251Inst<(outs), (ins mcs251_addr16:$dst), "ljmp $dst", []>;
+let isCall = 1, hasSideEffects = 1, Size = 3 in
+  def LCALL : MCS251Inst<(outs), (ins mcs251_addr16:$dst), "lcall $dst", []>;
+let isReturn = 1, isTerminator = 1, isBarrier = 1, Size = 1 in
+  def RET : MCS251Inst<(outs), (ins), "ret", []>;
+let Defs = [DPL, DPH], Uses = [DPL, DPH], Size = 1 in
+  def INCDPTR : MCS251Inst<(outs), (ins), "inc dptr", []>;
+let Defs = [A], Size = 1 in
+  def CLRA : MCS251Inst<(outs), (ins), "clr a", []>;
+let mayStore = 1, hasSideEffects = 1, Size = 3 in
+  def MOVDIRI : MCS251Inst<(outs), (ins mcs251_dir8:$addr, mcs251_imm8:$imm),
+                           "mov $addr, $imm", []>;
+let mayStore = 1, hasSideEffects = 1, Size = 2 in {
+  def PUSHDIR : MCS251Inst<(outs), (ins mcs251_dir8:$addr), "push $addr", []>;
+  def PUSHDR  : MCS251Inst<(outs), (ins GPR32:$src), "push $src", []>;
+}
+let mayLoad = 1, hasSideEffects = 1, Size = 2 in {
+  def POPDIR : MCS251Inst<(outs), (ins mcs251_dir8:$addr), "pop $addr", []>;
+  def POPDR  : MCS251Inst<(outs GPR32:$dst), (ins), "pop $dst", []>;
+}
+let Constraints = "$lhs = $dst", Defs = [PSW], Size = 2 in {
+  def MUL16rr : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$lhs, GPR16:$rhs),
+                           "mul $dst, $rhs", []>;
+  def INC8ri  : MCS251Inst<(outs GPR8:$dst),  (ins GPR8:$lhs, mcs251_imm8:$imm),
+                           "inc $dst, $imm", []>;
+  def DEC8ri  : MCS251Inst<(outs GPR8:$dst),  (ins GPR8:$lhs, mcs251_imm8:$imm),
+                           "dec $dst, $imm", []>;
+  def INC16ri : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$lhs, mcs251_imm8:$imm),
+                           "inc $dst, $imm", []>;
+  def DEC16ri : MCS251Inst<(outs GPR16:$dst), (ins GPR16:$lhs, mcs251_imm8:$imm),
+                           "dec $dst, $imm", []>;
+  def INC32ri : MCS251Inst<(outs GPR32:$dst), (ins GPR32:$lhs, mcs251_imm8:$imm),
+                           "inc $dst, $imm", []>;
+  def DEC32ri : MCS251Inst<(outs GPR32:$dst), (ins GPR32:$lhs, mcs251_imm8:$imm),
+                           "dec $dst, $imm", []>;
+}

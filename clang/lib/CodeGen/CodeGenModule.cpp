@@ -4227,6 +4227,9 @@ void CodeGenModule::SetFunctionAttributes(GlobalDecl GD, llvm::Function *F,
   // which replaces the whole attribute set.
   if (const auto *IA = FD->getCanonicalDecl()->getAttr<MCS251InterruptAttr>())
     F->addFnAttr("mcs251-isr-vector", llvm::utostr(IA->getVector()));
+  if (const auto *PA =
+          FD->getCanonicalDecl()->getAttr<MCS251ISRPriorityAttr>())
+    F->addFnAttr("mcs251-isr-priority", llvm::utostr(PA->getPriority()));
 
   // G11-A: declarations and definitions both carry the placement strings
   // (the bind-only function path needs the declaration record).

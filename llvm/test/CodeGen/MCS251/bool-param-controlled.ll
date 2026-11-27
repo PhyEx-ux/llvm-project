@@ -16,7 +16,7 @@
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -o /dev/null %t/i24.ll 2>&1 | FileCheck %s --check-prefix=TYPE
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -o /dev/null %t/i64.ll 2>&1 | FileCheck %s --check-prefix=TYPE
 ;
-; TYPE: LLVM ERROR: MCS251: arguments must be unsplit i8/i16/i32 scalars
+; TYPE: LLVM ERROR: MCS251: arguments must be i8/i16/i32/f32/i1 scalars, ordinary pointers, or supported aggregates
 
 ;--- i1.ll
 ; The one newly accepted width: an i1 formal parameter lowers without error.

@@ -1,7 +1,7 @@
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 %s -o - | FileCheck %s
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 %s -o - | FileCheck %s
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj %s -o %t.O0.rel
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj %s -o %t.O2.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj -mcs251-object-format=rel %s -o %t.O0.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj -mcs251-object-format=rel %s -o %t.O2.rel
 
 ; Keep all three directions covered at count 0, 1, width-1 and width.
 ; Counts >= width produce poison, NOT a saturating or masked shift. For a

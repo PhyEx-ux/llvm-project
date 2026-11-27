@@ -1,4 +1,4 @@
-; RUN: llc -mtriple=mcs251 -filetype=obj < %s | FileCheck %s
+; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=rel < %s | FileCheck %s
 
 ; Phase 13a (de-SDCC Step 2): llc -filetype=obj writes an ASxxxx XH3 .rel
 ; directly -- sdas251 is no longer in the production path.  The records are

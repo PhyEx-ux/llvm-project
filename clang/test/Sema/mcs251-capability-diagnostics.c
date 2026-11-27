@@ -17,40 +17,29 @@
 // Plus the supported neighbours that must keep compiling.
 
 // ---------------------------------------------------------------- A4/A5/A6 --
+// C11 _Atomic, __atomic_* and __sync_* builtins, fences, and lock-free queries
+// are now supported on MCS251 via EA (IE.7) critical sections (1/2/4-byte
+// inline; >4-byte via runtime libcalls).
 
-// Note: the atomic OBJECT declaration is its own diagnostic (A4); the
-// operations below use plain objects so the operation rule is what is under
-// test here.
-_Atomic unsigned short atomic_object; // expected-error {{atomic types}}
+_Atomic unsigned short atomic_object;
 
 unsigned short plain_object;
 volatile unsigned short volatile_plain_object;
 
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int atomic_load_builtin(void) { return __atomic_load_n(&plain_object, __ATOMIC_SEQ_CST); }
-
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 void atomic_store_builtin(void) { __atomic_store_n(&plain_object, 1, __ATOMIC_SEQ_CST); }
-
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int atomic_rmw_builtin(void) { return __atomic_fetch_add(&plain_object, 1, __ATOMIC_SEQ_CST); }
-
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 void atomic_fence_builtin(void) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
-
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int sync_rmw_builtin(void) { return __sync_fetch_and_add(&plain_object, 1); }
-
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 void sync_fence_builtin(void) { __sync_synchronize(); }
 
-// The compile-time lock-free query stays (it constant-folds to false -- the
-// target makes no lock-free claim), but the RUNTIME query is part of the
-// rejected family: implementing it would need a libcall the target does not
-// provide.
-_Static_assert(!__atomic_always_lock_free(2, 0),
-               "MCS251 must not claim lock-free atomic support");
-int runtime_lock_free_query(void) { return __atomic_is_lock_free(4, 0); } // expected-error {{atomic operations (C11/GNU) are not supported on MCS251}}
+// 1/2/4-byte atomics are inline lock-free via EA critical sections; larger
+// sizes fall back to runtime libcalls.
+_Static_assert(__atomic_always_lock_free(2, 0),
+               "MCS251 2-byte atomics are inline lock-free");
+_Static_assert(!__atomic_always_lock_free(8, 0),
+               "MCS251 >4-byte atomics use runtime libcalls");
+int runtime_lock_free_query(void) { return __atomic_is_lock_free(4, 0); }
 
 // A non-atomic volatile access is the supported way to touch shared memory;
 // volatile does not make the atomic family legal.
@@ -124,113 +113,59 @@ int uneval_lor_rhs(void) {
   return 1 || __atomic_load_n(plain_ptr, __ATOMIC_SEQ_CST);
 }
 
-// The evaluated counterparts of the same shapes must STILL be rejected: the
-// rule is evaluation, not spelling.
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
+// Both unevaluated and evaluated atomic forms are accepted on MCS251.
 int bce_selected_arm(void) { return __builtin_choose_expr(1, __atomic_load_n(plain_ptr, __ATOMIC_SEQ_CST), 1); }
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int cond_taken_arm(void) { return 0 ? 1 : __atomic_load_n(plain_ptr, __ATOMIC_SEQ_CST); }
-// expected-error@+1 {{access to an object with an atomic subobject}}
 int cond_variable_untaken(int c) { return c ? 1 : *atomic_ptr_param; }
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int land_rhs_evaluated(int c) { return c && __atomic_load_n(plain_ptr, __ATOMIC_SEQ_CST); }
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int lor_rhs_evaluated(int c) { return c || __atomic_load_n(plain_ptr, __ATOMIC_SEQ_CST); }
 
-// ------------------- GNU `a ?: b`: the COMMON expression is evaluated --------
-//
-// The common expression is the operand that is evaluated unconditionally: it
-// produces the tested value and, when non-zero, the value of the whole
-// operator. It is reached through getCommon(), not getCond() -- the condition
-// is written in terms of an OpaqueValueExpr whose children() is empty, so a
-// walk that followed only the condition would never see the real operands.
-// Each evaluated common expression is an operation like any other.
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
+// ------------------- GNU `a ?: b` with atomics -------------------------------
 int gnu_cond_common_load(void) { return (__atomic_load_n(plain_ptr, __ATOMIC_SEQ_CST)) ?: 0; }
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int gnu_cond_common_fence(void) { return (__atomic_signal_fence(0), 1) ?: 0; }
-// expected-error@+1 {{access to an object with an atomic subobject}}
 int gnu_cond_common_deref(void) { return (*atomic_ptr_param) ?: 1; }
-// The dead false arm of a non-zero constant common expression is not evaluated.
 int gnu_cond_false_dead(void) { return 1 ?: __atomic_load_n(plain_ptr, __ATOMIC_SEQ_CST); }
-// A non-constant common expression leaves the false arm reachable.
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int gnu_cond_false_live(int c) { return c ?: __atomic_load_n(plain_ptr, __ATOMIC_SEQ_CST); }
-// The atomic subobject access in the false arm of `1 ?: x` is dead, but the
-// common expression is an ordinary value, so the whole form is accepted.
 int gnu_cond_false_dead_deref(void) { return 1 ?: *atomic_ptr_param; }
 
-// --------------------- __builtin_offsetof: index operands are evaluated ------
-//
-// The components of __builtin_offsetof are member designators, but an array
-// subscript component's INDEX expression is an ordinary evaluated operand of
-// the address computation. It is exposed through OffsetOfExpr::children().
+// --------------------- __builtin_offsetof with atomics -----------------------
 struct offsetof_target { int a[8]; };
 int offsetof_index_load(void) {
-  // expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
   return __builtin_offsetof(struct offsetof_target, a[__atomic_load_n(plain_ptr, __ATOMIC_SEQ_CST)]);
 }
 int offsetof_index_store(void) {
-  // expected-error@+1 {{access to an object with an atomic subobject}}
   return __builtin_offsetof(struct offsetof_target, a[(*atomic_ptr_param = 1)]);
 }
-// A plain component designator stays accepted.
 int offsetof_plain(void) { return __builtin_offsetof(struct offsetof_target, a); }
 
-// ------------------- statement expressions: deferral is scoped --------------
-//
-// A statement inside `({ ... })` is its own full expression, checked before the
-// enclosing expression -- which decides whether the statement expression runs
-// at all -- is known. The inner check therefore defers, and the enclosing full
-// expression walks the statements. These three shapes are the ones the
-// re-check measured as wrongly refused.
+// ------------------- statement expressions with atomics ----------------------
 int stmt_expr_sizeof_dead(void) { return sizeof(({ __atomic_signal_fence(0); 0; })); }
 int stmt_expr_cond_dead(void) { return 1 ? 1 : ({ __atomic_signal_fence(0); 0; }); }
 int stmt_expr_generic_dead(void) {
   return _Generic(0, int: 1, default: ({ __atomic_signal_fence(0); 0; }));
 }
-// The deferred walk carries the dead-statement rules into the statement
-// expression body: a constant-false loop or if never runs its body.
 int stmt_expr_if_dead(void) { return ({ if (0) { __atomic_signal_fence(0); } 0; }); }
 int stmt_expr_while_dead(void) { return ({ while (0) { __atomic_signal_fence(0); } 0; }); }
 int stmt_expr_for_dead(void) { return ({ for (; 0;) { __atomic_signal_fence(0); } 0; }); }
-// A constant-false branch is dead by FALL-THROUGH only. When a `goto` outside
-// the branch can enter it at a label, the statements inside really do run and
-// must be reported. (Measured as wrongly accepted before this rule was added;
-// the same shapes are exercised at the object level by
-// clang/test/CodeGen/mcs251-wp4-r5-entry-shapes.c.)
-// expected-error@+2 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int stmt_expr_goto_if_live(void) {
   return ({ goto L; if (0) { L: __atomic_signal_fence(0); } 0; });
 }
-// expected-error@+2 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int stmt_expr_goto_while_live(void) {
   return ({ goto L; while (0) { L: __atomic_signal_fence(0); } 0; });
 }
-// expected-error@+2 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int stmt_expr_goto_for_live(void) {
   return ({ goto L; for (; 0;) { L: __atomic_signal_fence(0); } 0; });
 }
-// A `case` label of an ENCLOSING switch is an entry point for statements that
-// otherwise sit in a constant-false branch of that switch's body.
-// expected-error@+2 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int switch_case_in_dead_if_live(int x) {
   return ({ switch (x) { if (0) { case 1: __atomic_signal_fence(0); } } 0; });
 }
-// expected-error@+2 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int switch_case_in_dead_for_live(int x) {
   return ({ switch (x) { for (; 0;) { case 1: __atomic_signal_fence(0); } } 0; });
 }
-// The label rule is about reachability, not about labels: an operation on the
-// ordinary fall-through path next to a label is still reported.
-// expected-error@+2 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int stmt_expr_label_live(void) {
   return ({ __atomic_signal_fence(0); L2: ; 0; });
 }
-// The evaluated counterparts must STILL be rejected.
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int stmt_expr_live(void) { return ({ __atomic_signal_fence(0); 0; }); }
-// expected-error@+1 {{atomic operations (C11/GNU) are not supported on MCS251}}
 int stmt_expr_init_live(void) { int v = ({ __atomic_signal_fence(0); 1; }); return v; }
 
 // --------------------------- A2: the comma expression's value is its RHS ----
@@ -313,7 +248,7 @@ typedef unsigned short (*binop_t)(unsigned short, unsigned short);
 unsigned short add2(unsigned short a, unsigned short b) { return (unsigned short)(a + b); }
 
 void multiarg_indirect(binop_t fp) {
-  // expected-error@+1 {{multi-argument indirect calls are not supported on MCS251}}
+  // Multi-argument indirect calls are now supported under the stack-based ABI.
   (void)fp(1, 2);
 }
 
@@ -329,19 +264,19 @@ void supported_calls(void) {
 
 // -------------------------------------------------------------------- A8 --
 
-__attribute__((weak)) unsigned short weak_fn(unsigned short a, unsigned short b) { // expected-error {{weak function definitions}}
+// Ordinary weak function and variable definitions are supported for ELF object
+// output; weak definitions on MCS251 bit objects and fixed-placement entities
+// remain rejected.
+__attribute__((weak)) unsigned short weak_fn(unsigned short a, unsigned short b) {
   return (unsigned short)(a + b);
 }
 
-__attribute__((weak)) unsigned short weak_var = 1; // expected-error {{weak variable definitions}}
-
-// A tentative weak definition (file scope, no initializer) is still a weak
-// DEFINITION -- it materializes a zero-initialized weak symbol -- and is
-// rejected like any other. Only an extern declaration without storage in
-// this TU stays accepted.
-__attribute__((weak)) unsigned short weak_tentative; // expected-error {{weak variable definitions}}
+__attribute__((weak)) unsigned short weak_var = 1;
+__attribute__((weak)) unsigned short weak_tentative;
 extern __attribute__((weak)) unsigned short weak_only_decl;
 unsigned short use_weak_decl(void) { return weak_only_decl; }
+
+__attribute__((weak)) __bit weak_bit = 0; // expected-error {{weak variable definitions are not supported on MCS251}}
 
 // -------------------------------------------------------------------- D1 --
 
@@ -368,7 +303,9 @@ int ordinary_switch(int x) {
 
 // -------------------------------------------------------------------- A9 --
 
-// expected-error@+1 {{module-level inline assembly is not supported on MCS251}}
+// File-scope (module-level) inline assembly is accepted at the C source level
+// for ELF object output via MCS251AsmParser (legacy REL object output still
+// rejects inline assembly fail-closed in the backend).
 __asm__(".globl myasm\nmyasm:\n ret\n");
 
 // --------------------------------------------------------------------------

@@ -1,30 +1,36 @@
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 < %s | FileCheck %s
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 < %s | FileCheck %s
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj < %s -o %t.O0.rel
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj < %s -o %t.O2.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj -mcs251-object-format=rel < %s -o %t.O0.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj -mcs251-object-format=rel < %s -o %t.O2.rel
 
 ; Standard libcall lowering must use the SDCC-compatible family, exactly
 ; two underscores (the target's global prefix is applied once).
 define i8 @div8(i8 %a, i8 %b) {
 ; CHECK-LABEL: _div8:
-; CHECK: __divuint_PARM_2
+; CHECK-NOT: _PARM_
+; CHECK: inc spx, #0x2
 ; CHECK: ecall __divuint
+; CHECK: dec spx, #0x2
 ; CHECK: eret
   %q = udiv i8 %a, %b
   ret i8 %q
 }
 define i16 @div16(i16 %a, i16 %b) {
 ; CHECK-LABEL: _div16:
-; CHECK: __divuint_PARM_2
+; CHECK-NOT: _PARM_
+; CHECK: inc spx, #0x2
 ; CHECK: ecall __divuint
+; CHECK: dec spx, #0x2
 ; CHECK: eret
   %q = udiv i16 %a, %b
   ret i16 %q
 }
 define i32 @div32(i32 %a, i32 %b) {
 ; CHECK-LABEL: _div32:
-; CHECK: __divulong_PARM_2
+; CHECK-NOT: _PARM_
+; CHECK: inc spx, #0x4
 ; CHECK: ecall __divulong
+; CHECK: dec spx, #0x4
 ; CHECK: eret
   %q = udiv i32 %a, %b
   ret i32 %q

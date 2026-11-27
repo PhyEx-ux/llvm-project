@@ -1,0 +1,80 @@
+# RUN: rm -rf %t && split-file %s %t
+# RUN: llc -mtriple=mcs251 -O1 -filetype=obj %t/app.ll -o %t/app.o
+
+# 1. Recursive @response-file + --map-json + ET_EXEC e_flags=0x102 + --link-facts FIXED space.
+# RUN: lld -flavor mcs251 @%t/top.rsp %t/app.o -o %t/out.elf --map=%t/out.map --map-json=%t/out.map.json --link-facts=%t/out.facts
+# RUN: llvm-readobj -h %t/out.elf | FileCheck %s --check-prefix=HDR
+# HDR: Type: Executable (0x2)
+# HDR: Machine: EM_MCS251 (0x9999)
+# HDR: Flags [ (0x102)
+# HDR-NEXT: EF_MCS251_ABI_V2 (0x2)
+# HDR-NEXT: EF_MCS251_BACKEND_NATIVE (0x100)
+
+# RUN: %python %t/check_json.py %t/out.map.json
+
+# 2. Missing response file fails cleanly.
+# RUN: not lld -flavor mcs251 @%t/does_not_exist.rsp %t/app.o -o %t/m.elf 2>&1 | FileCheck %s --check-prefix=MISS
+# MISS: cannot read response file
+
+# 3. Recursive response-file cycle is detected and rejected.
+# RUN: not lld -flavor mcs251 @%t/cycle_a.rsp %t/app.o -o %t/c.elf 2>&1 | FileCheck %s --check-prefix=CYCLE
+# CYCLE: recursive response file inclusion
+
+# 4. Publication conflict: --map-json cannot overwrite a consumed @response-file.
+# RUN: not lld -flavor mcs251 @%t/top.rsp %t/app.o -o %t/conf.elf --map-json=%t/top.rsp 2>&1 | FileCheck %s --check-prefix=CONF
+# CONF: publication path conflict: map json conflicts with response file
+
+# 5. --reserve-data 64-bit overflow check rejects wraparound.
+# RUN: not lld -flavor mcs251 --reserve-data=0xffffffff,2 --area-start=CSEG=0xff0100 %t/app.o -o %t/ov.elf 2>&1 | FileCheck %s --check-prefix=OVF
+# OVF: invalid --reserve-data
+
+# 6. --link-facts reports FIXED-CODE space=2 and FIXED-XDATA space=1.
+# RUN: clang --target=mcs251-unknown-none -O1 -c %t/fixed.c -o %t/fixed.o
+# RUN: lld -flavor mcs251 --area-start=CSEG=0xff0200 --area-start=XDATA_INIT=0xff0800 --area-start=XSEG=0x010000 --flash-base=0xff0000 --flash-size=0x10000 --link-facts=%t/fixed.facts %t/fixed.o -o %t/fixed.elf
+# RUN: FileCheck %s --check-prefix=FACTS < %t/fixed.facts
+# FACTS-DAG: region=FIXED space=1 addr=0x20000 {{.*}} name .mcu.fixed.fx_xd
+# FACTS-DAG: region=FIXED space=2 addr=0xff4000 {{.*}} name .mcu.fixed.fx_cd
+
+#--- top.rsp
+--keep-symbols
+@sub/nested.rsp
+
+#--- sub/nested.rsp
+--area-start=CSEG=0xff0200
+--area-start=XINIT=0xff0800
+--area-start=XSEG=0x010000
+--flash-base=0xff0000
+--flash-size=0x10000
+
+#--- cycle_a.rsp
+@cycle_b.rsp
+
+#--- cycle_b.rsp
+@cycle_a.rsp
+
+#--- check_json.py
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["version"] == 1
+assert d["e_flags"] == 0x102, hex(d["e_flags"])
+assert d["flash_gate"]["enabled"] is True
+assert d["flash_gate"]["base"] == 0xff0000
+assert d["flash_gate"]["size"] == 0x10000
+assert d["areas"]["s_CSEG"] == 0xff0200
+assert any(s["name"] == ".text" and s["space"] == "CODE" for s in d["sections"])
+assert any(sym["name"] == "_main" for sym in d["symbols"])
+
+#--- app.ll
+target triple = "mcs251-unknown-none"
+@g = global i16 7, align 1
+define i16 @main() {
+  %v = load i16, ptr @g, align 1
+  ret i16 %v
+}
+!mcs251.signatures = !{!0}
+!0 = !{!"_main", i32 1, i32 0}
+
+#--- fixed.c
+__xdata volatile unsigned long __attribute__((mcu_place_at(0x20000), noinit)) fx_xd;
+__code const unsigned long __attribute__((mcu_place_at(0xff4000))) fx_cd = 42UL;
+int main(void) { return (int)(fx_xd + fx_cd); }

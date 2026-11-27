@@ -845,7 +845,7 @@ default:
 ;     end-to-end. The `not --crash` RUN below pins the crash so the gap stays
 ;     loud; when wide-integer runtime is connected, replace it with a real
 ;     E2-fallback pin.
-; I64: LLVM ERROR: MCS251: arguments must be unsplit i8/i16/i32 scalars
+; I64: LLVM ERROR: MCS251: arguments must be i8/i16/i32/f32/i1 scalars, ordinary pointers, or supported aggregates
 target datalayout = "E-m:s-p:32:8:8:32-p1:16:8:8:16-p2:16:8:8:16-p3:32:8:8:32-p4:32:8:8:32-p6:16:8:8:16-p7:32:8:8:32-p8:16:8:8:16-p9:32:8:8:32-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8:16:32-S8-P4-A0-G0"
 target triple = "mcs251"
 

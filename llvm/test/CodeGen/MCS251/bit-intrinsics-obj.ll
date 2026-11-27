@@ -282,7 +282,7 @@ define void @ordered(i8 %v) {
 ; all (an extern-only TU included: a use without a record is still ELF-only),
 ; and the REL object path rejects the relocation just the same.
 ; RUN: not llc -mtriple=mcs251 -O0 -filetype=asm %t/externuse.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ELFONLY
-; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj %t/externuse.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ELFONLY
+; RUN: not llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=rel %t/externuse.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ELFONLY
 ;ELFONLY: MCS251 bit object requires ELF object output
 
 

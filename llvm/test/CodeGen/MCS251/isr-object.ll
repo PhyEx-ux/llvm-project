@@ -30,7 +30,7 @@
 ; RUN: llvm-objcopy --dump-section=.mcs251.isr=%t.meta %t.o
 ; RUN: %python -c "import pathlib,struct,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert len(b)==48; a=[struct.unpack('>HHBBBBHHIII',b[i:i+24]) for i in (0,24)]; assert a==[(2,24,1,1,1,1,1,1,0,0,0),(2,24,2,1,1,1,1,1,0,0,0)],a" %t.meta
 ; RUN: llvm-readobj --symbols %t.o | FileCheck %s --check-prefix=SYM
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj %t/object.ll -o %t.rel 2>&1 | FileCheck %s --check-prefix=REL
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj -mcs251-object-format=rel %t/object.ll -o %t.rel 2>&1 | FileCheck %s --check-prefix=REL
 
 ; G1-1: high-slot persistence. Slot 126 (the new upper bound) and slot 31
 ; (reclassified Legal) pass ContractCheck and the AsmPrinter object boundary
@@ -183,7 +183,7 @@
 ; CHECK: AddressAlignment: 4
 ; The v2 identity carrier closes the section table (emitEndOfAsmFile).
 ; CHECK: Name: .mcs251.attributes
-; CHECK: Type: Unknown (0x70000003)
+; CHECK: Type: SHT_MCS251_ATTRIBUTES (0x70000003)
 ; CHECK: R_MCS251_ISR_REF _irq 0x0
 ; CHECK: R_MCS251_ISR_REF _irq 0x0
 ; REL: MCS251 ISR requires ELF object output
@@ -531,8 +531,8 @@ body: |
     ISR_POP_DR4 implicit-def $dr4, implicit-def $dr60, implicit $dr60
     ISR_POP_DR0 implicit-def $dr0, implicit-def $dr60, implicit $dr60
     ISR_POP_PSW implicit-def $psw, implicit-def $dr60, implicit $dr60
-    ADJCALLSTACKDOWN 0, 0
-    ADJCALLSTACKUP 0, 0
+    ADJCALLSTACKDOWN 0, 0, implicit-def $dr60, implicit-def $psw, implicit $dr60
+    ADJCALLSTACKUP 0, 0, implicit-def $dr60, implicit-def $psw, implicit $dr60
     RETI implicit-def $dr60, implicit-def $psw, implicit $dr60
 ...
 ;--- generic-pseudo.mir

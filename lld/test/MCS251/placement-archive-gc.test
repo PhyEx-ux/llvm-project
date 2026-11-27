@@ -1,0 +1,26 @@
+# RUN: rm -rf %t && split-file %s %t
+# RUN: clang --target=mcs251-unknown-none -O1 -ffunction-sections -fdata-sections -c %t/app.c -o %t/app.o
+# RUN: clang --target=mcs251-unknown-none -O1 -ffunction-sections -fdata-sections -c %t/libmod.c -o %t/libmod.o
+# RUN: llvm-ar rcs %t/libmod.a %t/libmod.o
+
+# 1. Placement audit (--placement-report + --verify-placement) succeeds with
+#    BOTH static archive (.a) lazy extraction AND --gc-sections enabled.
+# RUN: lld -flavor mcs251 --gc-sections --placement-report=%t/out.placement --verify-placement --area-start=CSEG=0xff0200 --area-start=XINIT=0xff0800 --area-start=XDATA_INIT=0xff0a00 --area-start=XSEG=0x010000 %t/app.o %t/libmod.a -o %t/fw.elf --map=%t/fw.map
+# RUN: FileCheck %s --check-prefix=MAP < %t/fw.map
+# MAP-DAG: .text._main
+# MAP-DAG: .text._lib_live
+# MAP-DAG: .mcu.fixed.fixed_buf 0x20000
+# MAP-NOT: .text._dead_app
+# MAP-NOT: .text._dead_lib
+# RUN: FileCheck %s --check-prefix=REP < %t/out.placement
+# REP: fixed_buf | _fixed_buf |
+
+#--- app.c
+extern int lib_live(void);
+int dead_app(void) { return 77; }
+int main(void) { return lib_live(); }
+
+#--- libmod.c
+__xdata volatile unsigned int __attribute__((mcu_place_at(0x20000), noinit)) fixed_buf;
+int dead_lib(void) { return 88; }
+int lib_live(void) { return (int)fixed_buf; }

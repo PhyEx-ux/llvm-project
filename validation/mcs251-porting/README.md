@@ -228,7 +228,7 @@ python3 tests/test-porting-tools.py   # 自包含套件，工作站在无语料/
 
 ## v1 限制和待办
 
-1. **Keil 语言方言尚未移植。** `sbit`、`bit`、`xdata`、`far`、`_at_`、中断声明、绝对放置、启动代码及 Keil 汇编均不由转换器翻译或编译。`sbit` 仍仅登记；XFR 是例外：`--xfr-macros` 将已确认的 `0x7E0000..0x7EFFFF` 物理地址转成标准 C 的 volatile 32 位指针宏，因而不需要 Keil `far`/`xdata` 方言。AS6 风味仍只影响直 SFR 宏，XFR 宏在两种头中完全相同；`RSTCFG@0xFF` 在 AS6 下仍因后端禁区降级为登记注释（见第 1 节）。
+1. **转换器不自动翻译 Keil 语言方言声明。** `sfr-convert.py` 只生成 SFR/XFR 宏与 `sbit` 登记注释，不改写源文件中的 `sbit`/`bit`/`xdata`/`code`/`interrupt`/绝对放置或 Keil 汇编（注：在当前 HEAD 编译器中，开启 `-fmcs251-keil` 已原生支持 `bit`/`sbit`/`xdata`/`code`/`interrupt N`，固定放置请改用 `mcu_place_at`/`mcu_bind_at`，`_at_` 明确拒收；详见 `docs/mcs251/02-clang-frontend-and-dialect.md`）。XFR 是例外：`--xfr-macros` 将已确认的 `0x7E0000..0x7EFFFF` 物理地址转成标准 C 的 volatile 32 位指针宏，因而不需要 Keil `far`/`xdata` 方言。AS6 风味仍只影响直 SFR 宏，XFR 宏在两种头中完全相同；`RSTCFG@0xFF` 在 AS6 下仍因后端禁区降级为登记注释（见第 1 节）。
 2. **生成 Makefile 不代表官方例程可端到端构建。** 270 个 Makefile 的解析/dry-run 已验收；例程真实编译验收必须等待上述源语言特性落地。
 3. **ELF 旗标是生产模板的硬要求。** s1 `llc -filetype=obj` 的默认值是 ASxxxx `XH3`/`.rel`，不是 lld 缺陷；llc 必须显式使用 `-mcs251-object-format=elf`（已内置在 `tools/uvproj2make.py` 模板中），否则 mcs251-lld 不能接受该旧格式。ELF 链还要求 HOME、VECS、BOOT、CSEG、XINIT 五个 `--area-start` 参数和板级 `--edata-end`。本目录的最小 smoke 及 QEMU 样板均已通过该完整链。
 4. **ELF `_nop_()` 有时序限制。** 当前 ELF streamer 缺少 MCS251 inline-asm parser，所以在 ELF 模式下公共头改调 `runtime/elf-nop.yaml` 中 `00 AA`（NOP; ERET）helper。它证明确实执行 NOP，却增加 call/return，暂不适用于依赖 Keil inline NOP 精确周期的例程；原 `.rel` 路径仍直接发射一条 inline `nop`。

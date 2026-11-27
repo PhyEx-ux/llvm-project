@@ -79,14 +79,27 @@ MCS251FrameLowering::MCS251FrameLowering()
 MachineBasicBlock::iterator MCS251FrameLowering::eliminateCallFramePseudoInstr(
     MachineFunction &MF, MachineBasicBlock &MBB,
     MachineBasicBlock::iterator MI) const {
-  // CALLSEQ protects static-parameter setup; it never adjusts the stack.
-  assert(MI->getOperand(0).getImm() == 0 &&
-         MI->getOperand(1).getImm() == 0 && "unexpected stack arguments");
+  uint64_t Amt = MI->getOperand(0).getImm();
+  if (Amt != 0) {
+    DebugLoc DL = MI->getDebugLoc();
+    bool IsDestroy = MI->getOpcode() == MCS251::ADJCALLSTACKUP;
+    // Stack grows up: ADJCALLSTACKDOWN allocates outgoing argument space by
+    // incrementing SPX; ADJCALLSTACKUP reclaims it by decrementing SPX.
+    emitSPAdjust(MBB, MI, DL, Amt, /*IsDec=*/IsDestroy,
+                 IsDestroy ? MachineInstr::FrameDestroy
+                           : MachineInstr::FrameSetup);
+  }
   return MBB.erase(MI);
 }
 
 bool MCS251FrameLowering::hasFPImpl(const MachineFunction &MF) const {
   return MF.getFrameInfo().hasVarSizedObjects();
+}
+
+bool MCS251FrameLowering::needsFrameIndexResolution(
+    const MachineFunction &MF) const {
+  return MF.getFrameInfo().hasStackObjects() ||
+         MF.getFrameInfo().adjustsStack();
 }
 
 void MCS251FrameLowering::emitSPAdjust(MachineBasicBlock &MBB,
@@ -182,8 +195,9 @@ void MCS251FrameLowering::emitEpilogue(MachineFunction &MF,
   MachineBasicBlock::iterator MBBI = MBB.getLastNonDebugInstr();
   bool IsISR = isISRFunction(MF);
   assert(((IsISR && MBBI->getOpcode() == MCS251::RETI) ||
-          (!IsISR && MBBI->getOpcode() == MCS251::ERET)) &&
-         "ISR exits must end in RETI, ordinary exits in ERET");
+          (!IsISR && (MBBI->getOpcode() == MCS251::ERET ||
+                      MBBI->getOpcode() == MCS251::TCRETURNdi))) &&
+         "ISR exits must end in RETI, ordinary exits in ERET or tail call");
   DebugLoc DL = MBBI->getDebugLoc();
   uint64_t StackSize = MFI.getStackSize();
   bool FramePtr = hasFP(MF);
@@ -237,6 +251,15 @@ StackOffset MCS251FrameLowering::getFrameIndexReference(
   // points at the frame TOP while the objects start one byte above the
   // entry SPX, hence ObjectOffset - StackSize (negative or zero, within
   // [1 - StackSize, 0]).
-  return StackOffset::getFixed((int64_t)MFI.getObjectOffset(FI) -
-                               (int64_t)MFI.getStackSize());
+  int64_t Offset = (int64_t)MFI.getObjectOffset(FI) -
+                   (int64_t)MFI.getStackSize();
+  // When hasFP() is true, emitPrologue pushes the 4-byte DR16 anchor BEFORE
+  // allocating StackSize. Local objects sit above the pushed DR16 (matching
+  // the DR16 anchor shift), whereas incoming fixed stack arguments live below
+  // the 3-byte return address (ObjectOffset <= 0) and are therefore 4 bytes
+  // further below DR16.
+  if (MFI.isFixedObjectIndex(FI) && MFI.getObjectOffset(FI) <= 0 &&
+      MFI.hasVarSizedObjects())
+    Offset -= 4;
+  return StackOffset::getFixed(Offset);
 }

@@ -123,12 +123,12 @@ define float @t_sin(float %x) {
 ; touches anything else. Reading the lanes at the return sites instead --
 ; i.e. the folded `COPY $dr4` this test used to require -- was the blocker:
 ; the read then happened after the TPIN=1 write that closes the window.
-; ASM2-NEXT: mov dr12, dr4
-; ASM2-NEXT: mov dpl, r15
-; ASM2-NEXT: mov dph, r14
-; ASM2-NEXT: mov b, r13
-; ASM2-NEXT: mov a, r12
-; ASM2-NEXT: eret
+; ASM2-NEXT: mov dr{{0|12}}, dr4
+; ASM2-NEXT: mov dpl, r{{3|15}}
+; ASM2-NEXT: mov dph, r{{2|14}}
+; ASM2-NEXT: mov b, r{{1|13}}
+; ASM2-NEXT: mov a, r{{0|12}}
+; ASM2: eret
 ;
 ; The O0 shape is the same sequence: same AR window load, same trigger, same
 ; 270-clock chain and the same in-window readback (only the byte-wise
@@ -232,7 +232,7 @@ define float @t_add(float %a, float %b) {
 ; ASM2: mov dr0, dr12
 ; ASM2: mov 0xed, #0x1c
 ; ASM2-COUNT-40: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
   %ba = bitcast float %a to i32
   %bb = bitcast float %b to i32
   %r = call i32 @llvm.mcs251.tfpu.add(i32 %ba, i32 %bb)
@@ -310,7 +310,7 @@ define float @t_nested(float %x, float %y) {
 ; ASM2: mov dr0, dr12
 ; ASM2: mov 0xed, #0x1e
 ; ASM2-COUNT-34: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
   %bx = bitcast float %x to i32
   %by = bitcast float %y to i32
   %s = call i32 @llvm.mcs251.tfpu.sin(i32 %bx)
@@ -372,8 +372,8 @@ define i32 @t_pressure(i32 %a0, i32 %a1, i32 %a2, i32 %a3,
 ; The very next instruction after the wait is the in-window readback; only
 ; after it does the pressure-driven spill traffic resume. The window bytes
 ; hold only the sqrt operand/result at the trigger.
-; ASM2-NEXT: mov dr12, dr4
-; ASM2: mov dpl, r3
+; ASM2-NEXT: mov dr{{0|12}}, dr4
+; ASM2: mov dpl, r{{[0-9]+}}
 ; ASM2: eret
   %s0 = add i32 %a0, %a1
   %s1 = add i32 %a1, %a2

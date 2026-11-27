@@ -1,7 +1,7 @@
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %s -o - | FileCheck %s --check-prefix=ASM
 ; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs %s -o - | FileCheck %s --check-prefix=ASM
-; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs -filetype=obj %s -o - | FileCheck %s --check-prefix=OBJ
-; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs -filetype=obj %s -o - | FileCheck %s --check-prefix=OBJ
+; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs -filetype=obj -mcs251-object-format=rel %s -o - | FileCheck %s --check-prefix=OBJ
+; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs -filetype=obj -mcs251-object-format=rel %s -o - | FileCheck %s --check-prefix=OBJ
 ;
 ; Mutable globals have one NOBITS DSEG allocation and one sparse XINIT record:
 ;   u16 DSEG address, u16 object size, u16 payload size, payload bytes.

@@ -74,48 +74,37 @@ import sys
 # them, which is the point of a byte golden.
 SHAPES = {
     "o2": {
-        "pre_unary": "7ccb7ed1f07ee1837ef1827f13",
+        "pre_unary": "0bfe796ffffd797fffff7ccb7ed1f07ee1837ef1827f13",
         "pre_binary": (
-            "0bfe0bfe7ccb7ed1f07ee1837ef182"
-            "796ffff9797ffff"
-            "b7e0800007a0c00007e0bc029d0000129e0000229f00003"
-            "796ffffd797fffff696ffff9697ffff"
-            "b7f13696ffffd697fffff7f03"
+            "0bfe0bfe0bfe796ffff5797ffff77ccb7ed1f07ee1837ef182"
+            "796ffff9797ffffb29cfffee29dfffef29effff029fffff1"
+            "796ffffd797fffff696ffff9697ffffb7f13696ffffd697fffff7f03"
         ),
-        "suf": "7f317af1827ae1837ad1f07cbcaa",
-        "suf_binary": "7f317af1827ae1837ad1f07cbc1bfe1bfeaa",
+        "suf": "7f017a31827a21837a11f0a5e8696ffffd697fffff1bfeaa",
+        "suf_binary": "7f017a31827a21837a11f0a5e8696ffff5697ffff71bfe1bfe1bfeaa",
     },
     "o0": {
-        "pre_unary": "a5f87e21f07ee1837e11827cf17c127d607f13",
+        "pre_unary": "0bfe796ffffd797fffffa5f87e21f07ee1837e11827cf17c127d607f13",
         "pre_binary": (
-            "0bfe0bfe0bfe0bfca5fc7e61f07ee1837e5182"
-            "7e0800007a0c00007e0b80297000017c97297000027afb7029000003"
-            "7efb207c307d0479"
-            "0ffffc791ffffe7cf57c567d6279"
-            "6ffff8797ffffa696ffffc697ffffe"
-            "796ffff4797ffff6696ffff8697ffffa7f13696ffff4697ffff67f03"
+            "0bfe0bfe0bfe0bfe0bfd796ffff1797ffff3794fffefa5fc7e61f07ee1837e5182"
+            "298fffe8290fffe97c90292fffea290fffeb7c307d04"
+            "790ffffd791fffff7cf57c567d62796ffff9797ffffb696ffffd697fffff"
+            "796ffff5797ffff7696ffff9697ffffb7f13696ffff5697ffff77f03"
         ),
-        "suf": "7f317d077c317c207d267c157c047a31827a21837a11f0a5e8aa",
-        "suf_binary": "7f317d077c317c207d267c157c047a31827a21837a11f0a5e81bfe1bfe1bfe1bfcaa",
+        "suf": "7f317d077c317c207d267c157c047a31827a21837a11f0a5e8696ffffd697fffff1bfeaa",
+        "suf_binary": "7f317d077c317c207d267c157c047a31827a21837a11f0a5e8694fffef696ffff1697ffff31bfe1bfe1bfe1bfe1bfdaa",
     },
-    # Both command operands the SAME value (tfpu_mul(x, x)): the singleton
-    # parking class is read twice, so the BR window load is the SAME
-    # instruction as the AR one (`7f 03` right after `7f 13`) and the
-    # allocator marks only one of the two reads killing. The regression this
-    # shape guards is the expand pass forcing kill on both loads, which made
-    # the second read a use of an already-killed register and tripped
-    # -verify-machineinstrs.
     "o2_same": {
-        "pre_unary": "7ccb7ed1f07ee1837ef1827f137f03",
-        "pre_binary": "7ccb7ed1f07ee1837ef1827f137f03",
-        "suf": "7f317af1827ae1837ad1f07cbcaa",
-        "suf_binary": "7f317af1827ae1837ad1f07cbcaa",
+        "pre_unary": "0bfe796ffffd797fffff7ccb7ed1f07ee1837ef1827f137f03",
+        "pre_binary": "0bfe796ffffd797fffff7ccb7ed1f07ee1837ef1827f137f03",
+        "suf": "7f017a31827a21837a11f0a5e8696ffffd697fffff1bfeaa",
+        "suf_binary": "7f017a31827a21837a11f0a5e8696ffffd697fffff1bfeaa",
     },
     "o0_same": {
-        "pre_unary": "a5f87e21f07ee1837e11827cf17c127d607f137f03",
-        "pre_binary": "a5f87e21f07ee1837e11827cf17c127d607f137f03",
-        "suf": "7f317d077c317c207d267c157c047a31827a21837a11f0a5e8aa",
-        "suf_binary": "7f317d077c317c207d267c157c047a31827a21837a11f0a5e8aa",
+        "pre_unary": "0bfe796ffffd797fffffa5f87e21f07ee1837e11827cf17c127d607f137f03",
+        "pre_binary": "0bfe796ffffd797fffffa5f87e21f07ee1837e11827cf17c127d607f137f03",
+        "suf": "7f317d077c317c207d267c157c047a31827a21837a11f0a5e8696ffffd697fffff1bfeaa",
+        "suf_binary": "7f317d077c317c207d267c157c047a31827a21837a11f0a5e8696ffffd697fffff1bfeaa",
     },
 }
 

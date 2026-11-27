@@ -57,41 +57,40 @@ void fill(unsigned char __xdata *p, unsigned char v, unsigned char __xdata *q) {
   q[0] = 0xA5;
 }
 
-// Symbol level: `_fill_PARM_2` (byte param) and `_fill_PARM_3` (AS3 pointer
-// param) are 1- and 4-byte objects; the first parameter is register-passed
-// and never materializes a `_PARM_1` slot.
-// SYM: FUNC GLOBAL DEFAULT {{[0-9]+}} _dispatch
-// SYM: {{[0-9]+}} 1 OBJECT GLOBAL DEFAULT {{[0-9]+}} _fill_PARM_2
-// SYM: {{[0-9]+}} 16 OBJECT GLOBAL DEFAULT {{[0-9]+}} _DmaTxBuffer
-// SYM: {{[0-9]+}} 4 OBJECT GLOBAL DEFAULT {{[0-9]+}} _fill_PARM_3
-// SYM: FUNC GLOBAL DEFAULT {{[0-9]+}} _fill
-// SYM-NOT: _PARM_1
+// Symbol level: no static `_PARM_` slots under the stack-based ABI;
+// `_DmaTxBuffer` is a 16-byte AS3 global object.
+// SYM-DAG: FUNC GLOBAL DEFAULT {{[0-9]+}} _dispatch
+// SYM-DAG: {{[0-9]+}} 16 OBJECT GLOBAL DEFAULT {{[0-9]+}} _DmaTxBuffer
+// SYM-DAG: FUNC GLOBAL DEFAULT {{[0-9]+}} _fill
+// SYM-NOT: _PARM_
 
-// Section level: the two static slots share the 5-byte OSEG overlay; the
-// AS3 object definition lands in XSEG.
-// SEC: .mcs251.OSEG{{.*}} NOBITS {{.*}} 000005
+// Section level: no OSEG parameter overlay; AS3 object definition lands in XSEG.
+// SEC-NOT: .mcs251.OSEG
 // SEC: .mcs251.XSEG._DmaTxBuffer{{.*}} 000010
 
 // asm: caller side -- the incoming AS3 pointer arrives as B/DPH/DPL
-// (bank:high:low), the callee's pointer argument is staged through the
-// 4-byte `_fill_PARM_3` slot before the call.
+// (bank:high:low), outgoing continuation args (1B byte + 4B AS3 pointer = 5B)
+// are pushed onto the stack before `ecall _fill` and popped after return.
 // ASM-LABEL: _dispatch:
 // ASM: mov r{{[0-9]+}}, b
 // ASM: mov r{{[0-9]+}}, dph
 // ASM: mov r{{[0-9]+}}, dpl
+// ASM: inc spx, #0x4
+// ASM: inc spx, #0x1
+// ASM: mov @dr60, r{{[0-9]+}}
+// ASM: mov @dr60-0x0004, r{{[0-9]+}}
 // ASM: mov b, r{{[0-9]+}}
 // ASM: ecall _fill
-//
-// asm: static slots -- OVR/DATA overlay, AS3 pointer slot is 4 bytes.
-// ASM: .area OSEG (OVR,DATA)
-// ASM: _fill_PARM_2:
-// ASM-NEXT: .ds 1
-// ASM: _fill_PARM_3:
-// ASM-NEXT: .ds 4
+// ASM: dec spx, #0x4
+// ASM: dec spx, #0x1
+// ASM-NOT: .area OSEG
+// ASM-NOT: _fill_PARM_
 //
 // asm: callee side -- both AS3 stores restore the DPXL bank byte (SFR
 // 0x84) and write through the 24-bit MOVX @DPTR channel.
 // ASM-LABEL: _fill:
+// ASM: mov r{{[0-9]+}}, @dr60-0x000b
+// ASM: mov r{{[0-9]+}}, @dr60-0x000f
 // ASM: mov 0x84, r{{[0-9]+}}
 // ASM-NEXT: mov dpl, r{{[0-9]+}}
 // ASM-NEXT: mov dph, r{{[0-9]+}}

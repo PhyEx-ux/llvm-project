@@ -6967,13 +6967,21 @@ bool Parser::DiagnoseMCS251UnsupportedFunctionSuffix() {
   IdentifierInfo *II = Tok.getIdentifierInfo();
   if (!II)
     return false;
+  if (!isMCS251DialectTarget(*this))
+    return false;
   StringRef Name = II->getName();
+  // Route B stack-argument default ABI makes every function reentrant by
+  // default: accept `__reentrant` (and bare `reentrant` under -fmcs251-keil)
+  // as a valid function suffix without error.
+  if (Name == "__reentrant" ||
+      (Name == "reentrant" && getLangOpts().MCS251Keil)) {
+    ConsumeToken();
+    return true;
+  }
   const bool IsUsing = Name == "using";
-  const bool IsSuffix = Name == "__reentrant" || Name == "__banked" ||
+  const bool IsSuffix = Name == "__banked" ||
                         (IsUsing && getLangOpts().MCS251Keil);
   if (!IsSuffix)
-    return false;
-  if (!isMCS251DialectTarget(*this))
     return false;
   SourceLocation Loc = Tok.getLocation();
   ConsumeToken();

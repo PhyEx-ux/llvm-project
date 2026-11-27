@@ -16,6 +16,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -30,7 +31,11 @@ struct Options {
   std::string Report;
   std::string LinkMap;
   std::vector<std::string> Objects;    // Complete link input set, in order.
+  // Parallel to Objects: when set, Objects[i] is an archive path and the
+  // input object is the archive member at this byte offset.
+  std::vector<std::optional<uint64_t>> ObjectArchiveOffsets;
   std::vector<std::string> Manifests;  // Every manifest, in link order.
+  bool GcSections = false;
 
   bool HasFlashBase = false, HasFlashSize = false;
   uint32_t FlashBase = 0, FlashSize = 0;

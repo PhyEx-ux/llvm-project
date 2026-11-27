@@ -1,6 +1,10 @@
 # RUN: split-file %s %t
 # RUN: yaml2obj %t/valid.yaml -o %t.valid.o
-# RUN: llvm-readobj -A %t.valid.o 2>&1 | FileCheck %s --check-prefix=VALID
+# RUN: llvm-readobj -h -S -A %t.valid.o 2>&1 | FileCheck %s --check-prefix=VALID
+# RUN: yaml2obj %t/sigs.yaml -o %t.sigs.o
+# RUN: llvm-readobj -A %t.sigs.o 2>&1 | FileCheck %s --check-prefix=SIGS
+# RUN: yaml2obj %t/notes.yaml -o %t.notes.o
+# RUN: llvm-readobj --notes %t.notes.o 2>&1 | FileCheck %s --check-prefix=NOTES
 # RUN: yaml2obj %t/badvendor.yaml -o %t.badvendor.o
 # RUN: llvm-readobj -A %t.badvendor.o 2>&1 | FileCheck %s --check-prefix=BADVENDOR
 # RUN: yaml2obj %t/minor2.yaml -o %t.minor2.o
@@ -14,6 +18,12 @@
 # and reports every malformed input as a warning carrying the codec's
 # diagnostic instead of guessing.
 
+# VALID:      Flags [ (0x102)
+# VALID-NEXT:   EF_MCS251_ABI_V2 (0x2)
+# VALID-NEXT:   EF_MCS251_BACKEND_NATIVE (0x100)
+# VALID-NEXT: ]
+# VALID:      Name: .mcs251.attributes
+# VALID-NEXT: Type: SHT_MCS251_ATTRIBUTES (0x70000003)
 # VALID:      MCS251Attributes {
 # VALID-NEXT:   FormatVersion: 0x41
 # VALID-NEXT:   VendorSize: 0xB2
@@ -80,9 +90,40 @@
 # VALID-NEXT:       ValueType: BYTES (4)
 # VALID-NEXT:       Length: 4
 # VALID-NEXT:       Value: (01 00 00 00)
+# VALID-NEXT:       Signatures [
+# VALID-NEXT:       ]
 # VALID-NEXT:     }
 # VALID-NEXT:   ]
 # VALID-NEXT: }
+
+# SIGS:      Tag: 28
+# SIGS-NEXT: Name: function_signatures
+# SIGS-NEXT: Critical: Yes
+# SIGS-NEXT: ValueType: BYTES (4)
+# SIGS-NEXT: Length: 20
+# SIGS-NEXT: Value (
+# SIGS-NEXT:   0000: 01000100 00000000 01020000 02015F66
+# SIGS-NEXT:   0010: 696C6C00
+# SIGS-NEXT: )
+# SIGS-NEXT: Signatures [
+# SIGS-NEXT:   Signature {
+# SIGS-NEXT:     Name: _fill
+# SIGS-NEXT:     Role: definition
+# SIGS-NEXT:     ParamCount: 2
+# SIGS-NEXT:     BitParams: none
+# SIGS-NEXT:     RetBit: No
+# SIGS-NEXT:     CallABI: 2.1
+# SIGS-NEXT:   }
+# SIGS-NEXT: ]
+
+# NOTES:      Name: .note.mcs251.abi
+# NOTES:      Type: NT_MCS251_ABI (
+# NOTES:      Name: .mcs251.placement
+# NOTES:      Type: NT_MCS251_PLACEMENT (
+# NOTES:      Name: .mcs251.placement.names
+# NOTES:      Type: NT_MCS251_PLACEMENT_NAMES (
+# NOTES:      Name: .mcs251.placement.positions
+# NOTES:      Type: NT_MCS251_PLACEMENT_POSITIONS (
 
 # BADVENDOR: warning: '{{.*}}': unable to decode the {{.*}}: MCS251 attributes: vendor is not exactly 7 bytes "MCS251\0"
 
@@ -113,6 +154,8 @@
 # OPTU32-NEXT:   ValueType: BYTES (4)
 # OPTU32-NEXT:   Length: 4
 # OPTU32-NEXT:   Value: (01 00 00 00)
+# OPTU32-NEXT:   Signatures [
+# OPTU32-NEXT:   ]
 # OPTU32-NEXT:   }
 # OPTU32-NEXT: ]
 # OPTU32-NEXT: }
@@ -130,6 +173,8 @@
 # OPTMIX-NEXT:   ValueType: BYTES (4)
 # OPTMIX-NEXT:   Length: 4
 # OPTMIX-NEXT:   Value: (01 00 00 00)
+# OPTMIX-NEXT:   Signatures [
+# OPTMIX-NEXT:   ]
 # OPTMIX-NEXT:   }
 # OPTMIX-NEXT: ]
 # OPTMIX-NEXT: }
@@ -141,10 +186,49 @@ FileHeader:
   Data:    ELFDATA2MSB
   Type:    ET_REL
   Machine: EM_MCS251
+  Flags:   [ EF_MCS251_ABI_V2, EF_MCS251_BACKEND_NATIVE ]
 Sections:
   - Name:  .mcs251.attributes
-    Type:  0x70000003
+    Type:  SHT_MCS251_ATTRIBUTES
     Content: 41000000B24D43533235310001000000A7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C840401000000
+
+#--- sigs.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+  Flags:   [ EF_MCS251_ABI_V2, EF_MCS251_BACKEND_NATIVE ]
+Sections:
+  - Name:  .mcs251.attributes
+    Type:  SHT_MCS251_ATTRIBUTES
+    Content: 41000000C24D43533235310001000000B7048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C841401000100000000000102000002015F66696C6C00
+
+#--- notes.yaml
+--- !ELF
+FileHeader:
+  Class:   ELFCLASS32
+  Data:    ELFDATA2MSB
+  Type:    ET_REL
+  Machine: EM_MCS251
+Sections:
+  - Name:  .note.mcs251.abi
+    Type:  SHT_NOTE
+    AddressAlign: 4
+    Content: 0000000700000020000000014D43533235310000000000010000000100000000000000020000F3FF000000070000000000000000
+  - Name:  .mcs251.placement
+    Type:  SHT_NOTE
+    AddressAlign: 4
+    Content: 0000000700000004000000014D4353323531000000000000
+  - Name:  .mcs251.placement.names
+    Type:  SHT_NOTE
+    AddressAlign: 4
+    Content: 0000000700000004000000024D4353323531000000000000
+  - Name:  .mcs251.placement.positions
+    Type:  SHT_NOTE
+    AddressAlign: 4
+    Content: 0000000700000004000000034D4353323531000000000000
 
 #--- badvendor.yaml
 --- !ELF

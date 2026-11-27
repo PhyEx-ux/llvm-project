@@ -32,12 +32,18 @@ using namespace llvm;
 
 static cl::opt<MCS251::ObjectFormat> ObjectFormatOption(
     "mcs251-object-format", cl::desc("MCS251 object output format"),
-    cl::init(MCS251::ObjectFormat::REL),
-    cl::values(clEnumValN(MCS251::ObjectFormat::REL, "rel", "ASxxxx REL (default)"),
-               clEnumValN(MCS251::ObjectFormat::ELF, "elf", "ELF32 big-endian RELA")));
+    cl::init(MCS251::ObjectFormat::ELF),
+    cl::values(clEnumValN(MCS251::ObjectFormat::ELF, "elf",
+                          "ELF32 big-endian RELA (default)"),
+               clEnumValN(MCS251::ObjectFormat::REL, "rel",
+                          "ASxxxx REL (legacy)")));
 
 MCS251::ObjectFormat llvm::MCS251::getObjectFormat() {
   return ObjectFormatOption;
+}
+
+bool llvm::MCS251::isObjectFormatExplicit() {
+  return ObjectFormatOption.getNumOccurrences() > 0;
 }
 
 #define GET_INSTRINFO_MC_DESC

@@ -26,3 +26,5 @@ ELF_RELOC(R_MCS251_ISR_REF, 9)
 // address field of a bit instruction. See lld/MCS251/BIT-OBJECT-CONTRACT.md.
 ELF_RELOC(R_MCS251_BIT_REF,   10)
 ELF_RELOC(R_MCS251_BITADDR8,  11)
+// 32-bit big-endian relocation for DWARF .debug_* sections.
+ELF_RELOC(R_MCS251_32,        12)

@@ -1,0 +1,141 @@
+# RUN: rm -rf %t && split-file %s %t
+
+# Compile with -function-sections -data-sections so each function/global gets its own section.
+# RUN: llc -mtriple=mcs251 -O1 -function-sections -data-sections -filetype=obj -mcs251-object-format=elf %t/app.ll -o %t/app.o
+# RUN: llc -mtriple=mcs251 -O1 -function-sections -data-sections -filetype=obj -mcs251-object-format=elf %t/extra.ll -o %t/extra.o
+# RUN: llvm-ar rcs %t/libextra.a %t/extra.o
+
+# 1. Default (without --gc-sections): dead code/data are preserved.
+# RUN: lld -flavor mcs251 --keep-symbols --area-start=CSEG=0xff0100 --area-start=XINIT=0xff0800 --area-start=XDATA_INIT=0xff0a00 --area-start=XSEG=0x010000 %t/app.o -o %t/nogc.elf --map=%t/nogc.map
+# RUN: FileCheck %s --check-prefix=NOGC < %t/nogc.map
+# NOGC-DAG: .text._main
+# NOGC-DAG: .text._dead_fn
+# NOGC-DAG: .mcs251.dseg._dead_g
+# NOGC-DAG: .mcs251.xinit._dead_g
+# NOGC-DAG: .mcs251.XSEG._dead_x
+# NOGC-DAG: .mcs251.xdata_init._dead_x
+
+# 2. With --gc-sections --print-gc-sections: dead code, dead DSEG/XINIT, dead
+#    XSEG/XDATA_INIT, dead rodata, and dead OSEG parameter slots are removed;
+#    live code/data and transitive pointer-initializer targets survive!
+# RUN: lld -flavor mcs251 --gc-sections --print-gc-sections --keep-symbols --area-start=CSEG=0xff0100 --area-start=XINIT=0xff0800 --area-start=XDATA_INIT=0xff0a00 --area-start=XSEG=0x010000 %t/app.o -o %t/gc.elf --map=%t/gc.map 2>&1 | FileCheck %s --check-prefix=PRINTGC
+# PRINTGC-DAG: removing unused section {{.*}}app.o:(.text._dead_fn)
+# PRINTGC-DAG: removing unused section {{.*}}app.o:(.mcs251.dseg._dead_g)
+# PRINTGC-DAG: removing unused section {{.*}}app.o:(.mcs251.xinit._dead_g)
+# PRINTGC-DAG: removing unused section {{.*}}app.o:(.mcs251.XSEG._dead_x)
+# PRINTGC-DAG: removing unused section {{.*}}app.o:(.mcs251.xdata_init._dead_x)
+# PRINTGC-DAG: removing unused section {{.*}}app.o:(.rodata._dead_ro)
+# RUN: FileCheck %s --check-prefix=GC < %t/gc.map
+# GC-DAG: .text._main
+# GC-DAG: .text._live_helper
+# GC-DAG: .mcs251.dseg._live_g
+# GC-DAG: .mcs251.xinit._live_g
+# GC-DAG: .mcs251.dseg._live_ptr
+# GC-DAG: .mcs251.xinit._live_ptr
+# GC-DAG: .mcs251.dseg._ptr_target
+# GC-DAG: .mcs251.xinit._ptr_target
+# GC-DAG: .mcs251.XSEG._live_x
+# GC-DAG: .mcs251.xdata_init._live_x
+# GC-NOT: _dead_fn
+# GC-NOT: _dead_g
+# GC-NOT: _dead_x
+# GC-NOT: _dead_ro
+
+# 3. -u keeps an otherwise unreferenced function (and pulls it from a static archive!),
+#    and -e overrides the ELF entry point.
+# RUN: lld -flavor mcs251 --gc-sections -u _extra_keep -e _main --keep-symbols --area-start=CSEG=0xff0100 --area-start=XINIT=0xff0800 --area-start=XDATA_INIT=0xff0a00 --area-start=XSEG=0x010000 %t/app.o %t/libextra.a -o %t/keep.elf --map=%t/keep.map
+# RUN: FileCheck %s --check-prefix=KEEP < %t/keep.map
+# KEEP: .text._main
+# KEEP: .text._extra_keep
+# KEEP-NOT: _dead_fn
+# RUN: llvm-readelf -h -s %t/keep.elf | FileCheck %s --check-prefix=ENTRY
+# ENTRY: Entry point address: 0xff01
+# ENTRY-DAG: FUNC GLOBAL DEFAULT {{[0-9]+}} _main
+# ENTRY-DAG: FUNC GLOBAL DEFAULT {{[0-9]+}} _extra_keep
+
+# 4. --gc-sections + --no-gc-sections restores default no-GC behavior.
+# RUN: lld -flavor mcs251 --gc-sections --no-gc-sections --area-start=CSEG=0xff0100 --area-start=XINIT=0xff0800 --area-start=XDATA_INIT=0xff0a00 --area-start=XSEG=0x010000 %t/app.o -o %t/nogc2.elf --map=%t/nogc2.map
+# RUN: FileCheck %s --check-prefix=NOGC < %t/nogc2.map
+
+# 5. Undefined symbol referenced ONLY inside a dead function does not fail under --gc-sections.
+# RUN: llc -mtriple=mcs251 -O1 -function-sections -data-sections -filetype=obj -mcs251-object-format=elf %t/dead_undef.ll -o %t/dead_undef.o
+# RUN: lld -flavor mcs251 --gc-sections --area-start=CSEG=0xff0100 %t/dead_undef.o -o %t/du.elf --map=%t/du.map
+# RUN: FileCheck %s --check-prefix=DU < %t/du.map
+# DU: .text._main
+# DU-NOT: _dead_caller
+
+# 6. Placement audit mode supports --gc-sections and verifies surviving sections
+#    end-to-end via mcs251-placement-verify.
+# RUN: lld -flavor mcs251 --gc-sections --verify-placement --placement-report=%t/audit.placement --area-start=CSEG=0xff0100 --area-start=XINIT=0xff0800 --area-start=XDATA_INIT=0xff0a00 --area-start=XSEG=0x010000 %t/app.o -o %t/audit.elf --map=%t/audit.map
+# RUN: FileCheck %s --check-prefix=GC < %t/audit.map
+
+#--- app.ll
+target triple = "mcs251-unknown-none"
+
+@ptr_target = global i16 123, align 1
+@live_ptr = global ptr @ptr_target, align 1
+@live_g = global i16 10, align 1
+@dead_g = global i16 20, align 1
+@dead_ro = constant i16 30, align 1
+@live_x = addrspace(3) global i16 40, align 1
+@dead_x = addrspace(3) global i16 50, align 1
+
+define i16 @live_helper(i16 %a, i16 %b) {
+  %s = add i16 %a, %b
+  ret i16 %s
+}
+
+define i16 @dead_fn(i16 %a, i16 %b) {
+  %g = load i16, ptr @dead_g, align 1
+  %r = load i16, ptr @dead_ro, align 1
+  %x = load i16, ptr addrspace(3) @dead_x, align 1
+  %s1 = add i16 %a, %b
+  %s2 = add i16 %s1, %g
+  %s3 = add i16 %s2, %r
+  %s4 = add i16 %s3, %x
+  ret i16 %s4
+}
+
+define i16 @main() {
+  %p = load ptr, ptr @live_ptr, align 1
+  %pv = load i16, ptr %p, align 1
+  %g = load i16, ptr @live_g, align 1
+  %x = load i16, ptr addrspace(3) @live_x, align 1
+  %h = call i16 @live_helper(i16 %pv, i16 %g)
+  %r = add i16 %h, %x
+  ret i16 %r
+}
+
+!mcs251.signatures = !{!0, !1, !2}
+!0 = !{!"_live_helper", i32 1, i32 0, i32 0, i32 0}
+!1 = !{!"_dead_fn", i32 1, i32 0, i32 0, i32 0}
+!2 = !{!"_main", i32 1, i32 0}
+
+#--- extra.ll
+target triple = "mcs251-unknown-none"
+
+define i16 @extra_keep() {
+  ret i16 77
+}
+
+!mcs251.signatures = !{!0}
+!0 = !{!"_extra_keep", i32 1, i32 0}
+
+#--- dead_undef.ll
+target triple = "mcs251-unknown-none"
+
+declare i16 @nonexistent_fn()
+
+define i16 @dead_caller() {
+  %v = call i16 @nonexistent_fn()
+  ret i16 %v
+}
+
+define i16 @main() {
+  ret i16 0
+}
+
+!mcs251.signatures = !{!0, !1, !2}
+!0 = !{!"_nonexistent_fn", i32 2, i32 0}
+!1 = !{!"_dead_caller", i32 1, i32 0}
+!2 = !{!"_main", i32 1, i32 0}

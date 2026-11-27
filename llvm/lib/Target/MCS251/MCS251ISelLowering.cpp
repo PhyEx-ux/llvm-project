@@ -4,6 +4,7 @@
 #include "MCS251.h"
 #include "MCS251BitObject.h"
 #include "MCS251LocalInterp.h"
+#include "MCS251MachineFunctionInfo.h"
 #include "MCS251Subtarget.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/Analysis/BlockFrequencyInfo.h"
@@ -63,6 +64,12 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   computeRegisterProperties(STI.getRegisterInfo());
   setStackPointerRegisterToSaveRestore(MCS251::DR60);
   setBooleanContents(ZeroOrOneBooleanContent);
+  MaxStoresPerMemcpy = 16;
+  MaxStoresPerMemcpyOptSize = 8;
+  MaxStoresPerMemmove = 16;
+  MaxStoresPerMemmoveOptSize = 8;
+  MaxStoresPerMemset = 16;
+  MaxStoresPerMemsetOptSize = 8;
 
   // Comparisons feed long conditional branches or register-valued selects.
   setOperationAction(ISD::BR_CC, MVT::i8, Custom);
@@ -256,8 +263,10 @@ MCS251TargetLowering::MCS251TargetLowering(const TargetMachine &TM,
   // i32 pointer. The operation legalizer consults MVT::Other for both nodes.
   setOperationAction(ISD::STACKSAVE, MVT::Other, Custom);
   setOperationAction(ISD::STACKRESTORE, MVT::Other, Custom);
-  // Atomics are separate opcodes (not flags on ISD::LOAD/STORE); route them
-  // to a loud rejection -- "Cannot select" gives no hint what is missing.
+  // Single-core MCU atomics: IR atomics are expanded by MCS251AtomicExpand
+  // into EA (IE.7, bit 0xAF) critical sections / generic libcalls, and
+  // ATOMIC_FENCE lowers to the zero-byte ATOMIC_FENCE scheduling barrier.
+  setOperationAction(ISD::ATOMIC_FENCE, MVT::Other, Custom);
   for (MVT VT : {MVT::i8, MVT::i16, MVT::i32}) {
     setOperationAction(ISD::ATOMIC_LOAD, VT, Custom);
     setOperationAction(ISD::ATOMIC_STORE, VT, Custom);
@@ -455,6 +464,8 @@ const char *MCS251TargetLowering::getTargetNodeName(unsigned Opcode) const {
     return "MCS251ISD::RETI";
   case MCS251ISD::CALL:
     return "MCS251ISD::CALL";
+  case MCS251ISD::TC_RETURN:
+    return "MCS251ISD::TC_RETURN";
   default:
     return nullptr;
   }
@@ -680,12 +691,15 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
     return LowerSTACKRESTORE(Op, DAG);
   case ISD::ADDRSPACECAST:
     return LowerAddrSpaceCast(Op, DAG);
+  case ISD::ATOMIC_FENCE:
+    return SDValue(DAG.getMachineNode(MCS251::ATOMIC_FENCE, SDLoc(Op),
+                                      MVT::Other, Op.getOperand(0)),
+                   0);
   case ISD::ATOMIC_LOAD:
   case ISD::ATOMIC_STORE:
-    // WP4: predictable capability rejection -- clean exit(1), no crash
-    // diagnostics. Normally unreachable: the structural contract check
-    // rejects atomic IR first; this is the MIR-entry defense.
-    reportFatalUsageError("MCS251: atomic memory operations are not supported");
+    // Normally lowered before ISel by MCS251AtomicExpand; MIR/unexpanded
+    // fallback fails cleanly rather than crashing in DAG ISel.
+    reportFatalUsageError("MCS251: unexpanded atomic memory operation reached ISel");
   case ISD::INTRINSIC_VOID:
   case ISD::INTRINSIC_W_CHAIN: {
     // Both node shapes carry the intrinsic ID as operand 1 (operand 0 is the
@@ -709,6 +723,19 @@ SDValue MCS251TargetLowering::LowerOperation(SDValue Op,
       // so the halt arm's block can never fall through.
       return SDValue(DAG.getMachineNode(MCS251::VARARG_HALT, SDLoc(Op),
                                         MVT::Other, Op.getOperand(0)),
+                     0);
+    case Intrinsic::mcs251_atomic_fence:
+      return SDValue(DAG.getMachineNode(MCS251::ATOMIC_FENCE, SDLoc(Op),
+                                        MVT::Other, Op.getOperand(0)),
+                     0);
+    case Intrinsic::mcs251_ea_save_disable:
+      return SDValue(DAG.getMachineNode(MCS251::EA_SAVE_DISABLE, SDLoc(Op),
+                                        MVT::i8, MVT::Other, Op.getOperand(0)),
+                     0);
+    case Intrinsic::mcs251_ea_restore:
+      return SDValue(DAG.getMachineNode(MCS251::EA_RESTORE, SDLoc(Op),
+                                        MVT::Other, Op.getOperand(2),
+                                        Op.getOperand(0)),
                      0);
     case Intrinsic::mcs251_tfpu_sin:
     case Intrinsic::mcs251_tfpu_cos:
@@ -2083,9 +2110,13 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
     MachineFunction *MF = BB->getParent();
     const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
     DebugLoc DL = MI.getDebugLoc();
+    unsigned CFS = TII->getCallFrameSizeAt(MI);
     MachineBasicBlock *FalseBB = MF->CreateMachineBasicBlock();
     MachineBasicBlock *TrueBB = MF->CreateMachineBasicBlock();
     MachineBasicBlock *MergeBB = MF->CreateMachineBasicBlock();
+    FalseBB->setCallFrameSize(CFS);
+    TrueBB->setCallFrameSize(CFS);
+    MergeBB->setCallFrameSize(CFS);
     auto Next = std::next(BB->getIterator());
     MF->insert(Next, FalseBB);
     MF->insert(Next, TrueBB);
@@ -2271,28 +2302,31 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
         getSkipBranchOpcode8S((ISD::CondCode)MI.getOperand(2).getImm()));
   }
   case MCS251::FIADDR: {
-    // Frame-index pointer materialisation: read SPX through the two SFR
-    // direct addresses (0x81 = SP, 0x85 = SPH on this platform), assemble
-    // the WR, and let ADD16fi carry the frame index to PEI, where the final
-    // displacement (depends on StackSize) is folded.
+    // Frame-index pointer materialisation: when hasVarSizedObjects() is set,
+    // read the low 16 bits of the DR16 frame anchor (wr18); otherwise read
+    // SPX through the pinned SFR-direct reads (0x81 = SP, 0x85 = SPH, ordered
+    // against DR60 updates inside call sequences). ADD16fi carries the frame
+    // index to PEI so the final displacement (including SPAdj) is folded.
     MachineFunction *MF = BB->getParent();
     MachineRegisterInfo &MRI = MF->getRegInfo();
     const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
     DebugLoc DL = MI.getDebugLoc();
     int FI = MI.getOperand(1).getIndex();
 
-    Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
-    Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
     Register Sp = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
-    BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8di), Lo)
-        .addImm(0x81); // SP (SFR direct)
-    BuildMI(*BB, MI, DL, TII->get(MCS251::MOV8di), Hi)
-        .addImm(0x85); // SPH (SFR direct, QEMU-arbitrated address)
-    BuildMI(*BB, MI, DL, TII->get(TargetOpcode::REG_SEQUENCE), Sp)
-        .addReg(Hi)
-        .addImm(MCS251::sub_hi8)
-        .addReg(Lo)
-        .addImm(MCS251::sub_lo8);
+    if (MF->getFrameInfo().hasVarSizedObjects()) {
+      BuildMI(*BB, MI, DL, TII->get(MCS251::MOV16fromFP), Sp);
+    } else {
+      Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+      Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+      BuildMI(*BB, MI, DL, TII->get(MCS251::READSPLO), Lo);
+      BuildMI(*BB, MI, DL, TII->get(MCS251::READSPHI), Hi);
+      BuildMI(*BB, MI, DL, TII->get(TargetOpcode::REG_SEQUENCE), Sp)
+          .addReg(Hi)
+          .addImm(MCS251::sub_hi8)
+          .addReg(Lo)
+          .addImm(MCS251::sub_lo8);
+    }
     BuildMI(*BB, MI, DL, TII->get(MCS251::ADD16fi),
             MI.getOperand(0).getReg())
         .addReg(Sp)
@@ -2300,6 +2334,197 @@ MCS251TargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
         .addImm(0);
     MI.eraseFromParent();
     return BB;
+  }
+  case MCS251::BYVAL_COPY32:
+  case MCS251::BYVAL_COPY16: {
+    // Inline byte-copy loop for large byval stack arguments (> 16B) inside an
+    // active call sequence (ADJCALLSTACKDOWN..ADJCALLSTACKUP). Copies Size
+    // bytes from SrcInit into [SPX + Disp .. SPX + Disp + Size - 1] without
+    // making a nested memcpy libcall.
+    MachineFunction &MF = *BB->getParent();
+    MachineRegisterInfo &MRI = MF.getRegInfo();
+    const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+    const bool Is32 = MI.getOpcode() == MCS251::BYVAL_COPY32;
+    const TargetRegisterClass *SrcRC =
+        Is32 ? &MCS251::GPR32RegClass : &MCS251::GPR16RegClass;
+    Register SrcInit = MI.getOperand(0).getReg();
+    int64_t Disp = MI.getOperand(1).getImm();
+    uint64_t Size = MI.getOperand(2).getImm();
+    unsigned CFS = TII.getCallFrameSizeAt(MI);
+
+    auto NewBlock = [&]() {
+      auto *MBB = MF.CreateMachineBasicBlock();
+      MF.insert(std::next(BB->getIterator()), MBB);
+      MBB->setCallFrameSize(CFS);
+      return MBB;
+    };
+    MachineBasicBlock *Done = NewBlock();
+    MachineBasicBlock *Back = NewBlock();
+    MachineBasicBlock *Loop = NewBlock();
+    Done->splice(Done->end(), BB, std::next(MI.getIterator()), BB->end());
+    Done->transferSuccessorsAndUpdatePHIs(BB);
+
+    // Compute DstInit = SPX_16 + Disp (mod 2^16) and CntInit = Size in BB.
+    Register Lo = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    Register Hi = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    Register Sp = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    BuildMI(BB, DL, TII.get(MCS251::READSPLO), Lo);
+    BuildMI(BB, DL, TII.get(MCS251::READSPHI), Hi);
+    BuildMI(BB, DL, TII.get(TargetOpcode::REG_SEQUENCE), Sp)
+        .addReg(Hi)
+        .addImm(MCS251::sub_hi8)
+        .addReg(Lo)
+        .addImm(MCS251::sub_lo8);
+    Register DstInit = Sp;
+    if ((Disp & 0xffff) != 0) {
+      DstInit = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+      BuildMI(BB, DL, TII.get(MCS251::ADD16ri), DstInit)
+          .addReg(Sp)
+          .addImm(Disp & 0xffff);
+    }
+    Register CntInit = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    BuildMI(BB, DL, TII.get(MCS251::MOV16ri), CntInit).addImm(Size & 0xffff);
+    BuildMI(BB, DL, TII.get(MCS251::EJMP)).addMBB(Loop);
+    BB->addSuccessor(Loop);
+
+    // Loop body: copy one byte, advance pointers, decrement counter.
+    Register Src = MRI.createVirtualRegister(SrcRC);
+    Register SrcNext = MRI.createVirtualRegister(SrcRC);
+    Register Dst = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    Register DstNext = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    Register Cnt = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    Register CntNext = MRI.createVirtualRegister(&MCS251::GPR16RegClass);
+    BuildMI(Loop, DL, TII.get(TargetOpcode::PHI), Src)
+        .addReg(SrcInit).addMBB(BB)
+        .addReg(SrcNext).addMBB(Back);
+    BuildMI(Loop, DL, TII.get(TargetOpcode::PHI), Dst)
+        .addReg(DstInit).addMBB(BB)
+        .addReg(DstNext).addMBB(Back);
+    BuildMI(Loop, DL, TII.get(TargetOpcode::PHI), Cnt)
+        .addReg(CntInit).addMBB(BB)
+        .addReg(CntNext).addMBB(Back);
+
+    Register Byte = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    if (Is32) {
+      BuildMI(Loop, DL, TII.get(MCS251::MOV8rmP), Byte).addReg(Src).addImm(0);
+    } else {
+      BuildMI(Loop, DL, TII.get(MCS251::MOV8rm), Byte).addReg(Src);
+    }
+    BuildMI(Loop, DL, TII.get(MCS251::MOV8mr)).addReg(Dst).addReg(Byte);
+    if (Is32) {
+      Register One = MRI.createVirtualRegister(&MCS251::GPR32RegClass);
+      BuildMI(Loop, DL, TII.get(MCS251::MOVDRri), One).addImm(1);
+      BuildMI(Loop, DL, TII.get(MCS251::ADD32rr), SrcNext)
+          .addReg(Src).addReg(One);
+    } else {
+      BuildMI(Loop, DL, TII.get(MCS251::ADD16ri), SrcNext)
+          .addReg(Src).addImm(1);
+    }
+    BuildMI(Loop, DL, TII.get(MCS251::ADD16ri), DstNext)
+        .addReg(Dst).addImm(1);
+    BuildMI(Loop, DL, TII.get(MCS251::SUB16ri), CntNext)
+        .addReg(Cnt).addImm(1);
+    BuildMI(Loop, DL, TII.get(MCS251::JNE)).addMBB(Back);
+    BuildMI(Loop, DL, TII.get(MCS251::EJMP)).addMBB(Done);
+    Loop->addSuccessor(Back);
+    Loop->addSuccessor(Done);
+
+    BuildMI(Back, DL, TII.get(MCS251::EJMP)).addMBB(Loop);
+    Back->addSuccessor(Loop);
+
+    MI.eraseFromParent();
+    return Done;
+  }
+  case MCS251::EA_SAVE_DISABLE: {
+    // Atomically capture and clear global interrupt enable EA (IE.7, bit 0xAF):
+    //   BB:
+    //     %r1 = mov #1
+    //     jbc 0xAF, Done   ; if EA==1: clears EA and jumps to Done (result=1)
+    //     ejmp OffBB
+    //   OffBB:
+    //     %r0 = mov #0
+    //     ejmp Done
+    //   Done:
+    //     $dst = PHI [%r1, BB], [%r0, OffBB]
+    MachineFunction &MF = *BB->getParent();
+    MachineRegisterInfo &MRI = MF.getRegInfo();
+    const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+    Register Dst = MI.getOperand(0).getReg();
+    unsigned CFS = TII.getCallFrameSizeAt(MI);
+
+    auto NewBlock = [&]() {
+      auto *MBB = MF.CreateMachineBasicBlock();
+      MF.insert(std::next(BB->getIterator()), MBB);
+      MBB->setCallFrameSize(CFS);
+      return MBB;
+    };
+    MachineBasicBlock *Done = NewBlock();
+    MachineBasicBlock *OffBB = NewBlock();
+    Done->splice(Done->end(), BB, std::next(MI.getIterator()), BB->end());
+    Done->transferSuccessorsAndUpdatePHIs(BB);
+
+    Register One = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    Register Zero = MRI.createVirtualRegister(&MCS251::GPR8RegClass);
+    BuildMI(BB, DL, TII.get(MCS251::MOV8ri), One).addImm(1);
+    BuildMI(BB, DL, TII.get(MCS251::JBC)).addMBB(Done).addImm(0xAF);
+    BuildMI(BB, DL, TII.get(MCS251::EJMP)).addMBB(OffBB);
+    BB->addSuccessor(Done);
+    BB->addSuccessor(OffBB);
+
+    BuildMI(OffBB, DL, TII.get(MCS251::MOV8ri), Zero).addImm(0);
+    BuildMI(OffBB, DL, TII.get(MCS251::EJMP)).addMBB(Done);
+    OffBB->addSuccessor(Done);
+
+    BuildMI(*Done, Done->begin(), DL, TII.get(TargetOpcode::PHI), Dst)
+        .addReg(One)
+        .addMBB(BB)
+        .addReg(Zero)
+        .addMBB(OffBB);
+
+    MI.eraseFromParent();
+    return Done;
+  }
+  case MCS251::EA_RESTORE: {
+    // Re-enable EA (IE.7, bit 0xAF) iff saved != 0, leaving IE.0..6 untouched:
+    //   BB:
+    //     cmp $saved, #0
+    //     je Done
+    //     ejmp RestoreBB
+    //   RestoreBB:
+    //     setb 0xAF
+    //     ejmp Done
+    //   Done:
+    MachineFunction &MF = *BB->getParent();
+    const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+    DebugLoc DL = MI.getDebugLoc();
+    Register Saved = MI.getOperand(0).getReg();
+    unsigned CFS = TII.getCallFrameSizeAt(MI);
+
+    auto NewBlock = [&]() {
+      auto *MBB = MF.CreateMachineBasicBlock();
+      MF.insert(std::next(BB->getIterator()), MBB);
+      MBB->setCallFrameSize(CFS);
+      return MBB;
+    };
+    MachineBasicBlock *Done = NewBlock();
+    MachineBasicBlock *RestoreBB = NewBlock();
+    Done->splice(Done->end(), BB, std::next(MI.getIterator()), BB->end());
+    Done->transferSuccessorsAndUpdatePHIs(BB);
+
+    BuildMI(BB, DL, TII.get(MCS251::CMP8ri)).addReg(Saved).addImm(0);
+    BuildMI(BB, DL, TII.get(MCS251::JE)).addMBB(Done);
+    BuildMI(BB, DL, TII.get(MCS251::EJMP)).addMBB(RestoreBB);
+    BB->addSuccessor(Done);
+    BB->addSuccessor(RestoreBB);
+
+    BuildMI(RestoreBB, DL, TII.get(MCS251::SETBBIT)).addImm(0xAF);
+    BuildMI(RestoreBB, DL, TII.get(MCS251::EJMP)).addMBB(Done);
+    RestoreBB->addSuccessor(Done);
+
+    MI.eraseFromParent();
+    return Done;
   }
   case MCS251::DYNALLOCA: {
     // Dynamic alloca (SFR-direct SPX read/modify/write -- `add dr60,wr` is
@@ -2384,9 +2609,11 @@ MachineBasicBlock *MCS251TargetLowering::emitVariableShift(
   // Layout: BB -> Zero -> Loop -> Back -> Done. Conditional targets are
   // adjacent skip blocks, never a potentially distant loop body/exit. Keep
   // the same uniform-successor invariant as expandLongConditionalBranch.
+  unsigned CFS = TII.getCallFrameSizeAt(MI);
   auto NewBlock = [&]() {
     auto *MBB = MF.CreateMachineBasicBlock();
     MF.insert(std::next(BB->getIterator()), MBB);
+    MBB->setCallFrameSize(CFS);
     return MBB;
   };
   MachineBasicBlock *Done = NewBlock();
@@ -2465,7 +2692,9 @@ MachineBasicBlock *MCS251TargetLowering::expandLongConditionalBranch(
   const DebugLoc &DL = MI.getDebugLoc();
 
   // The skip block is placed directly after BB.
+  unsigned CFS = TII->getCallFrameSizeAt(MI);
   MachineBasicBlock *SkipMBB = MF->CreateMachineBasicBlock();
+  SkipMBB->setCallFrameSize(CFS);
   MF->insert(std::next(BB->getIterator()), SkipMBB);
 
   // Everything after the pseudo moves into SkipMBB: the EJMP of the
@@ -2549,10 +2778,6 @@ struct MCS251Address {
 // a direct load/store base stays frame-relative and never materialises.
 static SDValue materializeFrameIndex(int FrameIdx, int64_t Off, EVT PtrVT,
                                      const SDLoc &DL, SelectionDAG &DAG) {
-  if (DAG.getMachineFunction().getFrameInfo().hasVarSizedObjects())
-    reportFatalUsageError("MCS251: taking the address of a frame object in a "
-                       "function with dynamic allocas is not supported "
-                       "(needs an anchor read, not yet implemented)");
   SDValue TFI = DAG.getTargetFrameIndex(FrameIdx, MVT::i16);
   SDValue P(DAG.getMachineNode(MCS251::FIADDR, DL, MVT::i16, TFI), 0);
   if (PtrVT == MVT::i32) {
@@ -3583,18 +3808,7 @@ SDValue MCS251TargetLowering::LowerDynamicStackAlloc(SDValue Op,
   return DAG.getMergeValues({Ptr, Alloc.getValue(1)}, DL);
 }
 
-// Static argument slots use the *mangled function symbol* plus _PARM_n.
-// The leading \1 prevents the external-symbol path from mangling it twice.
-static SDValue parameterSlot(StringRef Callee, unsigned Index,
-                             SelectionDAG &DAG) {
-  std::string Name = (Twine("\1") + Callee + "_PARM_" + Twine(Index + 1)).str();
-  MVT PtrVT = DAG.getTargetLoweringInfo().getPointerTy(DAG.getDataLayout());
-  return DAG.getExternalSymbol(
-      DAG.getMachineFunction().createExternalSymbolName(Name), PtrVT);
-}
-
-// Check the IR type as well as the legalized piece. A one-field aggregate (or
-// an empty aggregate preceding a scalar) need not carry the ISD split flag.
+// Check the IR type as well as the legalized piece.
 static bool hasOrdinaryPointerABI(const Type *Ty) {
   auto *PT = dyn_cast<PointerType>(Ty);
   if (!PT)
@@ -3613,95 +3827,62 @@ static bool hasOrdinaryPointerABI(const Type *Ty) {
   }
 }
 
-static void checkParameterType(Type *Ty, unsigned Index,
-                               bool AllowStaticPointers) {
+static void checkParameterType(Type *Ty) {
   if (Ty->isPointerTy()) {
     if (!hasOrdinaryPointerABI(Ty))
       reportFatalUsageError("MCS251: pointer parameter address space has no "
-                         "ordinary register/static-slot ABI");
-    if (Index && !AllowStaticPointers)
-      reportFatalUsageError("MCS251: static pointer parameters are not supported "
-                         "by the compatibility ABI");
+                            "ordinary ABI");
     return;
   }
-  // Float softening presents f32 as its IEEE-754 i32 bit pattern at this ABI
-  // boundary. True f64 is rejected by the MCS251 contract verifier before
-  // lowering and must never arrive here.
-  //
-  // WP5 A1: C `_Bool` parameters reach this boundary as `i1`, carried in the
-  // same 1-byte slot family as i8 (first argument DPL, continuation argument
-  // the named _<callee>_PARM_n static slot). This is a deliberately narrow
-  // widening: exactly i1 joins the whitelist, no other non-{8,16,32} integer
-  // width is admitted.
+  if (auto *ST = dyn_cast<StructType>(Ty)) {
+    for (Type *Elem : ST->elements())
+      checkParameterType(Elem);
+    return;
+  }
+  if (auto *AT = dyn_cast<ArrayType>(Ty)) {
+    checkParameterType(AT->getElementType());
+    return;
+  }
   if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) && !Ty->isIntegerTy(32) &&
       !Ty->isFloatTy() && !Ty->isIntegerTy(1))
-    reportFatalUsageError("MCS251: arguments must be unsplit i8/i16/i32 scalars");
+    reportFatalUsageError("MCS251: arguments must be i8/i16/i32/f32/i1 scalars, "
+                          "ordinary pointers, or supported aggregates");
 }
 
 template <typename ArgT>
-static void checkParameter(const ArgT &Arg, unsigned Index,
-                           bool AllowStaticPointers) {
+static void checkParameter(const ArgT &Arg) {
+  if (Arg.Flags.isByVal()) {
+    if (Arg.VT != MVT::i16 && Arg.VT != MVT::i32)
+      reportFatalUsageError(
+          "MCS251: byval argument must be a 16-bit or 32-bit pointer");
+    return;
+  }
   // f32 libcalls are softened to i32 but retain f32 as ArgVT for ABI metadata.
-  // It is the sole non-identical ArgVT/VT pair accepted by this backend.
   const bool IsSoftenedF32 = Arg.ArgVT == MVT::f32 && Arg.VT == MVT::i32;
-  // WP5 A1: a C `_Bool` parameter is i1 in IR and legalizes to the i8
-  // register channel (RegisterTypeForVT[i1] == i8), so it arrives here as the
-  // deliberately narrow non-identical pair (VT = i8, ArgVT = i1). Exactly i1
-  // joins the accepted set: no other sub-byte width and no other ArgVT/VT
-  // mismatch is admitted, and every PartOffset/Split/ByVal/... marker check
-  // below still applies unchanged.
+  // C `_Bool` parameters arrive as i1 promoted to i8.
   const bool IsBool1Byte = Arg.ArgVT == MVT::i1 && Arg.VT == MVT::i8;
   if ((Arg.VT != MVT::i8 && Arg.VT != MVT::i16 && Arg.VT != MVT::i32) ||
       (!IsSoftenedF32 && !IsBool1Byte && Arg.ArgVT != Arg.VT) ||
-      Arg.PartOffset || Arg.Flags.isSplit() || Arg.Flags.isByVal() ||
-      Arg.Flags.isByRef() || Arg.Flags.isSRet() || Arg.Flags.isInAlloca() ||
-      Arg.Flags.isNest())
-    reportFatalUsageError("MCS251: arguments must be unsplit i8/i16/i32 scalars");
-  if (Index && Arg.Flags.isPointer() && !AllowStaticPointers)
-    reportFatalUsageError("MCS251: static pointer parameters are not supported "
-                       "by the compatibility ABI");
+      Arg.Flags.isByRef() || Arg.Flags.isInAlloca() || Arg.Flags.isNest())
+    reportFatalUsageError("MCS251: unsupported argument type or ABI flag");
 }
 
 //===----------------------------------------------------------------------===//
-// Variadic lowering (G2 B-S2, G2-VARIADIC-DESIGN-draft.md R3 §4.3.4)
+// Stack-based reentrant variadic lowering
 //===----------------------------------------------------------------------===//
 //
-// va_start anchors the 8-byte va_list pair on THIS function's first
-// continuation slot:
+// Outgoing stack arguments are laid out downward from SPX_callsite:
+//   arg_k occupies [SPX_callsite - (ArgOff + Size) + 1 .. SPX_callsite - ArgOff]
+// so the first stack argument always sits immediately below the 3-byte return
+// address pushed by ecall.
 //
-//   __base = &slot _<this>_PARM_(F+1)   F = arg_size() (>= 1)
-//   __off  = 0
-//
-// F=1 (printf) anchors on _PARM_2, F=2 (sprintf) on _PARM_3 -- the same
-// slots the static-slot runtime already consumes.  F=0 was fail-closed in
-// LowerFormalArguments: the register-channel argument has no slot to
-// anchor on.
-//
-// The base is a slot-symbol ADDRESS AS A VALUE.  A bare ExternalSymbol
-// node is only selectable as a load/store base; as a value it must be
-// materialised through the same MOVADDR32/target-symbol path the
-// GlobalAddress custom lowering and getAddressingUse use for symbol
-// addresses (LowerOperation ISD::GlobalAddress case).
-//
-// Backend shape gate (G2 B-S2 review fix, Alice blocker 1, backend half):
-// LowerVASTART/VACOPY write the pair unconditionally -- a PtrVT-wide base
-// at +0 and a 4-byte i32 offset at +4 -- so a va_start/va_copy aimed at a
-// narrower object (e.g. the 6-byte {ptr, i16} an unpinned +int16 offset
-// field builds) would write up to 2 bytes past the object end and llc
-// would still exit 0.  clang pins the pair shape at ASTContext
-// construction (32-bit offset field, ASTContext ::buildVAList); this is
-// the fail-closed second gate on the IR that actually reaches codegen.
-// The VASTART/VACOPY nodes carry their IR pointer operand as an SrcValue
-// operand, so whenever the object is countable (an alloca or a global)
-// its exact shape is verified against the frozen two-field {ptr, i32}
-// 8-byte pair (field 0 may be a pointer of any address space).  An
-// opaque pointer -- a va_list forwarded into a helper -- names no
-// countable object and stays under the producer-side pin.  va_end needs
-// no gate: it is a pure no-op here (the pair lives in the owner's frame).
+// va_start anchors the {__base, __off} va_list pair on the top of the incoming
+// variadic area (VarArgsFrameIndex at offset -(2 + FixedStackArgBytes) from
+// SPX_entry), with __off = 0. EmitVAArg advances __off by each argument's size
+// and reads at (__base - __off). Both 8-byte ({ptr32, i32}, __off@4) and
+// 6-byte ({ptr16, i32}, __off@2) va_list layouts are supported.
 static void reportVAListPairShape(Type *ValTy, const DataLayout &DL,
                                   const char *What, uint64_t Bytes) {
-  // Unwrap clang's single-element __va_list_tag[1] array wrapper; any other
-  // array (e.g. [2 x pair]) keeps its array shape and fails.
   Type *PairTy = ValTy;
   while (const auto *AT = dyn_cast<ArrayType>(PairTy)) {
     if (AT->getNumElements() != 1)
@@ -3709,18 +3890,20 @@ static void reportVAListPairShape(Type *ValTy, const DataLayout &DL,
     PairTy = AT->getElementType();
   }
   const auto *ST = dyn_cast<StructType>(PairTy);
-  const bool IsFrozenPair =
-      ST && ST->getNumElements() == 2 &&
+  bool IsValidPair = false;
+  if (ST && ST->getNumElements() == 2 &&
       ST->getElementType(0)->isPointerTy() &&
-      ST->getElementType(1)->isIntegerTy(32) && Bytes == 8;
-  if (!IsFrozenPair) {
+      ST->getElementType(1)->isIntegerTy(32)) {
+    uint64_t ExpectedBytes = DL.getTypeAllocSize(ST->getElementType(0)) + 4;
+    IsValidPair = (Bytes == ExpectedBytes);
+  }
+  if (!IsValidPair) {
     std::string TyStr;
     raw_string_ostream OS(TyStr);
     ValTy->print(OS);
     reportFatalUsageError(Twine("MCS251: ") + What +
-                       " requires the frozen 8-byte va_list pair {ptr, i32}; "
-                       "got a " +
-                       Twine(Bytes) + "-byte object (" + TyStr + ")");
+                          " requires the va_list pair {ptr, i32}; got a " +
+                          Twine(Bytes) + "-byte object (" + TyStr + ")");
   }
 }
 
@@ -3730,10 +3913,6 @@ static void checkVAListPairShape(const SDValue &SrcValueOp,
   if (!SVN)
     return;
   const Value *Ptr = SVN->getValue()->stripPointerCasts();
-  // Follow the pointer through all-zero (decay-like) GEPs; a GEP that
-  // actually selects a field or element redirects the check to the
-  // sub-object it addresses (e.g. `alloca {i8,{ptr,i16}}` + field-1 GEP is
-  // judged as the 6-byte inner pair, not waved through as uncountable).
   const GetElementPtrInst *SelGEP = nullptr;
   while (const auto *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
     bool AllZero = all_of(GEP->indices(), [](const Value *Idx) {
@@ -3755,80 +3934,40 @@ static void checkVAListPairShape(const SDValue &SrcValueOp,
   uint64_t Bytes = 0;
   if (auto *AI = dyn_cast<AllocaInst>(const_cast<Value *>(Ptr))) {
     ValTy = AI->getAllocatedType();
-    // Honor the array-size operand: `alloca {ptr,i32}, i32 0` allocates
-    // nothing and must not pass as an 8-byte pair.
     auto Bits = AI->getAllocationSizeInBits(DL);
     Bytes = Bits ? *Bits / 8 : 0;
   } else if (auto *GV = dyn_cast<GlobalVariable>(const_cast<Value *>(Ptr))) {
     ValTy = GV->getValueType();
     Bytes = DL.getTypeAllocSize(ValTy);
   } else {
-    return; // no countable object behind the pointer
+    return;
   }
   reportVAListPairShape(ValTy, DL, What, Bytes);
-}
-
-static void reportVAListShape(Type *ValTy, const DataLayout &DL,
-                              const char *What) {
-
-  const uint64_t Size = DL.getTypeAllocSize(ValTy);
-  // Unwrap clang's single-element __va_list_tag[1] array wrapper; any
-  // other array (e.g. [2 x pair]) keeps its array shape and fails.
-  const Type *PairTy = ValTy;
-  while (const auto *AT = dyn_cast<ArrayType>(PairTy)) {
-    if (AT->getNumElements() != 1)
-      break;
-    PairTy = AT->getElementType();
-  }
-  const auto *ST = dyn_cast<StructType>(PairTy);
-  const bool IsFrozenPair =
-      ST && ST->getNumElements() == 2 &&
-      ST->getElementType(0)->isPointerTy() &&
-      ST->getElementType(1)->isIntegerTy(32) && Size == 8;
-  if (!IsFrozenPair) {
-    std::string TyStr;
-    raw_string_ostream OS(TyStr);
-    ValTy->print(OS);
-    reportFatalUsageError(Twine("MCS251: ") + What +
-                       " requires the frozen 8-byte va_list pair {ptr, i32}; "
-                       "got a " +
-                       Twine(Size) + "-byte object (" + OS.str() + ")");
-  }
 }
 
 SDValue MCS251TargetLowering::LowerVASTART(SDValue Op,
                                            SelectionDAG &DAG) const {
   SDLoc DL(Op);
   SDValue Chain = Op.getOperand(0);
-  SDValue AP = Op.getOperand(1); // address of the 8-byte va_list pair
+  SDValue AP = Op.getOperand(1);
 
   checkVAListPairShape(Op.getOperand(2), DAG.getDataLayout(), "va_start");
 
   MachineFunction &MF = DAG.getMachineFunction();
-  const Function &F = MF.getFunction();
+  auto *MCS251FI = MF.getInfo<MCS251MachineFunctionInfo>();
   EVT PtrVT = AP.getValueType();
+  unsigned OffFieldOffset = PtrVT == MVT::i16 ? 2 : 4;
 
-  std::string SlotName =
-      (Twine("\1") + DAG.getTarget().getSymbol(&F)->getName() + "_PARM_" +
-       Twine(F.arg_size() + 1))
-          .str();
-  unsigned Opc = PtrVT == MVT::i16 ? MCS251::MOV16ri : MCS251::MOVADDR32;
-  SDValue Base = SDValue(DAG.getMachineNode(
-                             Opc, DL, PtrVT,
-                             DAG.getTargetExternalSymbol(
-                                 MF.createExternalSymbolName(SlotName), PtrVT)),
-                         0);
+  SDValue Base = materializeFrameIndex(MCS251FI->getVarArgsFrameIndex(), 0,
+                                       PtrVT, DL, DAG);
   Chain = DAG.getStore(Chain, DL, Base, AP, MachinePointerInfo(), Align(1));
 
-  SDValue OffPtr =
-      DAG.getNode(ISD::ADD, DL, PtrVT, AP, DAG.getConstant(4, DL, PtrVT));
+  SDValue OffPtr = DAG.getNode(ISD::ADD, DL, PtrVT, AP,
+                               DAG.getConstant(OffFieldOffset, DL, PtrVT));
   return DAG.getStore(Chain, DL, DAG.getConstant(0, DL, MVT::i32), OffPtr,
                       MachinePointerInfo(), Align(1));
 }
 
-// va_copy duplicates the whole pair -- including the "partially consumed"
-// offset state -- through two aligned-1 field copies (G2 §4.3.5; the two
-// store/load shapes are probe-V selectable).
 SDValue MCS251TargetLowering::LowerVACOPY(SDValue Op,
                                           SelectionDAG &DAG) const {
   SDLoc DL(Op);
@@ -3836,10 +3975,8 @@ SDValue MCS251TargetLowering::LowerVACOPY(SDValue Op,
   SDValue Dst = Op.getOperand(1);
   SDValue Src = Op.getOperand(2);
   EVT PtrVT = Dst.getValueType();
+  unsigned OffFieldOffset = PtrVT == MVT::i16 ? 2 : 4;
 
-  // Same shape gate as va_start: the copy reads and writes the full
-  // 8-byte pair, so a narrow destination would take the same 2-byte
-  // out-of-bounds write.  Operands 3/4 are the SrcValues of dst/src.
   checkVAListPairShape(Op.getOperand(3), DAG.getDataLayout(),
                        "va_copy destination");
   checkVAListPairShape(Op.getOperand(4), DAG.getDataLayout(), "va_copy source");
@@ -3847,15 +3984,15 @@ SDValue MCS251TargetLowering::LowerVACOPY(SDValue Op,
   SDValue Base =
       DAG.getLoad(PtrVT, DL, Chain, Src, MachinePointerInfo(), Align(1));
   Chain = Base.getValue(1);
-  SDValue SrcOff =
-      DAG.getNode(ISD::ADD, DL, PtrVT, Src, DAG.getConstant(4, DL, PtrVT));
+  SDValue SrcOff = DAG.getNode(ISD::ADD, DL, PtrVT, Src,
+                               DAG.getConstant(OffFieldOffset, DL, PtrVT));
   SDValue Off =
       DAG.getLoad(MVT::i32, DL, Chain, SrcOff, MachinePointerInfo(), Align(1));
   Chain = Off.getValue(1);
 
   Chain = DAG.getStore(Chain, DL, Base, Dst, MachinePointerInfo(), Align(1));
-  SDValue DstOff =
-      DAG.getNode(ISD::ADD, DL, PtrVT, Dst, DAG.getConstant(4, DL, PtrVT));
+  SDValue DstOff = DAG.getNode(ISD::ADD, DL, PtrVT, Dst,
+                               DAG.getConstant(OffFieldOffset, DL, PtrVT));
   return DAG.getStore(Chain, DL, Off, DstOff, MachinePointerInfo(),
                       Align(1));
 }
@@ -3869,46 +4006,19 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
     reportFatalUsageError("Unsupported calling convention");
   case CallingConv::C:
   case CallingConv::Fast:
-    // IPO can select fastcc for local functions. MCS251 deliberately uses
-    // the C physical ABI for Fast too: ABI registers plus named scalar
-    // parameter slots. Call sites and definitions must still agree on CC.
     break;
   case CallingConv::MCS251_INTR:
-    // ISR campaign T05 (Alice ruling 5): the interrupt entry is lowered
-    // here, but it is zero-argument only and never enters the ordinary
-    // parameter distribution below. The asynchronous context (PSW, DR0-28,
-    // DPX and their alias SFRs) is real entry state; the frame saving of
-    // that context lives in emitPrologue, not in an argument location.
     break;
   }
 
-  // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md R3 §4.3.4): variadic definitions
-  // are supported -- the static continuation slots `_PARM_(F+1)..` exist in
-  // addition to the fixed ones and va_start anchors the va_list pair on the
-  // first of them.  One shape stays fail-closed: with zero fixed parameters
-  // the first source argument occupies the DPL register channel and the
-  // caller starts writing slots at `_PARM_2`, so the base formula
-  // (`_PARM_(F+1)` = `_PARM_1` for F=0) would anchor one slot BEFORE the
-  // first written one and va_arg would silently skip the register argument
-  // and read an unwritten slot.  The shape is compiler-countable, so it is
-  // a hard error, not a silent-corruption path (§4.3.6 design stance).
-  if (IsVarArg && Ins.empty())
-    reportFatalUsageError("MCS251: a variadic definition must have at least one "
-                       "fixed parameter (the first source argument uses the "
-                       "register channel, which va_arg cannot read)");
-
   MachineFunction &MF = DAG.getMachineFunction();
-  // DF0 P0-B: function placement must match the program address space (AS4 in
-  // Tiny/Small v2, AS0 in compatibility mode). AS5/AS7/AS10 etc. are not
-  // valid function address spaces and must be rejected even though they have
-  // no load/store -- the function itself has no call/return contract there.
   unsigned FnAS = MF.getFunction().getAddressSpace();
   unsigned ProgAS = DAG.getDataLayout().getProgramAddressSpace();
   if (FnAS != ProgAS)
     reportFatalUsageError("MCS251: functions must reside in the program address "
-                       "space (" +
-                       Twine(ProgAS) + "); address space " + Twine(FnAS) +
-                       " is not a valid function placement");
+                          "space (" +
+                          Twine(ProgAS) + "); address space " + Twine(FnAS) +
+                          " is not a valid function placement");
 
   if (CallConv == CallingConv::MCS251_INTR) {
     if (!Ins.empty())
@@ -3916,95 +4026,91 @@ SDValue MCS251TargetLowering::LowerFormalArguments(
     return Chain;
   }
 
-  bool AllowStaticPointers = DAG.getDataLayout().getProgramAddressSpace() == 4;
   for (const Argument &Arg : MF.getFunction().args())
-    checkParameterType(Arg.getType(), Arg.getArgNo(), AllowStaticPointers);
+    checkParameterType(Arg.getType());
 
-  if (Ins.empty())
-    return Chain;
+  for (unsigned I = 0; I < Ins.size(); ++I)
+    checkParameter(Ins[I]);
 
-  for (unsigned I = 0; I < Ins.size(); ++I) {
-    checkParameter(Ins[I], I, AllowStaticPointers);
-    if (Ins[I].OrigArgIndex != I)
-      reportFatalUsageError("MCS251: aggregate parameters are not supported");
-  }
+  MachineFrameInfo &MFI = MF.getFrameInfo();
+  auto *MCS251FI = MF.getInfo<MCS251MachineFunctionInfo>();
 
-  // The argument arrives in a reserved SFR (DPL/DPH/DPTR, and A/B for i32).
-  // addLiveIn hands its value to the DAG as a virtual register of the matching
-  // allocatable class; it emits no copy itself. At the end of instruction
-  // selection, SelectionDAGISel calls MachineRegisterInfo::EmitLiveInCopies
-  // to materialise the phys-to-virt COPY in the entry block. The coalescer
-  // cannot merge that COPY because the SFR is reserved and outside GPR8/GPR16,
-  // so it survives register allocation and ExpandPostRAPseudos lowers it via
-  // copyPhysReg (TargetInstrInfo::lowerCopy). A/B follow exactly the same path
-  // as DPL/DPH.
-  if (usesI32ABI(Ins[0].VT)) {
-    SmallVector<SDValue, 4> Parts;
-    for (MCPhysReg Reg : I32ABIRegs) {
-      // SDCC pointers occupy B:DPH:DPL; A is unspecified, not an address
-      // byte. Canonicalise it before comparisons, not just at dereference.
-      if (Ins[0].Flags.isPointer() && Reg == MCS251::A) {
-        Parts.push_back(buildMOV8ri(0, DL, DAG));
-        continue;
+  // Argument 0 arrives in registers (DPL / DPTR / DPL:DPH:B:A) unless it is a
+  // byval aggregate or this is a 0-fixed-argument variadic function.
+  const bool Arg0InReg = !Ins.empty() && !Ins[0].Flags.isByVal();
+  unsigned FirstStackIdx = 0;
+  if (Arg0InReg) {
+    if (usesI32ABI(Ins[0].VT)) {
+      SmallVector<SDValue, 4> Parts;
+      for (MCPhysReg Reg : I32ABIRegs) {
+        if (Ins[0].Flags.isPointer() && Reg == MCS251::A) {
+          Parts.push_back(buildMOV8ri(0, DL, DAG));
+          continue;
+        }
+        Register VReg = MF.addLiveIn(Reg, &MCS251::GPR8RegClass);
+        SDValue Part = DAG.getCopyFromReg(Chain, DL, VReg, MVT::i8);
+        Parts.push_back(Part);
+        Chain = Part.getValue(1);
       }
-      Register VReg = MF.addLiveIn(Reg, &MCS251::GPR8RegClass);
-      SDValue Part = DAG.getCopyFromReg(Chain, DL, VReg, MVT::i8);
-      Parts.push_back(Part);
-      Chain = Part.getValue(1);
+      InVals.push_back(fromI32ABIValue(combineI32FromBytes(Parts, DL, DAG),
+                                       Ins[0].VT, DL, DAG));
+    } else {
+      bool Byte = Ins[0].VT == MVT::i8;
+      Register VReg = MF.addLiveIn(Byte ? MCS251::DPL : MCS251::DPTR,
+          Byte ? &MCS251::GPR8RegClass : &MCS251::GPR16RegClass);
+      SDValue ArgValue = DAG.getCopyFromReg(Chain, DL, VReg, Ins[0].VT);
+      InVals.push_back(ArgValue);
+      Chain = ArgValue.getValue(1);
     }
-    InVals.push_back(fromI32ABIValue(combineI32FromBytes(Parts, DL, DAG),
-                                     Ins[0].VT, DL, DAG));
-  } else {
-    bool Byte = Ins[0].VT == MVT::i8;
-    Register VReg = MF.addLiveIn(Byte ? MCS251::DPL : MCS251::DPTR,
-        Byte ? &MCS251::GPR8RegClass : &MCS251::GPR16RegClass);
-    SDValue ArgValue = DAG.getCopyFromReg(Chain, DL, VReg, Ins[0].VT);
-    InVals.push_back(ArgValue);
-    Chain = ArgValue.getValue(1);
+    FirstStackIdx = 1;
   }
 
-  // Chain entry reads before any call can overwrite an overlay slot. Unknown
-  // pointer info deliberately avoids claiming that distinct slot symbols do
-  // not alias: leaf functions share the same OSEG storage across modules.
-  for (unsigned I = 1; I < Ins.size(); ++I) {
-    SDValue Ptr = parameterSlot(
-        DAG.getTarget().getSymbol(&MF.getFunction())->getName(), I, DAG);
-    SDValue Value = DAG.getLoad(Ins[I].VT, DL, Chain, Ptr,
-                                MachinePointerInfo(), Align(1));
+  // Remaining fixed arguments (and all byval arguments) live on the stack below
+  // the 3-byte return address pushed by ecall. Stack arguments are laid out
+  // downward from SPX_callsite:
+  //   ObjOff = -(2 + StackArgOff + ArgSize) relative to SPX_entry.
+  uint64_t StackArgOff = 0;
+  EVT PtrVT = getPointerTy(DAG.getDataLayout());
+  for (unsigned I = FirstStackIdx; I < Ins.size(); ++I) {
+    if (Ins[I].Flags.isByVal()) {
+      uint64_t ByValSize = Ins[I].Flags.getByValSize();
+      uint64_t SlotSize = std::max<uint64_t>(ByValSize, 1);
+      int64_t ObjOff = -(2 + (int64_t)StackArgOff + (int64_t)SlotSize);
+      int FI = MFI.CreateFixedObject(SlotSize, ObjOff, /*IsImmutable=*/false);
+      InVals.push_back(DAG.getFrameIndex(FI, PtrVT));
+      StackArgOff += SlotSize;
+      continue;
+    }
+    uint64_t ArgSize = Ins[I].VT.getSizeInBits() / 8;
+    int64_t ObjOff = -(2 + (int64_t)StackArgOff + (int64_t)ArgSize);
+    int FI = MFI.CreateFixedObject(ArgSize, ObjOff, /*IsImmutable=*/false);
+    SDValue FIN = DAG.getFrameIndex(FI, PtrVT);
+    SDValue Value = DAG.getLoad(Ins[I].VT, DL, Chain, FIN,
+                                MachinePointerInfo::getFixedStack(MF, FI),
+                                Align(1));
     Chain = Value.getValue(1);
     SDValue ArgValue = Value;
     if (Ins[I].Flags.isPointer() && Ins[I].VT == MVT::i32)
       ArgValue = canonicalizePointer32(Value, DL, DAG);
     InVals.push_back(ArgValue);
+    StackArgOff += ArgSize;
+  }
+
+  MCS251FI->setIncomingStackArgBytes(StackArgOff);
+  if (IsVarArg) {
+    // Anchor va_start at SPX_entry - 2 - StackArgOff (one byte above the first
+    // variadic argument's highest byte); EmitVAArg steps downward by Size.
+    int64_t VAOff = -(2 + (int64_t)StackArgOff);
+    int VAFI = MFI.CreateFixedObject(1, VAOff, /*IsImmutable=*/false);
+    MCS251FI->setVarArgsFrameIndex(VAFI);
   }
 
   return Chain;
 }
 
 //===----------------------------------------------------------------------===//
-//  Call lowering (Phase 7)
+//  Call lowering (stack-based reentrant ABI, byval/sret, direct tail calls)
 //===----------------------------------------------------------------------===//
-//
-// Direct calls compile to `ecall _sym` (9A + addr24, 4 bytes; the linker
-// fills the 24-bit address, so the symbol is never truncated). Argument
-// loading mirrors LowerFormalArguments: the first scalar uses the ABI
-// registers and subsequent scalars use the named callee's static slots.
-// Results come back through the same fixed locations
-// (LowerCallResult's CopyFromReg); a returned value feeding straight into
-// the caller's own return needs no intermediate copy at all -- the
-// phys->virt->phys chain through dpl/dptr coalesces away (dpl/dptr are
-// reserved), the SDCC-equivalent `ecall; eret` tail.
-//
-// CALLSEQ_START/END carry zero stack sizes but are still essential: independent
-// libcalls can start on the entry chain, and their static argument stores must
-// not interleave. The standard call-sequence scheduler dependency keeps each
-// setup/call together; PEI erases the zero-sized call-frame pseudos.
-//
-// Register pressure across calls: since Phase 9 the spiller has real frame
-// slots (storeRegToStackSlot/loadRegFromStackSlot -> @dr60 displacement
-// accesses), so values live across a call are spilled to the frame instead
-// of being a hard error. A mixed dynamic-alloca function references its
-// static slots through the dr16 anchor, so those spills stay correct too.
 SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                                         SmallVectorImpl<SDValue> &InVals) const {
   SelectionDAG &DAG = CLI.DAG;
@@ -4022,165 +4128,98 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     reportFatalUsageError("Unsupported calling convention");
   case CallingConv::C:
   case CallingConv::Fast:
-    // IPO can select fastcc for local functions. MCS251 deliberately uses
-    // the C physical ABI for Fast too: ABI registers plus named scalar
-    // parameter slots. Call sites and definitions must still agree on CC.
     break;
   case CallingConv::MCS251_INTR:
-    // ISR campaign T05: an interrupt entry has no call ABI (no argument or
-    // return transfer, no ERET-compatible frame), so no call site may carry
-    // its calling convention -- including a call written inside an ISR
-    // itself. The Verifier rejects this at IR level; this is the backend
-    // boundary.
     reportFatalUsageError("MCS251 ISR: interrupt entry may not be called");
   }
 
-  // G2 B-S2: the blanket variadic rejection that stood here was REMOVED.
-  // The two remaining call-side fail-closed points sit right below, once
-  // IsDirect has been computed (G2-VARIADIC-DESIGN-draft.md §4.5 row 3).
-
   if (CLI.CB && CLI.CB->isMustTailCall())
     reportFatalUsageError("MCS251: musttail calls are not supported");
-  // Ordinary tail hints, including calls without an IR CallBase, are optional.
-  // From an ISR this is mandatory: a tail call would place the helper's ERET
-  // where the fixed frame needs RETI (T05 step 6).
-  IsTailCall = false;
 
   const unsigned ProgramAS = DAG.getDataLayout().getProgramAddressSpace();
-  // Direct symbols, including target-generated libcalls, may initially carry
-  // getPointerTy() and therefore be i16 in Tiny. Preserve their symbol identity
-  // and rebuild them as CODE pointers below. Only a true indirect address is
-  // subject to pointer-container and original-IR address-space checks.
-  //
-  // RC-1: A GlobalAddress direct call target must be a function in the CODE
-  // address space (ProgramAS). A data global masquerading as a call target, or
-  // a function declared in a non-CODE address space (e.g. AS3), must be
-  // rejected loudly -- both can produce ELF symbols with the wrong flags.
   if (auto *GA = dyn_cast<GlobalAddressSDNode>(Callee)) {
     const GlobalValue *GV = GA->getGlobal();
     if (!isa<Function>(GV))
       reportFatalUsageError("MCS251: direct call target is not a function");
     if (GA->getAddressSpace() != ProgramAS)
-      reportFatalUsageError("MCS251: direct call target is not in the configured CODE "
+      reportFatalUsageError(
+          "MCS251: direct call target is not in the configured CODE "
           "address space");
-    // A call with an ordinary CC aimed at a known interrupt entry in this
-    // module is rejected here as well (T05 step 5); an unrecognized target
-    // stays the domain of the Verifier and the linker.
     if (cast<Function>(GV)->getCallingConv() == CallingConv::MCS251_INTR)
       reportFatalUsageError("MCS251 ISR: interrupt entry may not be called");
   }
   const bool IsDirect = isa<GlobalAddressSDNode>(Callee) ||
                         isa<ExternalSymbolSDNode>(Callee);
-  // G2 B-S2 call-side fail-closed gates (G2-VARIADIC-DESIGN-draft.md R3
-  // §4.3.6 / §4.4.3).  Sema (B-S1) hard-errors both shapes at the source
-  // level; these are the IR-level backstops.
-  if (IsVarArg && !IsDirect)
-    // C2, frozen: a function-pointer call has no named callee to derive the
-    // `_PARM_n` continuation-slot symbols from.
-    reportFatalUsageError("MCS251 variadic call form 'indirect' is not supported "
-                       "(static slots require a named callee)");
-  if (IsVarArg) {
-    // Message F, frozen: the six continuation slots are all the ABI has.
-    // NumFixedArgs is the callee's fixed-parameter count (set from the call
-    // site's FunctionType), so this is exactly the Sema A-formula
-    // (actuals - fixed > 6) re-checked on the lowered IR.
-    unsigned NumFixed = CLI.NumFixedArgs;
-    if (NumFixed == static_cast<unsigned>(-1))
-      NumFixed = 0; // no call-site type survived: fail towards the gate
-    if (Outs.size() > NumFixed && Outs.size() - NumFixed > 6)
-      reportFatalUsageError("MCS251: variadic call passes more than 6 variadic "
-                         "arguments (Sema cap gate missed this call; "
-                         "recompile the caller with a current compiler)");
-  }
   if (!IsDirect) {
     if (CLI.CB) {
       auto *CalleeTy = cast<PointerType>(CLI.CB->getCalledOperand()->getType());
       unsigned CalleeAS = CalleeTy->getAddressSpace();
       if (CalleeAS != ProgramAS)
-        reportFatalUsageError("MCS251: indirect call target is not in the configured CODE "
+        reportFatalUsageError(
+            "MCS251: indirect call target is not in the configured CODE "
             "address space");
     }
     if (Callee.getValueType() != MVT::i32)
-      reportFatalUsageError("MCS251: indirect call target must be a 32-bit CODE pointer");
-    // ECALLr consumes the complete region-qualified address (not a WR offset).
+      reportFatalUsageError(
+          "MCS251: indirect call target must be a 32-bit CODE pointer");
     if (isa<ConstantSDNode>(Callee))
       Callee = materializeImm(Callee, DL, DAG);
   }
 
-  bool AllowStaticPointers = ProgramAS == 4;
   if (CLI.CB) {
     if (!hasOrdinaryPointerABI(CLI.CB->getType()))
-      reportFatalUsageError("MCS251: pointer return address space has no ordinary ABI");
+      reportFatalUsageError(
+          "MCS251: pointer return address space has no ordinary ABI");
     for (unsigned I = 0; I < CLI.CB->arg_size(); ++I)
-      checkParameterType(CLI.CB->getArgOperand(I)->getType(), I,
-                         AllowStaticPointers);
+      checkParameterType(CLI.CB->getArgOperand(I)->getType());
   }
 
-  for (unsigned I = 0; I < Outs.size(); ++I) {
-    checkParameter(Outs[I], I, AllowStaticPointers);
-    if (CLI.CB && Outs[I].OrigArgIndex != I)
-      reportFatalUsageError("MCS251: aggregate parameters are not supported");
-  }
+  for (unsigned I = 0; I < Outs.size(); ++I)
+    checkParameter(Outs[I]);
 
-  Chain = DAG.getCALLSEQ_START(Chain, 0, 0, DL);
+  unsigned NumFixed = CLI.NumFixedArgs;
+  if (NumFixed == static_cast<unsigned>(-1))
+    NumFixed = 0;
+  const bool Arg0InReg =
+      !Outs.empty() && !Outs[0].Flags.isByVal() &&
+      !(IsVarArg && NumFixed == 0);
+  unsigned FirstStackIdx = Arg0InReg ? 1 : 0;
 
-  std::string SlotCallee;
-  if (Outs.size() > 1) {
-    if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee)) {
-      if (G->getOffset() || !isa<Function>(G->getGlobal()))
-        reportFatalUsageError("MCS251: static parameters require a named function");
-      SlotCallee = DAG.getTarget().getSymbol(G->getGlobal())->getName().str();
-    } else if (auto *S = dyn_cast<ExternalSymbolSDNode>(Callee)) {
-      SmallString<128> Name;
-      Mangler::getNameWithPrefix(Name, S->getSymbol(), DAG.getDataLayout());
-      SlotCallee = Name.str().str();
+  uint64_t OutStackBytes = 0;
+  bool HasByValArg = false;
+  for (unsigned I = FirstStackIdx; I < Outs.size(); ++I) {
+    if (Outs[I].Flags.isByVal()) {
+      HasByValArg = true;
+      OutStackBytes += std::max<uint64_t>(Outs[I].Flags.getByValSize(), 1);
     } else {
-      // WP4: predictable capability rejection -- clean exit(1). Normally
-      // unreachable: the structural contract check rejects the multi-argument
-      // indirect call shape first; this is the MIR-entry defense.
-      reportFatalUsageError("MCS251: multi-argument indirect calls are not supported "
-                         "(static parameter slots require a named callee)");
+      OutStackBytes += Outs[I].VT.getSizeInBits() / 8;
     }
-    // Finish every slot store before setting up the first argument registers.
-    // Memory objects use the same measured big-endian layout as SDCC.
-    for (unsigned I = 1; I < Outs.size(); ++I) {
-      SDValue SlotValue = OutVals[I];
-      if (Outs[I].Flags.isPointer() && Outs[I].VT == MVT::i32)
-        SlotValue = canonicalizePointer32(SlotValue, DL, DAG);
-      Chain = DAG.getStore(Chain, DL, SlotValue,
-                           parameterSlot(SlotCallee, I, DAG),
-                           MachinePointerInfo(), Align(1));
+  }
+  if (OutStackBytes > 32767)
+    reportFatalUsageError(
+        "MCS251: outgoing stack argument area exceeds 32767 bytes");
+
+  // Direct tail call eligibility: direct non-ISR non-vararg non-hasFP calls
+  // without byval parameters whose outgoing stack argument bytes fit inside
+  // the caller's own incoming stack argument area (caller's caller cleans up).
+  MachineFunction &MF = DAG.getMachineFunction();
+  const Function &CallerF = MF.getFunction();
+  auto *MCS251FI = MF.getInfo<MCS251MachineFunctionInfo>();
+  bool CallerHasByVal = any_of(CallerF.args(), [](const Argument &A) {
+    return A.hasByValAttr();
+  });
+  if (IsTailCall) {
+    if (!IsDirect ||
+        CallerF.getCallingConv() == CallingConv::MCS251_INTR ||
+        CallerF.isVarArg() || IsVarArg ||
+        MF.getFrameInfo().hasVarSizedObjects() ||
+        HasByValArg || CallerHasByVal ||
+        OutStackBytes > MCS251FI->getIncomingStackArgBytes()) {
+      IsTailCall = false;
     }
   }
 
-  // Copy the arguments into their ABI registers, chained and glued so nothing
-  // can be scheduled between the copies and the call.
-  SmallVector<std::pair<unsigned, SDValue>, 4> RegsToPass;
-  SDValue InGlue;
-  if (!Outs.empty() && usesI32ABI(Outs[0].VT)) {
-    SmallVector<SDValue, 4> Parts;
-    splitI32ToBytes(asI32ABIValue(OutVals[0], DL, DAG), DL, DAG, Parts);
-    if (Outs[0].Flags.isPointer())
-      Parts[3] = buildMOV8ri(0, DL, DAG);
-    for (unsigned I = 0; I < 4; ++I)
-      RegsToPass.emplace_back(I32ABIRegs[I], Parts[I]);
-  } else if (!Outs.empty()) {
-    RegsToPass.emplace_back(Outs[0].VT == MVT::i8 ? MCS251::DPL : MCS251::DPTR,
-                            OutVals[0]);
-  }
-  for (const auto &[Reg, Val] : RegsToPass) {
-    Chain = DAG.getCopyToReg(Chain, DL, Reg, Val, InGlue);
-    InGlue = Chain.getValue(1);
-  }
-
-  // Wrap the callee so legalisation cannot hack the address apart: every
-  // direct call reaches here as one of these two node kinds (checked above).
-  // Calls always use the 32-bit AS4 CODE address, independently of AS0 data
-  // pointer width. A Tiny/Huge translation unit must never truncate a function
-  // symbol to its 16-bit default data-pointer type.
-  // Do not derive this from the generic/default pointer VT.  The MCS-251
-  // executable address is always the region-qualified 32-bit CODE container;
-  // in particular this must stay i32 when AS0 is the 16-bit Tiny pointer ABI.
+  // Wrap the direct callee target in 32-bit CODE pointer form.
   constexpr MVT CodePtrVT = MVT::i32;
   if (getPointerTy(DAG.getDataLayout(), ProgramAS) != CodePtrVT)
     reportFatalUsageError("MCS251: CODE call target must use a 32-bit pointer");
@@ -4190,11 +4229,159 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   else if (auto *S = dyn_cast<ExternalSymbolSDNode>(Callee))
     Callee = DAG.getTargetExternalSymbol(S->getSymbol(), CodePtrVT);
 
-  // Build the CALL node: [chain, callee, arg regs..., regmask, glue]. The
-  // getRegister operands become implicit uses on the ECALL MachineInstr,
-  // keeping the ABI registers live into the call; the register mask (from
-  // getCallPreservedMask, everything caller-saved except spx) carries the
-  // clobber set so RA knows nothing else survives.
+  if (IsTailCall) {
+    // Store outgoing tail-call stack arguments directly into the caller's
+    // incoming argument slots (below the 3-byte return address). Use unknown
+    // MachinePointerInfo so stores never reorder ahead of incoming arg loads.
+    if (OutStackBytes > 0) {
+      MachineFrameInfo &MFI = MF.getFrameInfo();
+      EVT PtrVT = getPointerTy(DAG.getDataLayout());
+      uint64_t ArgOff = 0;
+      for (unsigned I = FirstStackIdx; I < Outs.size(); ++I) {
+        SDValue Val = OutVals[I];
+        uint64_t ArgSize = Outs[I].VT.getSizeInBits() / 8;
+        int64_t ObjOff = -(2 + (int64_t)ArgOff + (int64_t)ArgSize);
+        if (Outs[I].Flags.isPointer() && Outs[I].VT == MVT::i32)
+          Val = canonicalizePointer32(Val, DL, DAG);
+        int FI = MFI.CreateFixedObject(ArgSize, ObjOff, /*IsImmutable=*/false);
+        SDValue FIN = DAG.getFrameIndex(FI, PtrVT);
+        Chain =
+            DAG.getStore(Chain, DL, Val, FIN, MachinePointerInfo(), Align(1));
+        ArgOff += ArgSize;
+      }
+    }
+
+    SmallVector<std::pair<unsigned, SDValue>, 4> RegsToPass;
+    SDValue InGlue;
+    if (Arg0InReg && usesI32ABI(Outs[0].VT)) {
+      SmallVector<SDValue, 4> Parts;
+      splitI32ToBytes(asI32ABIValue(OutVals[0], DL, DAG), DL, DAG, Parts);
+      if (Outs[0].Flags.isPointer())
+        Parts[3] = buildMOV8ri(0, DL, DAG);
+      for (unsigned I = 0; I < 4; ++I)
+        RegsToPass.emplace_back(I32ABIRegs[I], Parts[I]);
+    } else if (Arg0InReg) {
+      RegsToPass.emplace_back(
+          Outs[0].VT == MVT::i8 ? MCS251::DPL : MCS251::DPTR, OutVals[0]);
+    }
+    for (const auto &[Reg, Val] : RegsToPass) {
+      Chain = DAG.getCopyToReg(Chain, DL, Reg, Val, InGlue);
+      InGlue = Chain.getValue(1);
+    }
+
+    SmallVector<SDValue, 8> Ops;
+    Ops.push_back(Chain);
+    Ops.push_back(Callee);
+    for (const auto &[Reg, Val] : RegsToPass)
+      Ops.push_back(DAG.getRegister(Reg, Val.getValueType()));
+    if (InGlue.getNode())
+      Ops.push_back(InGlue);
+    return DAG.getNode(MCS251ISD::TC_RETURN, DL, MVT::Other, Ops);
+  }
+
+  Chain = DAG.getCALLSEQ_START(Chain, OutStackBytes, 0, DL);
+
+  if (OutStackBytes > 0) {
+    SDValue SPReg = DAG.getRegister(MCS251::DR60, MVT::i32);
+    uint64_t ArgOff = 0;
+    for (unsigned I = FirstStackIdx; I < Outs.size(); ++I) {
+      if (Outs[I].Flags.isByVal()) {
+        uint64_t ByValSize = Outs[I].Flags.getByValSize();
+        uint64_t SlotSize = std::max<uint64_t>(ByValSize, 1);
+        int64_t BaseDisp = -(int64_t)(ArgOff + SlotSize) + 1;
+        SDValue SrcPtr = OutVals[I];
+        if (ByValSize == 0) {
+          // Nothing to copy for a zero-sized byval slot.
+        } else if (ByValSize <= 16) {
+          EVT SrcPtrVT = SrcPtr.getValueType();
+          for (uint64_t B = 0; B < ByValSize; ++B) {
+            SDValue Addr =
+                B == 0 ? SrcPtr
+                       : DAG.getNode(ISD::ADD, DL, SrcPtrVT, SrcPtr,
+                                     DAG.getConstant(B, DL, SrcPtrVT));
+            SDValue Byte = DAG.getLoad(MVT::i8, DL, Chain, Addr,
+                                       MachinePointerInfo(), Align(1));
+            Chain = Byte.getValue(1);
+            Chain = SDValue(
+                DAG.getMachineNode(
+                    MCS251::MOV8mrS, DL, MVT::Other,
+                    {SPReg,
+                     DAG.getTargetConstant(BaseDisp + (int64_t)B, DL, MVT::i16),
+                     Byte, Chain}),
+                0);
+          }
+        } else {
+          unsigned CopyOpc = SrcPtr.getValueType() == MVT::i16
+                                 ? MCS251::BYVAL_COPY16
+                                 : MCS251::BYVAL_COPY32;
+          if (isa<ConstantSDNode>(SrcPtr))
+            SrcPtr = materializeImm(SrcPtr, DL, DAG);
+          Chain = SDValue(
+              DAG.getMachineNode(
+                  CopyOpc, DL, MVT::Other,
+                  {SrcPtr,
+                   DAG.getTargetConstant(BaseDisp, DL, MVT::i16),
+                   DAG.getTargetConstant(ByValSize, DL, MVT::i16), Chain}),
+              0);
+        }
+        ArgOff += SlotSize;
+        continue;
+      }
+
+      SDValue Val = OutVals[I];
+      uint64_t ArgSize = Outs[I].VT.getSizeInBits() / 8;
+      int64_t BaseDisp = -(int64_t)(ArgOff + ArgSize) + 1;
+      if (Outs[I].Flags.isPointer() && Outs[I].VT == MVT::i32)
+        Val = canonicalizePointer32(Val, DL, DAG);
+
+      SmallVector<SDValue, 4> Bytes;
+      if (auto *C = dyn_cast<ConstantSDNode>(Val)) {
+        for (unsigned B = 0; B < ArgSize; ++B)
+          Bytes.push_back(buildMOV8ri(
+              C->getZExtValue() >> ((ArgSize - B - 1) * 8), DL, DAG));
+      } else if (ArgSize == 4) {
+        splitI32ToBytes(asI32ABIValue(Val, DL, DAG), DL, DAG, Bytes);
+        std::reverse(Bytes.begin(), Bytes.end());
+      } else if (ArgSize == 2) {
+        Bytes.push_back(
+            DAG.getTargetExtractSubreg(MCS251::sub_hi8, DL, MVT::i8, Val));
+        Bytes.push_back(
+            DAG.getTargetExtractSubreg(MCS251::sub_lo8, DL, MVT::i8, Val));
+      } else {
+        Bytes.push_back(Val);
+      }
+      for (unsigned B = 0; B < ArgSize; ++B) {
+        Chain = SDValue(
+            DAG.getMachineNode(
+                MCS251::MOV8mrS, DL, MVT::Other,
+                {SPReg,
+                 DAG.getTargetConstant(BaseDisp + (int64_t)B, DL, MVT::i16),
+                 Bytes[B], Chain}),
+            0);
+      }
+      ArgOff += ArgSize;
+    }
+  }
+
+  // Copy argument 0 into the ABI registers, chained and glued to the call.
+  SmallVector<std::pair<unsigned, SDValue>, 4> RegsToPass;
+  SDValue InGlue;
+  if (Arg0InReg && usesI32ABI(Outs[0].VT)) {
+    SmallVector<SDValue, 4> Parts;
+    splitI32ToBytes(asI32ABIValue(OutVals[0], DL, DAG), DL, DAG, Parts);
+    if (Outs[0].Flags.isPointer())
+      Parts[3] = buildMOV8ri(0, DL, DAG);
+    for (unsigned I = 0; I < 4; ++I)
+      RegsToPass.emplace_back(I32ABIRegs[I], Parts[I]);
+  } else if (Arg0InReg) {
+    RegsToPass.emplace_back(
+        Outs[0].VT == MVT::i8 ? MCS251::DPL : MCS251::DPTR, OutVals[0]);
+  }
+  for (const auto &[Reg, Val] : RegsToPass) {
+    Chain = DAG.getCopyToReg(Chain, DL, Reg, Val, InGlue);
+    InGlue = Chain.getValue(1);
+  }
+
   SmallVector<SDValue, 8> Ops;
   Ops.push_back(Chain);
   Ops.push_back(Callee);
@@ -4211,7 +4398,7 @@ SDValue MCS251TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                       DAG.getVTList(MVT::Other, MVT::Glue), Ops);
   InGlue = Chain.getValue(1);
 
-  Chain = DAG.getCALLSEQ_END(Chain, 0, 0, InGlue, DL);
+  Chain = DAG.getCALLSEQ_END(Chain, OutStackBytes, 0, InGlue, DL);
   InGlue = Chain.getValue(1);
   return LowerCallResult(Chain, InGlue, CallConv, IsVarArg, CLI.Ins, DL, DAG,
                          InVals);
@@ -4282,16 +4469,9 @@ bool MCS251TargetLowering::CanLowerReturn(
       reportFatalUsageError("MCS251 ISR: interrupt entry must return void");
     return true;
   }
-  // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md §4.5): the ordinary-definition
-  // IsVarArg rejection that stood here was REMOVED.  Variadic definitions
-  // now lower through the static continuation-slot ABI; the remaining
-  // fail-closed points for variadic shapes are the ISR branch above, the
-  // LowerCall indirect/count gates (C2 / message F) and the residual
-  // llvm.va_arg reject (message E).
+  // Multi-value / large aggregate returns demote automatically to sret in Arg 0.
   if (Outs.size() > 1)
-    reportFatalUsageError("minimal MCS251 backend only supports zero or one "
-                       "i8/i16/i32 return value; multi-value returns are not "
-                       "supported");
+    return false;
   if (!hasOrdinaryPointerABI(RetTy))
     reportFatalUsageError("MCS251: pointer return address space has no ordinary ABI");
   SmallVector<CCValAssign, 16> RVLocs;
@@ -4365,4 +4545,63 @@ SDValue MCS251TargetLowering::LowerReturn(
     RetOps.push_back(Glue);
 
   return DAG.getNode(MCS251ISD::ERET, DL, MVT::Other, RetOps);
+}
+
+TargetLowering::ConstraintType
+MCS251TargetLowering::getConstraintType(StringRef Constraint) const {
+  if (Constraint.size() == 1) {
+    switch (Constraint[0]) {
+    case 'r':
+    case 'a':
+    case 'b':
+      return C_RegisterClass;
+    default:
+      break;
+    }
+  }
+  return TargetLowering::getConstraintType(Constraint);
+}
+
+std::pair<unsigned, const TargetRegisterClass *>
+MCS251TargetLowering::getRegForInlineAsmConstraint(
+    const TargetRegisterInfo *TRI, StringRef Constraint, MVT VT) const {
+  if (Constraint.size() == 1) {
+    switch (Constraint[0]) {
+    case 'r':
+      if (VT == MVT::i8)
+        return std::make_pair(0U, &MCS251::GPR8RegClass);
+      if (VT == MVT::i16)
+        return std::make_pair(0U, &MCS251::GPR16RegClass);
+      if (VT == MVT::i32)
+        return std::make_pair(0U, &MCS251::GPR32RegClass);
+      break;
+    case 'a':
+      if (VT == MVT::i8 || VT == MVT::Other)
+        return std::make_pair(unsigned(MCS251::A), &MCS251::AB8RegClass);
+      break;
+    case 'b':
+      if (VT == MVT::i8 || VT == MVT::Other)
+        return std::make_pair(unsigned(MCS251::B), &MCS251::AB8RegClass);
+      break;
+    default:
+      break;
+    }
+  }
+  if (Constraint.size() >= 3 && Constraint.front() == '{' &&
+      Constraint.back() == '}') {
+    StringRef Name = Constraint.slice(1, Constraint.size() - 1);
+    if (Name.equals_insensitive("a"))
+      return std::make_pair(unsigned(MCS251::A), &MCS251::AB8RegClass);
+    if (Name.equals_insensitive("b"))
+      return std::make_pair(unsigned(MCS251::B), &MCS251::AB8RegClass);
+    if (Name.equals_insensitive("dpl"))
+      return std::make_pair(unsigned(MCS251::DPL), &MCS251::DP8RegClass);
+    if (Name.equals_insensitive("dph"))
+      return std::make_pair(unsigned(MCS251::DPH), &MCS251::DP8RegClass);
+    if (Name.equals_insensitive("dptr"))
+      return std::make_pair(unsigned(MCS251::DPTR), &MCS251::DP16RegClass);
+    if (Name.equals_insensitive("psw"))
+      return std::make_pair(unsigned(MCS251::PSW), nullptr);
+  }
+  return TargetLowering::getRegForInlineAsmConstraint(TRI, Constraint, VT);
 }

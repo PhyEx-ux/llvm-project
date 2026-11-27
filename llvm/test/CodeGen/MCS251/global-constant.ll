@@ -1,5 +1,5 @@
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs %s -o - | FileCheck %s --check-prefix=ASM
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -filetype=obj %s -o - | FileCheck %s --check-prefix=OBJ
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -filetype=obj -mcs251-object-format=rel %s -o - | FileCheck %s --check-prefix=OBJ
 ;
 ; Data-only modules must select the same CSEG MCSection as functions. Mixed
 ; modules, private references and SDCC __code reads are independently exercised

@@ -1,13 +1,10 @@
 // REQUIRES: mcs251-registered-target
-// RUN: not %clang_cc1 -triple mcs251-unknown-none -ffreestanding -Wno-varargs -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s
+// RUN: %clang_cc1 -triple mcs251-unknown-none -ffreestanding -Wno-varargs -emit-llvm -o - %s | FileCheck %s
 
-// G2 B-S2 (G2-VARIADIC-DESIGN-draft.md R3 §4.6): `va_arg(ap, __bit)` stays
-// on the frozen M2 boundary -- the B1 continuation-slot ABI defines no bit
-// encoding.  Sema only warns today (-Wvarargs; the M2 gap registered in
-// MCS251.h), so the CodeGen backstop stops loudly instead of the
-// historical silently-wrong i8-slot compile (which then crashed llc with a
-// generic "Cannot select" on the old va_list).  If this ever moves to a
-// proper Sema diagnostic, update this test to match.
+// Under the stack-based reentrant variadic ABI, `va_arg(ap, __bit)` is
+// supported: a `__bit` argument undergoes default argument promotion to `int`
+// at the call site, and `EmitVAArg` reads the promoted integer slot from the
+// downward-stepping stack cursor and normalizes it to 0/1 (`icmp ne 0` + `zext`).
 
 #include <stdarg.h>
 
@@ -19,4 +16,11 @@ int f(int n, ...) {
   return v;
 }
 
-// CHECK: fatal error: error in backend: MCS251: va_arg of __bit is not supported (frozen M2 boundary, G2 §4.6)
+// CHECK-LABEL: define dso_local i32 @f(i32 noundef %n, ...)
+// CHECK: %va.off.next = add i32 %va.off, 4
+// CHECK: %va.negoff = sub i32 0, %va.off.next
+// CHECK: %va.addr = getelementptr i8, ptr %va.base, i32 %va.negoff
+// CHECK: %[[RAW:[0-9]+]] = load i32, ptr %va.addr, align 1
+// CHECK: %va.bit.nz = icmp ne i32 %[[RAW]], 0
+// CHECK: %va.bit = zext i1 %va.bit.nz to i8
+// CHECK-NOT: va_arg

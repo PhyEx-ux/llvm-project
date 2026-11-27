@@ -66,175 +66,179 @@ public:
         llvm::Type::getInt8Ty(getVMContext()));
   }
 
+  ABIArgInfo classifyReturnType(QualType RetTy) const {
+    if (RetTy->isVoidType())
+      return ABIArgInfo::getIgnore();
+    if (isBitType(RetTy))
+      return classifyBit(RetTy);
+    if (isAggregateTypeForABI(RetTy)) {
+      if (isEmptyRecord(getContext(), RetTy, true) ||
+          getContext().getTypeSizeInChars(RetTy).isZero())
+        return ABIArgInfo::getIgnore();
+      if (const auto *RT = RetTy->getAs<RecordType>()) {
+        if (RT->getDecl()->hasFlexibleArrayMember())
+          return getNaturalAlignIndirect(RetTy, /*ByVal=*/false);
+      }
+      uint64_t SizeBits = getContext().getTypeSize(RetTy);
+      // Small trivially copyable structs/unions of 1, 2, or 4 bytes return
+      // directly in DPL / DPTR / DPL:DPH:B:A; 3-byte and >4-byte aggregates
+      // return via sret hidden pointer in Arg 0.
+      if (SizeBits == 8 || SizeBits == 16 || SizeBits == 32)
+        return ABIArgInfo::getDirect(
+            llvm::IntegerType::get(getVMContext(), SizeBits));
+      return getNaturalAlignIndirect(RetTy, /*ByVal=*/false);
+    }
+    return DefaultABIInfo::classifyReturnType(RetTy);
+  }
+
+  ABIArgInfo classifyArgumentType(QualType Ty) const {
+    Ty = useFirstFieldIfTransparentUnion(Ty);
+    if (isBitType(Ty))
+      return classifyBit(Ty);
+    if (isAggregateTypeForABI(Ty)) {
+      if (isEmptyRecord(getContext(), Ty, true) ||
+          getContext().getTypeSizeInChars(Ty).isZero())
+        return ABIArgInfo::getIgnore();
+      if (CGCXXABI::RecordArgABI RAA = getRecordArgABI(Ty, getCXXABI()))
+        return getNaturalAlignIndirect(
+            Ty, RAA == CGCXXABI::RAA_DirectInMemory);
+      // Pass all C/trivially-copyable aggregates by value on the stack with
+      // byte alignment (matches fixed and variadic downward stack layout).
+      return ABIArgInfo::getIndirect(CharUnits::One(), /*ByVal=*/true);
+    }
+    return DefaultABIInfo::classifyArgumentType(Ty);
+  }
+
   void computeInfo(CGFunctionInfo &FI) const override {
-    if (!getCXXABI().classifyReturnType(FI)) {
-      if (isBitType(FI.getReturnType()))
-        FI.getReturnInfo() = classifyBit(FI.getReturnType());
-      else
-        FI.getReturnInfo() = DefaultABIInfo::classifyReturnType(
-            FI.getReturnType());
-    }
-    for (auto &I : FI.arguments()) {
-      if (isBitType(I.type))
-        I.info = classifyBit(I.type);
-      else
-        I.info = DefaultABIInfo::classifyArgumentType(I.type);
-    }
+    if (!getCXXABI().classifyReturnType(FI))
+      FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
+    for (auto &I : FI.arguments())
+      I.info = classifyArgumentType(I.type);
   }
 
   RValue EmitVAArg(CodeGenFunction &CGF, Address VAListAddr, QualType Ty,
                    AggValueSlot Slot) const override;
 };
 
-// G2 B1 static-slot variadic ABI (G2-VARIADIC-DESIGN-draft.md R3 §4.3.3(c)
-// / §4.3.5).  va_arg is lowered HERE, as ordinary IR, and never reaches the
-// backend as an llvm.va_arg intrinsic (the backend fail-closes any residual
-// one).  `va_list` is the 8-byte {__base, __off} pair (MCS251BuiltinVaList,
-// __base@0, __off@4); VAListAddr points at that pair.  __base carries the
-// owner function's first continuation-slot address (identity of the source
-// slot area), so this code performs pure {base,off} pointer arithmetic and
-// never names a `_PARM_n` symbol -- a va_list forwarded to any ordinary
-// helper function consumes the OWNER's slots through the same code.
-//
-// IR shape per design §4.3.3(c) (R3 probe V: all of it selects on today's
-// llc); the halt arm never flows back, so the result needs no PHI:
-//
-//   entry:  %off = load i32, ptr %offp            ; pair byte 4
-//           %ok  = icmp ule i32 %off, 20          ; 6 slots x 4B, last = 20
-//           br i1 %ok, label %load, label %halt
-//   halt:   call void @llvm.mcs251.vararg.halt()  ; `sjmp .` in the backend
-//           unreachable                           ; deterministic halt
-//   load:   %base = load ptr, ptr %ap
-//           %addr = getelementptr i8, ptr %base, i32 %off
-//           %v    = load <slot type>, ptr %addr align 1   ; 4B slot
-//           store i32 %off + 4, ptr %offp          ; advance exactly 1 slot
-//
-// Narrow reads (i8/i16, the inverse of the default argument promotion) load
-// the 4B slot as i32 and truncate; f32 loads its bit pattern directly
-// (double == f32 on this target); pointers load the already-canonicalized
-// 4B slot (the caller's A-byte zeroing happened in the backend store path).
+// Stack-based reentrant variadic ABI:
+// `va_list` is `{ptr __base, i32 __off}` (8 bytes with __off@4 on 32-bit AS0,
+// or 6 bytes with __off@2 on 16-bit AS0 tiny/xtiny). `va_start` sets `__base`
+// to one byte above the first variadic argument on the up-growing stack and
+// `__off = 0`. Each `va_arg(ap, T)` advances `__off` by the exact stack slot
+// size `Step` (promoted `int` size for narrow ints/`__bit`, `sizeof(T)` for
+// aggregates/pointers/32-bit scalars) and loads from `__base - __off`.
 RValue MCS251ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
                                 QualType Ty, AggValueSlot Slot) const {
-  // Fail-closed classification.  Sema already hard-errors the frozen
-  // rejection set on this exact path (N18/D2, SemaMCS251::
-  // CheckMCS251VAArgType); these are the CodeGen backstops so a Sema bypass
-  // can never reach the backend as a silently-wrong slot read.  `bit` stays
-  // on the frozen M2 boundary (G2 §4.6): the continuation-slot ABI defines
-  // no bit encoding, so instead of the historical silent i8-slot compile it
-  // now stops loudly here.
-  if (isBitType(Ty))
-    report_fatal_error("MCS251: va_arg of __bit is not supported (frozen M2 "
-                       "boundary, G2 §4.6)");
-  const ASTContext &Ctx = CGF.getContext();
-  // Pair-layout backstop (G2 B-S2 review fix, Alice blocker 1): the IR
-  // below addresses __off with a hardwired 4-byte access at byte 4 and
-  // advances by 4, so a narrower pair (a 6-byte {ptr, i16} object) would
-  // silently run both past the object end.  The va_list construction path
-  // (ASTContext::CreateMCS251BuiltinVaListDecl) pins the offset field to
-  // the architecturally-32-bit `unsigned long`, so the i16-offset form
-  // cannot be built in any C model; this re-checks the frozen layout at
-  // the point of use so that a degenerate pair arriving by any other road
-  // (e.g. the 16-bit-AS0 memory contracts, whose `void*` base makes the
-  // pair 6 bytes with __off at byte 2) stops loudly instead of reading
-  // past the object end.
+  ASTContext &Ctx = CGF.getContext();
+  const llvm::DataLayout &DL = CGF.CGM.getDataLayout();
+
   auto *PairStruct = dyn_cast<llvm::StructType>(VAListAddr.getElementType());
-  if (!PairStruct || PairStruct->getNumElements() != 2 ||
-      !PairStruct->getElementType(0)->isPointerTy() ||
-      !PairStruct->getElementType(1)->isIntegerTy(32) ||
-      CGF.CGM.getDataLayout()
-              .getStructLayout(PairStruct)
-              ->getElementOffset(1) != 4)
-    report_fatal_error("MCS251: va_list must be the frozen 8-byte {4-byte "
-                       "base, 4-byte offset} pair with __off at byte 4; a "
-                       "narrower pair would put the 4-byte offset access "
-                       "past the object end (the offset field is pinned to "
-                       "i32 at construction; 16-bit data-pointer memory "
-                       "contracts have no variadic support)");
+  uint64_t OffOffset = 0;
+  if (PairStruct && PairStruct->getNumElements() == 2 &&
+      PairStruct->getElementType(0)->isPointerTy() &&
+      PairStruct->getElementType(1)->isIntegerTy(32)) {
+    OffOffset = DL.getStructLayout(PairStruct)->getElementOffset(1);
+  }
+  if (OffOffset != 2 && OffOffset != 4)
+    report_fatal_error("MCS251: va_list must be a {ptr, i32} pair with __off "
+                       "at byte 2 (16-bit ptr) or byte 4 (32-bit ptr)");
+
+  const bool IsBit = isBitType(Ty);
+  const bool IsAgg = !IsBit && isAggregateTypeForABI(Ty);
   llvm::Type *IRTy = CGF.ConvertTypeForMem(Ty);
-  if (IRTy->isPointerTy()) {
-    switch (cast<llvm::PointerType>(IRTy)->getAddressSpace()) {
-    case 0:
-    case 1:
-    case 2:
-    case 3:
-    case 4:
-    case 8:
-    case 9:
-      break; // hasOrdinaryPointerABI set, same boundary as the backend
-    default:
-      report_fatal_error("MCS251: va_arg pointer address space has no "
-                         "ordinary static-slot encoding");
+
+  if (!IsBit && !IsAgg) {
+    if (IRTy->isPointerTy()) {
+      switch (cast<llvm::PointerType>(IRTy)->getAddressSpace()) {
+      case 0:
+      case 1:
+      case 2:
+      case 3:
+      case 4:
+      case 8:
+      case 9:
+        break;
+      default:
+        report_fatal_error("MCS251: va_arg pointer address space has no "
+                           "ordinary ABI");
+      }
+    } else if (IRTy->isIntegerTy()) {
+      if (Ctx.getTypeSize(Ty) > 32)
+        report_fatal_error("MCS251: va_arg integer wider than 32 bits is not "
+                           "supported");
+    } else if (!IRTy->isFloatTy()) {
+      report_fatal_error("MCS251: unsupported va_arg type");
     }
-  } else if (IRTy->isIntegerTy()) {
-    // Integral and enumeration targets up to 32 bits (the promotion set).
-    if (Ctx.getTypeSize(Ty) > 32)
-      report_fatal_error("MCS251: va_arg integer wider than 32 bits has no "
-                         "slot encoding (rejected by Sema N18; CodeGen "
-                         "backstop)");
-  } else if (!IRTy->isFloatTy()) {
-    // float only: DoubleWidth is 32 on this target, so every real floating
-    // va_arg type is f32-sized; anything else (aggregates, complex, ...) is
-    // in the Sema rejection set.
-    report_fatal_error("MCS251: va_arg type must be a promoted scalar "
-                       "(i8/i16/i32/f32) or an ordinary data pointer "
-                       "(rejected by Sema N18; CodeGen backstop)");
   }
 
   CGBuilderTy &Builder = CGF.Builder;
   llvm::Value *AP = VAListAddr.emitRawPointer(CGF);
-  llvm::Type *APTy = AP->getType();
+  llvm::Type *BasePtrTy = PairStruct->getElementType(0);
 
-  // __off at byte 4 of the pair.
-  llvm::Value *OffP = Builder.CreateConstInBoundsGEP1_32(CGF.Int8Ty, AP, 4,
-                                                         "va.offp");
+  // Load current byte offset (__off at byte 2 or byte 4) and __base (at 0).
+  llvm::Value *OffP = Builder.CreateConstInBoundsGEP1_32(
+      CGF.Int8Ty, AP, static_cast<unsigned>(OffOffset), "va.offp");
   llvm::Value *Off = Builder.CreateAlignedLoad(CGF.Int32Ty, OffP,
                                                CharUnits::One(), "va.off");
-  // Six 4-byte continuation slots: offsets 0,4,...,20 stay legal, anything
-  // else halts deterministically (the compiler cannot count a loop of
-  // va_args; G2 §4.3.6 last row).
-  llvm::Value *OK = Builder.CreateICmpULE(
-      Off, llvm::ConstantInt::get(CGF.Int32Ty, 5 * 4), "va.ok");
+  llvm::Value *Base = Builder.CreateAlignedLoad(BasePtrTy, AP,
+                                                CharUnits::One(), "va.base");
 
-  llvm::BasicBlock *HaltBB = CGF.createBasicBlock("vaarg.halt");
-  llvm::BasicBlock *LoadBB = CGF.createBasicBlock("vaarg.load");
-  Builder.CreateCondBr(OK, LoadBB, HaltBB);
+  // Handle empty aggregates (size 0) without advancing __off.
+  if (IsAgg && (isEmptyRecord(Ctx, Ty, true) ||
+                Ctx.getTypeSizeInChars(Ty).isZero())) {
+    if (Slot.isIgnored())
+      return RValue::getAggregate(Address::invalid());
+    return RValue::getAggregate(Slot.getAddress());
+  }
 
-  // Halt arm: llvm.mcs251.vararg.halt lowers to the VARARG_HALT machine
-  // instruction (`sjmp .`, two bytes, no call frame, no runtime symbol).
-  // Deliberately not llvm.trap -- the generic expansion of that is an
-  // _abort libcall and this runtime has no abort provider (G2 §4.3.6, R3
-  // probe V3).  unreachable keeps the arm from rejoining, so the result is
-  // branch-free on this path.
-  // NB: the new blocks must be linked into the function with EmitBlock
-  // (createBasicBlock leaves them unparented in this tree); a bare
-  // Builder.SetInsertPoint would emit into detached blocks and leave the
-  // br dangling (<badref>), which crashes every later CFG consumer.
-  CGF.EmitBlock(HaltBB);
-  Builder.CreateCall(
-      CGF.CGM.getIntrinsic(llvm::Intrinsic::mcs251_vararg_halt));
-  Builder.CreateUnreachable();
+  const uint64_t IntSize = Ctx.getTargetInfo().getIntWidth() / 8;
+  llvm::Type *IntTy = llvm::IntegerType::get(getVMContext(), IntSize * 8);
 
-  CGF.EmitBlock(LoadBB);
-  llvm::Value *Base = Builder.CreateAlignedLoad(APTy, AP, CharUnits::One(),
-                                                "va.base");
-  llvm::Value *Addr =
-      Builder.CreateInBoundsGEP(CGF.Int8Ty, Base, Off, "va.addr");
+  uint64_t Step = 0;
+  bool ReadPromotedInt = false;
+  if (IsBit) {
+    Step = IntSize;
+    ReadPromotedInt = true;
+  } else if (IsAgg) {
+    Step = DL.getTypeAllocSize(IRTy);
+  } else if (IRTy->isIntegerTy() && DL.getTypeAllocSize(IRTy) < IntSize) {
+    Step = IntSize;
+    ReadPromotedInt = true;
+  } else {
+    Step = DL.getTypeAllocSize(IRTy);
+  }
+
+  llvm::Value *OffN =
+      Builder.CreateAdd(Off, llvm::ConstantInt::get(CGF.Int32Ty, Step),
+                        "va.off.next");
+  Builder.CreateAlignedStore(OffN, OffP, CharUnits::One());
+
+  // Stack arguments sit downward from __base: address = __base - OffN.
+  llvm::Value *NegOff =
+      Builder.CreateSub(llvm::ConstantInt::get(CGF.Int32Ty, 0), OffN,
+                        "va.negoff");
+  llvm::Value *Idx =
+      OffOffset == 2 ? Builder.CreateTrunc(NegOff, CGF.Int16Ty) : NegOff;
+  llvm::Value *Addr = Builder.CreateGEP(CGF.Int8Ty, Base, Idx, "va.addr");
+
+  if (IsAgg)
+    return CGF.EmitLoadOfAnyValue(
+        CGF.MakeAddrLValue(Address(Addr, IRTy, CharUnits::One()), Ty), Slot);
 
   llvm::Value *V;
-  if (IRTy->isIntegerTy(8) || IRTy->isIntegerTy(16)) {
-    // Narrow read: the slot always holds a promoted i32 (G2 §4.3.1 slot
-    // table: 1B/2B continuation slots do not exist).
+  if (IsBit) {
     llvm::Value *Wide =
-        Builder.CreateAlignedLoad(CGF.Int32Ty, Addr, CharUnits::One());
+        Builder.CreateAlignedLoad(IntTy, Addr, CharUnits::One());
+    llvm::Value *NZ = Builder.CreateICmpNE(
+        Wide, llvm::ConstantInt::get(IntTy, 0), "va.bit.nz");
+    V = Builder.CreateZExt(NZ, CGF.Int8Ty, "va.bit");
+  } else if (ReadPromotedInt) {
+    llvm::Value *Wide =
+        Builder.CreateAlignedLoad(IntTy, Addr, CharUnits::One());
     V = Builder.CreateTrunc(Wide, IRTy);
   } else {
     V = Builder.CreateAlignedLoad(IRTy, Addr, CharUnits::One());
   }
-
-  // Advance exactly one 4-byte slot, independent of the read width.
-  llvm::Value *OffN =
-      Builder.CreateAdd(Off, llvm::ConstantInt::get(CGF.Int32Ty, 4));
-  Builder.CreateAlignedStore(OffN, OffP, CharUnits::One());
 
   Address Temp = CGF.CreateMemTempWithoutCast(Ty, "va.arg.tmp");
   Builder.CreateStore(V, Temp);
@@ -291,7 +295,8 @@ public:
     // final module before the source walk.
     llvm::StringSet<> EmittedDefinitions;
     for (const llvm::Function &F : M.functions()) {
-      if (F.isIntrinsic() || F.isDeclaration() || !F.hasExternalLinkage())
+      if (F.isIntrinsic() || F.isDeclaration() || F.hasLocalLinkage() ||
+          F.hasAvailableExternallyLinkage())
         continue;
       EmittedDefinitions.insert(finalSymbol(F.getName()));
     }
@@ -435,7 +440,8 @@ public:
     for (const auto &KV : Candidates)
       Covered.insert(KV.getKey());
     for (const llvm::Function &F : M.functions()) {
-      if (F.isIntrinsic() || !F.hasExternalLinkage() || F.getName().empty())
+      if (F.isIntrinsic() || F.hasLocalLinkage() ||
+          F.hasAvailableExternallyLinkage() || F.getName().empty())
         continue;
       std::string Symbol = finalSymbol(F.getName());
       if (!Covered.insert(Symbol).second)

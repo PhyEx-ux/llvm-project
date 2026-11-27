@@ -32,7 +32,7 @@ void* memset(void* dst, int c, uint32_t n)
     return dst;
 }
 
-/* ---- memcpy：标准 3 参（PM 裁定 2026-09-15，见 mcs251_libc.h） ---- */
+/* ---- memcpy：标准 3 参（Route B 栈 ABI 可重入） ---- */
 void* memcpy(void* dst, const void* src, uint32_t n)
 {
     uint8_t* dp = (uint8_t*)dst;
@@ -42,6 +42,34 @@ void* memcpy(void* dst, const void* src, uint32_t n)
         dp++;
         sp++;
         n--;
+    }
+    return dst;
+}
+
+/* ---- memmove：重叠安全拷贝（Route B 栈 ABI 可重入） ---- */
+void* memmove(void* dst, const void* src, uint32_t n)
+{
+    uint8_t* dp = (uint8_t*)dst;
+    const uint8_t* sp = (const uint8_t*)src;
+    if (dp == sp || n == 0u) {
+        return dst;
+    }
+    if ((uintptr_t)dp < (uintptr_t)sp) {
+        while (n != 0u) {
+            *dp = *sp;
+            dp++;
+            sp++;
+            n--;
+        }
+    } else {
+        dp += n;
+        sp += n;
+        while (n != 0u) {
+            dp--;
+            sp--;
+            *dp = *sp;
+            n--;
+        }
     }
     return dst;
 }

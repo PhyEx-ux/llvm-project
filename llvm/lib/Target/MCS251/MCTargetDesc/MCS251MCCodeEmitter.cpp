@@ -415,6 +415,12 @@ void MCS251MCCodeEmitter::encodeInstruction(
     putDisp16(MI.getOperand(2), CB); break;
   case MCS251::MOV8di:
     B(0x17e); put8((R(MI, 0) << 4) | 1, CB); put8(Imm(MI, 1), CB); break;
+  case MCS251::READSPLO:
+    B(0x17e); put8((R(MI, 0) << 4) | 1, CB); put8(0x81, CB); break;
+  case MCS251::READSPHI:
+    B(0x17e); put8((R(MI, 0) << 4) | 1, CB); put8(0x85, CB); break;
+  case MCS251::MOV16fromFP:
+    B(0x17d); put8((R(MI, 0) << 4) | 9, CB); break;
   case MCS251::MOV8mr:
     B(0x17a); put8((R(MI, 0) << 4) | 9, CB); put8(R(MI, 1) << 4, CB); break;
   case MCS251::MOV8mrD:
@@ -573,7 +579,8 @@ void MCS251MCCodeEmitter::encodeInstruction(
   // The displacement byte goes out via put8, NOT the opcode helper: 0xFE has
   // low nibble >= 6 and putOpcode would wrongly A5-escape it.
   case MCS251::VARARG_HALT: B(0x080); put8(0xfe, CB); break;
-  case MCS251::EJMP: B(0x18a); E24(0); break;
+  case MCS251::EJMP:
+  case MCS251::TCRETURNdi: B(0x18a); E24(0); break;
   case MCS251::ECALL: B(0x19a); E24(0); break;
   case MCS251::ECALLr:
     B(0x199); put8((R(MI, 0) << 4) | 8, CB); break;
@@ -677,6 +684,56 @@ void MCS251MCCodeEmitter::encodeInstruction(
       putDisp16(MI.getOperand(1), CB);
     }
     break;
+  // Classic 8051 / CRT and generic MC-only encodings.
+  case MCS251::LJMP:
+    B(0x002);
+    putExprJ16(MI.getOperand(0), CB.size(), CB, Fixups);
+    break;
+  case MCS251::LCALL:
+    B(0x012);
+    putExprJ16(MI.getOperand(0), CB.size(), CB, Fixups);
+    break;
+  case MCS251::RET:     B(0x022); break;
+  case MCS251::INCDPTR: B(0x0a3); break;
+  case MCS251::CLRA:    B(0x0e4); break;
+  case MCS251::MOVDIRI:
+    B(0x075); put8(Imm(MI, 0), CB); putImm8(MI.getOperand(1), CB); break;
+  case MCS251::PUSHDIR:
+    B(0x0c0); put8(Imm(MI, 0), CB); break;
+  case MCS251::POPDIR:
+    B(0x0d0); put8(Imm(MI, 0), CB); break;
+  case MCS251::PUSHDR:
+    B(0x1ca); put8((R(MI, 0) << 4) | 0x0b, CB); break;
+  case MCS251::POPDR:
+    B(0x1da); put8((R(MI, 0) << 4) | 0x0b, CB); break;
+  case MCS251::MUL16rr:
+    B(0x1ad); put8(RR(MI, 0, 2), CB); break;
+  case MCS251::INC8ri:
+  case MCS251::DEC8ri:
+  case MCS251::INC16ri:
+  case MCS251::DEC16ri:
+  case MCS251::INC32ri:
+  case MCS251::DEC32ri: {
+    const bool IsDec = Op == MCS251::DEC8ri || Op == MCS251::DEC16ri ||
+                       Op == MCS251::DEC32ri;
+    const unsigned BaseMode =
+        (Op == MCS251::INC8ri || Op == MCS251::DEC8ri)     ? 0x00
+        : (Op == MCS251::INC16ri || Op == MCS251::DEC16ri) ? 0x04
+                                                           : 0x0c;
+    const unsigned Step = Imm(MI, 2);
+    unsigned Delta = 0;
+    if (Step == 1)
+      Delta = 0;
+    else if (Step == 2)
+      Delta = 1;
+    else if (Step == 4)
+      Delta = 2;
+    else
+      reportFatalUsageError("MCS251: inc/dec immediate step must be 1, 2, or 4");
+    B(IsDec ? 0x11b : 0x10b);
+    put8((R(MI, 0) << 4) | (BaseMode + Delta), CB);
+    break;
+  }
   default:
     reportFatalInternalError("MCS251: unsupported instruction in MC emitter: " +
                        MCII.getName(Op));

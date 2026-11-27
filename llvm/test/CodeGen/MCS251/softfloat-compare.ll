@@ -7,25 +7,27 @@
 ; connected compare helpers and their static slots.
 ;
 ; O0-LABEL: _predicates:
-; O0: __eqsf2_PARM_2
+; O0-NOT: _PARM_
+; O0: inc spx, #0x4
 ; O0: ecall __eqsf2
-; O0: __lesf2_PARM_2
+; O0: dec spx, #0x4
+; O0: inc spx, #0x4
 ; O0: ecall __lesf2
-; O0: __gtsf2_PARM_2
+; O0: dec spx, #0x4
+; O0: inc spx, #0x4
 ; O0: ecall __gtsf2
-; O0: __unordsf2_PARM_2
+; O0: dec spx, #0x4
+; O0: inc spx, #0x4
 ; O0: ecall __unordsf2
+; O0: dec spx, #0x4
 ; O0: eret
 ;
 ; O2-LABEL: _predicates:
-; O2: __eqsf2_PARM_2
-; O2: ecall __eqsf2
-; O2: __gtsf2_PARM_2
-; O2: ecall __gtsf2
-; O2: __unordsf2_PARM_2
-; O2: ecall __unordsf2
-; O2: __lesf2_PARM_2
-; O2: ecall __lesf2
+; O2-NOT: _PARM_
+; O2-DAG: ecall __eqsf2
+; O2-DAG: ecall __gtsf2
+; O2-DAG: ecall __unordsf2
+; O2-DAG: ecall __lesf2
 ; O2: eret
 
 ;--- cmp.ll

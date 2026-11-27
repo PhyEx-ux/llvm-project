@@ -61,6 +61,9 @@ struct LinkerConfig {
   std::vector<std::pair<std::string, uint32_t>> AreaStarts;
   std::vector<Range> ReservedData;
   std::vector<std::string> Inputs;
+  // Parallel to Inputs: true for inputs bracketed by --whole-archive ...
+  // --no-whole-archive (missing trailing entries default to false).
+  std::vector<bool> InputWholeArchive;
   bool PrintInput = false;
   bool EnableStackGate = false;
   // E1 (WP2): static parameter-slot reentrancy check.  Conflict severity
@@ -121,6 +124,35 @@ struct LinkerConfig {
   // data.  Set only when an audit option (--placement-report /
   // --verify-placement) requested the positioning carrier in the final ELF.
   bool CollectPositions = false;
+  // Dead section garbage collection (--gc-sections). Off by default so plain
+  // links keep byte-identical output and never drop unreferenced sections.
+  bool GcSections = false;
+  bool PrintGcSections = false;
+  // Explicit GC/archive root symbols (-u / --undefined) and entry (-e / --entry).
+  std::vector<std::string> UndefinedRoots;
+  std::string EntrySymbol;
+  // GNU-style linker script (-T / --script) symbol assignments and KEEP globs.
+  struct ScriptSymbol {
+    std::string Name;
+    uint32_t Value = 0;
+    bool Provide = false;
+  };
+  std::vector<ScriptSymbol> ScriptSymbols;
+  std::vector<std::string> KeepSectionPatterns;
+  // In-memory ELF object inputs (e.g. produced by LTO/ThinLTO codegen).
+  struct MemoryInput {
+    std::string Name;
+    std::string Bytes;
+  };
+  std::vector<MemoryInput> MemoryInputs;
+  // Hardware ISR priority overrides (--isr-priority=<sym|slot>=<0..3>) and
+  // automatic preemption-pair derivation (pri(B) > pri(A) => B preempts A).
+  struct IsrPriorityOverride {
+    std::string Target;
+    uint8_t Priority = 0;
+  };
+  std::vector<IsrPriorityOverride> IsrPriorities;
+  bool AutoIsrPreemption = true;
 };
 
 // E5: one final-ELF symbol collected after layout.  Synth marks the
@@ -137,6 +169,7 @@ struct OutputSymbol {
 
 struct LinkerResult {
   uint32_t Entry = 0;
+  uint32_t OutputEFlags = 1; // EF_MCS251_ABI_V1 (0x1) or v2 (0x102)
   std::map<uint32_t, uint8_t> Image;
   std::string Map;
   std::string InputReport;
@@ -147,6 +180,14 @@ struct LinkerResult {
   // E5: final symbols with post-layout addresses, always collected so the
   // flavor shell can decide whether to serialize them.
   std::vector<OutputSymbol> Symbols;
+  // Concatenated and relocated non-ALLOC DWARF .debug_* sections. Emitted
+  // outside PT_LOAD so firmware HEX bytes stay identical to non-debug links.
+  struct OutputDebugSection {
+    std::string Name;
+    std::vector<uint8_t> Data;
+    uint32_t Align = 1;
+  };
+  std::vector<OutputDebugSection> DebugSections;
   // G11 (design §3.4): the merged placement contract produced by
   // mergePlacement() -- one row per stable-symbol group, including the
   // bind-only rows.  `LayoutHash` is the report hash recomputed over the
@@ -204,6 +245,25 @@ struct LinkerResult {
   // (ObjectId, InputShndx).  Synthesized sections and the DATA_EMPTY_PENDING
   // ("IGNORE") exemption never appear here.
   std::vector<PositionSection> PositionSections;
+  // Actual loaded object descriptors in Files order (including archive members
+  // extracted during linking), so the placement verifier can re-read each input
+  // independently without trusting the producer.
+  struct LoadedInputInfo {
+    std::string DisplayPath;
+    std::string FilePath;
+    bool FromArchive = false;
+    uint64_t ArchiveOffset = 0;
+  };
+  std::vector<LoadedInputInfo> LoadedInputs;
+  // Hardware ISR priority resolution & synthesized STC32G SFR configuration.
+  struct IsrPriorityInfo {
+    uint32_t Slot = 0;
+    std::string Name;
+    uint8_t Priority = 0;
+    std::string Source; // "default", "attribute", or "cli"
+  };
+  std::vector<IsrPriorityInfo> IsrPriorities;
+  std::vector<std::pair<std::string, uint8_t>> IsrPrioritySfrs;
 
   // E1 (WP2): the single authoritative ISR reentrancy analysis result.
   // Both the human diagnostics and the link-facts interface render from
@@ -400,6 +460,32 @@ struct LinkerResult {
     Capacity Cap;
     ReentrancyReport Reentrancy;
   };
+  struct MapData {
+    struct Section {
+      std::string File, Name, Region;
+      uint8_t Space = 0; // 0 DATA, 1 XDATA, 2 CODE
+      uint32_t Address = 0, Size = 0;
+      uint64_t Flags = 0;
+    };
+    struct BitEntry {
+      std::string Name;
+      uint32_t BitAddr = 0;
+      bool IsSfr = false;
+      bool Automatic = false;
+      uint32_t ByteAddr = 0, Index = 0;
+      std::string Init;
+    };
+    std::vector<std::pair<std::string, uint32_t>> SynthSymbols;
+    std::vector<Section> Sections;
+    std::vector<BitEntry> Bits;
+    bool StackRequested = false;
+    uint32_t StackH = 0, StackSpx = 0, StackCapacity = 0;
+    uint32_t EdataEnd = 0, IramSize = 0;
+    bool FlashGate = false;
+    uint32_t FlashBase = 0, FlashSize = 0;
+    uint32_t XdataSize = 0;
+  };
+  MapData MapInfo;
   LinkFacts Facts;
 };
 

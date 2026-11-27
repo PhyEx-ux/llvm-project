@@ -23,6 +23,12 @@ MCS251InstrInfo::MCS251InstrInfo(const MCS251Subtarget &STI,
                         MCS251::ADJCALLSTACKUP), RI(PointerBits) {}
 
 bool MCS251InstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
+  if (MI.getOpcode() == MCS251::ATOMIC_FENCE) {
+    // On single-core in-order MCS-251, an atomic fence is purely a compiler
+    // barrier; erase it once register allocation and scheduling have finished.
+    MI.eraseFromParent();
+    return true;
+  }
   if (MI.getOpcode() != MCS251::SRL32one &&
       MI.getOpcode() != MCS251::SRA32one)
     return false;
@@ -320,7 +326,8 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   // builds too).  Generic opcodes emit no bytes by the time they reach the
   // printer; anything else reaching the emitter with a pseudo is a hard
   // error there.
-  if (Opc <= (unsigned)TargetOpcode::GENERIC_OP_END)
+  if (Opc <= (unsigned)TargetOpcode::GENERIC_OP_END ||
+      Opc == MCS251::ATOMIC_FENCE)
     return 0;
   // Pseudo target opcodes exist only before FinalizeISel/PEI have finished;
   // the pre-RA heuristic callers of this hook (e.g. MachineFunction::
@@ -354,6 +361,7 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
     return 2;
   case MCS251::EJMP:
   case MCS251::ECALL:
+  case MCS251::TCRETURNdi:
     return 4; // opcode + addr24
   case MCS251::ECALLr:
     // 0x199 (native, no A5 escape) + specifier byte (regCode<<4)|0x8.
@@ -400,6 +408,8 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case MCS251::MOV8rb:
   case MCS251::MOV8rm:
   case MCS251::MOV8di:
+  case MCS251::READSPLO:
+  case MCS251::READSPHI:
   case MCS251::MOV8mr:
   case MCS251::MOV8id:
   case MCS251::ADD8ri:
@@ -449,6 +459,7 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   case MCS251::DECSPX4:
   case MCS251::SETFP:
   case MCS251::RESTORESP:
+  case MCS251::MOV16fromFP:
   case MCS251::PUSHFP:
   case MCS251::POPFP:
   case MCS251::ISR_PUSH_PSW:
@@ -528,7 +539,8 @@ unsigned MCS251InstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
 
 TargetInstrInfo::InstSizeVerifyMode
 MCS251InstrInfo::getInstSizeVerifyMode(const MachineInstr &MI) const {
-  if (MI.getOpcode() <= (unsigned)TargetOpcode::GENERIC_OP_END)
+  if (MI.getOpcode() <= (unsigned)TargetOpcode::GENERIC_OP_END ||
+      MI.getOpcode() == MCS251::ATOMIC_FENCE)
     return InstSizeVerifyMode::NoVerify;
   // Plain ExactSize would only be honored in +asserts builds (upstream
   // NDEBUG semantics), silently dropping the cross-check exactly where it

@@ -1,15 +1,13 @@
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %s -o - | FileCheck %s --check-prefix=ASM
 ; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs %s -o - | FileCheck %s --check-prefix=ASM
-; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs -filetype=obj %s -o - | FileCheck %s --check-prefix=OBJ
-; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs -filetype=obj %s -o - | FileCheck %s --check-prefix=OBJ
+; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs -filetype=obj -mcs251-object-format=rel %s -o - | FileCheck %s --check-prefix=OBJ
+; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs -filetype=obj -mcs251-object-format=rel %s -o - | FileCheck %s --check-prefix=OBJ
 ;
-; A non-leaf multi-argument function contributes its own DSEG parameter frame;
-; mutable globals contribute a second DSEG slice. The XINIT destination must
-; relocate against the global slice (area 3), not the parameter frame (area 2).
+; Under the stack-based ABI, `@nonleaf` uses the stack rather than a DSEG
+; parameter frame, leaving mutable global `@g` in the sole DSEG slice (area 2)
+; with XINIT relocating cleanly against area 2.
 ;
-; ASM: .area DSEG (DATA)
-; ASM: _nonleaf_PARM_2:
-; ASM-NEXT: .ds 2
+; ASM-NOT: _nonleaf_PARM_2
 ; ASM: .area DSEG (DATA)
 ; ASM: _g:
 ; ASM-NEXT: .ds 2
@@ -19,14 +17,13 @@
 ; ASM-NEXT: .word 2
 ; ASM-NEXT: .word 4951
 ;
-; OBJ: H 6 areas 5 global symbols
+; OBJ: H 5 areas 4 global symbols
+; OBJ-NOT: _nonleaf_PARM_2
 ; OBJ: A DSEG size 2 flags 0 addr 0
-; OBJ-NEXT: S _nonleaf_PARM_2 Def000000
-; OBJ-NEXT: A DSEG size 2 flags 0 addr 0
 ; OBJ-NEXT: S _g Def000000
 ; OBJ-NEXT: A XINIT size 8 flags 20 addr 0
 ; OBJ-NEXT: A REG_BANK_0 size 8 flags 4 addr 0
-; OBJ: R 00 00 00 04 00 03 00 03
+; OBJ: R 00 00 00 03 00 03 00 02
 
 declare void @sink()
 

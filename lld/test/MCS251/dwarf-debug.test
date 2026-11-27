@@ -1,0 +1,137 @@
+# RUN: rm -rf %t && split-file %s %t
+
+# Build debug (-g) and non-debug (-g0) ELF objects from the same functions.
+# RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O1 -function-sections -filetype=obj -mcs251-object-format=elf %t/a_dbg.ll -o %t/a_dbg.o
+# RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O1 -function-sections -filetype=obj -mcs251-object-format=elf %t/b_dbg.ll -o %t/b_dbg.o
+# RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O1 -function-sections -filetype=obj -mcs251-object-format=elf %t/a_nodbg.ll -o %t/a_nodbg.o
+# RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -O1 -function-sections -filetype=obj -mcs251-object-format=elf %t/b_nodbg.ll -o %t/b_nodbg.o
+
+# Link both with --keep-symbols and --gc-sections (also tests tombstone for GC'd dead_fn).
+# RUN: lld -flavor mcs251 --keep-symbols --gc-sections --area-start=CSEG=0xff0200 %t/a_dbg.o %t/b_dbg.o -o %t/out_dbg.elf
+# RUN: lld -flavor mcs251 --keep-symbols --gc-sections --area-start=CSEG=0xff0200 %t/a_nodbg.o %t/b_nodbg.o -o %t/out_nodbg.elf
+
+# Verify DWARF sections are present, non-ALLOC, and relocated with final PCs.
+# RUN: llvm-readobj -S %t/out_dbg.elf | FileCheck %s --check-prefix=SECS
+# RUN: llvm-dwarfdump --debug-info --debug-line %t/out_dbg.elf | FileCheck %s --check-prefix=DWARF
+
+# Verify Intel HEX firmware output is bit-identical between -g and non-debug links!
+# RUN: llvm-objcopy -O ihex %t/out_dbg.elf %t/out_dbg.hex
+# RUN: llvm-objcopy -O ihex %t/out_nodbg.elf %t/out_nodbg.hex
+# RUN: diff -u %t/out_nodbg.hex %t/out_dbg.hex
+
+# SECS: Name: .debug_info
+# SECS-NEXT: Type: SHT_PROGBITS
+# SECS-NEXT: Flags [ (0x0)
+# SECS-NEXT: ]
+# SECS: Name: .debug_line
+# SECS-NEXT: Type: SHT_PROGBITS
+# SECS-NEXT: Flags [ (0x0)
+# SECS-NEXT: ]
+
+# DWARF: Compile Unit:
+# DWARF: DW_TAG_compile_unit
+# DWARF: DW_AT_name ("a.c")
+# DWARF: DW_TAG_subprogram
+# DWARF: DW_AT_low_pc (0x00ff02{{[0-9a-f][0-9a-f]}})
+# DWARF: DW_AT_name ("main")
+# DWARF: Compile Unit:
+# DWARF: DW_TAG_compile_unit
+# DWARF: DW_AT_name ("b.c")
+# DWARF: DW_TAG_subprogram
+# DWARF: DW_AT_low_pc (0x00ff02{{[0-9a-f][0-9a-f]}})
+# DWARF: DW_AT_name ("helper")
+# DWARF: .debug_line contents:
+# DWARF: a.c
+# DWARF: 0x0000000000ff02{{[0-9a-f][0-9a-f]}}
+# DWARF: b.c
+# DWARF: 0x0000000000ff02{{[0-9a-f][0-9a-f]}}
+
+#--- a_dbg.ll
+target triple = "mcs251-unknown-none"
+
+declare i16 @helper(i16)
+
+define i16 @dead_fn(i16 %x) !dbg !10 {
+  %r = add i16 %x, 99, !dbg !11
+  ret i16 %r, !dbg !11
+}
+
+define i16 @main() !dbg !4 {
+  %r = call i16 @helper(i16 5), !dbg !8
+  ret i16 %r, !dbg !9
+}
+
+!llvm.dbg.cu = !{!0}
+!llvm.module.flags = !{!2, !3}
+!0 = distinct !DICompileUnit(language: DW_LANG_C11, file: !1, producer: "clang", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)
+!1 = !DIFile(filename: "a.c", directory: "/src")
+!2 = !{i32 7, !"Dwarf Version", i32 4}
+!3 = !{i32 2, !"Debug Info Version", i32 3}
+!4 = distinct !DISubprogram(name: "main", scope: !1, file: !1, line: 10, type: !5, scopeLine: 10, spFlags: DISPFlagDefinition, unit: !0)
+!5 = !DISubroutineType(types: !6)
+!6 = !{!7}
+!7 = !DIBasicType(name: "unsigned short", size: 16, encoding: DW_ATE_unsigned)
+!8 = !DILocation(line: 11, column: 3, scope: !4)
+!9 = !DILocation(line: 12, column: 3, scope: !4)
+!10 = distinct !DISubprogram(name: "dead_fn", scope: !1, file: !1, line: 3, type: !5, scopeLine: 3, spFlags: DISPFlagDefinition, unit: !0)
+!11 = !DILocation(line: 4, column: 3, scope: !10)
+
+!mcs251.signatures = !{!100, !101, !102}
+!100 = !{!"_helper", i32 2, i32 1, i32 0, i32 0, i32 0, i32 0}
+!101 = !{!"_dead_fn", i32 1, i32 1, i32 0, i32 0, i32 0, i32 0}
+!102 = !{!"_main", i32 1, i32 0, i32 0, i32 0, i32 0}
+
+#--- b_dbg.ll
+target triple = "mcs251-unknown-none"
+
+define i16 @helper(i16 %v) !dbg !4 {
+  %r = add i16 %v, 1, !dbg !8
+  ret i16 %r, !dbg !9
+}
+
+!llvm.dbg.cu = !{!0}
+!llvm.module.flags = !{!2, !3}
+!0 = distinct !DICompileUnit(language: DW_LANG_C11, file: !1, producer: "clang", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)
+!1 = !DIFile(filename: "b.c", directory: "/src")
+!2 = !{i32 7, !"Dwarf Version", i32 4}
+!3 = !{i32 2, !"Debug Info Version", i32 3}
+!4 = distinct !DISubprogram(name: "helper", scope: !1, file: !1, line: 20, type: !5, scopeLine: 20, spFlags: DISPFlagDefinition, unit: !0)
+!5 = !DISubroutineType(types: !6)
+!6 = !{!7, !7}
+!7 = !DIBasicType(name: "unsigned short", size: 16, encoding: DW_ATE_unsigned)
+!8 = !DILocation(line: 21, column: 3, scope: !4)
+!9 = !DILocation(line: 22, column: 3, scope: !4)
+
+!mcs251.signatures = !{!100}
+!100 = !{!"_helper", i32 1, i32 1, i32 0, i32 0, i32 0, i32 0}
+
+#--- a_nodbg.ll
+target triple = "mcs251-unknown-none"
+
+declare i16 @helper(i16)
+
+define i16 @dead_fn(i16 %x) {
+  %r = add i16 %x, 99
+  ret i16 %r
+}
+
+define i16 @main() {
+  %r = call i16 @helper(i16 5)
+  ret i16 %r
+}
+
+!mcs251.signatures = !{!100, !101, !102}
+!100 = !{!"_helper", i32 2, i32 1, i32 0, i32 0, i32 0, i32 0}
+!101 = !{!"_dead_fn", i32 1, i32 1, i32 0, i32 0, i32 0, i32 0}
+!102 = !{!"_main", i32 1, i32 0, i32 0, i32 0, i32 0}
+
+#--- b_nodbg.ll
+target triple = "mcs251-unknown-none"
+
+define i16 @helper(i16 %v) {
+  %r = add i16 %v, 1
+  ret i16 %r
+}
+
+!mcs251.signatures = !{!100}
+!100 = !{!"_helper", i32 1, i32 1, i32 0, i32 0, i32 0, i32 0}

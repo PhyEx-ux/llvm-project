@@ -19,7 +19,7 @@ namespace llvm {
 class MCS251TargetMachine final : public CodeGenTargetMachineImpl {
   std::unique_ptr<TargetLoweringObjectFile> TLOF;
   MCS251Subtarget Subtarget;
-  const bool ELFObjectOutput;
+  bool ELFObjectOutput;
   bool ObjectFileOutput = false;
   // P1-2: the numeric storage-model contract no longer lives in the generic
   // TargetOptions; it arrives through the target-feature string
@@ -49,6 +49,9 @@ public:
 
   void registerPassBuilderCallbacks(PassBuilder &PB) override;
   TargetPassConfig *createPassConfig(PassManagerBase &PM) override;
+  MachineFunctionInfo *
+  createMachineFunctionInfo(BumpPtrAllocator &Allocator, const Function &F,
+                            const TargetSubtargetInfo *STI) const override;
   Expected<std::unique_ptr<MCStreamer>>
   createMCStreamer(raw_pwrite_stream &Out, raw_pwrite_stream *DwoOut,
                    CodeGenFileType FileType, MCContext &Ctx) override;

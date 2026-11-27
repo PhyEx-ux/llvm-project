@@ -1,16 +1,20 @@
-; RUN: sed -n '/^define { i32, i32 }/,/^}/p' %s | not llc -mtriple=mcs251 2>&1 | FileCheck %s --check-prefix=TWO-I32
-; RUN: sed -n '/^define { i8, i32 }/,/^}/p' %s | not llc -mtriple=mcs251 2>&1 | FileCheck %s --check-prefix=I8-I32
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs < %s | FileCheck %s
 
-; Multiple return values must fail before CCState can assign independent values
-; to separate candidates in the i32 gatekeeper entry. Otherwise LowerReturn
-; would only transfer the first i32 value's four ABI byte lanes.
+; Multi-value returns are automatically demoted via hidden sret pointer
+; in DPL:DPH:B:A (`dr0`) by SelectionDAG when CanLowerReturn returns false.
 
 define { i32, i32 } @two_i32() {
-; TWO-I32: LLVM ERROR: minimal MCS251 backend only supports zero or one i8/i16/i32 return value; multi-value returns are not supported
+; CHECK-LABEL: _two_i32:
+; CHECK-DAG: mov @dr0+0x0003, r{{[0-9]+}}
+; CHECK-DAG: mov @dr0+0x0007, r{{[0-9]+}}
+; CHECK: eret
   ret { i32, i32 } { i32 1, i32 2 }
 }
 
 define { i8, i32 } @i8_i32() {
-; I8-I32: LLVM ERROR: minimal MCS251 backend only supports zero or one i8/i16/i32 return value; multi-value returns are not supported
+; CHECK-LABEL: _i8_i32:
+; CHECK-DAG: mov @dr0, r{{[0-9]+}}
+; CHECK-DAG: mov @dr0+0x0004, r{{[0-9]+}}
+; CHECK: eret
   ret { i8, i32 } { i8 1, i32 2 }
 }

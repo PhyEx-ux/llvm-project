@@ -158,13 +158,15 @@
 # RUN: not mcs251-lld v1fix.o --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o v1fix.elf 2>&1 | FileCheck %s --check-prefix=V1FIX
 # V1FIX: fixed placement section requires a v2 object identity: .mcu.fixed.fx
 
-# --- P-3: archives (classic and thin) with one frozen wording.
+# --- P-3: placement audit mode supports static archive inputs (verifying each
+# --- extracted archive member via mcs251-placement-verify), while malformed
+# --- thin archives still fail closed.
 # RUN: llvm-ar rcs arch.a base.o
-# RUN: not mcs251-lld arch.a --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o arch.elf 2>&1 | FileCheck %s --check-prefix=ARCH
-# ARCH: archive inputs are not supported: arch.a (link placement objects directly)
+# RUN: mcs251-lld --whole-archive arch.a --placement-report=arch.report --verify-placement --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o arch.elf
+# RUN: grep '^fx | _fx |' arch.report
 # RUN: printf '!<thin>\n' > thin.a
-# RUN: not mcs251-lld thin.a --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o thin.elf 2>&1 | FileCheck %s --check-prefix=ARCHT
-# ARCHT: archive inputs are not supported: thin.a (link placement objects directly)
+# RUN: not mcs251-lld thin.a --placement-report=thin.report --area-start=CSEG=0xff0200 --area-start=XSEG=0x010000 -o thin.elf 2>&1 | FileCheck %s --check-prefix=ARCHT
+# ARCHT: no input files
 
 #--- seteflags.py
 #!/usr/bin/env python3

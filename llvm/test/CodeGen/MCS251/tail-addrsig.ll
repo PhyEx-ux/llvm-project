@@ -10,8 +10,9 @@
 ; Pinned to the v1 compatibility contract: this is a legacy-layout suite. The
 ; llc no-flag default is the xsmall/v2-Small model (clang cc1 default).
 
-; Tail hints fall back to ordinary calls, including indirect calls and calls
-; with a live frame. ASxxxx REL ignores address-significance emission requests.
+; Direct tail calls lower to `ejmp` (after tearing down any local frame);
+; indirect tail calls still fall back to `ecall @drN; eret`. ASxxxx REL
+; ignores address-significance emission requests.
 source_filename = "tail-addrsig.ll"
 
 declare i8 @step8(i8)
@@ -20,16 +21,17 @@ declare i32 @step32(i32)
 
 define i8 @tail8(i8 %x) {
 ; CHECK-LABEL: _tail8:
-; CHECK: ecall _step8
-; CHECK: eret
+; CHECK: ejmp _step8
+; CHECK-NOT: ecall _step8
   %v = tail call i8 @step8(i8 %x)
   ret i8 %v
 }
 
 define i16 @tail16(i16 %x) {
 ; CHECK-LABEL: _tail16:
-; CHECK: ecall _step16
-; CHECK: eret
+; CHECK: dec spx, #0x2
+; CHECK: ejmp _step16
+; CHECK-NOT: ecall _step16
   %slot = alloca i16, align 1
   store volatile i16 %x, ptr %slot, align 1
   %saved = load volatile i16, ptr %slot, align 1
@@ -39,8 +41,8 @@ define i16 @tail16(i16 %x) {
 
 define i32 @tail32(i32 %x) {
 ; CHECK-LABEL: _tail32:
-; CHECK: ecall _step32
-; CHECK: eret
+; CHECK: ejmp _step32
+; CHECK-NOT: ecall _step32
   %v = tail call i32 @step32(i32 %x)
   ret i32 %v
 }

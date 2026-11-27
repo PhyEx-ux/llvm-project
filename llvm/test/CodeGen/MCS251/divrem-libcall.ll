@@ -17,10 +17,10 @@
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 %t/srem16.ll -o - | FileCheck %s --check-prefixes=SREM16
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 %t/srem32.ll -o - | FileCheck %s --check-prefixes=SREM32
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 %t/srem32.ll -o - | FileCheck %s --check-prefixes=SREM32
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj %t/sdiv32.ll -o %t.sdiv32.O0.rel
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj %t/sdiv32.ll -o %t.sdiv32.O2.rel
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj %t/srem32.ll -o %t.srem32.O0.rel
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj %t/srem32.ll -o %t.srem32.O2.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj -mcs251-object-format=rel %t/sdiv32.ll -o %t.sdiv32.O0.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj -mcs251-object-format=rel %t/sdiv32.ll -o %t.sdiv32.O2.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj -mcs251-object-format=rel %t/srem32.ll -o %t.srem32.O0.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj -mcs251-object-format=rel %t/srem32.ll -o %t.srem32.O2.rel
 
 ; Former divrem-errors.ll (9 fragments / 10 negative RUNs): every
 ; SDIV/SREM/UREM rejection is now a libcall lowering (division design v4
@@ -39,8 +39,9 @@
 ;--- sdiv8.ll
 define i8 @f(i8 %a, i8 %b) {
 ; SDIV8-LABEL: _f:
-; SDIV8: __divsint_PARM_2
+; SDIV8: inc spx, #0x2
 ; SDIV8: ecall __divsint
+; SDIV8: dec spx, #0x2
 ; SDIV8: eret
   %r = sdiv i8 %a, %b
   ret i8 %r
@@ -48,8 +49,9 @@ define i8 @f(i8 %a, i8 %b) {
 ;--- sdiv16.ll
 define i16 @f(i16 %a, i16 %b) {
 ; SDIV16-LABEL: _f:
-; SDIV16: __divsint_PARM_2
+; SDIV16: inc spx, #0x2
 ; SDIV16: ecall __divsint
+; SDIV16: dec spx, #0x2
 ; SDIV16: eret
   %r = sdiv i16 %a, %b
   ret i16 %r
@@ -57,8 +59,9 @@ define i16 @f(i16 %a, i16 %b) {
 ;--- sdiv32.ll
 define i32 @f(i32 %a, i32 %b) {
 ; SDIV32-LABEL: _f:
-; SDIV32: __divslong_PARM_2
+; SDIV32: inc spx, #0x4
 ; SDIV32: ecall __divslong
+; SDIV32: dec spx, #0x4
 ; SDIV32: eret
   %r = sdiv i32 %a, %b
   ret i32 %r
@@ -66,8 +69,9 @@ define i32 @f(i32 %a, i32 %b) {
 ;--- urem8.ll
 define i8 @f(i8 %a, i8 %b) {
 ; UREM8-LABEL: _f:
-; UREM8: __moduint_PARM_2
+; UREM8: inc spx, #0x2
 ; UREM8: ecall __moduint
+; UREM8: dec spx, #0x2
 ; UREM8: eret
   %r = urem i8 %a, %b
   ret i8 %r
@@ -75,8 +79,9 @@ define i8 @f(i8 %a, i8 %b) {
 ;--- urem16.ll
 define i16 @f(i16 %a, i16 %b) {
 ; UREM16-LABEL: _f:
-; UREM16: __moduint_PARM_2
+; UREM16: inc spx, #0x2
 ; UREM16: ecall __moduint
+; UREM16: dec spx, #0x2
 ; UREM16: eret
   %r = urem i16 %a, %b
   ret i16 %r
@@ -84,8 +89,9 @@ define i16 @f(i16 %a, i16 %b) {
 ;--- urem32.ll
 define i32 @f(i32 %a, i32 %b) {
 ; UREM32-LABEL: _f:
-; UREM32: __modulong_PARM_2
+; UREM32: inc spx, #0x4
 ; UREM32: ecall __modulong
+; UREM32: dec spx, #0x4
 ; UREM32: eret
   %r = urem i32 %a, %b
   ret i32 %r
@@ -93,8 +99,9 @@ define i32 @f(i32 %a, i32 %b) {
 ;--- srem8.ll
 define i8 @f(i8 %a, i8 %b) {
 ; SREM8-LABEL: _f:
-; SREM8: __modsint_PARM_2
+; SREM8: inc spx, #0x2
 ; SREM8: ecall __modsint
+; SREM8: dec spx, #0x2
 ; SREM8: eret
   %r = srem i8 %a, %b
   ret i8 %r
@@ -102,8 +109,9 @@ define i8 @f(i8 %a, i8 %b) {
 ;--- srem16.ll
 define i16 @f(i16 %a, i16 %b) {
 ; SREM16-LABEL: _f:
-; SREM16: __modsint_PARM_2
+; SREM16: inc spx, #0x2
 ; SREM16: ecall __modsint
+; SREM16: dec spx, #0x2
 ; SREM16: eret
   %r = srem i16 %a, %b
   ret i16 %r
@@ -111,8 +119,9 @@ define i16 @f(i16 %a, i16 %b) {
 ;--- srem32.ll
 define i32 @f(i32 %a, i32 %b) {
 ; SREM32-LABEL: _f:
-; SREM32: __modslong_PARM_2
+; SREM32: inc spx, #0x4
 ; SREM32: ecall __modslong
+; SREM32: dec spx, #0x4
 ; SREM32: eret
   %r = srem i32 %a, %b
   ret i32 %r

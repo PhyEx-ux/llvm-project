@@ -13,8 +13,10 @@
 
 namespace clang::driver::toolchains {
 
-// Compilation uses LLVM's ASxxxx object writer, not a host ELF assembler or
-// linker. Firmware linking remains an explicit mcs251_ld.py invocation.
+// Bare-metal ELF toolchain for Intel/STC MCS-251: uses Clang's integrated
+// assembler (MCS251AsmParser) by default, llvm-mc as external assembler,
+// llvm-ar for static libraries, and lld (-flavor mcs251) / mcs251-lld for
+// firmware linking.
 class LLVM_LIBRARY_VISIBILITY MCS251ToolChain final : public ToolChain {
 public:
   MCS251ToolChain(const Driver &D, const llvm::Triple &Triple,
@@ -23,12 +25,14 @@ public:
 
   bool isBareMetal() const override { return true; }
   bool isCrossCompiling() const override { return true; }
+  bool IsIntegratedAssemblerDefault() const override { return true; }
   bool HasNativeLLVMSupport() const override { return true; }
   bool IsMathErrnoDefault() const override { return false; }
   bool isPICDefault() const override { return false; }
   bool isPIEDefault(const llvm::opt::ArgList &) const override { return false; }
   bool isPICDefaultForced() const override { return false; }
   bool SupportsProfiling() const override { return false; }
+  const char *getDefaultLinker() const override { return "lld"; }
   UnwindTableLevel
   getDefaultUnwindTableLevel(const llvm::opt::ArgList &) const override {
     return UnwindTableLevel::None;

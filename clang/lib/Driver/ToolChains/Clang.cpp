@@ -4972,18 +4972,35 @@ renderDebugOptions(const ToolChain &TC, const Driver &D, const llvm::Triple &T,
   // Adjust the debug info kind for the given toolchain.
   TC.adjustDebugInfoKind(DebugInfoKind, Args);
 
-  // WP4 C1: the final reduction is done, so this is the effective debug
-  // request. On MCS251 the target emits no source-level debug info
-  // (SupportsDebugInformation == false), so an effective request is a hard
-  // error instead of the silent delivery of an object with zero debug
-  // sections. `-g -g0` reduces to NoDebugInfo and keeps compiling; `-g0 -g`
-  // reduces to a real kind and fails. The g_Group guard keeps the check off
-  // internally promoted line tables (optimization remarks / profiling
-  // recipes that did not ask for source debugging), which are not debug
-  // requests in the user's sense.
+  // WP4 C1: ELF object output is now the default for MCS251 and emits DWARF
+  // .debug_* sections via R_MCS251_32. Legacy ASxxxx REL (-mllvm
+  // -mcs251-object-format=rel) and plain text assembly (-S without -emit-llvm)
+  // still have no debug-info carrier, so an effective -g in those modes fails
+  // closed.
+  auto HasMCS251RELObjectFormat = [&]() {
+    const auto MllvmArgs = Args.getAllArgValues(options::OPT_mllvm);
+    bool IsREL = false;
+    for (size_t I = 0; I < MllvmArgs.size(); ++I) {
+      if (MllvmArgs[I] == "-mcs251-object-format=rel")
+        IsREL = true;
+      else if (MllvmArgs[I] == "-mcs251-object-format=elf")
+        IsREL = false;
+      else if (MllvmArgs[I] == "-mcs251-object-format" &&
+               I + 1 < MllvmArgs.size()) {
+        if (MllvmArgs[I + 1] == "rel")
+          IsREL = true;
+        else if (MllvmArgs[I + 1] == "elf")
+          IsREL = false;
+      }
+    }
+    return IsREL;
+  };
+  const bool IsMCS251TextAsm =
+      Args.hasArg(options::OPT_S) && !Args.hasArg(options::OPT_emit_llvm);
   if (T.getArch() == llvm::Triple::mcs251 &&
       DebugInfoKind != llvm::codegenoptions::NoDebugInfo &&
-      Args.hasArg(options::OPT_g_Group))
+      Args.hasArg(options::OPT_g_Group) &&
+      (HasMCS251RELObjectFormat() || IsMCS251TextAsm))
     D.Diag(diag::err_drv_mcs251_debug_unsupported);
 
   // On AIX, the debugger tuning option can be omitted if it is not explicitly

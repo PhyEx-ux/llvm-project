@@ -39,6 +39,7 @@ class Triple;
 class MCS251MCAsmInfo final : public MCAsmInfo {
 public:
   MCS251MCAsmInfo(const Triple &TT, const MCTargetOptions &Options);
+  void setELFObjectMode(bool IsELF);
 };
 } // namespace llvm
 

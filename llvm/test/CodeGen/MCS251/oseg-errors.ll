@@ -1,20 +1,20 @@
 ; RUN: split-file %s %t
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/pointer-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/pointer-call.ll -o - 2>&1 | FileCheck %s --check-prefix=PTR
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/aggregate-formal.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/aggregate-call.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/empty.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
+; Under the stack-based reentrant ABI, pointer parameters, single-field/empty
+; aggregates, and multi-argument indirect calls are all supported.
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs %t/pointer-formal.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs %t/pointer-call.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs %t/aggregate-formal.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs %t/aggregate-call.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs %t/empty.ll -o /dev/null
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -verify-machineinstrs %t/indirect.ll -o /dev/null
+; Scalar widths >32 bits (i64/f64) and weak linkage on legacy REL remain rejected.
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/i64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/f64.ll -o - 2>&1 | FileCheck %s --check-prefix=TYPE
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/indirect.ll -o - 2>&1 | FileCheck %s --check-prefix=INDIRECT
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 %t/weak.ll -o - 2>&1 | FileCheck %s --check-prefix=LINKAGE
+; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=rel %t/weak.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=LINKAGE
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %t/weak.ll -o %t/weak.o
 ;
-; Pinned to the v1 compatibility contract: this is a legacy-layout suite. The
-; llc no-flag default is the xsmall/v2-Small model (clang cc1 default).
-; PTR: LLVM ERROR: MCS251: static pointer parameters are not supported by the compatibility ABI
-; TYPE: LLVM ERROR: MCS251: arguments must be unsplit i8/i16/i32 scalars
-; INDIRECT: LLVM ERROR: MCS251 contract violation: multi-argument indirect calls are not supported
-; LINKAGE: LLVM ERROR: MCS251 contract violation: weak function definitions are not supported: the current linking model implements no weak resolution and static parameter slots require a local/external owner; provide one strong definition (an unused weak declaration is accepted)
+; TYPE: LLVM ERROR: MCS251: arguments must be i8/i16/i32/f32/i1 scalars, ordinary pointers, or supported aggregates
+; LINKAGE: LLVM ERROR: MCS251: weak/COMDAT function 'f' requires ELF object output
 
 ;--- pointer-formal.ll
  define i8 @f(i8 %a, ptr %b) { ret i8 %a }

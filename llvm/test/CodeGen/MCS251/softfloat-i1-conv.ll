@@ -26,7 +26,7 @@
 ; RUN: split-file %s %t
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/i1.ll -o - | FileCheck %s --check-prefix=O0
 ; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs %t/i1.ll -o - | FileCheck %s --check-prefix=O2
-; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/i1.ll -filetype=obj -o /dev/null
+; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %t/i1.ll -filetype=obj -mcs251-object-format=rel -o /dev/null
 
 ; The converted-to-signed-float shape: mask the boolean, negate it (true is
 ; -1), then call the signed helper.  The `sub` between the `anl` and the call

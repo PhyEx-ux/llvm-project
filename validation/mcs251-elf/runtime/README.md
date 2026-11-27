@@ -9,11 +9,13 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `crt-selfstart.yaml` | 手工 YAML fixture（ELF32/MSB/ET_REL/EM 0x9999，含 RELA） |
+| `crt-selfstart.yaml` | 手工 YAML fixture（v1 ELF32/MSB/ET_REL/EM 0x9999，含 `.note.mcs251.abi` 与 RELA） |
+| `crt-selfstart-v2.yaml` | v2 对象身份版本（`e_flags=0x102` + `.mcs251.attributes`，由 `gen-crt-v2.sh` 生成、`check-crt-v2.py` 校验） |
 | `gen-crt-elf.sh` | 生成器：冻结 yaml2obj 造对象 + 冻结 llvm-readobj 冒烟校验 |
 | `crt.o` | 生成物（3096 字节；可用生成器随时重现） |
 | `crt-xdata-init-walker.asm` | X4 XDATA_INIT 遍历器的 sdas251 汇编证据源（不参与链接） |
-| `crt-irq.yaml` / `gen-crt-irq.sh` / `check-crt-irq.py` | T08 IRQ 模式 fixture（独立 checker 20 项断言，含 X4 遍历器；G1-2 起 `--chain` 再验发布配方链接链） |
+| `crt-irq.yaml` / `crt-irq-v2.yaml` / `gen-crt-irq.sh` / `gen-crt-v2.sh` / `check-crt-irq.py` / `check-crt-v2.py` | G1 127 槽 IRQ 模式 fixture（v1 与 v2 双身份；`BOOT=0xFF0500`、`CSEG=0xFF0700`，独立 checker 20 项断言 + `--chain` 链接链验收） |
+| `crt-bit.yaml` / `crt-bit-walker.asm` | BT14 位感知 CRT（含 `.mcs251.bitprofile` 与 `__mcs251_bit_init`，消费 `lld` 合成的 `BITINIT` 3B 掩码 RMW 表以保护邻位） |
 
 ## 路线裁定：yaml2obj 手造（路 A），不采用 C + fork-clang（路 B）
 

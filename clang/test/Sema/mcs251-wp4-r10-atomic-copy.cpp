@@ -1,8 +1,8 @@
 // RUN: %clang_cc1 -triple mcs251-unknown-none -std=gnu++17 -fsyntax-only -verify %s
+// expected-no-diagnostics
 //
-// A trivial C++ copy constructor receives its source by reference, so the
-// source expression has no lvalue-to-rvalue conversion for the atomic-use
-// scanner to find. The generated memberwise copy still reads every subobject.
+// C11/GNU atomics are supported on MCS251 via EA critical sections, so C++
+// copies and moves of records containing _Atomic subobjects are accepted.
 
 struct AtomicMember {
   _Atomic(int) value;
@@ -12,7 +12,6 @@ struct AtomicMember {
 void use(AtomicMember *);
 
 void copy_atomic_member(AtomicMember *source) {
-  // expected-error@+1 {{access to an object with an atomic subobject}}
   AtomicMember copy = *source;
   use(&copy);
 }
@@ -28,7 +27,6 @@ void passing_reference_is_not_a_copy(AtomicMember *source) {
 }
 
 void move_atomic_member(AtomicMember *source) {
-  // expected-error@+1 {{access to an object with an atomic subobject}}
   AtomicMember moved = static_cast<AtomicMember &&>(*source);
   use(&moved);
 }
@@ -44,7 +42,6 @@ void dead_arm_copy(AtomicMember *source) {
 }
 
 void selected_arm_copy(AtomicMember *source) {
-  // expected-error@+1 {{access to an object with an atomic subobject}}
   AtomicMember copy = true ? AtomicMember(*source) : AtomicMember{};
   use(&copy);
 }
@@ -56,7 +53,6 @@ struct DerivedAtomic : AtomicBase {
   int ordinary;
 };
 void copy_atomic_base(DerivedAtomic *source) {
-  // expected-error@+1 {{access to an object with an atomic subobject}}
   DerivedAtomic copy = *source;
   (void)copy.ordinary;
 }

@@ -139,9 +139,9 @@ EXPECTED_SYMBOLS = ("r5_pointer_target", "r5_symbol_pointer",
 EXPECTED_RELOC_SECTION = ".rela.mcs251.xinit"
 EXPECTED_RELOC_TARGET = "r5_pointer_target"
 
-REJECTED = {
-    # (1) label entry into a constant-false branch. A relaxed fence lowers to
-    # nothing in IR, so no later layer can repair a wrong decision here.
+# Atomic operations are now supported on MCS251 (via EA critical sections), so
+# these shapes must compile cleanly across syntax/ir/obj at -O0 and -O2.
+ACCEPTED_ATOMICS = {
     "goto-if-fence": """
 int f(void) { return ({ goto L; if (0) { L: __atomic_signal_fence(0); } 1; }); }
 """,
@@ -151,21 +151,36 @@ int f(void) { return ({ goto L; while (0) { L: __atomic_signal_fence(0); } 1; })
     "goto-for-fence": """
 int f(void) { return ({ goto L; for (; 0;) { L: __atomic_signal_fence(0); } 1; }); }
 """,
-    # A C11 atomic store is the second shape whose later lowering may fold the
-    # operation away, so the source decision is the only one that decides it.
     "goto-c11-store": """
 int f(_Atomic int *p) {
   return ({ goto L; if (0) { L: __c11_atomic_store(p, 1, 5); } 1; });
 }
 """,
-    # (1b) case entry from an enclosing switch.
     "switch-case-dead-if": """
 int f(int x) { return ({ switch (x) { if (0) { case 1: __atomic_signal_fence(0); } } 1; }); }
 """,
     "switch-case-dead-for": """
 int f(int x) { return ({ switch (x) { for (; 0;) { case 1: __atomic_signal_fence(0); } } 1; }); }
 """,
-    # (2) the A2 shapes that must decide on the final value.
+    "cpp-condvar-if": ("""
+int f(void) { return ({ if (int y = (__atomic_signal_fence(0), 1)) {} 0; }); }
+""", "c++17"),
+    "cpp-condvar-while": ("""
+int f(void) { return ({ while (int y = (__atomic_signal_fence(0), 0)) {} 0; }); }
+""", "c++17"),
+    "cpp-condvar-for": ("""
+int f(void) { return ({ for (; int y = (__atomic_signal_fence(0), 0);) {} 0; }); }
+""", "c++17"),
+    "cpp-condvar-switch": ("""
+int f(void) { return ({ switch (int y = (__atomic_signal_fence(0), 1)) { default: break; } 0; }); }
+""", "c++17"),
+    "cpp-condvar-atomic-init": ("""
+int f(_Atomic int *p) { return ({ if (int y = (__c11_atomic_init(p, 1), 1)) {} 0; }); }
+""", "c++17"),
+}
+
+REJECTED = {
+    # (1) the A2 shapes that must decide on the final value.
     "a2-gnu-cond-abs": """
 int *p = 0 ?: (int *)0x5678;
 """,
@@ -176,12 +191,8 @@ int *p = ((unsigned char *)0x1234 != (unsigned char *)0) ? (unsigned char *)0x9A
     "a2-agg-abs-second": """
 unsigned char *p[2] = {(unsigned char *)0, (unsigned char *)0x1234};
 """,
-    # (3) WP4 round 6, A2 union traversal. A union initializes exactly ONE
+    # (2) WP4 round 6, A2 union traversal. A union initializes exactly ONE
     # member -- the one the designator names, not the first one declared.
-    # Pairing the initializer with the first field judged a non-pointer
-    # member's integer initializer as a pointer (false rejection) and a
-    # pointer member's initializer as an integer (missed rejection that then
-    # disagreed with the IR/object layers).
     "a2-union-nonfirst-ptr": """
 union Box { int tag; int *ptr; };
 union Box box = { .ptr = (int *)0x1234 };
@@ -195,34 +206,10 @@ union U { int tag; int *ptr; };
 struct S { int n; union U u; };
 struct S s = { 1, { .ptr = (int *)0x1234 } };
 """,
-    # The anonymous-union-member pair of the same rule (field-order variation
-    # is the whole point of the union fix).
     "a2-union-anon-ptr": """
 struct Box { int n; union { unsigned tag; int *ptr; }; };
 struct Box b = { 1, { .ptr = (int *)0x1234 } };
 """,
-    # (4) WP4 round 6: the C++ condition-variable shapes, six cells each.
-    # The initializer of `if (T y = init)` runs before the condition is
-    # tested, in all four statement forms; the atomic operation inside it is
-    # an operation. These run in C++ mode (condition declarations are C++
-    # [stmt.select]); the helper's per-shape `lang` field carries the mode.
-    "cpp-condvar-if": ("""
-int f(void) { return ({ if (int y = (__atomic_signal_fence(0), 1)) {} 0; }); }
-""", "c++17"),
-    "cpp-condvar-while": ("""
-int f(void) { return ({ while (int y = (__atomic_signal_fence(0), 0)) {} 0; }); }
-""", "c++17"),
-    "cpp-condvar-for": ("""
-int f(void) { return ({ for (; int y = (__atomic_signal_fence(0), 0);) {} 0; }); }
-""", "c++17"),
-    "cpp-condvar-switch": ("""
-int f(void) { return ({ switch (int y = (__atomic_signal_fence(0), 1)) { default: break; } 0; }); }
-""", "c++17"),
-    # `__c11_atomic_init` initializes the condition variable through the C11
-    # atomic-init builtin: same statement forms, same verdict.
-    "cpp-condvar-atomic-init": ("""
-int f(_Atomic int *p) { return ({ if (int y = (__c11_atomic_init(p, 1), 1)) {} 0; }); }
-""", "c++17"),
 }
 
 CRASH_TEXT = (
@@ -306,6 +293,47 @@ if not cc1:
     sys.exit("usage: mcs251-r5-obj-check.py <obj>... -- <clang-cc1 argv...>")
 
 with tempfile.TemporaryDirectory() as tmp:
+    for name, spec in ACCEPTED_ATOMICS.items():
+        if isinstance(spec, tuple):
+            text, std = spec
+        else:
+            text, std = spec, "gnu11"
+        suffix = ".cpp" if std.startswith("c++") else ".c"
+        src = Path(tmp) / (name + suffix)
+        src.write_text(text)
+        modes = {
+            "syntax": ["-fsyntax-only"],
+            "ir": ["-emit-llvm"],
+            "obj": ["-emit-obj"],
+        }
+        for opt in ("-O0", "-O2"):
+            for mode, mode_args in modes.items():
+                out = Path(tmp) / f"{name}.{mode}.out"
+                out.unlink(missing_ok=True)
+                result = subprocess.run(
+                    cc1 + [
+                        "-triple", "mcs251-unknown-none",
+                        f"-std={std}",
+                        "-Wno-unused-value",
+                        opt,
+                        *mode_args,
+                        str(src),
+                        "-o", str(out),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                label = f"{name}{opt}.{mode}"
+                if result.returncode != 0:
+                    failures.append(
+                        f"{label}: expected status 0, got {result.returncode}: {result.stderr[:300]}"
+                    )
+                elif mode == "obj":
+                    try:
+                        read_elf(out)
+                    except ValueError as exc:
+                        failures.append(f"{label}: {exc}")
+
     for name, spec in REJECTED.items():
         # A shape is either plain C source or a (source, language) pair; the
         # C++ condition-variable shapes need the C++ mode condition

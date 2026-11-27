@@ -41,6 +41,7 @@
  * 红线：纯 C；无 64 位；无浮点运算符；无内联汇编；无 pragma。
  */
 
+#include <stdarg.h>
 #include "mcs251_libc.h"
 #include "mcs251_printf_internal.h"
 
@@ -234,69 +235,19 @@ static void out_hex(uint32_t v, uint32_t wpu)
  * 判定规则（何时可用无浮点引擎）冻结于该头文件。 */
 
 
-/* ---- 格式化引擎 ----
- * 解析 fmt，按序从 PARM 静态槽取实参输出。
- * output_mode 已由调用方设置。
- *
- * 2026-09-09 Kazimi：去 g_args[6]/g_nargs（DSEG 预算，见文件头）。
- * 实参直接读 printf/sprintf 的静态参数槽——引擎本就运行在参数槽已
- * 写好之后，语义等价（本就非重入）。
- * 2026-09-15 B-S4 迁移（G2-VARIADIC-DESIGN §4.7）：printf/sprintf 定义
- * 改变参，具名 a0..a5 与镜像回存退役。目标侧槽由调用方后端在调用前
- * 写入（LowerCall 既有机制）+ 本对象 B1 延续槽补发（_printf_PARM_2..7 /
- * _sprintf_PARM_3..8）提供；宿主 oracle 侧由 printf/sprintf 体内的
- * va_start/va_arg shim 把变参物化进同名全局（两端同源的新机制）。
- * 取参用 if 链 + volatile 序号（k），防止 clang 把多值比较综合成
- * switch IR（switch -> br_jt 后端不支持，同文件既有手法）。 */
-/* C 标识符不带前导下划线：目标 '_' 前缀后恰为后端参数槽符号
- * _printf_PARM_2（多一层下划线会变成另一个符号 __printf_PARM_2，
- * 链接期未定义）。printf 槽 = _PARM_2..7（6 变参延续槽）；
- * sprintf 槽 = _PARM_3..8（_PARM_2 是 fmt 指针槽、由被调方
- * LowerFormalArguments 既有路径读，引擎不经手）。
- * 槽位宽度：目标 32 位（指针与提升标量同 4B，get_arg 原 u32 读法
- * 逐字节不变）；宿主 64 位（uintptr_t——%s 的指针实参必须完整过槽，
- * 截成低 32 位会在 out_str 解引用时崩溃，2026-09-15 B-S4 实测）。
- * 目标侧 typedef 恒 uint32_t，对象级布局零变化。 */
+/* ---- 格式化引擎（Route B 栈 ABI：标准 va_list / va_arg，无 6 参上限） ----
+ * 目标侧与宿主侧统一通过 va_list 读取变参；在 MCS-251 ILP32 下指针、整数与
+ * binary32 浮点提升值均为 4 字节标量，按 uint32_t / const char* 直接取参，
+ * 既完全适配 Route B 栈变参 ABI，又不引入 float/double/i64 IR token。 */
 #ifdef MCS251_RT_TARGET
 typedef uint32_t printf_arg_t;
 #else
 typedef uintptr_t printf_arg_t;
 #endif
-extern volatile printf_arg_t printf_PARM_2, printf_PARM_3, printf_PARM_4,
-    printf_PARM_5, printf_PARM_6, printf_PARM_7;
-extern volatile printf_arg_t sprintf_PARM_3, sprintf_PARM_4, sprintf_PARM_5,
-    sprintf_PARM_6, sprintf_PARM_7, sprintf_PARM_8;
-#ifdef MCS251_RT_TARGET
-/* 目标侧：槽对象由本 TU 的 B-S2 延续槽补发定义（emitParameterSlots），
- * 上面 extern 即绑定到它们。 */
-#else
-/* 宿主侧：无后端槽补发，这里定义同名全局供 oracle 编译本文件使用；
- * printf/sprintf 体内的 va_start/va_arg shim 在调用引擎前写入。 */
-volatile printf_arg_t printf_PARM_2, printf_PARM_3, printf_PARM_4,
-    printf_PARM_5, printf_PARM_6, printf_PARM_7;
-volatile printf_arg_t sprintf_PARM_3, sprintf_PARM_4, sprintf_PARM_5,
-    sprintf_PARM_6, sprintf_PARM_7, sprintf_PARM_8;
-#include <stdarg.h>   /* 宿主桥 shim 专用（目标侧不用 va_*） */
-#endif
 
 __attribute__((noinline))
-static printf_arg_t get_arg(uint32_t idx)
+static void format_engine(const char* fmt, va_list* ap)
 {
-    volatile uint32_t k = idx;
-    uint32_t m = g_output_mode;
-
-    if (k == 0u) return (m == 0u) ? printf_PARM_2 : sprintf_PARM_3;
-    if (k == 1u) return (m == 0u) ? printf_PARM_3 : sprintf_PARM_4;
-    if (k == 2u) return (m == 0u) ? printf_PARM_4 : sprintf_PARM_5;
-    if (k == 3u) return (m == 0u) ? printf_PARM_5 : sprintf_PARM_6;
-    if (k == 4u) return (m == 0u) ? printf_PARM_6 : sprintf_PARM_7;
-    return (m == 0u) ? printf_PARM_7 : sprintf_PARM_8;
-}
-
-__attribute__((noinline))
-static void format_engine(const char* fmt)
-{
-    uint32_t ai = 0u;
     const char* p = fmt;
 
     for (;;) {
@@ -373,68 +324,43 @@ static void format_engine(const char* fmt)
                 out_char('%');
                 p++;
             } else if (fc == (uint32_t)'d' || fc == (uint32_t)'i') {
-                if (ai < 6u) {
-                    out_int((int32_t)get_arg(ai), ((uint32_t)(uint8_t)pad << 16) | width);
-                    ai++;
-                }
+                printf_arg_t arg = va_arg(*ap, printf_arg_t);
+                out_int((int32_t)arg, ((uint32_t)(uint8_t)pad << 16) | width);
                 p++;
             } else if (fc == (uint32_t)'u') {
-                if (ai < 6u) {
-                    out_uint(get_arg(ai), ((uint32_t)(uint8_t)pad << 16) | width);
-                    ai++;
-                }
+                printf_arg_t arg = va_arg(*ap, printf_arg_t);
+                out_uint((uint32_t)arg, ((uint32_t)(uint8_t)pad << 16) | width);
                 p++;
             } else if (fc == (uint32_t)'x') {
-                if (ai < 6u) {
-                    out_hex(get_arg(ai), ((uint32_t)(uint8_t)pad << 16) | width);
-                    ai++;
-                }
+                printf_arg_t arg = va_arg(*ap, printf_arg_t);
+                out_hex((uint32_t)arg, ((uint32_t)(uint8_t)pad << 16) | width);
                 p++;
             } else if (fc == (uint32_t)'X') {
-                if (ai < 6u) {
-                    out_hex(get_arg(ai), 0x80000000u | ((uint32_t)(uint8_t)pad << 16) | width);
-                    ai++;
-                }
+                printf_arg_t arg = va_arg(*ap, printf_arg_t);
+                out_hex((uint32_t)arg,
+                        0x80000000u | ((uint32_t)(uint8_t)pad << 16) | width);
                 p++;
             } else if (fc == (uint32_t)'s') {
-                if (ai < 6u) {
-                    out_str((const char*)(uintptr_t)get_arg(ai));
-                    ai++;
-                }
+                const char* s = va_arg(*ap, const char*);
+                out_str(s);
                 p++;
             } else if (fc == (uint32_t)'c') {
-                if (ai < 6u) {
-                    out_char((char)get_arg(ai));
-                    ai++;
-                }
+                printf_arg_t arg = va_arg(*ap, printf_arg_t);
+                out_char((char)arg);
                 p++;
             }
 #ifndef MCS251_PRINTF_NO_FLOAT
-            /* 完整形态的浮点分支（默认）。裁剪形态（无浮点引擎，
-             * -DMCS251_PRINTF_NO_FLOAT）：三分支整体缺席，f/F/g/G/e/E
-             * 落入下方未知格式符分支（原样输出 '%' + 格式符；该分
-             * 支不消费实参、ai 不前进）。违反"可证明程序无浮点格
-             * 式"前提时不提供降级安全保证：后续转换会错读浮点实
-             * 参槽乃至非法访存（宿主探针 %f %s 实测 %s 解引用首槽
-             * 浮点位模式即 SIGSEGV）；仅当按 mcs251_printf_internal.h
-             * 冻结规则可证明程序无浮点格式时才允许该形态。 */
             else if (fc == (uint32_t)'f' || fc == (uint32_t)'F') {
-                if (ai < 6u) {
-                    out_float(get_arg(ai), precision);
-                    ai++;
-                }
+                printf_arg_t arg = va_arg(*ap, printf_arg_t);
+                out_float((uint32_t)arg, precision);
                 p++;
             } else if (fc == (uint32_t)'g' || fc == (uint32_t)'G') {
-                if (ai < 6u) {
-                    out_float(get_arg(ai), 0x80000000u | precision);
-                    ai++;
-                }
+                printf_arg_t arg = va_arg(*ap, printf_arg_t);
+                out_float((uint32_t)arg, 0x80000000u | precision);
                 p++;
             } else if (fc == (uint32_t)'e' || fc == (uint32_t)'E') {
-                if (ai < 6u) {
-                    out_float(get_arg(ai), precision);
-                    ai++;
-                }
+                printf_arg_t arg = va_arg(*ap, printf_arg_t);
+                out_float((uint32_t)arg, precision);
                 p++;
             }
 #endif /* !MCS251_PRINTF_NO_FLOAT */
@@ -447,62 +373,26 @@ static void format_engine(const char* fmt)
     }
 }
 
-/* ---- printf ----
- * B-S4 迁移（G2-VARIADIC-DESIGN §4.7）：固定 7 参 → 变参
- * （固定形参 7→1，P-4 记录 bit3 0→1、param_count 7→1）。
- * fmt 走 DPL 首参通道；6 个变参延续槽 _printf_PARM_2..7 由调用方
- * 后端在调用前写入 + 本对象 B1 延续槽补发（对象级布局与迁移前
- * 逐字节相同，探针 R：6×4B 连续 @0x0..0x14）。目标侧无物化代码；
- * 宿主（Oracle-A）侧由 va_start/va_arg shim 物化槽值。 */
+/* ---- printf ---- */
 void printf(const char* fmt, ...)
 {
-#ifndef MCS251_RT_TARGET
-    /* 宿主桥 shim：宿主没有后端槽写机制，把变参物化进同名全局。
-     * 契约：宿主 oracle 调用方必须恰好传满 6 个 printf_arg_t
-     * (uintptr_t) 实参——少于 6 个或类型不匹配时 va_arg 是未定义
-     * 行为（会读入栈参数区，不是无害的寄存器保存区读）。oracle
-     * battery（/tmp/bs4-host/battery.c 先例）以补齐六参的方式
-     * 调用；本 shim 不对欠参调用提供任何保证。 */
     va_list ap;
     va_start(ap, fmt);
-    printf_PARM_2 = va_arg(ap, printf_arg_t);
-    printf_PARM_3 = va_arg(ap, printf_arg_t);
-    printf_PARM_4 = va_arg(ap, printf_arg_t);
-    printf_PARM_5 = va_arg(ap, printf_arg_t);
-    printf_PARM_6 = va_arg(ap, printf_arg_t);
-    printf_PARM_7 = va_arg(ap, printf_arg_t);
-    va_end(ap);
-#endif
     g_output_mode = 0u;
-    format_engine(fmt);
+    format_engine(fmt, &ap);
+    va_end(ap);
 }
 
-/* ---- sprintf ----
- * B-S4 迁移：固定 7 参（fmt+6，无 buf）→ 变参
- * sprintf(buf, fmt, ...)（固定形参 7→2，P-4 记录 bit3 0→1、
- * param_count 7→2）。buf = 首源参数（DPL 寄存器通道、无槽），
- * fmt = 第二源参数 → _sprintf_PARM_2（4B 指针槽），变参延续槽
- * _sprintf_PARM_3..8（对象 7 槽 28B，较迁移前 +4B）。
- * buf 语义：输出写调用方缓冲（g_out_buf），g_sprintf_pos 每次调用
- * 清零，24B 截断 + 强制 NUL 维持。 */
+/* ---- sprintf ---- */
 void sprintf(char* buf, const char* fmt, ...)
 {
-#ifndef MCS251_RT_TARGET
-    /* 宿主桥 shim：变参从 fmt 之后起取（buf 是固定首参）。 */
     va_list ap;
     va_start(ap, fmt);
-    sprintf_PARM_3 = va_arg(ap, printf_arg_t);
-    sprintf_PARM_4 = va_arg(ap, printf_arg_t);
-    sprintf_PARM_5 = va_arg(ap, printf_arg_t);
-    sprintf_PARM_6 = va_arg(ap, printf_arg_t);
-    sprintf_PARM_7 = va_arg(ap, printf_arg_t);
-    sprintf_PARM_8 = va_arg(ap, printf_arg_t);
-    va_end(ap);
-#endif
     g_out_buf = buf;
     g_sprintf_pos = 0u;
     g_output_mode = 1u;
-    format_engine(fmt);
+    format_engine(fmt, &ap);
+    va_end(ap);
     /* 确保 NUL 结尾（超长截断：末字节强制 NUL，与迁移前语义一致） */
     if (g_sprintf_pos < SPRINTF_BUFSZ) {
         g_out_buf[g_sprintf_pos] = 0;

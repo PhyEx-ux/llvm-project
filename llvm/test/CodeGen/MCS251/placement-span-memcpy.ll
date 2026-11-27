@@ -16,21 +16,19 @@
 ; ELF: Name: .mcu.fixed.mcp
 ; ELF: Type: SHT_PROGBITS
 ; ELF: Flags [ (0x6)
-; ELF: Size: 227
-; The inline expansion never leaves a call behind: the only relocations of
-; the entity's section are the parameter-slot loads.
-; ELF: R_MCS251_MID8 _mcp_PARM_2
-; ELF: R_MCS251_LO8 _mcp_PARM_2
-; ELF: R_MCS251_HI8 _mcp_PARM_2
+; ELF: Size: 247
+; Under the stack-based ABI, `%s` arrives on the stack (no `_mcp_PARM_2` static
+; slot), and the inline 16B memcpy leaves zero relocations in `.mcu.fixed.mcp`.
+; ELF-NOT: _mcp_PARM_2
 ; ELF: Name: _mcp
 ; ELF: Value: 0x0
-; ELF: Size: 227
+; ELF: Size: 247
 ; ELF: Type: Function
 ; ELF: Section: .mcu.fixed.mcp
 ;
-; NOTE.size == sh_size == 227 decoded and re-hashed by the independent
+; NOTE.size == sh_size == 247 decoded and re-hashed by the independent
 ; oracle (a FAIL, never a SKIP; printed sizes are not acceptance).
-; RUN: %python %S/Inputs/check-placement-note.py %t.o mcp 2 1 0 0xFC7000 227 1 0
+; RUN: %python %S/Inputs/check-placement-note.py %t.o mcp 2 1 0 0xFC7000 247 1 0
 
 target triple = "mcs251-unknown-none"
 

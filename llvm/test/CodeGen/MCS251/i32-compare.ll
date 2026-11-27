@@ -1,6 +1,6 @@
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs < %s | FileCheck %s
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 < %s | FileCheck %s
-; RUN: llc -mtriple=mcs251 -filetype=obj < %s -o %t
+; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=rel < %s -o %t
 ;
 ; All ten integer conditions, including materialisation and i32 select.
 ; Each jcc is the inverse condition, skipping the long true-edge EJMP.

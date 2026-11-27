@@ -1,7 +1,7 @@
-; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj %S/oseg-multi.ll -o %t.multi.rel
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=rel %S/oseg-multi.ll -o %t.multi.rel
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %S/oseg-multi.ll -o %t.multi.o
 ; RUN: %python %S/Inputs/check-elf-rela.py %t.multi.o %t.multi.rel
-; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj %S/Inputs/oseg-caller.ll -o %t.caller.rel
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=rel %S/Inputs/oseg-caller.ll -o %t.caller.rel
 ; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,1,32,8,1 -filetype=obj -mcs251-object-format=elf %S/Inputs/oseg-caller.ll -o %t.caller.o
 ; RUN: %python %S/Inputs/check-elf-rela.py %t.caller.o %t.caller.rel
 ; RUN: llvm-readobj -r %t.caller.o | FileCheck %s --check-prefix=CALLER
@@ -11,12 +11,10 @@
 ; Pinned to the v1 compatibility contract: this is a legacy-layout suite. The
 ; llc no-flag default is the xsmall/v2-Small model (clang cc1 default).
 ;
-; Cross-module slots remain ordinary symbol references. Taking a function's
-; address alone must not invent undefined parameter-slot dependencies.
-; CALLER-DAG: R_MCS251_MID8 _mixed_PARM_3 0x0
-; CALLER-DAG: R_MCS251_LO8 _mixed_PARM_3 0x0
-; CALLER-DAG: R_MCS251_HI8 _mixed_PARM_3 0x0
-; CALLER-DAG: R_MCS251_24 _mixed 0x0
+; Cross-module calls pass continuation arguments on the stack (no `_PARM_`
+; relocations). Taking a function's address alone emits an undefined symbol ref.
+; CALLER-NOT: _PARM_
+; CALLER: R_MCS251_24 _mixed 0x0
 ; ADDRESS: R_MCS251_MID8 _remote 0x0
 ; ADDRESS: Name: _remote
 ; ADDRESS: Section: Undefined

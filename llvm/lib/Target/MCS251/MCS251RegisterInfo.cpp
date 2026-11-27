@@ -10,6 +10,7 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -26,8 +27,13 @@ MCS251RegisterInfo::MCS251RegisterInfo(unsigned PointerBits)
 
 const MCPhysReg *
 MCS251RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
-  static const MCPhysReg NoCalleeSaved[] = {0};
-  return NoCalleeSaved;
+  if (MF && MF->getFunction().getCallingConv() == CallingConv::MCS251_INTR) {
+    // ISRs emit their own fixed 37B save/restore frame (covering DR12 & DR8);
+    // PEI must not double-save callee-saved registers in an interrupt entry.
+    static const MCPhysReg NoCalleeSaved[] = {0};
+    return NoCalleeSaved;
+  }
+  return CSR_MCS251_SaveList;
 }
 
 // The caller-side view of the same ABI fact: which registers survive an
@@ -108,8 +114,6 @@ MCS251RegisterInfo::getPointerRegClass(unsigned Kind) const {
 bool MCS251RegisterInfo::eliminateFrameIndex(
     MachineBasicBlock::iterator II, int SPAdj, unsigned FIOperandNum,
     RegScavenger *RS) const {
-  assert(SPAdj == 0 && "MCS251 has no SP-adjusting call sequences");
-
   MachineInstr &MI = *II;
   MachineFunction &MF = *MI.getParent()->getParent();
   const TargetFrameLowering *TFL = MF.getSubtarget().getFrameLowering();
@@ -118,6 +122,12 @@ bool MCS251RegisterInfo::eliminateFrameIndex(
   int FI = MI.getOperand(FIOperandNum).getIndex();
   Register FrameReg;
   int64_t Dis = TFL->getFrameIndexReference(MF, FI, FrameReg).getFixed() + Off;
+  // For StackGrowsUp, PEI sets SPAdj = -CallFrameBytes inside an active
+  // ADJCALLSTACKDOWN..ADJCALLSTACKUP sequence. When addressing relative to SPX
+  // (DR60), the incremented SPX shifts frame displacements by +SPAdj. When
+  // anchored to DR16 (hasFP), DR16 is invariant across call sequences.
+  if (FrameReg == MCS251::DR60)
+    Dis += SPAdj;
   if (!isInt<16>(Dis))
     reportFatalUsageError("MCS251: frame offset out of the signed 16-bit "
                        "displacement range (large frames need a dpx-based "
@@ -176,14 +186,9 @@ bool MCS251RegisterInfo::eliminateFrameIndex(
   case MCS251::ADD16fi:
     // Frame-index pointer materialisation: morph into the plain immediate
     // form. add wr,#imm16 wraps mod 2^16, which is the correct region-00
-    // behaviour for the negative displacement (Phase 8 ruling). This path
-    // reads SPX at runtime, so it is only valid while SPX is the frame
-    // reference -- a var-sized function would need to materialise the dr16
-    // anchor (not yet implemented).
-    if (MF.getFrameInfo().hasVarSizedObjects())
-      reportFatalUsageError("MCS251: taking the address of a frame object in a "
-                         "function with dynamic allocas is not supported "
-                         "(needs an anchor read, not yet implemented)");
+    // behaviour for the negative displacement (Phase 8 ruling). Works for both
+    // SPX-relative frames (with SPAdj) and DR16-anchored dynamic-alloca frames
+    // (FIADDR reads wr18 = low 16 bits of DR16 when hasVarSizedObjects()).
     MI.setDesc(
         MF.getSubtarget().getInstrInfo()->get(MCS251::ADD16ri));
     MI.getOperand(FIOperandNum).ChangeToImmediate(Dis & 0xffff);

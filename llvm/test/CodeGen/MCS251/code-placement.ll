@@ -6,7 +6,7 @@
 ; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/struct.ll -o %t/struct.o
 ; RUN: llvm-readobj --sections --section-data --symbols %t/struct.o | FileCheck %s --check-prefix=STRUCT
 ; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf %t/scalar-align.ll -o %t/sc.o 2>&1 | FileCheck %s --check-prefix=SCALIGN
-; RUN: not llc -mtriple=mcs251 -filetype=obj %t/defs.ll -o %t/rel.o 2>&1 | FileCheck %s --check-prefix=REL
+; RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=rel %t/defs.ll -o %t/rel.o 2>&1 | FileCheck %s --check-prefix=REL
 ;
 ; X3 placement: an AS4 (__code) definition is a read-only CODE-space image
 ; emitted in place in CSEG exactly like the ordinary RO path (PROGBITS in the

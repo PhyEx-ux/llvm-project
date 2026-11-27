@@ -1,37 +1,28 @@
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %s -o - | FileCheck %s --check-prefix=ASM
 ; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs %s -o - | FileCheck %s --check-prefix=ASM
-; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs -filetype=obj %s -o - | FileCheck %s --check-prefix=OBJ
-; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs -filetype=obj %s -o - | FileCheck %s --check-prefix=OBJ
+; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs -filetype=obj -mcs251-object-format=rel %s -o - | FileCheck %s --check-prefix=OBJ
+; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs -filetype=obj -mcs251-object-format=rel %s -o - | FileCheck %s --check-prefix=OBJ
 ; RUN: llc -mtriple=mcs251 -O0 -verify-machineinstrs %S/Inputs/oseg-caller.ll -o - | FileCheck %s --check-prefix=CALL
 ; RUN: llc -mtriple=mcs251 -O2 -verify-machineinstrs %S/Inputs/oseg-caller.ll -o - | FileCheck %s --check-prefix=CALL
-; RUN: llc -mtriple=mcs251 -filetype=obj %S/Inputs/oseg-caller.ll -o - | FileCheck %s --check-prefix=EXTERN
+; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=rel %S/Inputs/oseg-caller.ll -o - | FileCheck %s --check-prefix=EXTERN
 ;
-; ASM: .area REG_BANK_0 (OVR,DATA)
-; ASM-NEXT: .ds 8
-; ASM: .area OSEG (OVR,DATA)
-; ASM: _bytes_PARM_2:
-; ASM-NEXT: .ds 1
-; ASM: _bytes_PARM_3:
-; ASM-NEXT: .ds 1
-; ASM: .area CSEG (CODE)
+; Stack-based reentrant ABI: continuation arguments arrive on the stack below
+; the return address (`@dr60-0x...`) and callers push outgoing continuation
+; arguments via `inc spx` / `@dr60` / `dec spx` (no compiler-generated OSEG /
+; DSEG `_PARM_` slots).
+;
+; ASM-NOT: .area OSEG
 ; ASM-LABEL: _bytes:
-; ASM: .area OSEG (OVR,DATA)
-; ASM: _mixed_PARM_2:
-; ASM-NEXT: .ds 1
-; ASM: _mixed_PARM_3:
-; ASM-NEXT: .ds 4
+; ASM: mov {{r[0-9]+}}, dpl
+; ASM: mov {{r[0-9]+}}, @dr60-0x0003
+; ASM: mov {{r[0-9]+}}, @dr60-0x0004
+; ASM: eret
 ; ASM-LABEL: _mixed:
-; ASM: .area OSEG (OVR,DATA)
-; ASM: _wide_PARM_2:
-; ASM-NEXT: .ds 4
-; ASM: _wide_PARM_3:
-; ASM-NEXT: .ds 2
+; ASM: mov {{r[0-9]+}}, @dr60-0x
+; ASM: eret
 ; ASM-LABEL: _wide:
-; ASM: .area DSEG (DATA)
-; ASM: _nested_PARM_2:
-; ASM-NEXT: .ds 4
-; ASM: _nested_PARM_3:
-; ASM-NEXT: .ds 2
+; ASM: mov {{r[0-9]+}}, @dr60-0x
+; ASM: eret
 ; ASM-LABEL: _nested:
 ; ASM-NOT: ecall
 ; ASM-DAG: mov {{r[0-9]+}}, a
@@ -39,81 +30,68 @@
 ; ASM-DAG: mov {{r[0-9]+}}, dph
 ; ASM-DAG: mov {{r[0-9]+}}, dpl
 ; ASM: (_nested_PARM_2) >> 8
-; ASM: (_wide_PARM_2) >> 8
-; ASM: mov @{{dr[0-9]+}}+0x0003,
-; ASM: (_wide_PARM_3) >> 8
-; ASM: mov @{{dr[0-9]+}}+0x0001,
+; ASM: inc spx, #0x4
+; ASM: inc spx, #0x2
 ; ASM: mov dpl,
 ; ASM: mov dph,
 ; ASM: mov b,
 ; ASM: mov a,
 ; ASM-NEXT: ecall _wide
-; ASM: mov {{r[0-9]+}}, @{{dr[0-9]+}}+0x0003
+; ASM: dec spx, #0x4
+; ASM: dec spx, #0x2
 ; ASM: (_nested_PARM_3) >> 8
-; ASM: .area OSEG (OVR,DATA)
-; ASM-NOT: .globl _local_PARM_2
-; ASM: _local_PARM_2:
-; ASM: .L_private_PARM_2:
-; ASM-NOT: .globl .L_private_PARM_2
-; ASM: raw_PARM_2:
+; ASM: eret
 ; ASM-LABEL: _local_user:
-; ASM: (_local_PARM_2) >> 8
+; ASM: inc spx, #0x2
 ; ASM: ecall _local
-; ASM: (.L_private_PARM_2) >> 8
+; ASM: dec spx, #0x2
+; ASM: inc spx, #0x2
 ; ASM: ecall .L_private
-; ASM: (raw_PARM_2) >> 8
+; ASM: dec spx, #0x2
+; ASM: inc spx, #0x2
 ; ASM: ecall raw
+; ASM: dec spx, #0x2
+; ASM: eret
 ;
-; Independent OSEG records start each leaf frame at offset zero.
-; OBJ: A OSEG size 2 flags 4 addr 0
-; OBJ-NEXT: S _bytes_PARM_2 Def000000
-; OBJ-NEXT: S _bytes_PARM_3 Def000001
-; OBJ-NEXT: A OSEG size 5 flags 4 addr 0
-; OBJ-NEXT: S _mixed_PARM_2 Def000000
-; OBJ-NEXT: S _mixed_PARM_3 Def000001
-; OBJ-NEXT: A OSEG size 6 flags 4 addr 0
-; OBJ-NEXT: S _wide_PARM_2 Def000000
-; OBJ-NEXT: S _wide_PARM_3 Def000004
-; OBJ-NEXT: A DSEG size 6 flags 0 addr 0
-; OBJ-NEXT: S _nested_PARM_2 Def000000
-; OBJ-NEXT: S _nested_PARM_3 Def000004
-; OBJ-NEXT: A OSEG size 2 flags 4 addr 0
-; OBJ-NEXT: A OSEG size 2 flags 4 addr 0
-; OBJ-NEXT: A OSEG size 2 flags 4 addr 0
-; OBJ-NEXT: S raw_PARM_2 Def000000
-; OBJ: A DSEG size 4 flags 0 addr 0
-; OBJ-NEXT: S _outer_PARM_2 Def000000
-; OBJ: A REG_BANK_0 size 8 flags 4 addr 0
-; Byte-of24 relocations to the first slot's area (index 2), NOT CSEG (1).
-; OBJ: R 00 00 00 01 {{.*}}F1 81 {{[0-9A-F][0-9A-F]}} 00 02
+; OBJ: A CSEG
+; OBJ-NOT: A OSEG
+; OBJ-NOT: _bytes_PARM_2
+; OBJ-NOT: _mixed_PARM_2
+; OBJ-NOT: _wide_PARM_2
+; OBJ: S _bytes Def
+; OBJ: S _mixed Def
+; OBJ: S _wide Def
+; OBJ: S _nested Def
+; OBJ: S raw Def
 ;
-; Literal 0x89abcdef is written MSB first; all stores precede the ABI copy.
+; Literal 0x89abcdef is written MSB first onto the stack before the ABI copy.
 ; CALL-LABEL: _call_mixed:
-; CALL: (_mixed_PARM_2) >> 8
-; CALL: mov @{{dr[0-9]+}},
-; CALL: mov [[B0:r[0-9]+]], #0x89
-; CALL: (_mixed_PARM_3) >> 8
-; CALL: mov @[[P:dr[0-9]+]], [[B0]]
-; CALL: mov [[B1:r[0-9]+]], #0xab
-; CALL: mov @[[P]]+0x0001, [[B1]]
-; CALL: mov [[B2:r[0-9]+]], #0xcd
-; CALL: mov @[[P]]+0x0002, [[B2]]
-; CALL: mov [[B3:r[0-9]+]], #0xef
-; CALL: mov @[[P]]+0x0003, [[B3]]
+; CALL-NOT: _mixed_PARM_
+; CALL: inc spx, #0x4
+; CALL: inc spx, #0x1
+; CALL-DAG: mov {{r[0-9]+}}, #0x89
+; CALL-DAG: mov {{r[0-9]+}}, #0xab
+; CALL-DAG: mov {{r[0-9]+}}, #0xcd
+; CALL-DAG: mov {{r[0-9]+}}, #0xef
 ; CALL: mov {{wr[0-9]+}}, #0x1357
 ; CALL: mov dpl,
 ; CALL: mov dph,
 ; CALL-NEXT: ecall _mixed
+; CALL: dec spx, #0x4
+; CALL: dec spx, #0x1
 ; CALL-LABEL: _call_wide:
-; CALL: mov {{wr[0-9]+}}, #0x5678
-; CALL: mov {{wr[0-9]+}}, #0x1234
+; CALL: inc spx, #0x4
+; CALL: inc spx, #0x2
 ; CALL: ecall _wide
-; EXTERN: S _bytes_PARM_2 Ref000000
-; EXTERN: S _mixed_PARM_3 Ref000000
-; EXTERN: S _nested_PARM_2 Ref000000
-; EXTERN: S _oracle_PARM_3 Ref000000
-; EXTERN: A DSEG size 2 flags 0 addr 0
-; EXTERN-NEXT: S _remote_PARM_2 Def000000
+; CALL: dec spx, #0x4
+; CALL: dec spx, #0x2
+; EXTERN-NOT: _bytes_PARM_2
+; EXTERN-NOT: _mixed_PARM_3
+; EXTERN-NOT: _nested_PARM_2
+; EXTERN-NOT: _oracle_PARM_3
+; EXTERN-NOT: _remote_PARM_2
+; EXTERN: S _mixed Ref000000
+; EXTERN: S _wide Ref000000
 ;
 ; Also exercised by Inputs/oseg-qemu.py, with independently compiled callers.
 ; Distinct leaf frames must overlay, not concatenate, within a module too.

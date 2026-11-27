@@ -18,7 +18,7 @@
 ; COMMON: Flags [ (0x102)
 ; COMMON-NOT: .note.mcs251.abi
 ; COMMON: Name: .mcs251.attributes
-; COMMON: Type: Unknown (0x70000003)
+; COMMON: Type: SHT_MCS251_ATTRIBUTES (0x70000003)
 ; COMMON: Size: 195
 ; COMMON: AddressAlignment: 1
 ;

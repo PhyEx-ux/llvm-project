@@ -32,28 +32,18 @@
 ; capability word.
 ; IDENT: Flags [ (0x102)
 
-; V2: Name: .mcs251.DSEG.
-; V2: SHT_NOBITS
-; V2: Flags [ (0x20000003)
-; V2: SHF_MCS251_EDATA_MOVABLE
-
-; The leaf slot area is an overlay and is never a migration candidate, under
-; either contract.
-; V2: Name: .mcs251.OSEG.
-; V2: Flags [ (0x10000003)
-; V2-NOT: SHF_MCS251_EDATA_MOVABLE
-
+; Under the stack-based ABI, no `.mcs251.OSEG.*` / `.mcs251.DSEG.*` parameter
+; slot areas are emitted; ordinary mutable globals in `.mcs251.dseg` retain the
+; v2-only `SHF_MCS251_EDATA_MOVABLE` capability mark.
+; V2-NOT: .mcs251.OSEG.
+; V2-NOT: .mcs251.DSEG.
 ; V2: Name: .mcs251.dseg
 ; V2: SHT_NOBITS
 ; V2: Flags [ (0x20000003)
 ; V2: SHF_MCS251_EDATA_MOVABLE
 
-; V1: Name: .mcs251.DSEG.
-; V1: SHT_NOBITS
-; V1: Flags [ (0x3)
-; V1-NOT: SHF_MCS251_EDATA_MOVABLE
-; V1: Name: .mcs251.OSEG.
-; V1: Flags [ (0x10000003)
+; V1-NOT: .mcs251.OSEG.
+; V1-NOT: .mcs251.DSEG.
 ; V1: Name: .mcs251.dseg
 ; V1: SHT_NOBITS
 ; V1: Flags [ (0x3)

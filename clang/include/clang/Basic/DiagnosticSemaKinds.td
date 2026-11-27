@@ -12722,6 +12722,12 @@ def err_mcs251_isr_external_inline
     : Error<"MCS251 interrupt function may not use external 'inline'; use 'static inline'">;
 def err_mcs251_isr_alias_target
     : Error<"MCS251 interrupt entry cannot be an alias or weakref target">;
+def err_mcs251_isr_priority_range
+    : Error<"MCS251 interrupt priority must be an integer constant in 0-%0">;
+def err_mcs251_isr_priority_conflict
+    : Error<"conflicting MCS251 interrupt priority">;
+def err_mcs251_isr_priority_requires_interrupt
+    : Error<"'mcs251_isr_priority' attribute is only valid on MCS251 interrupt functions">;
 def err_mcs251_ifunc_unsupported
     : Error<"'ifunc' attribute is not supported for MCS251 targets">;
 def err_mcs251_bit_address_of

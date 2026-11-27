@@ -1,14 +1,24 @@
 add_lld_library(lldMCS251
   Driver.cpp
+  LTO.cpp
   LinkerCore.cpp
+  LinkerScript.cpp
   PlacementReport.cpp
 
   PARTIAL_SOURCES_INTENDED
 
   LINK_COMPONENTS
+  ${LLVM_TARGETS_TO_BUILD}
   BinaryFormat
+  BitReader
+  Core
+  LTO
+  MC
   Object
+  Passes
   Support
+  Target
+  TargetParser
 
   LINK_LIBS
   lldCommon

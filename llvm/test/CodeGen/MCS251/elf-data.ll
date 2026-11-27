@@ -1,4 +1,4 @@
-; RUN: llc -mtriple=mcs251 -O0 -filetype=obj %s -o %t.rel
+; RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=rel %s -o %t.rel
 ; RUN: FileCheck %s --check-prefix=REL < %t.rel
 ; RUN: llc -mtriple=mcs251 -O0 -filetype=obj -mcs251-object-format=elf %s -o %t.o
 ; RUN: llvm-readobj --sections --symbols --relocations --section-data %t.o | FileCheck %s --check-prefix=ELF
@@ -36,9 +36,7 @@ define i16 @nonleaf(i16 %a, i16 %b) noinline {
   ret i16 %r
 }
 
-; REL: A OSEG size 2 flags 4 addr 0
-; REL: A OSEG size 6 flags 4 addr 0
-; REL: A DSEG size 2 flags 0 addr 0
+; REL-NOT: A OSEG
 ; REL: A DSEG size 47 flags 0 addr 0
 ; REL: A XINIT size 19 flags 20 addr 0
 ; REL: A REG_BANK_0 size 8 flags 4 addr 0
@@ -47,22 +45,8 @@ define i16 @nonleaf(i16 %a, i16 %b) noinline {
 ; ELF: Type: SHT_NOBITS
 ; ELF: SHF_MCS251_OVERLAY
 ; ELF: Size: 8
-; ELF: Name: .mcs251.OSEG.0
-; ELF: Type: SHT_NOBITS
-; ELF: SHF_MCS251_OVERLAY
-; ELF: Size: 2
-; ELF: Name: .mcs251.OSEG.1
-; ELF: Type: SHT_NOBITS
-; ELF: SHF_MCS251_OVERLAY
-; ELF: Size: 6
-; ELF: Name: .mcs251.DSEG.2
-; ELF: Type: SHT_NOBITS
-; G8: a v2 object marks its ordinary AS0 writable slices as EDATA-migration
-; candidates (a capability bit, not a placement decision: the linker keeps
-; the low window by preference and only migrates on failure).
-; ELF: Flags [ (0x20000003)
-; ELF: SHF_MCS251_EDATA_MOVABLE
-; ELF: Size: 2
+; ELF-NOT: .mcs251.OSEG
+; ELF-NOT: .mcs251.DSEG.
 ; ELF: Name: .mcs251.dseg
 ; ELF: Type: SHT_NOBITS
 ; ELF: Flags [ (0x20000003)
@@ -79,10 +63,9 @@ define i16 @nonleaf(i16 %a, i16 %b) noinline {
 ; ELF-NEXT: 0x8 R_MCS251_16 _zero 0x0
 ; ELF-NEXT: 0xE R_MCS251_16 _aggregate 0x0
 ; ELF: Symbols [
-; ELF: Name: _leaf_PARM_2
-; ELF: Value: 0x0
-; ELF: Size: 2
-; ELF: Type: Object
+; ELF-NOT: _leaf_PARM_2
+; ELF: Name: _leaf
+; ELF: Type: Function
 
 !mcs251.signatures = !{!10000, !10001, !10002, !10003}
 !10000 = !{!"_sink", i32 2, i32 0}

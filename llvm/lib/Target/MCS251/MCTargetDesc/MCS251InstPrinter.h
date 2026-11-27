@@ -23,6 +23,9 @@ public:
   void printImm16(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printDis16(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   void printDir8(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+  void printBranchTarget(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+  void printCallTarget(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+  void printAddr16(const MCInst *MI, unsigned OpNo, raw_ostream &O);
   // Bit address of a bit-addressed operand (`setb 0x00`): the numeric bit
   // address itself, never the backing byte. Validated (range + immediate) by
   // the shared MCS251::getBitAddr helper, so the text path rejects the same

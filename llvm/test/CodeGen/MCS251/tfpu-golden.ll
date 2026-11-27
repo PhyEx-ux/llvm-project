@@ -100,36 +100,36 @@
 ; ASM2: mov dr4, dr12
 ; ASM2-NEXT: mov 0xed, #0x2d
 ; ASM2-COUNT-270: nop
-; ASM2-NEXT: mov dr12, dr4
-; ASM2-NEXT: mov dpl, r15
-; ASM2-NEXT: mov dph, r14
-; ASM2-NEXT: mov b, r13
-; ASM2-NEXT: mov a, r12
-; ASM2-NEXT: eret
+; ASM2-NEXT: mov dr{{0|12}}, dr4
+; ASM2-NEXT: mov dpl, r{{3|15}}
+; ASM2-NEXT: mov dph, r{{2|14}}
+; ASM2-NEXT: mov b, r{{1|13}}
+; ASM2-NEXT: mov a, r{{0|12}}
+; ASM2: eret
 ;
 ; ASM2-LABEL: _t_cos:
 ; ASM2: mov dr4, dr12
 ; ASM2-NEXT: mov 0xed, #0x2e
 ; ASM2-COUNT-270: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ;
 ; ASM2-LABEL: _t_tan:
 ; ASM2: mov dr4, dr12
 ; ASM2-NEXT: mov 0xed, #0x2f
 ; ASM2-COUNT-258: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ;
 ; ASM2-LABEL: _t_atan:
 ; ASM2: mov dr4, dr12
 ; ASM2-NEXT: mov 0xed, #0x30
 ; ASM2-COUNT-175: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ;
 ; ASM2-LABEL: _t_sqrt:
 ; ASM2: mov dr4, dr12
 ; ASM2-NEXT: mov 0xed, #0x20
 ; ASM2-COUNT-54: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ;
 ; Binary: both window loads before the trigger, BR (dr0) last so it abuts it.
 ; ASM2-LABEL: _t_add:
@@ -137,25 +137,25 @@
 ; ASM2: mov dr0, dr12
 ; ASM2-NEXT: mov 0xed, #0x1c
 ; ASM2-COUNT-40: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ;
 ; ASM2-LABEL: _t_sub:
 ; ASM2: mov dr0, dr12
 ; ASM2-NEXT: mov 0xed, #0x1d
 ; ASM2-COUNT-40: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ;
 ; ASM2-LABEL: _t_mul:
 ; ASM2: mov dr0, dr12
 ; ASM2-NEXT: mov 0xed, #0x1e
 ; ASM2-COUNT-34: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ;
 ; ASM2-LABEL: _t_div:
 ; ASM2: mov dr0, dr12
 ; ASM2-NEXT: mov 0xed, #0x1f
 ; ASM2-COUNT-67: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ;
 ; Same-operand shape at O2: both loads from dr12, then trigger/wait/readback.
 ; ASM2-LABEL: _t_same:
@@ -163,7 +163,7 @@
 ; ASM2-NEXT: mov dr0, dr12
 ; ASM2-NEXT: mov 0xed, #0x1e
 ; ASM2-COUNT-34: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ;
 ; The O0 shapes: the same nine triggers and wait counts through the byte-wise
 ; window materialisation, and the same in-window readback (`mov dr12, dr4`).

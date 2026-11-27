@@ -1,7 +1,7 @@
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 < %s | FileCheck %s
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 < %s | FileCheck %s
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj < %s -o %t.O0.rel
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj < %s -o %t.O2.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj -mcs251-object-format=rel < %s -o %t.O0.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj -mcs251-object-format=rel < %s -o %t.O2.rel
 
 ; Byte/word patterns expand fixed-operand pseudos before register allocation.
 ; Truncated MUL is modulo 2^N for both signed and unsigned operands.

@@ -15,6 +15,7 @@
 #include "llvm/BinaryFormat/MCS251AttributesReader.h"
 #include "llvm/BinaryFormat/MCS251ISR.h"
 #include "llvm/BinaryFormat/MCS251Signatures.h"
+#include "llvm/Object/Archive.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Endian.h"
@@ -79,6 +80,7 @@ static constexpr uint32_t SupportedCapabilitiesHi = 0;
 // backend stream emits the raw numeric types in the meantime.
 static constexpr uint32_t R_MCS251_BIT_REF = 10;    // zero-width identity
 static constexpr uint32_t R_MCS251_BITADDR8 = 11;   // 1-byte address field
+static constexpr uint32_t R_MCS251_32 = 12;         // 4-byte DWARF field
 static constexpr StringRef BitObjectSectionName = ".mcs251.bit";
 static constexpr StringRef BitProfileSectionName = ".mcs251.bitprofile";
 static constexpr uint32_t BitObjectRecordSize = 8;
@@ -285,6 +287,7 @@ struct BitRecord {
   uint32_t InitValue = 0;     // 0 or 1 (kind 1 only).
   uint32_t SymIndex = 0;      // Symbol table index of the association.
   InputSymbol *Ref = nullptr; // Exact referenced symbol.
+  bool Discarded = false;     // Set by --gc-sections when unreferenced.
 };
 
 struct InputSymbol {
@@ -312,10 +315,12 @@ struct InputSection {
   uint32_t RelocIndex = 0;
   uint32_t Address = 0;
   bool IsAlloc = false;
+  bool IsDebug = false;
   bool IsCode = false;
   bool IsNobits = false;
   bool IsOverlay = false;
   bool IsLoadable = false;
+  uint32_t DebugOutputOffset = 0;
   // G8: the producer marked this section as a candidate for the EDATA window
   // (SHF_MCS251_EDATA_MOVABLE, v2 objects only).  The linker prefers the low
   // DSEG window and may migrate the whole section to [max(0x100,DsegStart),
@@ -331,6 +336,9 @@ struct InputSection {
   // True only for sections lld itself created (vector slots, synthesized bit
   // XINIT): they are trusted owners and are exempt from input-side checks.
   bool Synthesized = false;
+  // Set when COMDAT deduplication, weak override, or --gc-sections removes
+  // this input section from the link.
+  bool Discarded = false;
   // G11: the placement storage class mergePlacement() pinned onto a FIXED
   // Region section (PSC_*), or 0xff while unset/not a placement section.
   // classifySection deliberately leaves it unset: the NOTE lives in another
@@ -344,6 +352,9 @@ struct InputSection {
 
 struct InputFile {
   std::string Path;
+  bool FromArchive = false;
+  std::string ArchivePath;
+  uint64_t ArchiveOffset = 0;
   std::unique_ptr<MemoryBuffer> Buffer;
   std::unique_ptr<ObjectFile> Object;
   std::vector<std::unique_ptr<InputSection>> Sections;
@@ -363,6 +374,8 @@ struct InputFile {
   bool HasIsrMeta = false;
   InputSection *MetaSection = nullptr;
   std::vector<IsrRecord> IsrRecords;
+  InputSection *IsrPrioritySection = nullptr;
+  std::vector<std::pair<uint16_t, uint8_t>> IsrPriorityRecords;
   // BT12: at most one `.mcs251.bit` per object.
   InputSection *BitSection = nullptr;
   std::vector<BitRecord> BitRecords;
@@ -385,6 +398,12 @@ struct InputFile {
   // symbol table is loaded (validateV2Identity only sees the section bytes).
   bool HasSignatures = false;
   MCS251Signatures::Table Signatures;
+  struct ComdatGroup {
+    std::string Signature;
+    bool IsComdat = true;
+    std::vector<uint32_t> Members;
+  };
+  std::vector<ComdatGroup> ComdatGroups;
 };
 
 // E3: one occupied DATA range plus its provenance.  The owner string is the
@@ -409,7 +428,8 @@ static uint16_t read16BE(ArrayRef<uint8_t> B, size_t O) {
 }
 
 static uint32_t relocWidth(uint32_t Type) {
-  return Type == ELF::R_MCS251_16 || Type == ELF::R_MCS251_J16 ||
+  return Type == R_MCS251_32 ? 4
+         : Type == ELF::R_MCS251_16 || Type == ELF::R_MCS251_J16 ||
                  Type == ELF::R_MCS251_J11 ? 2
          : Type == ELF::R_MCS251_24 ? 3
          : Type == R_MCS251_BIT_REF || Type == ELF::R_MCS251_NONE ? 0
@@ -667,8 +687,11 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
   S.EDataMovable = (S.Flags & SHF_MCS251_EDATA_MOVABLE) != 0;
   S.IsLoadable = S.IsAlloc && !S.IsNobits && S.Size != 0;
 
-  if (!S.IsAlloc)
+  if (!S.IsAlloc) {
+    if (N.starts_with(".debug_") && S.Type == ELF::SHT_PROGBITS)
+      S.IsDebug = true;
     return true; // validateMetaSection() checks the exact supported set.
+  }
 
   // The mask names every flag a *placement* rule may see.  SHF_MCS251_EDATA_MOVABLE
   // is a capability bit carried by the section's own Region rule below, so it
@@ -677,8 +700,9 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
   // accepted for `.mcu.fixed.*` only, compared with the bit masked out).
   // Every other processor/OS bit stays unsupported.
   const uint64_t Common = ELF::SHF_ALLOC | ELF::SHF_WRITE | ELF::SHF_EXECINSTR |
-                          SHF_MCS251_OVERLAY | SHF_MCS251_EDATA_MOVABLE |
-                          SHF_MCS251_XSEG_SPLIT | ELF::SHF_GNU_RETAIN;
+                          ELF::SHF_GROUP | SHF_MCS251_OVERLAY |
+                          SHF_MCS251_EDATA_MOVABLE | SHF_MCS251_XSEG_SPLIT |
+                          ELF::SHF_GNU_RETAIN;
   if (S.Flags & ~Common)
     return fail(Err, "unsupported ALLOC section flags for " + N);
   // G11 F1(iii) belt: with SHF_GNU_RETAIN inside the mask, every non-fixed
@@ -690,20 +714,26 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
   if ((S.Flags & ELF::SHF_GNU_RETAIN) && !N.starts_with(FixedSectionPrefix))
     return fail(Err, "section " + N + " carries SHF_GNU_RETAIN outside "
                          ".mcu.fixed.*");
+  if ((S.Flags & ELF::SHF_GROUP) && N.starts_with(FixedSectionPrefix))
+    return fail(Err, "fixed placement section must not belong to a COMDAT "
+                     "group: " +
+                         N);
+  const uint64_t BaseFlags = S.Flags & ~uint64_t(ELF::SHF_GROUP);
   if (N == ".text" || N.starts_with(".text.")) {
-    if (S.Type != ELF::SHT_PROGBITS || S.Flags != (ELF::SHF_ALLOC | ELF::SHF_EXECINSTR))
+    if (S.Type != ELF::SHT_PROGBITS ||
+        BaseFlags != (ELF::SHF_ALLOC | ELF::SHF_EXECINSTR))
       return fail(Err, "invalid flags or type for " + N);
     S.Region = "CSEG";
     return true;
   }
   if (N == ".rodata" || N.starts_with(".rodata.")) {
-    if (S.Type != ELF::SHT_PROGBITS || S.Flags != ELF::SHF_ALLOC)
+    if (S.Type != ELF::SHT_PROGBITS || BaseFlags != ELF::SHF_ALLOC)
       return fail(Err, "invalid flags or type for " + N);
     S.Region = "CSEG";
     return true;
   }
   if (N == ".mcs251.xinit" || N.starts_with(".mcs251.xinit.")) {
-    if (S.Type != ELF::SHT_PROGBITS || S.Flags != ELF::SHF_ALLOC)
+    if (S.Type != ELF::SHT_PROGBITS || BaseFlags != ELF::SHF_ALLOC)
       return fail(Err, "invalid XINIT section " + N);
     S.Region = "XINIT";
     return true;
@@ -717,7 +747,7 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
   // structural, single-window, XSEG-containment and non-overlap validation
   // as input records (validateXDATAInit).
   if (N == ".mcs251.xdata_init" || N.starts_with(".mcs251.xdata_init.")) {
-    if (S.Type != ELF::SHT_PROGBITS || S.Flags != ELF::SHF_ALLOC)
+    if (S.Type != ELF::SHT_PROGBITS || BaseFlags != ELF::SHF_ALLOC)
       return fail(Err, "invalid XDATA_INIT section " + N);
     S.Region = "XDATA_INIT";
     return true;
@@ -737,7 +767,7 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
     return CodeFragment("BOOT") || fail(Err, "invalid BOOT section " + N);
   if (N.starts_with(".mcs251.OSEG.")) {
     if (S.Type != ELF::SHT_NOBITS ||
-        S.Flags != (ELF::SHF_ALLOC | ELF::SHF_WRITE | SHF_MCS251_OVERLAY))
+        BaseFlags != (ELF::SHF_ALLOC | ELF::SHF_WRITE | SHF_MCS251_OVERLAY))
       return fail(Err, "OSEG must be writable NOBITS overlay: " + N);
     S.Region = "OSEG";
     S.Group = "OSEG";
@@ -752,7 +782,8 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
     S.Region = "DATA_EMPTY_PENDING";
     return true;
   }
-  if (N == ".mcs251.dseg" || N.starts_with(".mcs251.DSEG.") ||
+  if (N == ".mcs251.dseg" || N.starts_with(".mcs251.dseg.") ||
+      N.starts_with(".mcs251.DSEG.") ||
       N == ".data" || N.starts_with(".data.") || N == ".bss" ||
       N.starts_with(".bss.")) {
     // G8: an ordinary AS0 writable NOBITS slice may additionally carry the
@@ -770,8 +801,8 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
                       : "generic DSEG name carries the EDATA-movable flag "
                         "(only .mcs251.* slices may): " + N);
     if (S.Type != ELF::SHT_NOBITS ||
-        S.Flags != (ELF::SHF_ALLOC | ELF::SHF_WRITE |
-                    (S.EDataMovable ? SHF_MCS251_EDATA_MOVABLE : 0)))
+        BaseFlags != (ELF::SHF_ALLOC | ELF::SHF_WRITE |
+                      (S.EDataMovable ? SHF_MCS251_EDATA_MOVABLE : 0)))
       return fail(Err, "DSEG sections must be writable NOBITS: " + N);
     S.Region = "DSEG";
     return true;
@@ -848,8 +879,8 @@ static bool classifySection(InputSection &S, raw_ostream &Err) {
       return fail(Err, "XSEG section carries the XSEG-split flag outside "
                        "its v2 contract: " + N);
     if (S.Type != ELF::SHT_NOBITS ||
-        S.Flags != (ELF::SHF_ALLOC | ELF::SHF_WRITE |
-                    (S.XsegSplit ? SHF_MCS251_XSEG_SPLIT : 0)))
+        BaseFlags != (ELF::SHF_ALLOC | ELF::SHF_WRITE |
+                      (S.XsegSplit ? SHF_MCS251_XSEG_SPLIT : 0)))
       return fail(Err, "XSEG must be writable NOBITS: " + N);
     S.Region = "XSEG";
     return true;
@@ -912,6 +943,10 @@ static bool validateMetaSection(const InputSection &S, raw_ostream &Err) {
     return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 &&
                S.Align == MCS251ISR::MetaSectionAlignment ||
            fail(Err, "malformed " + MCS251ISR::MetaSectionName);
+  if (N == MCS251ISR::PrioritySectionName)
+    return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 &&
+               S.Align == MCS251ISR::PrioritySectionAlignment ||
+           fail(Err, "malformed " + MCS251ISR::PrioritySectionName);
   // BT12: the bit-object metadata section, exact name only.
   if (N == BitObjectSectionName)
     return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 && S.Align == 4 ||
@@ -953,8 +988,11 @@ static bool validateMetaSection(const InputSection &S, raw_ostream &Err) {
   if (N == ".strtab" || N == ".shstrtab")
     return S.Type == ELF::SHT_STRTAB && S.Flags == 0 ||
            fail(Err, "malformed string table " + N);
+  if (S.Type == ELF::SHT_GROUP)
+    return S.Flags == 0 || fail(Err, "malformed SHT_GROUP section " + N);
   if (S.Type == ELF::SHT_RELA)
-    return (S.Flags == 0 || S.Flags == ELF::SHF_INFO_LINK) ||
+    return (S.Flags & ~(uint64_t(ELF::SHF_INFO_LINK) |
+                        uint64_t(ELF::SHF_GROUP))) == 0 ||
            fail(Err, "unsupported RELA section flags");
   if (S.Type == ELF::SHT_REL)
     return fail(Err, "SHT_REL is unsupported; MCS251 requires SHT_RELA");
@@ -964,6 +1002,11 @@ static bool validateMetaSection(const InputSection &S, raw_ostream &Err) {
   if (N == ".note.GNU-stack")
     return S.Type == ELF::SHT_PROGBITS && S.Flags == 0 && S.Size == 0 ||
            fail(Err, "malformed .note.GNU-stack");
+  if (N.starts_with(".debug_"))
+    return S.Type == ELF::SHT_PROGBITS &&
+               (S.Flags & ~(uint64_t(ELF::SHF_MERGE) |
+                            uint64_t(ELF::SHF_STRINGS))) == 0 ||
+           fail(Err, "malformed DWARF section " + N);
   return fail(Err, "unsupported non-ALLOC metadata section " + N);
 }
 
@@ -1190,22 +1233,10 @@ static const V2ComparedTag V2ComparedTags[] = {
     {MCS251Attributes::Tag_ObjectProtocolMinor, "object_protocol_minor"},
 };
 
-static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
+static bool loadObjectBuffer(StringRef Path, std::unique_ptr<MemoryBuffer> MB,
+                             InputFile &F, raw_ostream &Err) {
   F.Path = Path.str();
-  auto MB = MemoryBuffer::getFile(Path);
-  if (!MB)
-    return fail(Err, Path + ": cannot read input");
-  F.Buffer = std::move(*MB);
-  // G11 P-3 (design §8): archive inputs -- classic `!<arch>\n` and thin
-  // `!<thin>\n` alike -- are rejected with one frozen message before the
-  // generic object-file sniff, because placement objects must be linked
-  // directly (this linker has no archive member extraction, probe 2[C]).
-  {
-    StringRef Head = F.Buffer->getBuffer().take_front(8);
-    if (Head == "!<arch>\n" || Head == "!<thin>\n")
-      return fail(Err, "archive inputs are not supported: " + Path +
-                           " (link placement objects directly)");
-  }
+  F.Buffer = std::move(MB);
   Expected<std::unique_ptr<ObjectFile>> Obj =
       ObjectFile::createObjectFile(F.Buffer->getMemBufferRef());
   if (!Obj)
@@ -1298,6 +1329,20 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
       if (F.MetaSection)
         return fail(Err, Path + ": MCS251 ISR: at most one .mcs251.isr per object");
       F.MetaSection = S.get();
+    }
+    if (S->Name == MCS251ISR::PrioritySectionName) {
+      if (S->Size == 0)
+        return fail(Err, Path + ": MCS251 ISR: empty .mcs251.isr.priority section");
+      if (H.sh_entsize != 0)
+        return fail(Err, Path + ": MCS251 ISR: .mcs251.isr.priority must have "
+                                "sh_entsize 0");
+      if (S->Size % MCS251ISR::PriorityRecordSize != 0)
+        return fail(Err, Path + ": MCS251 ISR: .mcs251.isr.priority size must "
+                                "be a multiple of 4");
+      if (F.IsrPrioritySection)
+        return fail(Err, Path + ": MCS251 ISR: at most one .mcs251.isr.priority "
+                                "per object");
+      F.IsrPrioritySection = S.get();
     }
     if (S->Name == BitObjectSectionName) {
       // BT12: record-only, no entry size, no trailing padding, one per file.
@@ -1501,11 +1546,16 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
     IS.Bind = Sym.getBinding();
     IS.Type = Sym.getType();
     IS.Section = Sym.st_shndx;
-    if (IS.Bind != ELF::STB_LOCAL && IS.Bind != ELF::STB_GLOBAL)
+    if (IS.Bind != ELF::STB_LOCAL && IS.Bind != ELF::STB_GLOBAL &&
+        IS.Bind != ELF::STB_WEAK)
       return fail(Err, Path + ": unsupported symbol binding " + IS.Name);
     if (IS.Type != ELF::STT_NOTYPE && IS.Type != ELF::STT_OBJECT &&
-        IS.Type != ELF::STT_FUNC && IS.Type != ELF::STT_SECTION)
+        IS.Type != ELF::STT_FUNC && IS.Type != ELF::STT_SECTION &&
+        IS.Type != ELF::STT_FILE)
       return fail(Err, Path + ": unsupported symbol type " + IS.Name);
+    if (IS.Type == ELF::STT_FILE &&
+        (IS.Bind != ELF::STB_LOCAL || IS.Section != ELF::SHN_ABS))
+      return fail(Err, Path + ": malformed STT_FILE symbol " + IS.Name);
     if (IS.Section == ELF::SHN_COMMON)
       return fail(Err, Path + ": unsupported common symbol " + IS.Name);
     if (IS.Section != ELF::SHN_UNDEF && IS.Section != ELF::SHN_ABS &&
@@ -1518,6 +1568,48 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
         return fail(Err, Path + ": symbol exceeds section bounds: " + IS.Name);
     }
     F.Symbols.push_back(std::move(IS));
+  }
+
+  // Parse ELF SHT_GROUP (COMDAT) sections after the symbol table is loaded.
+  for (uint32_t I = 0; I != RawSections->size(); ++I) {
+    const ELF32BE::Shdr &GH = (*RawSections)[I];
+    if (GH.sh_type != ELF::SHT_GROUP)
+      continue;
+    if (GH.sh_link != SymtabIndex || GH.sh_entsize != 4 || GH.sh_info == 0 ||
+        GH.sh_info >= F.Symbols.size())
+      return fail(Err, Path + ": malformed SHT_GROUP section " +
+                           F.Sections[I]->Name);
+    const InputSymbol &SigSym = F.Symbols[GH.sh_info];
+    if (SigSym.Name.empty())
+      return fail(Err, Path + ": SHT_GROUP signature symbol has empty name");
+    const ArrayRef<uint8_t> B(F.Sections[I]->Data);
+    if (B.size() < 4 || (B.size() % 4) != 0)
+      return fail(Err, Path + ": malformed SHT_GROUP payload in " +
+                           F.Sections[I]->Name);
+    const uint32_t GroupFlags = read32BE(B, 0);
+    if (GroupFlags != ELF::GRP_COMDAT && GroupFlags != 0)
+      return fail(Err, Path + ": unsupported SHT_GROUP flags 0x" +
+                           Twine::utohexstr(GroupFlags));
+    InputFile::ComdatGroup CG;
+    CG.Signature = SigSym.Name;
+    CG.IsComdat = (GroupFlags == ELF::GRP_COMDAT);
+    for (size_t Off = 4; Off < B.size(); Off += 4) {
+      const uint32_t MemberIdx = read32BE(B, Off);
+      if (MemberIdx == 0 || MemberIdx >= F.Sections.size())
+        return fail(Err, Path + ": SHT_GROUP member section index out of range");
+      const InputSection &MS = *F.Sections[MemberIdx];
+      if (MS.Region == "FIXED" || MS.Name == MCS251ISR::MetaSectionName ||
+          MS.Name == MCS251ISR::PrioritySectionName ||
+          MS.Name == BitObjectSectionName ||
+          MS.Name == PlacementNoteSectionName ||
+          MS.Name == PlacementNamesNoteSectionName ||
+          MS.Name == MCS251Attributes::SectionName)
+        return fail(Err, Path + ": section " + MS.Name +
+                             " cannot be a member of COMDAT group " +
+                             CG.Signature);
+      CG.Members.push_back(MemberIdx);
+    }
+    F.ComdatGroups.push_back(std::move(CG));
   }
 
   // A3.2: parse the exact ISR metadata records. Field-level structure is
@@ -1598,6 +1690,27 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
                              " does not match the frozen "
                              "entry/hardware/save/asset profile");
       F.IsrRecords.push_back(R);
+    }
+  }
+  if (F.IsrPrioritySection) {
+    const InputSection &P = *F.IsrPrioritySection;
+    const ArrayRef<uint8_t> B(P.Data);
+    for (uint32_t Off = 0; Off + MCS251ISR::PriorityRecordSize <= P.Size;
+         Off += MCS251ISR::PriorityRecordSize) {
+      uint16_t Slot = read16BE(B, Off);
+      uint8_t Pri = B[Off + 2];
+      uint8_t Rsv = B[Off + 3];
+      if (!MCS251ISR::isLegalISRSlot(Slot))
+        return fail(Err, Path + ": MCS251 ISR: priority record references "
+                                "illegal slot " +
+                             Twine(Slot));
+      if (Pri > MCS251ISR::MaxISRPriority)
+        return fail(Err, Path + ": MCS251 ISR: priority value " +
+                             Twine(unsigned(Pri)) + " exceeds 3");
+      if (Rsv != 0)
+        return fail(Err, Path + ": MCS251 ISR: priority record reserved byte "
+                                "must be zero");
+      F.IsrPriorityRecords.emplace_back(Slot, Pri);
     }
   }
 
@@ -1927,6 +2040,9 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
                              "exactly one type9 relocation");
         Covered[Rec] = true;
         const InputSymbol &Sym = F.Symbols[R.Sym];
+        if (Sym.Bind == ELF::STB_WEAK)
+          return fail(Err, Path + ": MCS251 ISR: interrupt service routine " +
+                               Sym.Name + " must not have weak binding");
         if (Sym.Name.empty() || Sym.Type != ELF::STT_FUNC)
           return fail(Err, Path + ": MCS251 ISR: type9 must name an STT_FUNC "
                              "symbol (never a section+addend fold)");
@@ -1985,6 +2101,9 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
                              "one BIT_REF relocation");
         Covered[Rec] = true;
         const InputSymbol &Sym = F.Symbols[R.Sym];
+        if (Sym.Bind == ELF::STB_WEAK)
+          return fail(Err, Path + ": MCS251 bit: bit object " + Sym.Name +
+                               " must not have weak binding");
         if (Sym.Name.empty() || Sym.Type != ELF::STT_OBJECT)
           return fail(Err, Path + ": MCS251 bit: BIT_REF must name an "
                              "STT_OBJECT symbol (never a section+addend fold)");
@@ -1996,7 +2115,7 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
                              " has no BIT_REF association");
       continue;
     }
-    if (!TS->IsAlloc || TS->Type == ELF::SHT_NOBITS)
+    if ((!TS->IsAlloc && !TS->IsDebug) || TS->Type == ELF::SHT_NOBITS)
       return fail(Err, Path + ": RELA targets non-loadable section " + TS->Name);
     // SPEC §4.1: an empty PROGBITS .data section with a non-empty RELA is
     // not supported.  An empty RELA table (zero entries) is harmless and
@@ -2017,8 +2136,12 @@ static bool loadFile(StringRef Path, InputFile &F, raw_ostream &Err) {
         return fail(Err, Path + ": MCS251 bit: R_MCS251_BIT_REF is only "
                            "allowed in the bit metadata RELA");
       uint32_t Width = relocWidth(R.Type);
-      if ((R.Type > ELF::R_MCS251_J11 && R.Type != R_MCS251_BITADDR8) ||
-          R.Offset > TS->Size || Width > TS->Size - R.Offset)
+      const bool ValidType =
+          TS->IsDebug
+              ? (R.Type == ELF::R_MCS251_NONE || R.Type == ELF::R_MCS251_16 ||
+                 R.Type == ELF::R_MCS251_24 || R.Type == R_MCS251_32)
+              : (R.Type <= ELF::R_MCS251_J11 || R.Type == R_MCS251_BITADDR8);
+      if (!ValidType || R.Offset > TS->Size || Width > TS->Size - R.Offset)
         return fail(Err, Path + ": relocation offset/type out of range");
       if (R.Type == R_MCS251_BITADDR8) {
         if (R.Addend != 0)
@@ -2145,6 +2268,7 @@ private:
 
   uint32_t areaStart(StringRef Name, uint32_t Default) const;
   bool hasAreaStart(StringRef Name) const;
+  bool loadInputs();
   bool validateIdentitySet();
 
   // P-4 (freeze 2026-09-14): the object-internal symbol association and the
@@ -2161,6 +2285,10 @@ private:
   /// channels R_MCS251_16 and MID8/LO8/HI8.
   static std::set<StringRef> functionReferencedNames(const InputFile &F);
   bool rejectInputVecs();
+  void rebuildActiveSections();
+  bool deduplicateComdatGroups();
+  bool gcSections();
+  InputSymbol *resolveTargetSymbol(InputSymbol *IS) const;
   bool resolveSymbols();
   bool buildBitIdentities();
   // BT14: set-level bit-profile rules.  At most one carrier in the link, and
@@ -2182,6 +2310,8 @@ private:
   InputFile *BitProfileFile = nullptr;
   bool validateISRIdentitiesAndRegistrations();
   bool synthesizeIRQVectors();
+  bool resolveISRPrioritiesAndSynthesizeInit(LinkerResult &Result);
+  std::vector<std::unique_ptr<InputSymbol>> OwnedSynthSyms;
   bool layout();
   bool checkFlashGate();
   bool validateIRQReservedRangesAndCRT();
@@ -2213,6 +2343,7 @@ private:
   // analysis path and the no-IRQ facts-only path.
   void collectLinkFactsBasic(LinkerResult &Result);
   void buildMap(raw_ostream &Out) const;
+  void collectMapData(LinkerResult &Result) const;
   void collectSymbols(std::vector<OutputSymbol> &Out) const;
   void printInputs(raw_ostream &Out) const;
   // G11-D2 (design §6.2): read-only positioning snapshot, taken after every
@@ -2223,6 +2354,7 @@ private:
   bool collectPositions(LinkerResult &Result);
   InputSymbol *findSymbol(InputFile &F, uint32_t Index);
   bool errorUndefined();
+  bool linkDebugSections(LinkerResult &Result);
 
   // IRQ mode (A3.6): triggered by any input carrying `.mcs251.isr`.
   bool IrqMode = false;
@@ -2336,14 +2468,221 @@ static bool isReservedBoundarySymbol(StringRef Name) {
   return false;
 }
 
+void Linker::rebuildActiveSections() {
+  AllSections.clear();
+  for (auto &F : Files)
+    for (auto &S : F->Sections)
+      if (S->IsAlloc && !S->Discarded)
+        AllSections.push_back(S.get());
+  for (InputSection *S : SynthSections)
+    if (S->IsAlloc && !S->Discarded)
+      AllSections.push_back(S);
+}
+
+bool Linker::deduplicateComdatGroups() {
+  std::set<std::string> SeenComdat;
+  bool AnyDiscarded = false;
+  for (auto &F : Files) {
+    for (const InputFile::ComdatGroup &CG : F->ComdatGroups) {
+      if (!CG.IsComdat)
+        continue;
+      if (SeenComdat.insert(CG.Signature).second)
+        continue;
+      for (uint32_t MemberIdx : CG.Members) {
+        if (MemberIdx < F->Sections.size()) {
+          F->Sections[MemberIdx]->Discarded = true;
+          AnyDiscarded = true;
+        }
+      }
+    }
+  }
+  if (AnyDiscarded)
+    rebuildActiveSections();
+  return true;
+}
+
+static bool matchSectionGlob(StringRef Pat, StringRef Text) {
+  size_t P = 0, T = 0;
+  size_t StarP = StringRef::npos, MatchT = 0;
+  while (T < Text.size()) {
+    if (P < Pat.size() && (Pat[P] == '?' || Pat[P] == Text[T])) {
+      ++P;
+      ++T;
+    } else if (P < Pat.size() && Pat[P] == '*') {
+      StarP = P++;
+      MatchT = T;
+    } else if (StarP != StringRef::npos) {
+      P = StarP + 1;
+      T = ++MatchT;
+    } else {
+      return false;
+    }
+  }
+  while (P < Pat.size() && Pat[P] == '*')
+    ++P;
+  return P == Pat.size();
+}
+
+bool Linker::gcSections() {
+  std::set<InputSection *> Live;
+  std::vector<InputSection *> Work;
+  auto Mark = [&](InputSection *S) {
+    if (S && S->IsAlloc && !S->Discarded && Live.insert(S).second)
+      Work.push_back(S);
+  };
+  auto MarkSymName = [&](StringRef Name) -> InputSymbol * {
+    auto It = Globals.find(Name.str());
+    if (It == Globals.end() || !It->second->Defined)
+      return nullptr;
+    if (It->second->Sec)
+      Mark(It->second->Sec);
+    return It->second;
+  };
+
+  // 1. Structural / hardware roots (never GC'd).
+  bool HasBootOrHome = false;
+  for (InputSection *S : AllSections) {
+    if (S->Discarded)
+      continue;
+    if (S->Region == "HOME" || S->Region == "BOOT")
+      HasBootOrHome = true;
+    if (S->Synthesized || S->Region == "HOME" || S->Region == "VECS" ||
+        S->Region == "BOOT" || S->Region == "REG" ||
+        S->Region == "BSEG_BYTES" || S->Region == "BIT_BANK" ||
+        S->Region == "SSEG" || S->Region == "DATA_ABS" ||
+        S->Region == "FIXED" || (S->Flags & ELF::SHF_GNU_RETAIN)) {
+      Mark(S);
+      continue;
+    }
+    for (const std::string &Pat : Config.KeepSectionPatterns) {
+      if (matchSectionGlob(Pat, S->Name)) {
+        Mark(S);
+        break;
+      }
+    }
+  }
+
+  // 2. Registered ISR & CRT roots.
+  if (DefaultSym && DefaultSym->Sec)
+    Mark(DefaultSym->Sec);
+  if (ResetSym && ResetSym->Sec)
+    Mark(ResetSym->Sec);
+  for (InputSymbol *ISR : IsrSymbols)
+    if (ISR && ISR->Sec)
+      Mark(ISR->Sec);
+  if (BitProfileFile) {
+    for (const InputSymbol &Sym : BitProfileFile->Symbols)
+      if (Sym.Name == BitInitWalkerName && Sym.Defined && Sym.Sec)
+        Mark(Sym.Sec);
+  }
+
+  // 3. Explicit CLI entry (-e) and undefined roots (-u).
+  if (!Config.EntrySymbol.empty()) {
+    if (!MarkSymName(Config.EntrySymbol))
+      return fail(Err, "undefined entry symbol: " + Config.EntrySymbol);
+  } else if (!HasBootOrHome) {
+    MarkSymName("_main");
+  }
+  for (const std::string &U : Config.UndefinedRoots)
+    MarkSymName(U);
+
+  // 4. Reverse dependency map: a live data section pulls in the XINIT /
+  //    XDATA_INIT record section(s) that initialize it.  Relocation-less
+  //    init sections (hand-crafted absolute records) stay live as roots.
+  std::map<InputSection *, std::vector<InputSection *>> InitForData;
+  for (InputSection *S : AllSections) {
+    if (S->Discarded || S->Synthesized)
+      continue;
+    if (S->Region != "XINIT" && S->Region != "XDATA_INIT")
+      continue;
+    bool Attached = false;
+    for (const Relocation &R : S->Relocs) {
+      if (!S->File)
+        continue;
+      InputSymbol *IS = findSymbol(*S->File, R.Sym);
+      InputSymbol *Target = resolveTargetSymbol(IS);
+      if (Target && Target->Defined && Target->Sec && Target->Sec->IsAlloc &&
+          !Target->Sec->IsCode) {
+        InitForData[Target->Sec].push_back(S);
+        Attached = true;
+      }
+    }
+    if (!Attached)
+      Mark(S);
+  }
+
+  // 5. Mark phase: propagate liveness along relocations and data->init edges.
+  std::set<InputSymbol *> LiveBits;
+  while (!Work.empty()) {
+    InputSection *S = Work.back();
+    Work.pop_back();
+    if (S->File) {
+      for (const Relocation &R : S->Relocs) {
+        InputSymbol *IS = findSymbol(*S->File, R.Sym);
+        InputSymbol *Target = resolveTargetSymbol(IS);
+        if (!Target)
+          continue;
+        if (R.Type == R_MCS251_BITADDR8) {
+          LiveBits.insert(Target);
+          continue;
+        }
+        if (Target->Defined && Target->Sec && Target->Sec->IsAlloc)
+          Mark(Target->Sec);
+      }
+    }
+    auto It = InitForData.find(S);
+    if (It != InitForData.end())
+      for (InputSection *InitSec : It->second)
+        Mark(InitSec);
+  }
+
+  // 6. Sweep phase: discard unreachable input sections and unreferenced
+  //    automatic bit records.
+  bool AnyDiscarded = false;
+  for (InputSection *S : AllSections) {
+    if (S->Discarded || S->Synthesized || Live.count(S))
+      continue;
+    S->Discarded = true;
+    AnyDiscarded = true;
+    if (Config.PrintGcSections)
+      Err << "removing unused section "
+          << (S->File ? S->File->Path : std::string("<synth>")) << ":("
+          << S->Name << ")\n";
+  }
+  for (auto &F : Files)
+    for (BitRecord &R : F->BitRecords)
+      if (R.Kind == BitKindDefinition && R.Ref && !LiveBits.count(R.Ref))
+        R.Discarded = true;
+  if (AnyDiscarded)
+    rebuildActiveSections();
+  return true;
+}
+
+InputSymbol *Linker::resolveTargetSymbol(InputSymbol *IS) const {
+  if (!IS)
+    return nullptr;
+  if (!IS->Defined || IS->Bind == ELF::STB_WEAK ||
+      (IS->Sec && IS->Sec->Discarded)) {
+    auto It = Globals.find(IS->Name);
+    if (It != Globals.end())
+      return It->second;
+  }
+  return IS;
+}
+
 bool Linker::resolveSymbols() {
   for (auto &F : Files)
     for (auto &S : F->Symbols) {
-      if (S.Name.empty() || !S.Defined)
+      if (S.Name.empty() || !S.Defined || S.Type == ELF::STT_FILE)
         continue;
-        if (S.Bind == ELF::STB_WEAK || S.Bind == ELF::STB_GNU_UNIQUE ||
-          S.Type == ELF::STT_COMMON)
+      if (S.Sec && (S.Sec->Discarded || S.Sec->IsDebug))
+        continue;
+      if (S.Bind == ELF::STB_GNU_UNIQUE || S.Type == ELF::STT_COMMON)
         return fail(Err, "unsupported weak/common symbol " + S.Name);
+      if (S.Bind == ELF::STB_WEAK && S.Sec && S.Sec->Region == "FIXED")
+        return fail(Err, "MCS251: fixed placement symbol must not have weak "
+                         "binding: " +
+                             S.Name);
       if (isReservedBoundarySymbol(S.Name))
         return fail(Err, "user definition of reserved symbol " + S.Name);
       if (S.Sec && S.Sec->IsAlloc)
@@ -2352,11 +2691,83 @@ bool Linker::resolveSymbols() {
         S.Address = S.Value;
       if (S.Bind != ELF::STB_LOCAL) {
         auto It = Globals.find(S.Name);
-        if (It != Globals.end() && It->second->Defined)
-          return fail(Err, "duplicate definition of " + S.Name);
-        Globals[S.Name] = &S;
+        if (It == Globals.end()) {
+          Globals[S.Name] = &S;
+        } else {
+          InputSymbol *Prev = It->second;
+          const bool PrevWeak = Prev->Bind == ELF::STB_WEAK;
+          const bool CurWeak = S.Bind == ELF::STB_WEAK;
+          if (!PrevWeak && !CurWeak)
+            return fail(Err, "duplicate definition of " + S.Name);
+          if (PrevWeak && !CurWeak)
+            It->second = &S; // Strong definition overrides weak definition.
+          // Strong+weak keeps strong; weak+weak keeps first-seen weak.
+        }
       }
     }
+
+  // Discard dedicated init-record and per-symbol sections belonging strictly to
+  // overridden (losing) weak definitions so losing XINIT/XDATA_INIT records do
+  // not run over strong winners and losing weak storage does not waste RAM/ROM.
+  auto IsLosingWeak = [&](const InputSymbol &S) -> bool {
+    if (!S.Defined || S.Bind != ELF::STB_WEAK || S.Name.empty())
+      return false;
+    auto It = Globals.find(S.Name);
+    return It != Globals.end() && It->second != &S;
+  };
+  bool AnyDiscarded = false;
+  for (auto &F : Files) {
+    for (auto &SP : F->Sections) {
+      InputSection *S = SP.get();
+      if (!S->IsAlloc || S->Discarded)
+        continue;
+      const StringRef N = S->Name;
+      if ((S->Region == "XINIT" && N.starts_with(".mcs251.xinit.")) ||
+          (S->Region == "XDATA_INIT" &&
+           N.starts_with(".mcs251.xdata_init."))) {
+        for (const Relocation &R : S->Relocs) {
+          if (R.Offset != 0)
+            continue;
+          InputSymbol *IS = findSymbol(*F, R.Sym);
+          if (IS && IsLosingWeak(*IS)) {
+            S->Discarded = true;
+            AnyDiscarded = true;
+            break;
+          }
+        }
+        continue;
+      }
+      const bool PerSymCandidate =
+          N.starts_with(".mcs251.dseg.") || N.starts_with(".mcs251.DSEG.") ||
+          N.starts_with(".mcs251.OSEG.") || N.starts_with(".mcs251.XSEG.") ||
+          N.starts_with(".rodata.") || N.starts_with(".text.");
+      if (!PerSymCandidate)
+        continue;
+      bool HasLosingWeak = false;
+      bool HasOtherOwner = false;
+      for (const InputSymbol &Sym : F->Symbols) {
+        if (!Sym.Defined || Sym.Sec != S || Sym.Type == ELF::STT_SECTION ||
+            Sym.Name.empty())
+          continue;
+        if (Sym.Bind == ELF::STB_LOCAL) {
+          if (Sym.Type == ELF::STT_FUNC || Sym.Type == ELF::STT_OBJECT)
+            HasOtherOwner = true;
+          continue;
+        }
+        if (IsLosingWeak(Sym))
+          HasLosingWeak = true;
+        else
+          HasOtherOwner = true;
+      }
+      if (HasLosingWeak && !HasOtherOwner) {
+        S->Discarded = true;
+        AnyDiscarded = true;
+      }
+    }
+  }
+  if (AnyDiscarded)
+    rebuildActiveSections();
+
   for (auto &F : Files)
     for (auto &S : F->Symbols)
       if (S.Bind != ELF::STB_LOCAL && !S.Defined) {
@@ -2605,7 +3016,9 @@ bool Linker::validateIdentitySet() {
 std::set<StringRef>
 Linker::functionReferencedNames(const InputFile &F) {
   std::set<StringRef> Names;
-  for (const auto &S : F.Sections)
+  for (const auto &S : F.Sections) {
+    if (S->Discarded || S->IsDebug)
+      continue;
     for (const Relocation &R : S->Relocs) {
       if (R.Sym >= F.Symbols.size())
         continue;
@@ -2622,6 +3035,7 @@ Linker::functionReferencedNames(const InputFile &F) {
           R.Type == ELF::R_MCS251_J11)
         Names.insert(IS.Name);
     }
+  }
   // G11-C2 (design rev 8 §8.3): a bind placement record with entity=function
   // is an EXPLICIT function declaration even when no code relocation
   // references it -- the association carrier names the undefined external
@@ -2707,7 +3121,7 @@ bool Linker::validateFileSignatures(InputFile &F) {
       // the coverage pass use) -- otherwise it is data too.
       for (const InputSymbol *IS : Entries) {
         if (!IS->Defined) {
-          if (IS->Bind != ELF::STB_GLOBAL)
+          if (IS->Bind != ELF::STB_GLOBAL && IS->Bind != ELF::STB_WEAK)
             return fail(Err, F.Path + ": MCS251 signature '" + Name +
                                  "' is declared, but its symbol is not an "
                                  "external (global) undefined symbol");
@@ -2988,6 +3402,176 @@ bool Linker::synthesizeIRQVectors() {
     } else {
       New(".mcs251.VECS." + NN + ".rsv", ELF::SHT_NOBITS,
           ELF::SHF_ALLOC | ELF::SHF_EXECINSTR, 8, Base);
+    }
+  }
+  return true;
+}
+
+bool Linker::resolveISRPrioritiesAndSynthesizeInit(LinkerResult &Result) {
+  struct SlotPri {
+    InputSymbol *Sym = nullptr;
+    uint8_t Priority = 0;
+    std::string Source = "default";
+    bool AttrSet = false;
+  };
+  std::map<uint32_t, SlotPri> BySlot;
+  std::map<std::string, uint32_t> NameToSlot;
+  for (unsigned Slot = 0; Slot < MCS251ISR::ISRVectorCount; ++Slot) {
+    if (SlotSym[Slot]) {
+      BySlot[Slot] = {SlotSym[Slot], 0, "default", false};
+      NameToSlot[SlotSym[Slot]->Name] = Slot;
+    }
+  }
+
+  bool AnyPriorityConfigured = !Config.IsrPriorities.empty();
+  for (const auto &F : Files) {
+    for (const auto &Rec : F->IsrPriorityRecords) {
+      AnyPriorityConfigured = true;
+      auto It = BySlot.find(Rec.first);
+      if (It == BySlot.end())
+        return fail(Err, F->Path + ": MCS251 ISR: priority declared for "
+                                   "unregistered slot " +
+                             Twine(Rec.first));
+      if (It->second.AttrSet && It->second.Priority != Rec.second)
+        return fail(Err, "MCS251 ISR: conflicting priority attributes for slot " +
+                             Twine(Rec.first));
+      It->second.Priority = Rec.second;
+      It->second.Source = "attribute";
+      It->second.AttrSet = true;
+    }
+  }
+
+  for (const auto &Ov : Config.IsrPriorities) {
+    uint32_t Slot = 0;
+    uint64_t ParsedSlot = 0;
+    if (MCS251ISR::parseCanonicalSlot(Ov.Target, ParsedSlot)) {
+      Slot = static_cast<uint32_t>(ParsedSlot);
+      if (!BySlot.count(Slot))
+        return fail(Err, "MCS251 ISR: --isr-priority slot " + Twine(Slot) +
+                             " is not a registered ISR");
+    } else {
+      auto It = NameToSlot.find(Ov.Target);
+      if (It == NameToSlot.end())
+        return fail(Err, "MCS251 ISR: --isr-priority target '" + Ov.Target +
+                             "' is not a registered ISR");
+      Slot = It->second;
+    }
+    BySlot[Slot].Priority = Ov.Priority;
+    BySlot[Slot].Source = "cli";
+  }
+
+  // Compute STC32G hardware priority SFR values (IP/IPH, IP2/IP2H, IP3/IP3H).
+  struct SfrReg {
+    const char *Name;
+    uint8_t Addr;
+    uint8_t Val;
+  };
+  SfrReg Sfrs[] = {
+      {"IP", 0xB8, 0},   {"IPH", 0xB7, 0},  {"IP2", 0xB5, 0},
+      {"IP2H", 0xB6, 0}, {"IP3", 0xDF, 0},  {"IP3H", 0xEE, 0},
+  };
+  auto SetSfrBit = [&](uint8_t Addr, uint8_t Mask) {
+    for (SfrReg &R : Sfrs)
+      if (R.Addr == Addr) {
+        R.Val |= Mask;
+        return;
+      }
+  };
+
+  if (AnyPriorityConfigured) {
+    for (const auto &KV : BySlot) {
+      Result.IsrPriorities.push_back(
+          {KV.first, KV.second.Sym->Name, KV.second.Priority, KV.second.Source});
+      if (KV.second.Priority != 0) {
+        if (const auto *Desc = MCS251ISR::lookupISRPrioritySFR(KV.first)) {
+          if (KV.second.Priority & 1u)
+            SetSfrBit(Desc->LowSFR, Desc->BitMask);
+          if (KV.second.Priority & 2u)
+            SetSfrBit(Desc->HighSFR, Desc->BitMask);
+        }
+      }
+    }
+    for (const SfrReg &R : Sfrs)
+      if (R.Val != 0)
+        Result.IsrPrioritySfrs.emplace_back(R.Name, R.Val);
+
+    // Automatically derive ISR preemption pairs: whenever pri(B) > pri(A),
+    // hardware ISR B can preempt ISR A. Feed into WP2 diagnoseIsrReentrancy().
+    if (Config.AutoIsrPreemption) {
+      for (const auto &A : BySlot) {
+        for (const auto &B : BySlot) {
+          if (A.first == B.first)
+            continue;
+          if (B.second.Priority <= A.second.Priority)
+            continue;
+          const std::string &NA = A.second.Sym->Name;
+          const std::string &NB = B.second.Sym->Name;
+          bool Exists = llvm::any_of(
+              Config.IsrPreemptionPairs,
+              [&](const LinkerConfig::IsrPreemptionPair &P) {
+                return (P.NameA == NA && P.NameB == NB) ||
+                       (P.NameA == NB && P.NameB == NA);
+              });
+          if (!Exists)
+            Config.IsrPreemptionPairs.push_back(
+                {NA, NB, "<auto-isr-priority>", 0});
+        }
+      }
+    }
+  }
+
+  // Synthesize callable CSEG routine ___mcs251_isr_priority_init (C name
+  // __mcs251_isr_priority_init) whenever referenced as undefined and not
+  // user-defined: emits `mov <sfr>, #<val>` (0x75 <addr> <val>) + `eret` (0xAA).
+  std::vector<std::string> WantedInitNames;
+  for (const char *Cand :
+       {"___mcs251_isr_priority_init", "__mcs251_isr_priority_init"}) {
+    if (Globals.count(Cand))
+      continue;
+    bool Referenced = false;
+    for (const auto &F : Files)
+      for (const InputSymbol &S : F->Symbols)
+        if (!S.Defined && S.Name == Cand)
+          Referenced = true;
+    if (Referenced)
+      WantedInitNames.emplace_back(Cand);
+  }
+  if (!WantedInitNames.empty()) {
+    auto Syn = std::make_unique<InputSection>();
+    Syn->Name = ".mcs251.isr_priority_init";
+    Syn->Type = ELF::SHT_PROGBITS;
+    Syn->Flags = ELF::SHF_ALLOC | ELF::SHF_EXECINSTR;
+    Syn->Align = 1;
+    Syn->Region = "CSEG";
+    Syn->IsAlloc = true;
+    Syn->IsCode = true;
+    Syn->IsNobits = false;
+    Syn->Synthesized = true;
+    for (const SfrReg &R : Sfrs) {
+      if (R.Val == 0)
+        continue;
+      Syn->Data.push_back(0x75); // mov dir8, #imm8
+      Syn->Data.push_back(R.Addr);
+      Syn->Data.push_back(R.Val);
+    }
+    Syn->Data.push_back(0xAA); // eret
+    Syn->Size = Syn->Data.size();
+    Syn->IsLoadable = true;
+    InputSection *SynPtr = Syn.get();
+    SynthSections.push_back(SynPtr);
+    AllSections.push_back(SynPtr);
+    OwnedSynth.push_back(std::move(Syn));
+    for (const std::string &SymName : WantedInitNames) {
+      auto Sym = std::make_unique<InputSymbol>();
+      Sym->Name = SymName;
+      Sym->Value = 0;
+      Sym->Size = static_cast<uint32_t>(SynPtr->Size);
+      Sym->Bind = ELF::STB_GLOBAL;
+      Sym->Type = ELF::STT_FUNC;
+      Sym->Defined = true;
+      Sym->Sec = SynPtr;
+      Globals[SymName] = Sym.get();
+      OwnedSynthSyms.push_back(std::move(Sym));
     }
   }
   return true;
@@ -4165,7 +4749,8 @@ bool Linker::allocateBitSlots() {
   std::vector<std::pair<InputFile *, BitRecord *>> Recs;
   for (auto &F : Files)
     for (BitRecord &R : F->BitRecords)
-      Recs.push_back({F.get(), &R});
+      if (!R.Discarded)
+        Recs.push_back({F.get(), &R});
 
   // 1. Fixed references reserve their whole backing byte exclusively.  A byte
   //    already in the pool needs no second reservation; SFR addresses
@@ -5118,16 +5703,23 @@ bool Linker::layoutData() {
   }
 
   for (auto &F : Files)
-    for (auto &S : F->Symbols)
+    for (auto &S : F->Symbols) {
+      if (S.Sec && S.Sec->Discarded)
+        continue;
       if (S.Sec && S.Sec->IsAlloc)
         S.Address = S.Sec->Address + S.Value;
       else if (S.Defined)
         S.Address = S.Value;
+    }
+  for (auto &SS : OwnedSynthSyms)
+    if (SS->Sec && !SS->Sec->Discarded)
+      SS->Address = SS->Sec->Address + SS->Value;
 
   bool StackDefinition = false;
   for (const auto &F : Files)
     for (const InputSymbol &S : F->Symbols)
-      if (S.Name == "__mcs251_stack_base") {
+      if (S.Name == "__mcs251_stack_base" &&
+          (!S.Sec || !S.Sec->Discarded)) {
         StackRequested |= !S.Defined;
         StackDefinition |= S.Defined;
       }
@@ -5141,6 +5733,21 @@ bool Linker::layoutData() {
     SPX = First - 1;
     Capacity = Config.EdataEnd + 1 >= First ? Config.EdataEnd + 1 - First : 0;
     Synth["__mcs251_stack_base"] = SPX;
+  }
+  for (const LinkerConfig::ScriptSymbol &Sym : Config.ScriptSymbols) {
+    if (Sym.Name.empty())
+      continue;
+    if (Sym.Provide) {
+      if (!Globals.count(Sym.Name) && !Synth.count(Sym.Name) &&
+          !PlacementNames.count(Sym.Name))
+        Synth[Sym.Name] = Sym.Value;
+    } else {
+      if (Globals.count(Sym.Name))
+        return fail(Err, "linker script symbol conflicts with object "
+                         "definition: " +
+                             Sym.Name);
+      Synth[Sym.Name] = Sym.Value;
+    }
   }
   return true;
 }
@@ -5281,12 +5888,33 @@ bool Linker::checkFlashGate() {
 }
 
 bool Linker::errorUndefined() {
+  std::set<std::string> LiveReferenced;
+  if (Config.GcSections) {
+    for (const auto &F : Files)
+      for (const auto &S : F->Sections) {
+        if (S->Discarded || S->IsDebug)
+          continue;
+        for (const Relocation &R : S->Relocs) {
+          InputSymbol *IS = findSymbol(*F, R.Sym);
+          if (IS && !IS->Defined && !IS->Name.empty())
+            LiveReferenced.insert(IS->Name);
+        }
+      }
+    for (const std::string &U : Config.UndefinedRoots)
+      LiveReferenced.insert(U);
+    if (!Config.EntrySymbol.empty())
+      LiveReferenced.insert(Config.EntrySymbol);
+  }
   for (const auto &F : Files)
     for (const InputSymbol &S : F->Symbols) {
       if (S.Defined || S.Name.empty())
         continue;
+      if (Config.GcSections && !LiveReferenced.count(S.Name))
+        continue;
       if (S.Bind == ELF::STB_LOCAL)
         return fail(Err, "undefined local symbol: " + S.Name);
+      if (S.Bind == ELF::STB_WEAK)
+        continue; // Unresolved weak references evaluate to 0.
       // G11 (§3.3 insertion 3): a bind-only placement name is a legal
       // undefined reference -- the placement table carries its address.
       if (!Globals.count(S.Name) && !Synth.count(S.Name) &&
@@ -5438,17 +6066,14 @@ bool Linker::applyRelocationsImpl(std::map<std::pair<InputSection *, uint32_t>,
                                           unsigned> *P6Writes) {
   std::set<std::pair<InputSection *, uint32_t>> Written;
   for (auto &F : Files)
-    for (auto &S : F->Sections)
+    for (auto &S : F->Sections) {
+      if (S->Discarded || S->IsDebug)
+        continue;
       for (const Relocation &R : S->Relocs) {
         InputSymbol *IS = findSymbol(*F, R.Sym);
         if (!IS)
           return fail(Err, "invalid relocation symbol");
-        InputSymbol *Target = IS;
-        if (!IS->Defined) {
-          auto It = Globals.find(IS->Name);
-          if (It != Globals.end())
-            Target = It->second;
-        }
+        InputSymbol *Target = resolveTargetSymbol(IS);
         // BT13: bit relocations. BITADDR8 writes the resolved bit address; the
         // bit symbol's ELF Address field is never a byte address, so it is
         // looked up in the allocation ledger, not read from Target->Address.
@@ -5539,12 +6164,15 @@ bool Linker::applyRelocationsImpl(std::map<std::pair<InputSection *, uint32_t>,
                                    S->Name + " lands inside the default entry");
           }
         }
-        uint32_t V = IS->Defined ? IS->Address
-                     : Globals.count(IS->Name) ? Globals[IS->Name]->Address
-                     : PlacementNames.count(IS->Name)
-                         ? PlacementNames[IS->Name].Address
-                     : Synth.count(IS->Name) ? Synth[IS->Name]
-                     : 0;
+        uint32_t V = 0;
+        if (Target->Defined && (!Target->Sec || !Target->Sec->Discarded))
+          V = Target->Address;
+        else if (Globals.count(IS->Name))
+          V = Globals[IS->Name]->Address;
+        else if (PlacementNames.count(IS->Name))
+          V = PlacementNames[IS->Name].Address;
+        else if (Synth.count(IS->Name))
+          V = Synth[IS->Name];
         int64_t Value = static_cast<int64_t>(V) + R.Addend;
         // X3-R3/X3-R8: a stored pointer initializer must resolve inside its
         // target object.  The channel is identified by the resolved target's
@@ -5681,6 +6309,7 @@ bool Linker::applyRelocationsImpl(std::map<std::pair<InputSection *, uint32_t>,
         default: return fail(Err, "unknown MCS251 relocation");
         }
       }
+    }
   // T07 step 6: the synthesized EJMP table is applied after layout, when the
   // vetted targets have final addresses. Metadata type9 relocations are never
   // seen here: they are consumed during loadFile() (T07 step 14).
@@ -6226,7 +6855,7 @@ bool Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
   for (auto &F : Files)
     for (auto &S : F->Symbols)
       if (S.Defined && !S.Name.empty() && S.Type != ELF::STT_SECTION &&
-          S.Sec && S.Sec->IsAlloc && S.Sec->IsCode)
+          S.Sec && S.Sec->IsAlloc && !S.Sec->Discarded && S.Sec->IsCode)
         Candidates[S.Sec].push_back(&S);
   std::map<InputSection *, std::vector<Interval>> Funcs;
   std::vector<InputSymbol *> FuncNodes; // graph nodes == canonical owners
@@ -6421,7 +7050,8 @@ bool Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
   std::map<InputSection *, std::vector<Instr>> Instrs;
   for (auto &F : Files)
     for (auto &S : F->Sections) {
-      if (!S->IsAlloc || !S->IsCode || S->IsNobits || S->Size == 0)
+      if (!S->IsAlloc || S->Discarded || !S->IsCode || S->IsNobits ||
+          S->Size == 0)
         continue;
       std::vector<uint8_t> Bytes(S->Size, 0);
       bool Complete = true;
@@ -6515,13 +7145,8 @@ bool Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
     InputSymbol *IS = findSymbol(*F, R.Sym);
     if (!IS)
       return nullptr;
-    if (!IS->Defined) {
-      auto It = Globals.find(IS->Name);
-      if (It == Globals.end())
-        return nullptr;
-      return It->second;
-    }
-    return IS;
+    InputSymbol *T = resolveTargetSymbol(IS);
+    return (T && T->Defined && (!T->Sec || !T->Sec->Discarded)) ? T : nullptr;
   };
   if (CrtFile) {
     // kind 0: the reset trampoline.
@@ -6776,7 +7401,7 @@ bool Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
       return true;
     };
     auto SlotCapable = [](InputSection *S) {
-      return S && S->IsAlloc && !S->IsCode && !S->Synthesized &&
+      return S && S->IsAlloc && !S->Discarded && !S->IsCode && !S->Synthesized &&
              (S->Region == "DSEG" || S->Region == "OSEG" ||
               S->Region == "EDATA");
     };
@@ -6848,19 +7473,15 @@ bool Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
   // storage reference that is not a confirmed slot access is an unknown.
   for (auto &F : Files)
     for (auto &S : F->Sections) {
-      if (!S->IsAlloc || !S->IsCode)
+      if (!S->IsAlloc || S->Discarded || !S->IsCode)
         continue;
       for (const Relocation &R : S->Relocs) {
         InputSymbol *IS = findSymbol(*F, R.Sym);
         if (!IS)
           continue;
-        InputSymbol *Target = IS;
-        if (!IS->Defined) {
-          auto It = Globals.find(IS->Name);
-          if (It == Globals.end())
-            continue; // unresolved cross-object: documented boundary
-          Target = It->second;
-        }
+        InputSymbol *Target = resolveTargetSymbol(IS);
+        if (!Target || !Target->Defined)
+          continue; // unresolved cross-object: documented boundary
         const Interval *FromIv = Containing(S.get(), R.Offset);
         if (IsControlType(R.Type)) {
           const uint8_t CtrlEv = ControlEvidence(S.get(), R);
@@ -6979,7 +7600,7 @@ bool Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
   std::map<InputSection *, std::map<uint32_t, const Relocation *>> RelocAt;
   for (auto &F : Files)
     for (auto &S : F->Sections) {
-      if (!S->IsAlloc || !S->IsCode)
+      if (!S->IsAlloc || S->Discarded || !S->IsCode)
         continue;
       for (const Relocation &R : S->Relocs)
         RelocAt[S.get()][R.Offset] = &R;
@@ -7021,13 +7642,9 @@ bool Linker::diagnoseIsrReentrancy(LinkerResult &Result) {
           InputSymbol *IS = findSymbol(*F, R.Sym);
           if (!IS)
             return std::nullopt;
-          InputSymbol *T = IS;
-          if (!IS->Defined) {
-            auto It = Globals.find(IS->Name);
-            if (It == Globals.end())
-              return std::nullopt;
-            T = It->second;
-          }
+          InputSymbol *T = resolveTargetSymbol(IS);
+          if (!T || !T->Defined)
+            return std::nullopt;
           if (IS->Type == ELF::STT_SECTION) {
             if (R.Addend < 0 || !IS->Sec || !IS->Sec->IsAlloc)
               return std::nullopt;
@@ -8184,7 +8801,7 @@ void Linker::collectLinkFactsBasic(LinkerResult &Result) {
   for (size_t ObjI = 0; ObjI != Files.size(); ++ObjI)
     for (const auto &SP : Files[ObjI]->Sections) {
       const InputSection &S = *SP;
-      if (!S.IsAlloc || S.Region == "IGNORE")
+      if (!S.IsAlloc || S.Discarded || S.Region == "IGNORE")
         continue;
       LinkerResult::LinkFacts::Section R;
       R.ObjectId = uint32_t(ObjI);
@@ -8193,9 +8810,11 @@ void Linker::collectLinkFactsBasic(LinkerResult &Result) {
       R.Region = S.Region;
       const StringRef Rg = S.Region;
       if (Rg == "CSEG" || Rg == "HOME" || Rg == "VECS" || Rg == "BOOT" ||
-          Rg == "XINIT" || Rg == "XDATA_INIT")
+          Rg == "XINIT" || Rg == "XDATA_INIT" || Rg == "BITINIT" ||
+          (Rg == "FIXED" && S.PlacementClass == PSC_CODE))
         R.Space = 2;
-      else if (Rg == "XSEG")
+      else if (Rg == "XSEG" ||
+               (Rg == "FIXED" && S.PlacementClass == PSC_XDATA))
         R.Space = 1;
       else
         R.Space = 0;
@@ -8207,8 +8826,14 @@ void Linker::collectLinkFactsBasic(LinkerResult &Result) {
   for (size_t ObjI = 0; ObjI != Files.size(); ++ObjI)
     for (size_t SymI = 0; SymI != Files[ObjI]->Symbols.size(); ++SymI) {
       const InputSymbol &S = Files[ObjI]->Symbols[SymI];
-      if (!S.Defined || S.Name.empty() || S.Type == ELF::STT_SECTION)
+      if (!S.Defined || S.Name.empty() || S.Type == ELF::STT_SECTION ||
+          (S.Sec && S.Sec->Discarded))
         continue;
+      if (S.Bind != ELF::STB_LOCAL) {
+        auto It = Globals.find(S.Name);
+        if (It == Globals.end() || It->second != &S)
+          continue;
+      }
       if (Files[ObjI]->BitSection && S.Sec == Files[ObjI]->BitSection)
         continue;
       LinkerResult::LinkFacts::Symbol R;
@@ -8258,13 +8883,83 @@ void Linker::printInputs(raw_ostream &Out) const {
   }
 }
 
+void Linker::collectMapData(LinkerResult &Result) const {
+  LinkerResult::MapData &M = Result.MapInfo;
+  M.SynthSymbols.assign(Synth.begin(), Synth.end());
+  for (const auto &F : Files)
+    for (const auto &SP : F->Sections) {
+      const InputSection &S = *SP;
+      if (!S.IsAlloc || S.Discarded || S.Region == "IGNORE")
+        continue;
+      LinkerResult::MapData::Section MS;
+      MS.File = F->Path;
+      MS.Name = S.Name;
+      MS.Region = S.Region;
+      const StringRef Rg = S.Region;
+      if (Rg == "CSEG" || Rg == "HOME" || Rg == "VECS" || Rg == "BOOT" ||
+          Rg == "XINIT" || Rg == "XDATA_INIT" || Rg == "BITINIT" ||
+          (Rg == "FIXED" && S.PlacementClass == PSC_CODE))
+        MS.Space = 2;
+      else if (Rg == "XSEG" ||
+               (Rg == "FIXED" && S.PlacementClass == PSC_XDATA))
+        MS.Space = 1;
+      else
+        MS.Space = 0;
+      MS.Address = S.Address;
+      MS.Size = uint32_t(S.Size);
+      MS.Flags = S.Flags;
+      M.Sections.push_back(std::move(MS));
+    }
+  M.StackRequested = StackRequested;
+  M.StackH = StackH;
+  M.StackSpx = SPX;
+  M.StackCapacity = Capacity;
+  M.EdataEnd = Config.EdataEnd;
+  M.IramSize = Config.IramSize;
+  M.FlashGate = Config.FlashGate;
+  M.FlashBase = Config.FlashBase;
+  M.FlashSize = Config.FlashSize;
+  M.XdataSize = Config.XdataSize;
+  for (const auto &P : BitOf) {
+    LinkerResult::MapData::BitEntry BE;
+    BE.Name = P.first->Name;
+    if (P.first->Bind == ELF::STB_LOCAL && P.first->File)
+      BE.Name = P.first->File->Path + ":" + BE.Name;
+    BE.BitAddr = P.second;
+    if (P.second > 0x7f) {
+      BE.IsSfr = true;
+      BE.ByteAddr = P.second & 0xf8;
+      BE.Index = P.second & 7;
+      BE.Init = "0";
+    } else {
+      BE.ByteAddr = BitWindowBase + (P.second >> 3);
+      BE.Index = P.second & 7;
+      auto It = BitMask.find(BE.ByteAddr);
+      BE.Automatic =
+          It != BitMask.end() && ((It->second & (1u << BE.Index)) != 0);
+      if (BE.Automatic) {
+        auto V = BitValue.find(BE.ByteAddr);
+        BE.Init = (V != BitValue.end() && (V->second & (1u << BE.Index)))
+                      ? "1"
+                      : "0";
+      } else {
+        BE.Init = BitInputXInitDest.count(BE.ByteAddr) ? "user-xinit" : "none";
+      }
+    }
+    M.Bits.push_back(std::move(BE));
+  }
+  llvm::sort(M.Bits, [](const auto &A, const auto &B) {
+    return A.BitAddr != B.BitAddr ? A.BitAddr < B.BitAddr : A.Name < B.Name;
+  });
+}
+
 void Linker::buildMap(raw_ostream &Out) const {
   Out << "MCS251 map\n";
   for (const auto &P : Synth)
     Out << P.first << " = " << format_hex(P.second, 6, false) << '\n';
   for (const auto &F : Files)
     for (const auto &S : F->Sections)
-      if (S->IsAlloc)
+      if (S->IsAlloc && !S->Discarded)
         Out << F->Path << ":" << S->Name << " "
             << format_hex(S->Address, 6, false) << " +"
             << format_hex(S->Size, 0, false) << "\n";
@@ -8417,21 +9112,35 @@ void Linker::buildMap(raw_ostream &Out) const {
 // carry no audit value and are skipped; duplicate names across objects are
 // kept because each names a distinct definition in its own object.
 void Linker::collectSymbols(std::vector<OutputSymbol> &Out) const {
-  auto Emit = [&](uint8_t Bind) {
+  auto Emit = [&](bool Locals) {
     for (const auto &F : Files)
-      for (const InputSymbol &S : F->Symbols)
-        if (S.Defined && !S.Name.empty() && S.Type != ELF::STT_SECTION &&
-            S.Bind == Bind) {
-          // BT13: a bit object has no byte address (its st_value is a bit
-          // metadata record offset), so it never enters the byte-address
-          // symbol table.  The bit allocation is reported in the map instead.
-          if (S.Sec && F->BitSection == S.Sec)
+      for (const InputSymbol &S : F->Symbols) {
+        if (!S.Defined || S.Name.empty() || S.Type == ELF::STT_SECTION ||
+            S.Type == ELF::STT_FILE)
+          continue;
+        if (S.Sec && (S.Sec->Discarded || S.Sec->IsDebug))
+          continue;
+        if (Locals ? (S.Bind != ELF::STB_LOCAL) : (S.Bind == ELF::STB_LOCAL))
+          continue;
+        if (!Locals) {
+          auto It = Globals.find(S.Name);
+          if (It == Globals.end() || It->second != &S)
             continue;
-          Out.push_back({S.Name, S.Address, S.Size, S.Bind, S.Type, false});
         }
+        // BT13: a bit object has no byte address (its st_value is a bit
+        // metadata record offset), so it never enters the byte-address
+        // symbol table.  The bit allocation is reported in the map instead.
+        if (S.Sec && F->BitSection == S.Sec)
+          continue;
+        Out.push_back({S.Name, S.Address, S.Size, S.Bind, S.Type, false});
+      }
   };
-  Emit(ELF::STB_LOCAL);
-  Emit(ELF::STB_GLOBAL);
+  Emit(/*Locals=*/true);
+  Emit(/*Locals=*/false);
+  for (const auto &SS : OwnedSynthSyms)
+    if (SS->Defined && (!SS->Sec || !SS->Sec->Discarded))
+      Out.push_back(
+          {SS->Name, SS->Address, SS->Size, SS->Bind, SS->Type, false});
   for (const auto &P : Synth)
     Out.push_back({P.first, P.second, 0, ELF::STB_GLOBAL, ELF::STT_NOTYPE,
                    true});
@@ -8470,7 +9179,7 @@ bool Linker::collectPositions(LinkerResult &Result) {
   for (size_t ObjId = 0; ObjId != Files.size(); ++ObjId) {
     for (const auto &SP : Files[ObjId]->Sections) {
       const InputSection &S = *SP;
-      if (!S.IsAlloc || S.Region == "IGNORE")
+      if (!S.IsAlloc || S.Discarded || S.Region == "IGNORE")
         continue;
       LinkerResult::PositionSection P;
       P.ObjectId = static_cast<uint32_t>(ObjId);
@@ -8523,16 +9232,226 @@ bool Linker::collectPositions(LinkerResult &Result) {
   return true;
 }
 
-bool Linker::run(LinkerResult &Result) {
-  for (StringRef P : Config.Inputs) {
-    auto F = std::make_unique<InputFile>();
-    if (!loadFile(P, *F, Err))
-      return false;
+static void indexArchiveMemberSymbols(const object::Archive::Child &C,
+                                      uint64_t ChildOff,
+                                      std::map<std::string, uint64_t> &SymMap) {
+  Expected<MemoryBufferRef> MBOrErr = C.getMemoryBufferRef();
+  if (!MBOrErr) {
+    consumeError(MBOrErr.takeError());
+    return;
+  }
+  Expected<std::unique_ptr<ObjectFile>> ObjOrErr =
+      ObjectFile::createObjectFile(*MBOrErr);
+  if (!ObjOrErr) {
+    consumeError(ObjOrErr.takeError());
+    return;
+  }
+  auto *ELFObj = dyn_cast<ELF32BEObjectFile>(ObjOrErr->get());
+  if (!ELFObj)
+    return;
+  const ELFFile<ELF32BE> &ELF = ELFObj->getELFFile();
+  Expected<ELF32BE::ShdrRange> Shdrs = ELF.sections();
+  if (!Shdrs) {
+    consumeError(Shdrs.takeError());
+    return;
+  }
+  for (const ELF32BE::Shdr &H : *Shdrs) {
+    if (H.sh_type != ELF::SHT_SYMTAB)
+      continue;
+    Expected<ELF32BE::SymRange> Syms = ELF.symbols(&H);
+    Expected<StringRef> Strs = ELF.getStringTableForSymtab(H);
+    if (!Syms || !Strs) {
+      if (!Syms)
+        consumeError(Syms.takeError());
+      if (!Strs)
+        consumeError(Strs.takeError());
+      continue;
+    }
+    for (const ELF32BE::Sym &Sym : *Syms) {
+      if (Sym.st_shndx == ELF::SHN_UNDEF ||
+          Sym.getBinding() == ELF::STB_LOCAL)
+        continue;
+      Expected<StringRef> Name = Sym.getName(*Strs);
+      if (!Name) {
+        consumeError(Name.takeError());
+        continue;
+      }
+      if (!Name->empty())
+        SymMap.try_emplace(Name->str(), ChildOff);
+    }
+  }
+}
+
+bool Linker::loadInputs() {
+  struct PendingArchive {
+    std::string Path;
+    std::unique_ptr<MemoryBuffer> Buffer;
+    std::unique_ptr<object::Archive> Ar;
+    std::map<std::string, uint64_t> SymToChildOffset;
+    std::map<uint64_t, object::Archive::Child> OffsetToChild;
+    std::set<uint64_t> ExtractedOffsets;
+  };
+
+  std::vector<PendingArchive> Archives;
+  std::set<std::string> DefinedGlobals;
+
+  auto RegisterLoadedObject = [&](std::unique_ptr<InputFile> F) {
     for (auto &S : F->Sections)
       if (S->IsAlloc)
         AllSections.push_back(S.get());
+    for (const InputSymbol &Sym : F->Symbols)
+      if (Sym.Defined && Sym.Bind != ELF::STB_LOCAL && !Sym.Name.empty())
+        DefinedGlobals.insert(Sym.Name);
     Files.push_back(std::move(F));
+  };
+
+  auto ExtractMember = [&](PendingArchive &PA, uint64_t ChildOff,
+                           const object::Archive::Child &C) -> bool {
+    if (!PA.ExtractedOffsets.insert(ChildOff).second)
+      return true;
+    std::string MemberName;
+    if (Expected<StringRef> NameOrErr = C.getName()) {
+      MemberName = NameOrErr->str();
+    } else {
+      consumeError(NameOrErr.takeError());
+      MemberName = "<member>";
+    }
+    std::string DisplayPath = PA.Path + "(" + MemberName + ")";
+    Expected<MemoryBufferRef> MemberRef = C.getMemoryBufferRef();
+    if (!MemberRef)
+      return fail(Err, DisplayPath + ": " + toString(MemberRef.takeError()));
+    std::unique_ptr<MemoryBuffer> OwnedBuf =
+        MemoryBuffer::getMemBufferCopy(MemberRef->getBuffer(), DisplayPath);
+    auto F = std::make_unique<InputFile>();
+    if (!loadObjectBuffer(DisplayPath, std::move(OwnedBuf), *F, Err))
+      return false;
+    F->FromArchive = true;
+    F->ArchivePath = PA.Path;
+    F->ArchiveOffset = ChildOff;
+    RegisterLoadedObject(std::move(F));
+    return true;
+  };
+
+  for (const LinkerConfig::MemoryInput &MI : Config.MemoryInputs) {
+    std::unique_ptr<MemoryBuffer> OwnedBuf =
+        MemoryBuffer::getMemBufferCopy(MI.Bytes, MI.Name);
+    auto F = std::make_unique<InputFile>();
+    if (!loadObjectBuffer(MI.Name, std::move(OwnedBuf), *F, Err))
+      return false;
+    RegisterLoadedObject(std::move(F));
   }
+
+  for (size_t I = 0; I != Config.Inputs.size(); ++I) {
+    StringRef P = Config.Inputs[I];
+    const bool Whole =
+        I < Config.InputWholeArchive.size() && Config.InputWholeArchive[I];
+    auto MB = MemoryBuffer::getFile(P);
+    if (!MB)
+      return fail(Err, P + ": cannot read input");
+    StringRef Head = (*MB)->getBuffer().take_front(8);
+    if (Head == "!<arch>\n" || Head == "!<thin>\n") {
+      Expected<std::unique_ptr<object::Archive>> ArOrErr =
+          object::Archive::create((*MB)->getMemBufferRef());
+      if (!ArOrErr)
+        return fail(Err, P + ": invalid archive: " +
+                             toString(ArOrErr.takeError()));
+      PendingArchive PA;
+      PA.Path = P.str();
+      PA.Buffer = std::move(*MB);
+      PA.Ar = std::move(*ArOrErr);
+      std::vector<std::pair<uint64_t, object::Archive::Child>> Ordered;
+      Error ChildErr = Error::success();
+      for (const object::Archive::Child &C : PA.Ar->children(ChildErr)) {
+        uint64_t Off = C.getChildOffset();
+        Ordered.emplace_back(Off, C);
+        PA.OffsetToChild.emplace(Off, C);
+      }
+      if (ChildErr)
+        return fail(Err, P + ": invalid archive member: " +
+                             toString(std::move(ChildErr)));
+      if (Whole) {
+        for (const auto &Entry : Ordered)
+          if (!ExtractMember(PA, Entry.first, Entry.second))
+            return false;
+        continue;
+      }
+      if (PA.Ar->hasSymbolTable()) {
+        for (const object::Archive::Symbol &Sym : PA.Ar->symbols()) {
+          Expected<object::Archive::Child> MemberOrErr = Sym.getMember();
+          if (!MemberOrErr)
+            return fail(Err, P + ": invalid archive symbol table: " +
+                                 toString(MemberOrErr.takeError()));
+          PA.SymToChildOffset.try_emplace(Sym.getName().str(),
+                                          MemberOrErr->getChildOffset());
+        }
+      } else {
+        for (const auto &Entry : Ordered)
+          indexArchiveMemberSymbols(Entry.second, Entry.first,
+                                    PA.SymToChildOffset);
+      }
+      Archives.push_back(std::move(PA));
+      continue;
+    }
+    auto F = std::make_unique<InputFile>();
+    if (!loadObjectBuffer(P, std::move(*MB), *F, Err))
+      return false;
+    RegisterLoadedObject(std::move(F));
+  }
+
+  // Lazy archive member extraction: iterate to fixpoint over command-line
+  // archives, pulling in members that satisfy strong undefined symbols.
+  bool Progress = !Archives.empty();
+  while (Progress) {
+    Progress = false;
+    std::vector<std::string> Unresolved;
+    std::set<std::string> SeenUndef;
+    auto AddRootUndef = [&](const std::string &Name) {
+      if (!Name.empty() && !isReservedBoundarySymbol(Name) &&
+          !DefinedGlobals.count(Name) && SeenUndef.insert(Name).second)
+        Unresolved.push_back(Name);
+    };
+    if (!Config.EntrySymbol.empty())
+      AddRootUndef(Config.EntrySymbol);
+    for (const std::string &U : Config.UndefinedRoots)
+      AddRootUndef(U);
+    for (const auto &F : Files)
+      for (const InputSymbol &Sym : F->Symbols)
+        if (!Sym.Defined && Sym.Bind == ELF::STB_GLOBAL && !Sym.Name.empty() &&
+            !isReservedBoundarySymbol(Sym.Name) &&
+            !DefinedGlobals.count(Sym.Name) &&
+            SeenUndef.insert(Sym.Name).second)
+          Unresolved.push_back(Sym.Name);
+    if (Unresolved.empty())
+      break;
+    for (PendingArchive &PA : Archives) {
+      bool Extracted = false;
+      for (const std::string &SymName : Unresolved) {
+        if (DefinedGlobals.count(SymName))
+          continue;
+        auto It = PA.SymToChildOffset.find(SymName);
+        if (It == PA.SymToChildOffset.end())
+          continue;
+        uint64_t Off = It->second;
+        if (PA.ExtractedOffsets.count(Off))
+          continue;
+        auto CIt = PA.OffsetToChild.find(Off);
+        if (CIt == PA.OffsetToChild.end())
+          continue;
+        if (!ExtractMember(PA, Off, CIt->second))
+          return false;
+        Progress = true;
+        Extracted = true;
+      }
+      if (Extracted)
+        break;
+    }
+  }
+  return true;
+}
+
+bool Linker::run(LinkerResult &Result) {
+  if (!loadInputs())
+    return false;
   if (Files.empty())
     return fail(Err, "no input files");
   // A3.6: any input containing `.mcs251.isr` triggers IRQ mode; there is no
@@ -8560,6 +9479,8 @@ bool Linker::run(LinkerResult &Result) {
   // symbol resolution or placement work, so a link whose identities disagree
   // fails without ever touching layout, the image or an output file.
   if (!validateIdentitySet())
+    return false;
+  if (!deduplicateComdatGroups())
     return false;
   // G11 §3.3 (rev 4 fronting ruling): mergePlacement runs between the
   // identity set and symbol resolution -- its inputs are complete (NOTE
@@ -8595,9 +9516,13 @@ bool Linker::run(LinkerResult &Result) {
   if (IrqMode && (!validateISRIdentitiesAndRegistrations() ||
                   !synthesizeIRQVectors()))
     return false;
+  if (!resolveISRPrioritiesAndSynthesizeInit(Result))
+    return false;
   // G11 §3.3: the post-resolve bind-only collision check -- a PlacementNames
   // key that meets a defined global WITHOUT placement is a contradiction.
   if (!validatePlacementResolution())
+    return false;
+  if (Config.GcSections && !gcSections())
     return false;
   if (!layout())
     return false;
@@ -8622,9 +9547,25 @@ bool Linker::run(LinkerResult &Result) {
   // Result.Facts when requested.
   if (!diagnoseIsrReentrancy(Result))
     return false;
-  Result.Entry = llvm::any_of(AllSections,
-                              [](const InputSection *S) { return S->Region == "HOME"; })
-                     ? areaStart("HOME", 0) : 0;
+  if (!Config.EntrySymbol.empty()) {
+    auto It = Globals.find(Config.EntrySymbol);
+    if (It != Globals.end() && It->second->Defined &&
+        (!It->second->Sec || !It->second->Sec->Discarded)) {
+      Result.Entry = It->second->Address;
+    } else if (auto SIt = Synth.find(Config.EntrySymbol);
+               SIt != Synth.end()) {
+      Result.Entry = SIt->second;
+    } else {
+      return fail(Err, "undefined entry symbol: " + Config.EntrySymbol);
+    }
+  } else {
+    Result.Entry = llvm::any_of(AllSections,
+                                [](const InputSection *S) {
+                                  return S->Region == "HOME";
+                                })
+                       ? areaStart("HOME", 0)
+                       : 0;
+  }
   // E5: final symbol snapshot with post-layout addresses; the flavor shell
   // decides whether to serialize it into the output ELF.
   // G11 §3.3: the bind-only Synth append happens inside collectSymbols;
@@ -8634,16 +9575,119 @@ bool Linker::run(LinkerResult &Result) {
   if (!validatePlacementSymbolNames())
     return false;
   collectSymbols(Result.Symbols);
+  if (!linkDebugSections(Result))
+    return false;
   // G11-D2 (design §6.2): the positioning snapshot is taken in the result
   // snapshot stage, before Result.Image is moved out: every address is final
   // (G8 migration and G13b synthesis already happened) and the collection
   // itself cannot disturb the image, the map or the symbols.
   if (Config.CollectPositions && !collectPositions(Result))
     return false;
+  Result.LoadedInputs.reserve(Files.size());
+  for (const auto &F : Files)
+    Result.LoadedInputs.push_back(
+        {F->Path, F->FromArchive ? F->ArchivePath : F->Path, F->FromArchive,
+         F->ArchiveOffset});
+  Result.OutputEFlags =
+      (!Files.empty() && Files[0]->IsV2) ? ABI_FLAGS_V2 : ABI_FLAGS;
   Result.Image = std::move(Image);
   raw_string_ostream MapOS(Result.Map);
   buildMap(MapOS);
   MapOS.flush();
+  collectMapData(Result);
+  return true;
+}
+
+bool Linker::linkDebugSections(LinkerResult &Result) {
+  std::map<std::string, size_t> OutIndexByName;
+  std::vector<std::pair<InputSection *, size_t>> DebugInputs;
+
+  for (auto &F : Files) {
+    for (auto &S : F->Sections) {
+      if (!S->IsDebug || S->Discarded)
+        continue;
+      auto It = OutIndexByName.find(S->Name);
+      size_t OutIdx = 0;
+      if (It == OutIndexByName.end()) {
+        OutIdx = Result.DebugSections.size();
+        OutIndexByName[S->Name] = OutIdx;
+        LinkerResult::OutputDebugSection Out;
+        Out.Name = S->Name;
+        Out.Align = std::max<uint32_t>(1, S->Align);
+        Result.DebugSections.push_back(std::move(Out));
+      } else {
+        OutIdx = It->second;
+      }
+      auto &Out = Result.DebugSections[OutIdx];
+      const uint32_t Align = std::max<uint32_t>(1, S->Align);
+      if (Align > Out.Align)
+        Out.Align = Align;
+      const uint32_t Pad =
+          (Align - static_cast<uint32_t>(Out.Data.size() % Align)) % Align;
+      if (Pad != 0)
+        Out.Data.resize(Out.Data.size() + Pad, 0);
+      S->DebugOutputOffset = static_cast<uint32_t>(Out.Data.size());
+      Out.Data.insert(Out.Data.end(), S->Data.begin(), S->Data.end());
+      DebugInputs.push_back({S.get(), OutIdx});
+    }
+  }
+
+  for (auto [S, OutIdx] : DebugInputs) {
+    auto &OutData = Result.DebugSections[OutIdx].Data;
+    InputFile &F = *S->File;
+    for (const Relocation &R : S->Relocs) {
+      if (R.Type == ELF::R_MCS251_NONE)
+        continue;
+      InputSymbol *IS = findSymbol(F, R.Sym);
+      if (!IS)
+        return fail(Err, "invalid DWARF relocation symbol in " + S->Name);
+      InputSymbol *Target = resolveTargetSymbol(IS);
+
+      uint64_t SymVal = 0;
+      bool Tombstone = false;
+      if (Target->Defined && Target->Sec) {
+        if (Target->Sec->Discarded) {
+          Tombstone = true;
+        } else if (Target->Sec->IsDebug) {
+          SymVal = uint64_t(Target->Sec->DebugOutputOffset) + Target->Value;
+        } else {
+          SymVal = Target->Address;
+        }
+      } else if (Target->Defined && Target->Section == ELF::SHN_ABS) {
+        SymVal = Target->Address;
+      } else if (auto GIt = Globals.find(IS->Name); GIt != Globals.end()) {
+        if (GIt->second->Sec && GIt->second->Sec->Discarded)
+          Tombstone = true;
+        else
+          SymVal = GIt->second->Address;
+      } else if (auto PIt = PlacementNames.find(IS->Name);
+                 PIt != PlacementNames.end()) {
+        SymVal = PIt->second.Address;
+      } else if (auto SIt = Synth.find(IS->Name); SIt != Synth.end()) {
+        SymVal = SIt->second;
+      } else {
+        Tombstone = true;
+      }
+
+      // Standard DWARF tombstone values for relocations targeting discarded
+      // (--gc-sections / COMDAT) sections: -2 for DWARF v4 .debug_ranges /
+      // .debug_loc (where -1 is the base-address-selection sentinel) and -1
+      // for DWARF v5 .debug_addr/.debug_info/.debug_rnglists/.debug_line/etc.
+      const uint64_t TombstoneVal =
+          (S->Name == ".debug_ranges" || S->Name == ".debug_loc")
+              ? ~uint64_t(1)
+              : ~uint64_t(0);
+      const uint64_t Val = Tombstone
+                               ? TombstoneVal
+                               : static_cast<uint64_t>(int64_t(SymVal) + R.Addend);
+      const size_t Off = size_t(S->DebugOutputOffset) + R.Offset;
+      const uint32_t Width = relocWidth(R.Type);
+      if (Off > OutData.size() || Width > OutData.size() - Off)
+        return fail(Err, "DWARF relocation out of bounds in " + S->Name);
+      for (uint32_t I = 0; I != Width; ++I)
+        OutData[Off + I] = static_cast<uint8_t>(Val >> (8 * (Width - I - 1)));
+    }
+  }
   return true;
 }
 

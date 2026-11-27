@@ -1045,7 +1045,12 @@ enum {
 enum : unsigned {
   EF_MCS251_ABI_VERSION_MASK = 0xff,
   EF_MCS251_ABI_V1 = 1,
-  NT_MCS251_ABI = 1, // Owner: "MCS251".
+  EF_MCS251_ABI_V2 = 2,
+  EF_MCS251_BACKEND_NATIVE = 0x100,
+  NT_MCS251_ABI = 1,                 // Owner: "MCS251" (v1 ABI note).
+  NT_MCS251_PLACEMENT = 1,           // Owner: "MCS251" (.mcs251.placement).
+  NT_MCS251_PLACEMENT_NAMES = 2,     // Owner: "MCS251" (.mcs251.placement.names).
+  NT_MCS251_PLACEMENT_POSITIONS = 3, // Owner: "MCS251" (.mcs251.placement.positions).
 };
 
 // ELF relocation types for MCS251.
@@ -1258,6 +1263,8 @@ enum : unsigned {
   SHT_CSKY_ATTRIBUTES = 0x70000001U,
 
   SHT_HEXAGON_ATTRIBUTES = 0x70000003U,
+
+  SHT_MCS251_ATTRIBUTES = 0x70000003U,
 
   SHT_HIPROC = 0x7fffffff, // Highest processor arch-specific type.
   SHT_LOUSER = 0x80000000, // Lowest type reserved for applications.

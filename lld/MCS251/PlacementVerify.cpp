@@ -27,6 +27,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Object/Archive.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -809,16 +810,67 @@ bool Verifier::checkOutputEntry() {
 // two sections of one object are never read inconsistently.
 // ---------------------------------------------------------------------------
 bool Verifier::checkInputNoteStructure() {
-  for (const std::string &P : O.Objects) {
+  for (size_t ObjIdx = 0; ObjIdx != O.Objects.size(); ++ObjIdx) {
+    const std::string &RawP = O.Objects[ObjIdx];
+    const std::optional<uint64_t> ArchiveOff =
+        ObjIdx < O.ObjectArchiveOffsets.size()
+            ? O.ObjectArchiveOffsets[ObjIdx]
+            : std::nullopt;
     InputObj Obj;
-    Obj.Arg = P;
-    Obj.Abs = absPath(P);
-    auto MB = MemoryBuffer::getFile(P);
-    if (!MB)
-      return failVerify("malformed placement NOTE in " + P +
-                        ": cannot read input object");
-    Obj.E.Path = P;
-    Obj.E.Buf.assign((*MB)->getBuffer().begin(), (*MB)->getBuffer().end());
+    std::string P = RawP;
+    if (ArchiveOff) {
+      auto MB = MemoryBuffer::getFile(RawP);
+      if (!MB)
+        return failVerify("malformed placement NOTE in " + RawP +
+                          ": cannot read input archive");
+      Expected<std::unique_ptr<object::Archive>> ArOrErr =
+          object::Archive::create((*MB)->getMemBufferRef());
+      if (!ArOrErr)
+        return failVerify("malformed placement NOTE in " + RawP +
+                          ": invalid input archive: " +
+                          toString(ArOrErr.takeError()));
+      bool Found = false;
+      Error ChildErr = Error::success();
+      for (const object::Archive::Child &C : (*ArOrErr)->children(ChildErr)) {
+        if (C.getChildOffset() != *ArchiveOff)
+          continue;
+        std::string MemberName;
+        if (Expected<StringRef> NameOrErr = C.getName()) {
+          MemberName = NameOrErr->str();
+        } else {
+          consumeError(NameOrErr.takeError());
+          MemberName = "<member>";
+        }
+        Expected<MemoryBufferRef> MRef = C.getMemoryBufferRef();
+        if (!MRef)
+          return failVerify("malformed placement NOTE in " + RawP + "(" +
+                            MemberName + "): " + toString(MRef.takeError()));
+        P = RawP + "(" + MemberName + ")";
+        Obj.Arg = P;
+        Obj.Abs = absPath(RawP) + "(" + MemberName + ")";
+        Obj.E.Path = P;
+        Obj.E.Buf.assign(MRef->getBuffer().begin(), MRef->getBuffer().end());
+        Found = true;
+        break;
+      }
+      if (ChildErr)
+        return failVerify("malformed placement NOTE in " + RawP +
+                          ": invalid archive member: " +
+                          toString(std::move(ChildErr)));
+      if (!Found)
+        return failVerify("malformed placement NOTE in " + RawP +
+                          ": no archive member at offset " +
+                          Twine(*ArchiveOff));
+    } else {
+      Obj.Arg = P;
+      Obj.Abs = absPath(P);
+      auto MB = MemoryBuffer::getFile(P);
+      if (!MB)
+        return failVerify("malformed placement NOTE in " + P +
+                          ": cannot read input object");
+      Obj.E.Path = P;
+      Obj.E.Buf.assign((*MB)->getBuffer().begin(), (*MB)->getBuffer().end());
+    }
     if (!parseElf(Obj.E))
       return failVerify("malformed placement NOTE in " + P + ": " +
                         Obj.E.Reason);
@@ -2287,7 +2339,8 @@ ClassifiedSection Verifier::classifyAllocSection(const Section &S) {
     C.EmptyDataExempt = true;
     return C;
   }
-  if (N == ".mcs251.dseg" || N.starts_with(".mcs251.DSEG.") || N == ".data" ||
+  if (N == ".mcs251.dseg" || N.starts_with(".mcs251.dseg.") ||
+      N.starts_with(".mcs251.DSEG.") || N == ".data" ||
       N.starts_with(".data.") || N == ".bss" || N.starts_with(".bss.")) {
     const bool MCS = N.starts_with(".mcs251.");
     // The EDATA-movable capability bit is admitted only on the .mcs251.*
@@ -2299,7 +2352,8 @@ ClassifiedSection Verifier::classifyAllocSection(const Section &S) {
     C.IsMovable = (Fl & SHF_MCS251_EDATA_MOVABLE) != 0;
     return C;
   }
-  if (N == ".mcs251.edata" || N.starts_with(".mcs251.EDATA.")) {
+  if (N == ".mcs251.edata" || N.starts_with(".mcs251.edata.") ||
+      N.starts_with(".mcs251.EDATA.")) {
     if (!Nobits || Fl != AW)
       return C;
     C.Space = PSC_AS0_DATA;
@@ -2687,10 +2741,15 @@ bool Verifier::checkPositionsCoverage() {
         C.Space = E->Class;
       }
       const PosRecord *R = findPosition(uint32_t(ObjId), Idx);
-      if (!R)
+      if (!R) {
+        if (O.GcSections &&
+            !StringRef(IS.Name).starts_with(FixedSectionPrefix) &&
+            !(IS.Flags & SHF_GNU_RETAIN))
+          continue;
         return failVerify("the section " + IS.Name + " of " + Obj.Arg +
                           " has no positioning record, so its final storage "
                           "position is unverified");
+      }
       Consumed.erase({uint32_t(ObjId), Idx});
       if (R->Space != C.Space)
         return failVerify("the positioning record for " + IS.Name + " of " +
@@ -3184,6 +3243,10 @@ bool Verifier::checkPositionsMap() {
       if (R) {
         E.Addr = R->Slices.front().FinalAddress;
         E.Size = R->InputSize;
+      } else if (O.GcSections && !classifyAllocSection(IS).EmptyDataExempt) {
+        // GC-discarded non-FIXED, non-RETAIN section: omitted from both the
+        // positioning carrier and the link map.
+        continue;
       } else {
         // The verified empty-.data exemption: the map's zero row.
         E.Addr = 0;
@@ -3886,6 +3949,8 @@ bool Verifier::checkBindRelocations() {
       uint32_t SiteBase = 0;
       const bool HaveSite = resolveInputRange(uint32_t(ObjOrd), Rel.Info, 0, 0,
                                               SiteBase);
+      if (!HaveSite && O.GcSections)
+        continue;
       for (unsigned RI = 0; RI != Rel.Size / 12; ++RI) {
         size_t Off2 = Rel.Offset + size_t(RI) * 12;
         uint32_t ROff = 0, RInfo = 0, AddU = 0;

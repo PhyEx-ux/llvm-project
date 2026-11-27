@@ -81,6 +81,18 @@ inline constexpr HelperABI RegisteredHelperABIs[] = {
     // legalizer and are not separate symbols.
     {"__floatunsisf", 1},
     {"__fixunssfsi", 1},
+    // Standard memory helpers emitted when large struct copies exceed inline
+    // memcpy/memset expansion thresholds.
+    {"_memcpy", 3},
+    {"_memmove", 3},
+    {"_memset", 3},
+    // Generic C11/GNU atomic libcalls (single-core EA critical sections) for
+    // aggregates wider than 4 bytes and explicit runtime lock-free queries.
+    {"___atomic_load", 4},
+    {"___atomic_store", 4},
+    {"___atomic_exchange", 5},
+    {"___atomic_compare_exchange", 6},
+    {"___atomic_is_lock_free", 2},
 };
 
 /// \return the registered helper ABI for the final ELF symbol \p Symbol, or

@@ -113,7 +113,7 @@
 ;CALL: MCS251 contract violation: MCS251 bit object 'flag': handle must not be used by a non-whitelisted call or operand bundle
 
 ; The bit-object protocol is ELF-only: REL objects and asm text reject it.
-;RUN: not llc -mtriple=mcs251 -filetype=obj %t/def.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
+;RUN: not llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=rel %t/def.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
 ;RUN: not llc -mtriple=mcs251 -filetype=asm %t/def.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=REL
 ;REL: MCS251 bit object requires ELF object output
 

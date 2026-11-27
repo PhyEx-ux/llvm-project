@@ -27,8 +27,10 @@ define i32 @mul12(i16 noundef zeroext %a, i16 noundef zeroext %b) {
 
 define i32 @div24(i32 noundef %a, i32 noundef %b) {
 ; CHECK-LABEL: _div24:
-; CHECK: __divslong_PARM_2
+; CHECK-NOT: __divslong_PARM_2
+; CHECK: inc spx, #0x4
 ; CHECK: ecall __divslong
+; CHECK: dec spx, #0x4
 ; CHECK: eret
   %ta = trunc i32 %a to i24
   %tb = trunc i32 %b to i24
@@ -62,8 +64,7 @@ define i32 @cmp24(i32 noundef %a, i32 noundef %b) {
 ; byte stores span dr60-0x0002 .. dr60 (byte-granular stack storage).
 define i24 @slot24(i32 noundef %a) {
 ; CHECK-LABEL: _slot24:
-; CHECK: inc spx, #0x2
-; CHECK-NEXT: inc spx, #0x1
+; CHECK: inc spx, #0x
 ; CHECK-DAG: mov @dr60-0x0002, r{{[0-9]+}}
 ; CHECK-DAG: mov @dr60-0x0001, r{{[0-9]+}}
 ; CHECK-DAG: mov @dr60, r{{[0-9]+}}

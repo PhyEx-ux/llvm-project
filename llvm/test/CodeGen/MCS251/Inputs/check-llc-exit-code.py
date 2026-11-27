@@ -23,21 +23,13 @@ SECTION = ";--- %s\n"
 # shape exercised in unsupported-capabilities.ll.
 REJECTED = (
     (
-        "atomic-load",
-        "define i8 @f(ptr %p) {\n"
-        "  %v = load atomic i8, ptr %p seq_cst, align 1\n"
-        "  ret i8 %v\n"
-        "}\n",
+        "weak-alias",
+        "define i16 @f() { ret i16 1 }\n"
+        "@wa = weak alias i16 (), ptr addrspace(4) @f\n",
     ),
     (
-        "weak-def",
-        "define weak i16 @w(i16 %a) {\n"
-        "  ret i16 %a\n"
-        "}\n",
-    ),
-    (
-        "module-asm",
-        'module asm "nop"\n',
+        "abs-ptr-init",
+        "@abs_ptr = global ptr inttoptr (i32 65280 to ptr)\n",
     ),
     (
         "computed-goto-addr",
@@ -52,12 +44,12 @@ REJECTED = (
     ),
 )
 
-# A supported module: volatile access is the documented alternative.
+# Supported modules: volatile access and C11 atomic load both exit 0.
 POSITIVE = (
-    "atomic-alternative",
+    "atomic-supported",
     "@shared = global i16 0\n"
     "define i16 @g() {\n"
-    "  %v = load volatile i16, ptr @shared, align 2\n"
+    "  %v = load atomic i16, ptr @shared seq_cst, align 1\n"
     "  ret i16 %v\n"
     "}\n",
 )

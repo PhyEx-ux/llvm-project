@@ -45,8 +45,10 @@
 #include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCELFObjectWriter.h"
 #include "llvm/MC/MCFixup.h"
+#include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCValue.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -109,6 +111,8 @@ public:
       return MCFixupKind(MCS251::fixup_mcs251_mid8);
     if (Name == "R_MCS251_HI8")
       return MCFixupKind(MCS251::fixup_mcs251_hi8);
+    if (Name == "R_MCS251_32")
+      return MCFixupKind(FK_Data_4);
     return MCAsmBackend::getFixupKind(Name);
   }
 
@@ -139,6 +143,12 @@ public:
                                  "not supported");
         return;
       }
+      // R_MCS251_32 (FK_Data_4) is reserved exclusively for non-ALLOC DWARF
+      // .debug_* sections; ordinary ALLOC/metadata sections reject 32-bit
+      // symbolic fixups outside ABI v1.
+      if (Fixup.getKind() == FK_Data_4 &&
+          (!F.getParent() || !F.getParent()->getName().starts_with(".debug_")))
+        reportFatalUsageError("MCS251 ELF: unsupported relocation fixup");
       // This fork delegates relocation recording to the backend. RELA owns
       // the addend: record FIRST, then apply the returned FixedValue (zero),
       // never the section offset which the REL writer needs in its payload.
@@ -172,6 +182,9 @@ public:
         break;
       case MCS251::fixup_mcs251_24:
         Width = 3;
+        break;
+      case FK_Data_4:
+        Width = 4;
         break;
       default:
         llvm_unreachable("ELF writer rejected unsupported fixup");

@@ -1,7 +1,7 @@
 # RUN: split-file %s %t
 # RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/all.mir -o %t/all.o
 # RUN: llvm-objcopy --dump-section=.text=%t/all.bin %t/all.o
-# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert len(b) == 1000, 'full-corpus .text = %d bytes, expected 1000' % len(b)" %t/all.bin
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert len(b) == 1136, 'full-corpus .text = %d bytes, expected 1136' % len(b)" %t/all.bin
 #
 # E2 (size-table audit): every opcode shape in
 # MCS251InstrInfo::getInstSizeInBytes is emitted once here, so the AsmPrinter

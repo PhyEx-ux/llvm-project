@@ -3,15 +3,8 @@
 - **作者**：Sakuna（编译器运行时工程师）
 - **日期**：2026-09-07
 - **许可**：Apache-2.0 WITH LLVM-exception（随本 LLVM fork 分发；每个源文件头均载完整声明）
-- **规范依据**：除法设计 v4（`validation/mcs251-models/proposals/SIGNED-DIV-REMAINDER-DESIGN.md`，
-  §5.4/§6.1/§6.2/§6.4/§7.6/§10/§11.2）；SPEC 2026-09-07 修正案
-  （`validation/mcs251-elf/SPEC.md`，第 2 条、第 3 条，已获 PM 审批）
-- **状态**：源码已落盘；2026-09-07 按 Alice 复审（REQUEST-CHANGES）完成 R1–R3
-  构建草案修正与本目录注释/README 小修，并按窄复审完成三处构建草案修正
-  （-D 参数整参数引用、形态 B 工具文件级 DEPENDS、审计标记落盘结果检查），
-  八个实现的算法与红线**未改动**。
-  仍未构建、未产 IR、未审计产物、未实测语义（构建时隙归 PM；后端接线
-  `RuntimeLibcalls.td` / ISelLowering 另行串行，不在本目录任务内）
+- **规范依据**：现行总览见 [docs/mcs251/05-runtime-porting-and-validation.md](../../../../../docs/mcs251/05-runtime-porting-and-validation.md)（原除法设计 v4 与 SPEC 2026-09-07 修正案已整合归档）
+- **状态（已同步至 HEAD）**：源码、后端 `RuntimeLibcalls.td` / `MCS251ISelLowering` 接线及 CMake 形态 A 接入（`llvm/CMakeLists.txt` 选项 `LLVM_MCS251_ENABLE_RUNTIME`，默认 `OFF`）**均已完成**；QEMU 级验收 8/8 门 PASS、与宿主及 SDCC 4.6.0 三方对拍 680/680 零差异（记录见 `validation/mcs251-elf/runtime/README.md`）。注：当前默认 `llc` 产出已升级为 v2 ELF（`e_flags=0x102` + `.mcs251.attributes`）。
 
 ## 1. 来源声明
 
@@ -81,7 +74,7 @@ QEMU 执行级证据。
 | mcs251rt_modulong.c | `__modulong` | `define i32 @_modulong(i32, i32)` | 4B | 叶 / OSEG+OVERLAY |
 | mcs251rt_modsint.c | `__modsint` | `define i16 @_modsint(i16, i16)` | 2B | 1 层调 moduint / DSEG |
 | mcs251rt_modslong.c | `__modslong` | `define i32 @_modslong(i32, i32)` | 4B | 1 层调 modulong / DSEG |
-| CMakeLists.txt | `mcs251rt` target 定义草案（未并入 LLVM 构建图） | —— | —— | —— |
+| CMakeLists.txt | `mcs251rt` target 定义（已按形态 A 经 `LLVM_MCS251_ENABLE_RUNTIME` 接入 `llvm/CMakeLists.txt`） | —— | —— | —— |
 
 行数（wc -l）：divuint 68 / divulong 68 / moduint 64 / modulong 64 / divsint 76 /
 divslong 76 / modsint 82 / modslong 78 / div.h 63 / CMakeLists 334 / README 188。
@@ -171,20 +164,10 @@ C 标准保证（归一化步不属本项）；仅超范围转换到**有符号*
    `add_subdirectory(Runtime)`，但必须配置期传入缓存变量 `MCS251RT_CLANG` /
    `MCS251RT_LLC`（第一阶段二进制绝对路径，配置期校验存在性），两阶段顺序
    由构建者保证（先完成第一阶段构建再构建 mcs251rt）。
-   本期未接入；交付口径 = 八个独立 ELF32BE ET_REL `.o` + 清单，**不产 `.a`**
-   （lld MCS251 只收单对象，SPEC §3.5 排除 archive）。
+   现已按形态 A 接入 `llvm/CMakeLists.txt`（`-DLLVM_MCS251_ENABLE_RUNTIME=ON`，显式构建 `mcs251rt`）；交付口径 = 八个独立 ELF32BE ET_REL `.o` + 清单，**不产 `.a`**
+   （lld MCS251 只收单对象，不支持 archive）。
 
-## 6. 遗留风险与未竟事项
+## 6. 维护注意点与边界
 
-- 源级正确性已宿主对拍（§1.3），但**全部 QEMU 执行级验收（§8.2/8.4/8.7）、
-  Oracle-B 三方对拍（§8.5）、ELF 对象级验收（§8.6）未做**——对象生成 ≠ 链接
-  成功 ≠ 串口 PASS ≠ 运行时完成（§11.1）。
-- `-O2` 优化器行为未实测：理论上从本循环形状综合出除取余 IR 的可能性极低
-  （无常数除数、动态除数），§11.2-2 的 IR 审计门是硬兜底。
-- 若整数模型或工具链身份变化（§6.1 第 5 项重验触发），恢复转换依赖须全量重验；
-  `_Static_assert` 只锁宽度，不锁模型身份。
-- `CMakeLists.txt` 审计/清单步骤的脚本由 CMake 配置期生成、经 `cmake -P` +
-  `execute_process` 执行（不经 shell 引号层），属草案实现（构建树在 WSL）；
-  接线时可按 PM 的构建审计脚本统一重构；i64 实体口径与签名结构核对尚未
-  脚本化。CMake 草案未经 cmake 实跑验证（构建时隙归 PM），接线时以实际
-  配置为准。
+- QEMU 级验收（8/8 门 PASS、680/680 Oracle-B 三方零差异）已于 2026-09-07 完成（详见 `validation/mcs251-elf/runtime/README.md`），并在 `g12-divrt-i2c` / `uartdemo-33m` 中投入使用；若整数模型或工具链身份变化，恢复转换依赖须全量重验（`_Static_assert` 只锁宽度，不锁模型身份）。
+- `mcs251rt-audit-ir.cmake` 负责对实际送 `llc` 的 `.ll` 执行除取余 IR 三态拦截；`mcs251rt-manifest.cmake` 负责 8 行清单校验。

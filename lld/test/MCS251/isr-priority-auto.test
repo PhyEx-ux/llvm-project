@@ -1,0 +1,262 @@
+# RUN: rm -rf %t && split-file %s %t
+
+# 1. Compile C source with __attribute__((interrupt(N), mcs251_isr_priority(P)))
+#    and verify `.mcs251.isr.priority` section bytes alongside untouched `.mcs251.isr`.
+# RUN: clang --target=mcs251-unknown-none -O1 -c %t/isrs.c -o %t/isrs.o
+# RUN: llvm-readobj --sections --section-data %t/isrs.o | FileCheck %s --check-prefix=OBJ
+# OBJ: Name: .mcs251.isr
+# OBJ: Size: 96
+# OBJ: Name: .mcs251.isr.priority
+# OBJ: Size: 8
+# OBJ: 0000: 00010100 00040300
+
+# 2. Link with frozen IRQ CRT: verify synthesized ___mcs251_isr_priority_init
+#    machine bytes (IP=0x12 at 0xB8, IPH=0x10 at 0xB7 -> 75 B8 12 75 B7 10 AA)
+#    plus --map-json and --link-facts reporting.
+# RUN: yaml2obj %S/../../../validation/mcs251-elf/runtime/crt-irq-v2.yaml -o %t/crt.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t/crt.o
+# RUN: lld -flavor mcs251 --keep-symbols --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 %t/crt.o %t/isrs.o -o %t/fw.elf --map-json=%t/fw.json --link-facts=%t/fw.facts
+# RUN: %python %t/check_init.py %t/fw.elf %t/fw.json 75b81275b710aa
+# RUN: FileCheck %s --check-prefix=FACTS < %t/fw.facts
+# FACTS-DAG: isr_priority slot=1 pri=1 src=attribute name _isr_lo
+# FACTS-DAG: isr_priority slot=4 pri=3 src=attribute name _isr_hi
+# FACTS-DAG: isr_priority_sfr IP=0x12
+# FACTS-DAG: isr_priority_sfr IPH=0x10
+
+# 3. CLI --isr-priority override updates SFR bytes (slot 1 -> pri 2: IP=0x10, IPH=0x12).
+# RUN: lld -flavor mcs251 --keep-symbols --isr-priority=1=2 --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 %t/crt.o %t/isrs.o -o %t/cli.elf --map-json=%t/cli.json
+# RUN: %python %t/check_init.py %t/cli.elf %t/cli.json 75b81075b712aa
+
+# 4. Automatic preemption-graph derivation: two ISRs at DIFFERENT priorities
+#    with overlaid parameter slots fail WP2 reentrancy WITHOUT needing
+#    --isr-preemption-config; equal priorities or --no-auto-isr-preemption
+#    keep the link conditional (warning only, exit 0).
+# RUN: yaml2obj %t/two-isr.yaml -o %t/two.o
+# RUN: %python %S/Inputs/isr-v2flags.py %t/two.o
+# RUN: not lld -flavor mcs251 --isr-priority=_irq1=1 --isr-priority=_irq2=3 --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 %t/crt.o %t/two.o -o %t/reent_fail.elf 2>&1 | FileCheck %s --check-prefix=REENT
+# REENT: error: ISR reentrancy: proven static parameter-slot contract violation
+# RUN: lld -flavor mcs251 --isr-priority=_irq1=2 --isr-priority=_irq2=2 --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 %t/crt.o %t/two.o -o %t/reent_eq.elf
+# RUN: lld -flavor mcs251 --no-auto-isr-preemption --isr-priority=_irq1=1 --isr-priority=_irq2=3 --area-start=HOME=0xff0000 --area-start=BOOT=0xff0500 --area-start=CSEG=0xff0700 --area-start=XINIT=0xff8000 %t/crt.o %t/two.o -o %t/reent_noauto.elf
+
+#--- isrs.c
+extern void __mcs251_isr_priority_init(void);
+volatile int g_cnt;
+void __attribute__((interrupt(1), mcs251_isr_priority(1))) isr_lo(void) { g_cnt += 1; }
+void __attribute__((interrupt(4), mcs251_isr_priority(3))) isr_hi(void) { g_cnt += 2; }
+int main(void) {
+  __mcs251_isr_priority_init();
+  return g_cnt;
+}
+
+#--- check_init.py
+import json, struct, sys
+elf_path, json_path, expect_hex = sys.argv[1], sys.argv[2], sys.argv[3]
+data = open(elf_path, "rb").read()
+meta = json.load(open(json_path))
+sym = next(s for s in meta["symbols"] if s["name"] == "___mcs251_isr_priority_init")
+addr = sym["address"]
+size = sym["size"]
+e_phoff = struct.unpack_from(">I", data, 28)[0]
+e_phentsize, e_phnum = struct.unpack_from(">HH", data, 42)
+got = None
+for i in range(e_phnum):
+    p_type, p_off, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align = struct.unpack_from(">8I", data, e_phoff + i * e_phentsize)
+    if p_type == 1 and p_vaddr <= addr and addr + size <= p_vaddr + p_filesz:
+        off = p_off + (addr - p_vaddr)
+        got = data[off:off + size].hex()
+        break
+assert got == expect_hex, f"expected {expect_hex}, got {got}"
+
+#--- two-isr.yaml
+--- !ELF
+FileHeader:
+  Class: ELFCLASS32
+  Data: ELFDATA2MSB
+  Type: ET_REL
+  Machine: EM_MCS251
+  Flags: [ EF_MCS251_ABI_V1 ]
+Sections:
+  - Name: .text
+    Type: SHT_PROGBITS
+    Flags: [ SHF_ALLOC, SHF_EXECINSTR ]
+    AddressAlign: 1
+    Content: '7E1800007A1C00009A000000327E1800007A1C0000AA7E1800007A1C00009A000000327E1800007A1C0000AA9A000000AAAAAA'
+  - Name: .mcs251.OSEG.1
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.OSEG.5
+    Type: SHT_NOBITS
+    Flags: [ SHF_ALLOC, SHF_WRITE, SHF_MCS251_OVERLAY ]
+    AddressAlign: 1
+    Size: 2
+  - Name: .mcs251.isr
+    Type: SHT_PROGBITS
+    Flags: [ ]
+    AddressAlign: 4
+    Content: '000200180101010100010001000000000000000000000000000200180201010100010001000000000000000000000000000200180101010100020001000000000000000000000000000200180201010100020001000000000000000000000000'
+  - Name: .rela.text
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .text
+    Relocations:
+      - Offset: 0x2
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x3
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x7
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x9
+        Type: R_MCS251_24
+        Symbol: _isr_a
+        Addend: 0
+      - Offset: 0xF
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x10
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x14
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.1
+        Addend: 0
+      - Offset: 0x18
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x19
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x1D
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x1F
+        Type: R_MCS251_24
+        Symbol: _isr_b
+        Addend: 0
+      - Offset: 0x25
+        Type: R_MCS251_MID8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x26
+        Type: R_MCS251_LO8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x2A
+        Type: R_MCS251_HI8
+        Symbol: .mcs251.OSEG.5
+        Addend: 0
+      - Offset: 0x2D
+        Type: R_MCS251_24
+        Symbol: _fg
+        Addend: 0
+  - Name: .rela.mcs251.isr
+    Type: SHT_RELA
+    Flags: [ ]
+    AddressAlign: 4
+    Link: .symtab
+    Info: .mcs251.isr
+    Relocations:
+      - Offset: 0xC
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x24
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq1
+        Addend: 0
+      - Offset: 0x3C
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+      - Offset: 0x54
+        Type: R_MCS251_ISR_REF
+        Symbol: _irq2
+        Addend: 0
+  - Name: .mcs251.attributes
+    Type: SHT_MCS251_ATTRIBUTES
+    AddressAlign: 1
+    Content: '41000000D14D43533235310001000000C6048104000000020581040000000206810400000001078104000000030881040000F3FF098104000000200A8104000000200B8104000000200C8104000000020D8104000000080E8104000000020F810400000002108104000000021181040000000212810400000000138104000000001481040000000018830C010400000020010400000008198104000000011A8104000000201B8104000000001C8423010002000000000001000002010600000001000002015F6D61696E0068656C70657200'
+Symbols:
+  - Name: _irq1
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x0
+    Size: 0xD
+  - Name: _isr_a
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0xD
+    Size: 0x9
+  - Name: _irq2
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x16
+    Size: 0xD
+  - Name: _isr_b
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x23
+    Size: 0x9
+  - Name: _main
+    Type: STT_FUNC
+    Binding: STB_GLOBAL
+    Section: .text
+    Value: 0x2C
+    Size: 0x5
+  - Name: _fg
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x31
+    Size: 0x1
+  - Name: helper
+    Type: STT_FUNC
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0x32
+    Size: 0x1
+  - Name: .mcs251.OSEG.1
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+  - Name: .mcs251.OSEG.5
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.5
+    Value: 0
+  - Name: text_section
+    Type: STT_SECTION
+    Binding: STB_LOCAL
+    Section: .text
+    Value: 0
+  - Name: _isr_a_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.1
+    Value: 0
+    Size: 2
+  - Name: _isr_b_PARM_2
+    Type: STT_OBJECT
+    Binding: STB_LOCAL
+    Section: .mcs251.OSEG.5
+    Value: 0
+    Size: 2

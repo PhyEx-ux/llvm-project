@@ -25,6 +25,11 @@ public:
       MachineFunction &MF, MachineBasicBlock &MBB,
       MachineBasicBlock::iterator MI) const override;
 
+  bool hasReservedCallFrame(const MachineFunction &MF) const override {
+    return false;
+  }
+  bool needsFrameIndexResolution(const MachineFunction &MF) const override;
+
   // Stack-grows-up mirror of the default formula. The default
   // getFrameIndexReference computes ObjectOffset + StackSize - ... which is
   // the DOWN-growing layout; for our up-growing stack the frame top

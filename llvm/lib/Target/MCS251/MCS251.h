@@ -26,6 +26,7 @@ MachineFunctionPass *createMCS251BranchRelaxationPass();
 MachineFunctionPass *createMCS251TFPUExpandPass();
 
 void initializeMCS251AsmPrinterPass(PassRegistry &);
+void initializeMCS251AtomicExpandLegacyPass(PassRegistry &);
 void initializeMCS251BranchRelaxationPass(PassRegistry &);
 void initializeMCS251DAGToDAGISelLegacyPass(PassRegistry &);
 void initializeMCS251LoweringPrepLegacyPass(PassRegistry &);

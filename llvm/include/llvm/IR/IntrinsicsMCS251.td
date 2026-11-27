@@ -139,4 +139,17 @@ let TargetPrefix = "mcs251" in { // All intrinsics start with "llvm.mcs251.".
                                       [IntrHasSideEffects]>;
   def int_mcs251_tfpu_div : Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty],
                                       [IntrHasSideEffects]>;
+
+  // Single-core MCU critical-section primitives on global interrupt enable EA
+  // (IE.7, bit address 0xAF) and single-core compiler memory barrier:
+  //   * ea_save_disable: atomically tests and clears EA via `jbc 0xAF`,
+  //     returning 1 if EA was previously enabled and 0 otherwise.
+  //   * ea_restore: restores EA (`setb 0xAF`) iff the saved byte is non-zero,
+  //     leaving IE.0..6 untouched.
+  //   * atomic_fence: zero-byte scheduling barrier on single-core in-order MCU.
+  def int_mcs251_ea_save_disable : Intrinsic<[llvm_i8_ty], [],
+                                             [IntrHasSideEffects]>;
+  def int_mcs251_ea_restore : Intrinsic<[], [llvm_i8_ty],
+                                        [IntrHasSideEffects]>;
+  def int_mcs251_atomic_fence : Intrinsic<[], [], [IntrHasSideEffects]>;
 }

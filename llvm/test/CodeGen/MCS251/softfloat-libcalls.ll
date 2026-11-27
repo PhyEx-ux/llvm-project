@@ -7,27 +7,37 @@
 ; The binary operands use each helper's four-byte static _PARM_2 slot.
 ;
 ; O0-LABEL: _ops:
-; O0: __addsf3_PARM_2
+; O0-NOT: _PARM_
+; O0: inc spx, #0x4
 ; O0: ecall __addsf3
-; O0: __subsf3_PARM_2
+; O0: dec spx, #0x4
+; O0: inc spx, #0x4
 ; O0: ecall __subsf3
-; O0: __mulsf3_PARM_2
+; O0: dec spx, #0x4
+; O0: inc spx, #0x4
 ; O0: ecall __mulsf3
-; O0: __divsf3_PARM_2
+; O0: dec spx, #0x4
+; O0: inc spx, #0x4
 ; O0: ecall __divsf3
+; O0: dec spx, #0x4
 ; O0: ecall __floatsisf
 ; O0: ecall __fixsfsi
 ; O0: eret
 ;
 ; O2-LABEL: _ops:
-; O2: __addsf3_PARM_2
+; O2-NOT: _PARM_
+; O2: inc spx, #0x4
 ; O2: ecall __addsf3
-; O2: __subsf3_PARM_2
+; O2: dec spx, #0x4
+; O2: inc spx, #0x4
 ; O2: ecall __subsf3
-; O2: __mulsf3_PARM_2
+; O2: dec spx, #0x4
+; O2: inc spx, #0x4
 ; O2: ecall __mulsf3
-; O2: __divsf3_PARM_2
+; O2: dec spx, #0x4
+; O2: inc spx, #0x4
 ; O2: ecall __divsf3
+; O2: dec spx, #0x4
 ; O2: ecall __floatsisf
 ; O2: ecall __fixsfsi
 ; O2: eret

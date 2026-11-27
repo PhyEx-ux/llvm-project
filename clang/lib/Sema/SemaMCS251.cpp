@@ -297,18 +297,11 @@ bool SemaMCS251::containsAtomicSubobject(QualType T) {
 }
 
 bool SemaMCS251::CheckMCS251AtomicAccess(QualType T, SourceLocation Loc) {
-  if (!isMCS251Target(getASTContext()))
-    return false;
-  if (!T->isAtomicType() && !T->isArrayType() && !T->isRecordType())
-    return false; // fast path: scalars/pointers are never containers here
-  if (!containsAtomicSubobject(T))
-    return false;
-  // A directly _Atomic-typed access is reported here as well: an atomic
-  // MEMBER or ARRAY ELEMENT has no declaration-level diagnostic (the object
-  // declaration that carries it is a legal shape), and for a top-level
-  // atomic variable the declaration check has already reported the type.
-  Diag(Loc, diag::err_mcs251_atomic_access_unsupported) << T;
-  return true;
+  // C11 _Atomic and GNU atomic operations are supported on MCS-251 via
+  // single-core EA interrupt-disable critical sections and generic libcalls.
+  (void)T;
+  (void)Loc;
+  return false;
 }
 
 //===----------------------------------------------------------------------===//
@@ -839,60 +832,19 @@ bool SemaMCS251::inStatementExpressionScope() const {
 }
 
 bool SemaMCS251::CheckMCS251AtomicUse(const Expr *E) {
-  if (!E)
-    return false;
-  if (!isMCS251Target(getASTContext()))
-    return false;
-
-  // A statement inside a GNU statement expression is checked by the parser via
-  // ActOnFinishFullExpr before the enclosing full expression -- which decides
-  // whether the statement expression itself is evaluated at all -- is known.
-  // `sizeof(({ atomic_load(p); 0; }))` is the case that makes the distinction
-  // observable: the inner full expression already knows the atomic operation,
-  // but only the enclosing `sizeof` knows that nothing ever runs. The inner
-  // call therefore defers, and the enclosing full expression walks the
-  // statements through findEvaluatedAtomicUseInStmt. This mirrors the
-  // deferral the controlled-bit scanner has always used for the same reason.
-  if (inStatementExpressionScope())
-    return false;
-
-  QualType Type;
-  const Expr *Found = findEvaluatedAtomicUse(E, Type);
-  if (!Found)
-    return false;
-  if (Type.isNull()) {
-    // An atomic OPERATION (builtin family, fence, runtime lock-free query).
-    // The diagnostic points at the closing parenthesis -- the same position
-    // the family's original per-construction-site hook used, so the
-    // established expectations keep their column (the builtin macro
-    // expansion can put the "begin" location on a different line).
-    SourceLocation Loc = Found->getExprLoc();
-    SourceRange Range = Found->getSourceRange();
-    if (const auto *AE = dyn_cast<AtomicExpr>(Found)) {
-      Loc = AE->getRParenLoc();
-      Range = SourceRange(AE->getBuiltinLoc(), AE->getRParenLoc());
-    }
-    Diag(Loc, diag::err_mcs251_atomics_unsupported) << Range;
-    return true;
-  }
-  // A non-atomic access to an object that transitively contains an _Atomic
-  // subobject: reuse the shared emitter so the message stays identical.
-  return CheckMCS251AtomicAccess(Type, Found->getExprLoc());
+  // C11 _Atomic, <stdatomic.h>, __atomic_*, and __sync_* are supported on
+  // MCS-251 via EA critical-section lowering.
+  (void)E;
+  return false;
 }
 
-// A4: the _Atomic qualifier/specifier in user code. System headers (the
-// <stdatomic.h> typedefs) are exempt so the TU can still include the header;
-// actual operations are rejected by CheckMCS251AtomicUse at the end of the
-// enclosing full expression, or by the IR-layer atomic check for paths that
-// do not pass one (direct llc input).
 bool SemaMCS251::CheckMCS251AtomicType(QualType Underlying,
                                        SourceLocation Loc) {
-  if (!isMCS251Target(getASTContext()))
-    return false;
-  if (getASTContext().getSourceManager().isInSystemHeader(Loc))
-    return false;
-  Diag(Loc, diag::err_mcs251_atomic_type_unsupported) << Underlying;
-  return true;
+  // Ordinary C11 _Atomic types are supported; _Atomic(__bit) stays rejected
+  // by the MCS-251 bit-type semantic rules.
+  (void)Underlying;
+  (void)Loc;
+  return false;
 }
 
 // A2-only constant-condition fold. Unlike getFoldedCondition and
@@ -1339,20 +1291,16 @@ bool SemaMCS251::CheckMCS251AbsolutePointerInit(const Expr *Init,
   return true;
 }
 
-// A7 (EC1): an indirect call with two or more arguments needs the static
-// continuation slots, which are named after the callee symbol -- a function
-// pointer owns none. Zero/one-argument indirect calls (register channel
-// only) and direct calls of any arity keep their existing behavior.
+// Multi-argument indirect calls are supported via the stack-argument default ABI.
 bool SemaMCS251::CheckMCS251MultiArgIndirectCall(bool IsIndirect,
                                                  ArrayRef<Expr *> Args,
                                                  SourceLocation Loc,
                                                  SourceRange Range) {
-  if (!isMCS251Target(getASTContext()))
-    return false;
-  if (!IsIndirect || Args.size() < 2)
-    return false;
-  Diag(Loc, diag::err_mcs251_multiarg_indirect_call) << Range;
-  return true;
+  (void)IsIndirect;
+  (void)Args;
+  (void)Loc;
+  (void)Range;
+  return false;
 }
 
 // A8: weak DEFINITIONS. A weak declaration that is never defined in this TU
@@ -2784,38 +2732,12 @@ bool SemaMCS251::CheckMCS251BitCallForm(const FunctionType *FnType,
     return true;
   }
 
-  if (IsIndirect && AnyBitParam && Proto->getNumParams() > 1) {
-    // N15: a multi-argument indirect call with bit in the signature has no
-    // named callee for the `_PARM_n` static slots.
-    SemaRef.Diag(Loc, diag::err_mcs251_bit_call_unsupported)
-        << "multi-argument indirect" << Range;
-    return true;
-  }
   return false;
 }
 
-// G2 §4.2/§4.4.3: the frozen variadic rejection set shared by the call path
-// (D1, variadic-position arguments) and the va_arg read path (D2). A type is
-// rejected when the B1 continuation-slot ABI has no encoding for it:
-//  - aggregate or union (the backend would only ever see byval pieces);
-//  - an integer wider than 32 bits (i64, i.e. `long long` on this target:
-//    the slot-width table has no 8-byte slot and no promotion shrinks one);
-//  - a pointer into a non-ordinary address space (the ordinary set mirrors
-//    the backend's hasOrdinaryPointerABI: target AS 0,1,2,3,4,8,9; the
-//    LangAS-to-target-AS bridge is ASTContext::getTargetAddressSpace, the
-//    same mapping CodeGen uses for the IR addrspace).
-// Promotion cannot rescue any of these categories, so the as-written type
-// decides (G2 §4.4.3 "提升后类型判定"). bit is intentionally absent: bit
-// actual arguments through `...` are already rejected by the N13 check in
-// Sema::DefaultVariadicArgumentPromotion, and the va_arg-of-bit gap recorded
-// in clang/lib/Basic/Targets/MCS251.h is not widened by this batch (G2 §4.4.3
-// "bit 走 N13 既有拒绝（不新增）" / §4.6).
-//
-// Review fix (G2-S1 FINDING): an array argument decays before it reaches the
-// variadic slot, so the judgement type is the decayed pointer type -- an
-// `address_space(5)` array decays to an AS5 pointer (the element's address
-// space survives the decay) and must be rejected exactly like an AS5 pointer
-// passed directly, per the same §4.4.3 promoted-type rule.
+// Rejected variadic argument / va_arg types: integers wider than 32 bits and
+// pointers into non-ordinary address spaces. Aggregates (structs/unions) are
+// passed by value on the stack and are accepted.
 static bool isMCS251RejectedVariadicType(ASTContext &Ctx, QualType T) {
   if (T->isArrayType())
     T = Ctx.getArrayDecayedType(T);
@@ -2833,8 +2755,6 @@ static bool isMCS251RejectedVariadicType(ASTContext &Ctx, QualType T) {
       return true;
     }
   }
-  if (T->isRecordType())
-    return true;
   return T->isIntegerType() && Ctx.getTypeSize(T) > 32;
 }
 
@@ -2843,36 +2763,17 @@ bool SemaMCS251::CheckMCS251VariadicCall(const FunctionType *FnType,
                                          ArrayRef<Expr *> Args,
                                          SourceLocation Loc,
                                          SourceRange Range) {
+  (void)IsIndirect;
+  (void)Loc;
+  (void)Range;
   if (!isMCS251Target(SemaRef.Context))
     return false;
   if (!FnType || FnType->isDependentType())
     return false;
 
   const auto *Proto = dyn_cast<FunctionProtoType>(FnType);
-
-  // C1 (N16): an indirect variadic call has no named callee to derive the
-  // `_PARM_n` continuation-slot symbols from, so it is rejected regardless
-  // of how many variadic arguments it passes (frozen: G2 §4.4.3 C1; the llc
-  // `IsVarArg && !IsDirect` fatal of C2 stays as the IR-level backstop).
-  if (IsIndirect && Proto && Proto->isVariadic()) {
-    SemaRef.Diag(Loc, diag::err_mcs251_variadic_call_indirect) << Range;
-    return true;
-  }
-
   if (Proto && Proto->isVariadic()) {
-    // A (N17), prototype form: the six continuation slots are the only
-    // variadic storage, so a call passing more than six variadic arguments
-    // is a compile-time hard error (frozen formula Args.size() - NumParams
-    // > 6, G2 §4.4.2). Under-argument calls fall through and are diagnosed
-    // as ordinary arity errors later.
     unsigned NumFixed = Proto->getNumParams();
-    if (Args.size() > NumFixed && Args.size() - NumFixed > 6) {
-      SemaRef.Diag(Loc, diag::err_mcs251_variadic_call_cap_exceeded)
-          << static_cast<unsigned>(Args.size() - NumFixed) << Range;
-      return true;
-    }
-    // D1 (N18): reject every variadic-position argument in the frozen
-    // rejection set, per argument (G2 §4.4.3 D1).
     bool Diagnosed = false;
     for (unsigned I = NumFixed; I < Args.size(); ++I) {
       const Expr *Arg = Args[I];
@@ -2887,17 +2788,6 @@ bool SemaMCS251::CheckMCS251VariadicCall(const FunctionType *FnType,
     return Diagnosed;
   }
 
-  if (!Proto) {
-    // A (N17), unprototyped form: the first argument occupies the
-    // first-source-parameter channel (registers, no slot), so the remaining
-    // arguments are the ones the six continuation slots must hold -- frozen
-    // formula Args.size() - 1 > 6 (G2 §4.3.6/§4.4.2).
-    if (Args.size() > 7) {
-      SemaRef.Diag(Loc, diag::err_mcs251_variadic_call_cap_exceeded)
-          << static_cast<unsigned>(Args.size() - 1) << Range;
-      return true;
-    }
-  }
   return false;
 }
 

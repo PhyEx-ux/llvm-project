@@ -8,9 +8,12 @@
 
 #include "MCS251TargetMachine.h"
 #include "MCS251.h"
+#include "MCS251AtomicExpand.h"
 #include "MCS251ContractCheck.h"
 #include "MCS251LoweringPrep.h"
+#include "MCS251MachineFunctionInfo.h"
 #include "MCS251TargetObjectFile.h"
+#include "MCTargetDesc/MCS251MCAsmInfo.h"
 #include "MCTargetDesc/MCS251MCTargetDesc.h"
 #include "MCTargetDesc/MCS251RELObjectWriter.h"
 #include "TargetInfo/MCS251TargetInfo.h"
@@ -221,16 +224,23 @@ MCS251TargetMachine::MCS251TargetMachine(
 
 MCS251TargetMachine::~MCS251TargetMachine() = default;
 
-// REL remains the default, with its original explicit writer/streamer pair.
-// ELF is opt-in and uses the real MC ELF writer. The triple/TLOF alone cannot
-// select between them. Assembly/null output retains the legacy generic path.
+// ELF is the default object format and uses the real MC ELF writer; legacy
+// ASxxxx REL remains available via -mcs251-object-format=rel. Text assembly
+// (-S / -filetype=asm) retains the legacy ASxxxx text streamer unless
+// -mcs251-object-format=elf was explicitly passed.
 Expected<std::unique_ptr<MCStreamer>> MCS251TargetMachine::createMCStreamer(
     raw_pwrite_stream &Out, raw_pwrite_stream *, CodeGenFileType FileType,
     MCContext &Ctx) {
-  if (usesELFObjects() && FileType != CodeGenFileType::ObjectFile)
+  const bool FormatIsELF =
+      MCS251::getObjectFormat() == MCS251::ObjectFormat::ELF;
+  if (FormatIsELF && MCS251::isObjectFormatExplicit() &&
+      FileType != CodeGenFileType::ObjectFile)
     return make_error<StringError>(
         "MCS251 ELF output requires -filetype=obj", inconvertibleErrorCode());
   ObjectFileOutput = FileType == CodeGenFileType::ObjectFile;
+  ELFObjectOutput = ObjectFileOutput && FormatIsELF;
+  if (auto *MAI = const_cast<MCAsmInfo *>(AsmInfo.get()))
+    static_cast<MCS251MCAsmInfo *>(MAI)->setELFObjectMode(ELFObjectOutput);
   if (ObjectFileOutput && MemoryContract &&
       MemoryContract->isSpecified() &&
       MemoryContract->AS0PointerBits == 16)
@@ -309,6 +319,10 @@ public:
       addPass(MCS251::createMCS251ContractCheckPass(
           getTM<MCS251TargetMachine>().getMemoryContract(),
           /*CheckArithmetic=*/false));
+    // Single-core MCU atomics: expand fence, atomic load/store, atomicrmw, and
+    // cmpxchg into EA (IE.7, bit 0xAF) critical sections (or generic
+    // __atomic_* libcalls for >4B) before lowering prep and ISel.
+    addPass(MCS251::createMCS251AtomicExpandPass());
     // P1-2: the only IR-mutating preparation (alloca constant propagation,
     // constant folding, targeted wide/float DCE), mounted early and skipping
     // optnone functions entirely. Non-optnone functions must be prepared
@@ -367,11 +381,19 @@ MCS251TargetMachine::createPassConfig(PassManagerBase &PM) {
   return new MCS251PassConfig(*this, PM);
 }
 
+MachineFunctionInfo *MCS251TargetMachine::createMachineFunctionInfo(
+    BumpPtrAllocator &Allocator, const Function &F,
+    const TargetSubtargetInfo *STI) const {
+  return MCS251MachineFunctionInfo::create<MCS251MachineFunctionInfo>(
+      Allocator, F, STI);
+}
+
 extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void
 LLVMInitializeMCS251Target() {
   RegisterTargetMachine<MCS251TargetMachine> X(getTheMCS251Target());
   PassRegistry &PR = *PassRegistry::getPassRegistry();
   initializeMCS251AsmPrinterPass(PR);
+  initializeMCS251AtomicExpandLegacyPass(PR);
   initializeMCS251BranchRelaxationPass(PR);
   initializeMCS251DAGToDAGISelLegacyPass(PR);
   initializeMCS251LoweringPrepLegacyPass(PR);

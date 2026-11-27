@@ -1106,6 +1106,15 @@ def MCS251Interrupt : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
   let Documentation = [MCS251InterruptDocs];
 }
 
+def MCS251ISRPriority : InheritableAttr, TargetSpecificAttr<TargetMCS251> {
+  let Spellings = [GCC<"mcs251_isr_priority">,
+                   CXX11<"mcu", "isr_priority">,
+                   C23<"mcu", "isr_priority">];
+  let Subjects = SubjectList<[Function]>;
+  let Args = [UnsignedArgument<"Priority">];
+  let Documentation = [MCS251ISRPriorityDocs];
+}
+
 def AVRSignal : InheritableAttr, TargetSpecificAttr<TargetAVR> {
   let Spellings = [GCC<"signal">];
   let Subjects = SubjectList<[Function]>;

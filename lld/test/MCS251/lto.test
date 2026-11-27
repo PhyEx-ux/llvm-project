@@ -1,0 +1,49 @@
+# RUN: rm -rf %t && split-file %s %t
+
+# 1. Full LTO across two C translation units via clang -flto + mcs251-lld.
+# RUN: clang --target=mcs251-unknown-none -O2 -flto -c %t/a.c -o %t/a.bc
+# RUN: clang --target=mcs251-unknown-none -O2 -flto -c %t/b.c -o %t/b.bc
+# RUN: lld -flavor mcs251 --keep-symbols --area-start=CSEG=0xff0200 %t/a.bc %t/b.bc -o %t/full.elf --map=%t/full.map
+# RUN: llvm-readelf -h -s %t/full.elf | FileCheck %s --check-prefix=FULL
+# FULL: Type: EXEC
+# FULL: Machine: MCS251
+# FULL: Flags: 0x102
+# FULL: FUNC GLOBAL DEFAULT {{[0-9]+}} _main
+# FULL-NOT: FUNC GLOBAL DEFAULT {{[0-9]+}} _helper
+
+# 2. One-shot clang -flto link directly invoking mcs251-lld.
+# RUN: clang --target=mcs251-unknown-none -O2 -flto -Wl,--area-start=CSEG=0xff0200 %t/a.c %t/b.c -o %t/oneshot.elf
+# RUN: llvm-readelf -h %t/oneshot.elf | FileCheck %s --check-prefix=ONESHOT
+# ONESHOT: Type: EXEC
+# ONESHOT: Flags: 0x102
+
+# 3. ThinLTO (-flto=thin) mixed with a native ELF object and a bitcode archive.
+# RUN: clang --target=mcs251-unknown-none -O2 -flto=thin -c %t/a.c -o %t/a_thin.bc
+# RUN: clang --target=mcs251-unknown-none -O2 -flto=thin -c %t/b.c -o %t/b_thin.bc
+# RUN: llvm-ar rcs %t/libb.a %t/b_thin.bc
+# RUN: clang --target=mcs251-unknown-none -O2 -c %t/native.c -o %t/native.o
+# RUN: lld -flavor mcs251 --keep-symbols --area-start=CSEG=0xff0200 %t/a_thin.bc %t/native.o %t/libb.a -o %t/thin.elf
+# RUN: llvm-readelf -h -s %t/thin.elf | FileCheck %s --check-prefix=THIN
+# THIN: Type: EXEC
+# THIN: Flags: 0x102
+# THIN-DAG: FUNC GLOBAL DEFAULT {{[0-9]+}} _main
+# THIN-DAG: FUNC GLOBAL DEFAULT {{[0-9]+}} _native_add
+
+# 4. Cross-TU signature mismatch is still rejected fail-closed during LTO.
+# RUN: clang --target=mcs251-unknown-none -O2 -flto -c %t/bad_decl.c -o %t/bad_decl.bc
+# RUN: not lld -flavor mcs251 --area-start=CSEG=0xff0200 %t/bad_decl.bc %t/b.bc -o %t/bad.elf 2>&1 | FileCheck %s --check-prefix=BADSIG
+# BADSIG: MCS251 LTO:
+
+#--- a.c
+extern int helper(int x);
+int main(void) { return helper(20) + 2; }
+
+#--- b.c
+int helper(int x) { return x * 2; }
+
+#--- native.c
+int native_add(int a, int b) { return a + b; }
+
+#--- bad_decl.c
+extern int helper(int a, int b);
+int main(void) { return helper(1, 2); }

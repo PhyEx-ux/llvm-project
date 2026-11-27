@@ -47,6 +47,7 @@
 #include "MCS251TargetMachine.h"
 #include "MCS251TargetObjectFile.h"
 #include "MCTargetDesc/MCS251ABISignature.h"
+#include "MCTargetDesc/MCS251InstPrinter.h"
 #include "TargetInfo/MCS251TargetInfo.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
@@ -75,6 +76,7 @@
 #include "llvm/IR/Mangler.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/MC/MCContext.h"
@@ -128,6 +130,7 @@ static std::string getMCS251ModuleName(const Module &M) {
 namespace {
 class MCS251AsmPrinter final : public AsmPrinter {
   StringSet<> LocalParameterSlots;
+  StringSet<> WeakParameterSlots;
   StringSet<> DeclaredExternalSymbols;
   // Next free record index in the single .mcs251.isr section of this object;
   // the A3.4 relocation of record N sits at r_offset 24*N+12.
@@ -451,6 +454,32 @@ class MCS251AsmPrinter final : public AsmPrinter {
     return !F.isDeclaration() &&
            F.getCallingConv() == CallingConv::MCS251_INTR &&
            F.hasFnAttribute("mcs251-isr-vector");
+  }
+
+  static bool isWeakOrLinkOnce(const GlobalValue &GV) {
+    return GV.hasWeakLinkage() || GV.hasLinkOnceLinkage();
+  }
+
+  static bool isSupportedOrdinaryLinkage(const GlobalValue &GV) {
+    return GV.hasExternalLinkage() || GV.hasLocalLinkage() ||
+           isWeakOrLinkOnce(GV);
+  }
+
+  MCSectionELF *getMCS251SectionForGlobal(const Twine &Name, unsigned Type,
+                                          unsigned Flags,
+                                          const GlobalObject *GO) {
+    if (usesELFObjects() && GO && GO->hasComdat()) {
+      const Comdat *C = GO->getComdat();
+      if (C->getSelectionKind() != Comdat::Any &&
+          C->getSelectionKind() != Comdat::NoDeduplicate)
+        reportFatalUsageError("MCS251: unsupported COMDAT selection kind on '" +
+                              Twine(GO->getName()) + "'");
+      Flags |= ELF::SHF_GROUP;
+      return OutContext.getELFSection(Name, Type, Flags, /*EntrySize=*/0,
+                                      C->getName(),
+                                      C->getSelectionKind() == Comdat::Any);
+    }
+    return OutContext.getELFSection(Name, Type, Flags);
   }
 
   //===--------------------------------------------------------------------===//
@@ -893,12 +922,6 @@ class MCS251AsmPrinter final : public AsmPrinter {
     for (const Function &F : M) {
       if (!hasV1PointerTypes(F.getFunctionType(), SeenTypes, V2Whitelist))
         return false;
-      if (!V2Whitelist) {
-        unsigned Index = 0;
-        for (const Argument &Arg : F.args())
-          if (Index++ && Arg.getType()->isPointerTy())
-            return false; // v2-sized static pointer slot.
-      }
       for (const BasicBlock &BB : F)
         for (const Instruction &I : BB) {
           if (!hasV1PointerTypes(I.getType(), SeenTypes, V2Whitelist))
@@ -1216,11 +1239,25 @@ public:
       reportFatalUsageError("MCS251: function '" + Twine(F.getName()) +
           "' explicitly assigns fixed placement section '" + F.getSection() +
           "': .mcu.fixed.* sections are reserved for mcs251-place entities");
+    if (const Function &F = MF.getFunction();
+        (isWeakOrLinkOnce(F) || F.hasComdat()) &&
+        getMCS251TM().emitsObjectFile() && !usesELFObjects())
+      reportFatalUsageError(
+          "MCS251: weak/COMDAT function '" + Twine(F.getName()) +
+          "' requires ELF object output (-filetype=obj "
+          "-mcs251-object-format=elf)");
+    if (const Function &F = MF.getFunction();
+        isISRDefinition(F) && (isWeakOrLinkOnce(F) || F.hasComdat()))
+      reportFatalUsageError("MCS251 ISR: interrupt service routine '" +
+                            Twine(F.getName()) +
+                            "' must not be weak or in a COMDAT group");
     // T06 card steps 8/9: the final machine boundary is validated before any
     // byte of the function is emitted.
     verifyFinalMachineBoundary(MF);
     SetupMachineFunction(MF);
-    emitParameterSlots(MF);
+    // Route B stack-argument ABI: arguments beyond Arg 0 and variadic
+    // arguments live on the caller's SPX stack frame rather than static
+    // `_PARM_n` / OSEG slots.
     // G11-B: arm the fixed-section emission of a placed function before the
     // body goes out; emitFunctionEntryLabel switches the streamer into the
     // dedicated `.mcu.fixed.<stable-symbol>` section (nothing may precede
@@ -1253,6 +1290,8 @@ public:
       Bad("fixed placement requires ELF object output "
           "(-filetype=obj -mcs251-object-format=elf)");
     const Function &F = MF.getFunction();
+    if (isWeakOrLinkOnce(F) || F.hasComdat())
+      Bad("a fixed placement function must not be weak or in a COMDAT group");
     if (P.Entity != 1 || P.Ownership != 0)
       Bad("the mcs251-place attribute of a function definition must be "
           "'function,owned'");
@@ -1640,6 +1679,20 @@ public:
       OutStreamer->emitIntValue(0, 4);
       ++ISRRecordCount;
     }
+    if (F.hasFnAttribute("mcs251-isr-priority")) {
+      StringRef PriStr = F.getFnAttribute("mcs251-isr-priority").getValueAsString();
+      unsigned PriVal = 0;
+      if (PriStr.getAsInteger(10, PriVal) || PriVal > MCS251ISR::MaxISRPriority)
+        reportFatalUsageError(
+            "MCS251 ISR: mcs251-isr-priority must be an integer in 0-3");
+      MCSectionELF *PriSec = OutContext.getELFSection(
+          MCS251ISR::PrioritySectionName, ELF::SHT_PROGBITS, /*Flags=*/0);
+      PriSec->setAlignment(Align(MCS251ISR::PrioritySectionAlignment));
+      OutStreamer->switchSection(PriSec);
+      OutStreamer->emitIntValue(Slot, 2);
+      OutStreamer->emitIntValue(PriVal, 1);
+      OutStreamer->emitIntValue(0, 1);
+    }
     OutStreamer->switchSection(Saved);
   }
 
@@ -1739,106 +1792,6 @@ public:
     OutStreamer->switchSection(Saved);
   }
 
-  void emitParameterSlots(const MachineFunction &MF) {
-    const Function &F = MF.getFunction();
-    // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md §4.5): a variadic definition
-    // also needs its slot area even when it has fewer than two IR fixed
-    // parameters -- the printf shape is exactly one fixed parameter plus
-    // the six 4-byte continuation slots emitted below.
-    if (F.arg_size() < 2 && !F.isVarArg())
-      return;
-    if (!F.hasLocalLinkage() && !F.hasExternalLinkage())
-      // WP4: predictable capability rejection (A8 weak definitions are
-      // rejected earlier by the structural contract check) -- clean exit(1),
-      // no crash diagnostics. This stays as the emitter-side defense.
-      reportFatalUsageError("MCS251: static parameter slots require local or "
-                         "external function linkage");
-    // SDCC overlays leaf functions only. Non-leaf slots must survive nested
-    // calls, including calls into independently compiled SDCC modules.
-    bool Leaf = true;
-    for (const MachineBasicBlock &BB : MF)
-      for (const MachineInstr &MI : BB)
-        if (MI.isCall() || MI.isInlineAsm())
-          Leaf = false;
-    std::string Area = Leaf ? "OSEG" : "DSEG";
-    unsigned Flags = ELF::SHF_ALLOC | ELF::SHF_WRITE;
-    if (Leaf && usesELFObjects())
-      Flags |= ELF::SHF_MCS251_OVERLAY;
-    // G8 S2 (design §3(b1)): a non-leaf slot area is an AS0 writable slice
-    // whose accesses already go through 24-bit absolute addresses (the
-    // parameterSlot() ExternalSymbol path), so it may share the EDATA
-    // migration candidates under a v2 ELF object.  As with the global DSEG
-    // slice, this is a capability mark only: the linker keeps the low window
-    // by preference and migrates on failure, so a program that fits keeps
-    // its pre-G8 slot addresses byte for byte.  Leaf OSEG areas overlay and
-    // are never candidates.
-    if (!Leaf && marksEDataMovable())
-      Flags |= ELF::SHF_MCS251_EDATA_MOVABLE;
-    MCSection *Sec = OutContext.getELFSection(
-        ".mcs251." + Area + "." + Twine(MF.getFunctionNumber()),
-        ELF::SHT_NOBITS, Flags);
-    OutStreamer->switchSection(Sec);
-    emitASxxxxText("\t.area " + Area +
-                    (Leaf ? " (OVR,DATA)" : " (DATA)"));
-    unsigned I = 0;
-    for (const Argument &Arg : F.args()) {
-      if (I++ == 0)
-        continue;
-      Type *Ty = Arg.getType();
-      if (auto *PT = dyn_cast<PointerType>(Ty)) {
-        unsigned AS = PT->getAddressSpace();
-        if (AS == 5 || AS == 6 || AS == 7 || AS > 9)
-          reportFatalUsageError("MCS251: pointer parameter address space has no "
-                             "ordinary static-slot ABI");
-      } else if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) &&
-                 !Ty->isIntegerTy(32) && !Ty->isFloatTy() &&
-                 !Ty->isIntegerTy(1)) {
-        // f32 binary32 payloads use the i32 static-slot layout, matching the
-        // DPL:DPH:B:A first-argument/return ABI.
-        // WP5 A1: an i1 (`_Bool`) continuation parameter is emitted in the
-        // same 1-byte static slot as i8 (getTypeStoreSize(i1) == 1). Exactly
-        // i1 joins the accepted widths here, mirroring checkParameterType in
-        // MCS251ISelLowering.cpp; no other sub-byte width is admitted.
-        reportFatalUsageError("MCS251: static parameters require i8/i16/i32/f32 "
-                           "or an ordinary data/CODE pointer");
-      }
-      uint64_t SlotSize = F.getDataLayout().getTypeStoreSize(Ty).getFixedValue();
-      MCSymbol *Slot = OutContext.getOrCreateSymbol(
-          getSymbol(&F)->getName() + "_PARM_" + Twine(I));
-      if (!F.hasLocalLinkage())
-        OutStreamer->emitSymbolAttribute(Slot, MCSA_Global);
-      OutStreamer->emitLabel(Slot);
-      if (usesELFObjects()) {
-        OutStreamer->emitSymbolAttribute(Slot, MCSA_ELF_TypeObject);
-        OutStreamer->emitELFSize(
-            Slot, MCConstantExpr::create(SlotSize, OutContext));
-      }
-      OutStreamer->emitZeros(SlotSize);
-    }
-    // G2 B-S2 (G2-VARIADIC-DESIGN-draft.md R3 §4.3.1/§4.3.2): a variadic
-    // definition continues the same serial slot stream with exactly six
-    // 4-byte continuation slots `_PARM_(F+1).._PARM_(F+6)`.  Every actual
-    // promoted to the slot width is 4B (i8/i16 promote to i32; f32 and
-    // pointers are 4B), so there is no narrower continuation slot to emit.
-    if (F.isVarArg()) {
-      for (unsigned N = F.arg_size() + 1; N <= F.arg_size() + 6; ++N) {
-        MCSymbol *Slot = OutContext.getOrCreateSymbol(
-            getSymbol(&F)->getName() + "_PARM_" + Twine(N));
-        if (!F.hasLocalLinkage())
-          OutStreamer->emitSymbolAttribute(Slot, MCSA_Global);
-        OutStreamer->emitLabel(Slot);
-        if (usesELFObjects()) {
-          OutStreamer->emitSymbolAttribute(Slot, MCSA_ELF_TypeObject);
-          OutStreamer->emitELFSize(
-              Slot, MCConstantExpr::create(4, OutContext));
-        }
-        OutStreamer->emitZeros(4);
-      }
-    }
-    OutStreamer->switchSection(OutContext.getObjectFileInfo()->getTextSection());
-    emitASxxxxText("\t.area CSEG (CODE)");
-  }
-
   // P09 textdecode fix (direction (a), producer-side section split): the
   // read-only byte image section.  A module that carries persistent bit
   // objects will hold R_MCS251_BITADDR8 fields in its .text, and the linker
@@ -1872,6 +1825,8 @@ public:
   }
 
   void emitInstruction(const MachineInstr *MI) override {
+    if (MI->getOpcode() == MCS251::ATOMIC_FENCE)
+      return;
     // Merely taking a function's address must not create undefined references
     // to its parameter slots. Declare only slots actually referenced by code.
     for (const MachineOperand &MO : MI->operands()) {
@@ -1880,7 +1835,9 @@ public:
       MCSymbol *Sym = GetExternalSymbolSymbol(MO.getSymbolName());
       if (!LocalParameterSlots.contains(Sym->getName()) &&
           DeclaredExternalSymbols.insert(Sym->getName()).second)
-        OutStreamer->emitSymbolAttribute(Sym, MCSA_Global);
+        OutStreamer->emitSymbolAttribute(
+            Sym, WeakParameterSlots.contains(Sym->getName()) ? MCSA_Weak
+                                                             : MCSA_Global);
     }
     // P-4: backend-generated external libcalls surface here as
     // MO_ExternalSymbol operands of a call (never as an IR function, so the
@@ -2137,7 +2094,7 @@ public:
     for (const Function &F : M) {
       if (F.isIntrinsic())
         continue;
-      if (!F.hasExternalLinkage())
+      if (F.hasLocalLinkage() || F.hasAvailableExternallyLinkage())
         continue; // local/internal functions are outside the signature domain
       std::string Final = getSymbolName(&F);
       if (!FunctionSignatureNames.contains(Final))
@@ -2284,10 +2241,10 @@ public:
     // Object path (Phase 13a): the MCS251ObjectStreamer deliberately
     // swallows the raw-text prologue above and the REL writer regenerates
     // the equivalent M/O/A records.  The writer has no access to the Module,
-    // so bridge the sanitized module name through the MCContext (the only
-    // other MainFileName consumer is DWARF line-table setup, which this
-    // target never enables).
-    OutStreamer->getContext().setMainFileName(ModuleName);
+    // so bridge the sanitized module name through the MCContext.  In ELF
+    // mode DWARF owns MainFileName, so leave it untouched there.
+    if (!usesELFObjects())
+      OutStreamer->getContext().setMainFileName(ModuleName);
     // A3.5: an ISR module's assembly text is an inspection artifact only.
     // The marker is deliberately not an ASxxxx directive, so the text can
     // never be assembled into a "production" object that carries the plain
@@ -2302,15 +2259,7 @@ public:
     EmittedFixedSections.clear();
     PlacementNoteEntries.clear();
     ActiveFixedFunction.reset();
-    if (llvm::any_of(M, [](const Function &F) {
-          return !F.isDeclaration() &&
-                 // G2 B-S2: a variadic definition owns a slot area even with
-                 // fewer than two fixed parameters (printf shape: 1 + six
-                 // continuation slots), so it reserves the bank like any
-                 // other slotted definition.
-                 (F.arg_size() > 1 || F.isVarArg());
-        }) ||
-        llvm::any_of(M.globals(), [this](const GlobalVariable &GV) {
+    if (llvm::any_of(M.globals(), [this](const GlobalVariable &GV) {
           // T06 rework R1 + BT12 + G11-B (design §3.2 N5): keepalive
           // metadata whose members all classify (ISR / Bit / Placement /
           // Bind) is registration data and reserves no storage. The
@@ -2339,20 +2288,11 @@ public:
                       "\t.area CSEG (CODE)");
     }
     LocalParameterSlots.clear();
+    WeakParameterSlots.clear();
     DeclaredExternalSymbols.clear();
     for (const Function &F : M) {
-      if (!F.hasLocalLinkage())
-        continue;
-      for (unsigned I = 1; I < F.arg_size(); ++I)
-        LocalParameterSlots.insert(
-            (getSymbol(&F)->getName() + "_PARM_" + Twine(I + 1)).str());
-      // G2 B-S2: a local variadic definition owns the six continuation
-      // slots too; references to them must not turn into external
-      // declarations.
-      if (F.isVarArg())
-        for (unsigned N = F.arg_size() + 1; N <= F.arg_size() + 6; ++N)
-          LocalParameterSlots.insert(
-              (getSymbol(&F)->getName() + "_PARM_" + Twine(N)).str());
+      if (usesELFObjects() && F.isDeclaration() && F.hasExternalWeakLinkage())
+        OutStreamer->emitSymbolAttribute(getSymbol(&F), MCSA_ELF_TypeFunction);
     }
 
     // BT12: the single `.mcs251.bit` section (if any bit-object placeholder is
@@ -2690,6 +2630,31 @@ public:
         MCS251Attributes::SectionType, AttributeSection, Records);
   }
 
+  bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
+                       const char *ExtraCode, raw_ostream &O) override {
+    if (ExtraCode && ExtraCode[0])
+      return AsmPrinter::PrintAsmOperand(MI, OpNo, ExtraCode, O);
+    const MachineOperand &MO = MI->getOperand(OpNo);
+    switch (MO.getType()) {
+    case MachineOperand::MO_Register:
+      O << StringRef(MCS251InstPrinter::getRegisterName(
+                         MO.getReg(), MCS251::NoRegAltName))
+               .lower();
+      return false;
+    case MachineOperand::MO_Immediate:
+      O << '#' << MO.getImm();
+      return false;
+    case MachineOperand::MO_GlobalAddress:
+      O << '#';
+      getSymbol(MO.getGlobal())->print(O, MAI);
+      if (MO.getOffset() != 0)
+        O << (MO.getOffset() > 0 ? "+" : "") << MO.getOffset();
+      return false;
+    default:
+      return AsmPrinter::PrintAsmOperand(MI, OpNo, ExtraCode, O);
+    }
+  }
+
   bool doInitialization(Module &M) override {
     // WP4 ordering guard: in the legacy pass manager every doInitialization
     // hook of the pipeline runs BEFORE any runOnModule, so this entry (and
@@ -2716,6 +2681,24 @@ public:
     // emits the v1 note only when the flags word still announces v1.  A
     // module whose capabilities fall outside the registered v2 identity
     // fails here fail-closed (classifyModule).
+    // Inline assembly (module-level and function-level) uses MCS251AsmParser
+    // in ELF mode. Legacy ASxxxx REL object output has no assembly-text entry
+    // in its object streamer, so reject inline assembly fail-closed there.
+    if (getMCS251TM().emitsObjectFile() && !usesELFObjects()) {
+      for (const Module::GlobalAsmFragment &Frag : M.getModuleInlineAsm())
+        if (!Frag.Asm.empty())
+          reportFatalUsageError(
+              "MCS251: module-level inline assembly requires ELF object output "
+              "(-mcs251-object-format=elf -filetype=obj)");
+      for (const Function &F : M)
+        for (const BasicBlock &BB : F)
+          for (const Instruction &I : BB)
+            if (const auto *CB = dyn_cast<CallBase>(&I))
+              if (isa<InlineAsm>(CB->getCalledOperand()))
+                reportFatalUsageError(
+                    "MCS251: inline assembly requires ELF object output "
+                    "(-mcs251-object-format=elf -filetype=obj)");
+    }
     classifyModule(M);
     return AsmPrinter::doInitialization(M);
   }
@@ -2828,17 +2811,26 @@ public:
     // image is emitted packed (byte-aligned) regardless, which MCS-251
     // permits for word accesses (QEMU + real hardware verified).  Scalars
     // and all mutable DSEG storage keep the byte-alignment requirement.
+    const bool AllowPrivateROStruct =
+        GV->isConstant() && GV->hasPrivateLinkage() &&
+        GV->hasGlobalUnnamedAddr() && isa<StructType>(GV->getValueType());
     const bool AlignedROArrayOK =
-        GV->isConstant() && isa<ArrayType>(GV->getValueType());
+        GV->isConstant() &&
+        (isa<ArrayType>(GV->getValueType()) || AllowPrivateROStruct);
     if (GV->isThreadLocal() || GV->getAddressSpace() != 0 || GV->hasSection() ||
-        GV->hasComdat() ||
-        (!GV->hasExternalLinkage() && !GV->hasLocalLinkage()) ||
+        !isSupportedOrdinaryLinkage(*GV) ||
         GV->getVisibility() != GlobalValue::DefaultVisibility ||
         GV->getDLLStorageClass() != GlobalValue::DefaultStorageClass ||
         (!AlignedROArrayOK && (GV->getAlign().valueOrOne() != Align(1) ||
                                DL.getABITypeAlign(GV->getValueType()) !=
                                    Align(1))))
       Reject();
+    if ((isWeakOrLinkOnce(*GV) || GV->hasComdat()) &&
+        getMCS251TM().emitsObjectFile() && !usesELFObjects())
+      reportFatalUsageError(
+          "MCS251: weak/COMDAT global '" + Twine(GV->getName()) +
+          "' requires ELF object output (-filetype=obj "
+          "-mcs251-object-format=elf)");
 
     const Constant *Init = GV->getInitializer();
     MCSymbol *Sym = getSymbol(GV);
@@ -2860,7 +2852,19 @@ public:
 
       const auto &TLOF =
           static_cast<const MCS251TargetObjectFile &>(getObjFileLowering());
-      OutStreamer->switchSection(TLOF.getDSEGSection());
+      const bool PerSymbolSec =
+          usesELFObjects() &&
+          (TM.getDataSections() || isWeakOrLinkOnce(*GV) || GV->hasComdat());
+      if (PerSymbolSec) {
+        const unsigned DSEGFlags =
+            ELF::SHF_ALLOC | ELF::SHF_WRITE |
+            (marksEDataMovable() ? ELF::SHF_MCS251_EDATA_MOVABLE : 0);
+        OutStreamer->switchSection(getMCS251SectionForGlobal(
+            Twine(".mcs251.dseg.") + Sym->getName(), ELF::SHT_NOBITS,
+            DSEGFlags, GV));
+      } else {
+        OutStreamer->switchSection(TLOF.getDSEGSection());
+      }
       emitASxxxxText("\t.area DSEG (DATA)");
       emitLinkage(GV, Sym);
       OutStreamer->emitLabel(Sym);
@@ -2873,7 +2877,13 @@ public:
       // ROM bytes. Nonzero records carry the complete target-endian byte image.
       // This sparse form remains correct when DSEG has register-bank/bit-area
       // holes or when several modules contribute independently placed slices.
-      OutStreamer->switchSection(TLOF.getXINITSection());
+      if (PerSymbolSec) {
+        OutStreamer->switchSection(getMCS251SectionForGlobal(
+            Twine(".mcs251.xinit.") + Sym->getName(), ELF::SHT_PROGBITS,
+            ELF::SHF_ALLOC, GV));
+      } else {
+        OutStreamer->switchSection(TLOF.getXINITSection());
+      }
       emitASxxxxText("\t.area XINIT (CODE)");
       OutStreamer->emitValue(MCSymbolRefExpr::create(Sym, OutContext), 2);
       OutStreamer->emitIntValue(Size, 2);
@@ -2888,16 +2898,27 @@ public:
     }
 
     if (!isSupportedROInitializer(Init, DL, /*AllowZeroImage=*/false,
-                                  /*AllowStructs=*/false))
+                                  /*AllowStructs=*/AllowPrivateROStruct))
       Reject();
 
     // Read-only globals and string literals stay in the established CSEG path.
     // A bit module splits them into .rodata (selectROImageSection) so its
     // .text remains a pure, link-decodable instruction stream.
-    OutStreamer->switchSection(selectROImageSection());
+    const bool PerSymbolRO =
+        usesELFObjects() &&
+        (TM.getDataSections() || isWeakOrLinkOnce(*GV) || GV->hasComdat());
+    if (PerSymbolRO)
+      OutStreamer->switchSection(getMCS251SectionForGlobal(
+          Twine(".rodata.") + Sym->getName(), ELF::SHT_PROGBITS, ELF::SHF_ALLOC,
+          GV));
+    else
+      OutStreamer->switchSection(selectROImageSection());
     emitLinkage(GV, Sym);
     OutStreamer->emitLabel(Sym);
     emitROInitializer(DL, Init);
+    if (PerSymbolRO)
+      OutStreamer->switchSection(
+          OutContext.getObjectFileInfo()->getTextSection());
   }
 
   //===--------------------------------------------------------------------===//
@@ -3139,8 +3160,8 @@ public:
     if (!getMCS251TM().emitsObjectFile() || !usesELFObjects())
       Bad("storage requires ELF object output "
           "(-filetype=obj -mcs251-object-format=elf)");
-    if (GV->isThreadLocal() || GV->hasSection() || GV->hasComdat() ||
-        (!GV->hasExternalLinkage() && !GV->hasLocalLinkage()) ||
+    if (GV->isThreadLocal() || GV->hasSection() ||
+        !isSupportedOrdinaryLinkage(*GV) ||
         GV->getVisibility() != GlobalValue::DefaultVisibility ||
         GV->getDLLStorageClass() != GlobalValue::DefaultStorageClass)
       Bad("unsupported placement or linkage");
@@ -3195,10 +3216,11 @@ public:
       }
       const bool XsegSplit = Size > UINT16_MAX;
 
-      MCSection *XSEG = OutContext.getELFSection(
+      MCSection *XSEG = getMCS251SectionForGlobal(
           (Twine(".mcs251.XSEG.") + Sym->getName()).str(), ELF::SHT_NOBITS,
           ELF::SHF_ALLOC | ELF::SHF_WRITE |
-              (XsegSplit ? ELF::SHF_MCS251_XSEG_SPLIT : 0));
+              (XsegSplit ? ELF::SHF_MCS251_XSEG_SPLIT : 0),
+          GV);
       OutStreamer->switchSection(XSEG);
       emitLinkage(GV, Sym);
       OutStreamer->emitLabel(Sym);
@@ -3215,7 +3237,12 @@ public:
         // write discipline, the storage class comes from the address space.
         // A split object emits none (a single v1 record cannot describe it;
         // the linker synthesizes the per-window records).
-        OutStreamer->switchSection(TLOF.getXDATAInitSection());
+        if (TM.getDataSections() || isWeakOrLinkOnce(*GV) || GV->hasComdat())
+          OutStreamer->switchSection(getMCS251SectionForGlobal(
+              Twine(".mcs251.xdata_init.") + Sym->getName(), ELF::SHT_PROGBITS,
+              ELF::SHF_ALLOC, GV));
+        else
+          OutStreamer->switchSection(TLOF.getXDATAInitSection());
         emitXDATAInitAddress(Sym);
         OutStreamer->emitIntValue(Size, 2);
         OutStreamer->emitIntValue(HasPayload ? Size : 0, 2);
@@ -3248,10 +3275,20 @@ public:
     // AS4 keeps CODE-space semantics under the bit-module split as well:
     // .rodata is the same CSEG region to the linker, so a __code image only
     // leaves the *executable* section, never CODE space.
-    OutStreamer->switchSection(selectROImageSection());
+    const bool PerSymbolRO =
+        TM.getDataSections() || isWeakOrLinkOnce(*GV) || GV->hasComdat();
+    if (PerSymbolRO)
+      OutStreamer->switchSection(getMCS251SectionForGlobal(
+          Twine(".rodata.") + Sym->getName(), ELF::SHT_PROGBITS, ELF::SHF_ALLOC,
+          GV));
+    else
+      OutStreamer->switchSection(selectROImageSection());
     emitLinkage(GV, Sym);
     OutStreamer->emitLabel(Sym);
     emitROInitializer(DL, Init);
+    if (PerSymbolRO)
+      OutStreamer->switchSection(
+          OutContext.getObjectFileInfo()->getTextSection());
   }
 };
 } // namespace

@@ -1,19 +1,19 @@
 ; RUN: llc -mtriple=mcs251 < %s | FileCheck %s
 
-; Phase 9: values live across calls spill to the frame. Every GPR is
-; caller-saved in the SDCC MCS-251 ABI, so the first call's result must be
-; parked in a frame slot before the second call -- previously a hard error
-; ("register spilling is not implemented"), now a normal @dr60 access.
+; Phase 9 + CSR: values live across calls are preserved either in callee-saved
+; registers (WR8 / DR12, saved in the prologue and restored in the epilogue) or
+; spilled to the frame when CSR capacity is exhausted.
 
 define i8 @sum2() {
 ; CHECK-LABEL: _sum2:
-; CHECK: inc spx, #0x1
+; CHECK: inc spx, #0x2
+; CHECK: mov @dr60-0x0001, wr8
 ; CHECK: ecall _f8a
-; CHECK: mov @dr60, r{{[0-9]+}}
+; CHECK: mov r8, dpl
 ; CHECK: ecall _f8a
-; CHECK: mov r{{[0-9]+}}, @dr60
 ; CHECK: add
-; CHECK: dec spx, #0x1
+; CHECK: mov wr8, @dr60-0x0001
+; CHECK: dec spx, #0x2
 ; CHECK: eret
 entry:
   %x = call i8 @f8a()
@@ -25,17 +25,17 @@ entry:
 declare i8 @f8a()
 declare i16 @f16a()
 
-; An i16 value live across a call spills as ONE word-granular access pair
-; (mov @dr60+dis,wr / mov wr,@dr60+dis) -- the single-instruction WR
-; displaced form, never two byte accesses.
+; An i16 value live across a call stays in callee-saved WR8, whose prologue
+; save/restore uses ONE word-granular access pair (`mov @dr60-0x0001, wr8` /
+; `mov wr8, @dr60-0x0001`).
 define i16 @sum16() {
 ; CHECK-LABEL: _sum16:
 ; CHECK: inc spx, #0x2
+; CHECK: mov @dr60-0x0001, wr8
 ; CHECK: ecall _f16a
-; CHECK: mov @dr60-0x0001, wr{{[0-9]+}}
 ; CHECK: ecall _f16a
-; CHECK: mov wr{{[0-9]+}}, @dr60-0x0001
 ; CHECK: add
+; CHECK: mov wr8, @dr60-0x0001
 ; CHECK: dec spx, #0x2
 ; CHECK: eret
 entry:
@@ -45,18 +45,22 @@ entry:
   ret i16 %z
 }
 
-; Register pressure: three live values across interleaved calls reuse the
-; frame slot (spill/reload between the calls, two adds at the end).
+; Register pressure: three live values across interleaved calls use both CSRs
+; (WR8 and DR12's WR12/WR14 halves) saved in the prologue and restored in the
+; epilogue.
 define i16 @pressure() {
 ; CHECK-LABEL: _pressure:
+; CHECK: mov @dr60-0x0003, wr12
+; CHECK: mov @dr60-0x0001, wr14
+; CHECK: mov @dr60-0x0005, wr8
 ; CHECK: ecall _f16a
-; CHECK: mov @dr60-0x0001, wr{{[0-9]+}}
 ; CHECK: ecall _f16a
-; CHECK: mov wr{{[0-9]+}}, @dr60-0x0001
 ; CHECK: add
 ; CHECK: ecall _f16a
-; CHECK: mov wr{{[0-9]+}}, @dr60-0x0001
 ; CHECK: add
+; CHECK: mov wr8, @dr60-0x0005
+; CHECK: mov wr12, @dr60-0x0003
+; CHECK: mov wr14, @dr60-0x0001
 ; CHECK: eret
 entry:
   %x = call i16 @f16a()

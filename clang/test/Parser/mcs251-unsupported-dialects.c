@@ -30,7 +30,6 @@ unsigned char __at(0x30) w; // keil-error {{'__at' is a recognized MCS251 (Keil 
 
 // ----------------------------------------------- function-suffix positions --
 void f_using(void) using 1 { } // keil-error {{'using' is a recognized MCS251 (Keil C) dialect spelling}}
-int f_reentrant(int x) __reentrant { return x; } // keil-error {{'__reentrant' is a recognized MCS251 (Keil C) dialect spelling}}
 void f_banked(void) __banked { } // keil-error {{'__banked' is a recognized MCS251 (Keil C) dialect spelling}}
 
 // ----------------------------------------------- ordinary-identifier uses --
@@ -54,6 +53,8 @@ __xdata unsigned char xd;
 __code const unsigned char cd = 1;
 __bit bb;
 void isr(void) interrupt 1 { xd = 1; }
+int f_reentrant(int x) __reentrant { return x; }
+int f_reentrant_keil(int x) reentrant { return x; }
 
 //--- plain.c
 // Without -fmcs251-keil the bare `using` suffix is not a dialect word: it

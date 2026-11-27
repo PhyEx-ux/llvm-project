@@ -1,6 +1,6 @@
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs < %s | FileCheck %s
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 < %s | FileCheck %s
-; RUN: llc -mtriple=mcs251 -filetype=obj < %s -o %t
+; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=rel < %s -o %t
 ;
 ; Four-byte canonical pointers, signed DR displacement and symbolic regions.
 @far = external global i8

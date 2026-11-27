@@ -109,3 +109,20 @@ def __builtin_mcs251_tfpu_div :
   let Attributes = [CustomTypeChecking];
   let Prototype = "float(...)";
 }
+
+// Single-core MCU critical-section primitives for global interrupt flag EA
+// (IE.7, bit address 0xAF):
+//   * __builtin_mcs251_ea_save_disable(): atomically tests and clears EA via
+//     `jbc 0xAF`, returning 1 if EA was enabled and 0 otherwise.
+//   * __builtin_mcs251_ea_restore(saved): sets EA (`setb 0xAF`) iff saved != 0,
+//     leaving IE.0..6 untouched and preserving nested interrupt-disabled state.
+def __builtin_mcs251_ea_save_disable :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_ea_save_disable"];
+  let Prototype = "unsigned char()";
+}
+def __builtin_mcs251_ea_restore :
+    TargetBuiltin {
+  let Spellings = ["__builtin_mcs251_ea_restore"];
+  let Prototype = "void(unsigned char)";
+}

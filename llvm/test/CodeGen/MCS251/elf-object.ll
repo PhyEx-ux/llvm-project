@@ -1,11 +1,11 @@
-; RUN: llc -mtriple=mcs251 -filetype=obj %s -o %t.default.rel
-; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=rel %s -o %t.explicit.rel
-; RUN: cmp %t.default.rel %t.explicit.rel
-; RUN: FileCheck %s --check-prefix=REL < %t.default.rel
+; RUN: llc -mtriple=mcs251 -filetype=obj %s -o %t.default.o
 ; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf -verify-machineinstrs %s -o %t.o
+; RUN: cmp %t.default.o %t.o
+; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=rel %s -o %t.explicit.rel
+; RUN: FileCheck %s --check-prefix=REL < %t.explicit.rel
 ; RUN: llvm-readobj --file-headers --sections --symbols --relocations --section-data %t.o | FileCheck %s --check-prefix=V2-ELF
 ; RUN: llvm-readelf -h -r -n %t.o | FileCheck %s --check-prefix=READELF
-; RUN: %python %S/Inputs/check-elf-rela.py %t.o %t.default.rel
+; RUN: %python %S/Inputs/check-elf-rela.py %t.o %t.explicit.rel
 ; RUN: llc -mtriple=mcs251 -filetype=obj -mcs251-object-format=elf -addrsig %s -o %t.addrsig.o
 ; RUN: cmp %t.o %t.addrsig.o
 ;
@@ -62,7 +62,7 @@ define void @caller() {
 ; see elf-v2-identity.ll for the byte-pinned variant). readelf -n has no
 ; note to print: the v2 object carries none.
 ; V2-ELF: Name: .mcs251.attributes
-; V2-ELF: Type: Unknown (0x70000003)
+; V2-ELF: Type: SHT_MCS251_ATTRIBUTES (0x70000003)
 ; V2-ELF: Size: 250
 ; V2-ELF: AddressAlignment: 1
 ; V2-ELF: 0000: 41000000 F94D4353 32353100 01000000

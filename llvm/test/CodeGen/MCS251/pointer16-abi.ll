@@ -33,30 +33,23 @@ define ptr addrspace(3) @far_identity(ptr addrspace(3) %p) {
 }
 
 define i8 @near_second(i8 %tag, ptr %p) {
-; CHECK: .globl _near_second_PARM_2
-; CHECK: _near_second_PARM_2:
-; CHECK-NEXT: .ds 2
+; CHECK-NOT: _near_second_PARM_2
 ; CHECK-LABEL: _near_second:
-; CHECK: mov [[NEARSLOT:wr[0-9]+]], #_near_second_PARM_2
-; CHECK: mov {{r[0-9]+}}, @[[NEARSLOT]]
-; CHECK: add [[NEARSLOT]], #0x0001
-; CHECK: mov {{r[0-9]+}}, @[[NEARSLOT]]
+; CHECK: mov {{r[0-9]+}}, @dr60-0x0004
+; CHECK: mov {{r[0-9]+}}, @dr60-0x0003
+; CHECK: mov {{r[0-9]+}}, @wr{{[0-9]+}}
   %v = load volatile i8, ptr %p, align 1
   %r = xor i8 %v, %tag
   ret i8 %r
 }
 
 define i8 @far_second(i8 %tag, ptr addrspace(3) %p) {
-; CHECK: .globl _far_second_PARM_2
-; CHECK: _far_second_PARM_2:
-; CHECK-NEXT: .ds 4
+; CHECK-NOT: _far_second_PARM_2
 ; CHECK-LABEL: _far_second:
-; CHECK: mov {{wr[0-9]+}}, #_far_second_PARM_2
-; CHECK: add {{wr[0-9]+}}, #0x0001
-; CHECK: mov {{r[0-9]+}}, @{{wr[0-9]+}}
-; CHECK: add {{wr[0-9]+}}, #0x0003
-; CHECK: mov {{r[0-9]+}}, @{{wr[0-9]+}}
-; X2: the AS3 load itself now travels through the MOVX @DPTR channel.
+; CHECK: mov {{r[0-9]+}}, @dr60-0x{{[0-9a-f]+}}
+; CHECK: mov {{r[0-9]+}}, @dr60-0x{{[0-9a-f]+}}
+; CHECK: mov {{r[0-9]+}}, @dr60-0x{{[0-9a-f]+}}
+; X2: the AS3 load itself travels through the MOVX @DPTR channel.
 ; CHECK: mov dpl, r{{[0-9]+}}
 ; CHECK: mov dph, r{{[0-9]+}}
 ; CHECK: movx a, @dptr
@@ -70,22 +63,26 @@ declare i8 @take_far(i8, ptr addrspace(3))
 
 define i8 @call_near() {
 ; CHECK-LABEL: _call_near:
-; CHECK: mov [[CALLNEAR:wr[0-9]+]], #_take_near_PARM_2
-; CHECK: mov @[[CALLNEAR]],
-; CHECK: add [[CALLNEAR]], #0x0001
-; CHECK: mov @[[CALLNEAR]],
+; CHECK-NOT: _take_near_PARM_2
+; CHECK: inc spx, #0x2
+; CHECK: mov @dr60-0x0001,
+; CHECK: mov @dr60,
 ; CHECK: ecall _take_near
+; CHECK: dec spx, #0x2
   %r = call i8 @take_near(i8 7, ptr inttoptr (i16 512 to ptr))
   ret i8 %r
 }
 
 define i8 @call_far() {
 ; CHECK-LABEL: _call_far:
-; CHECK: mov [[CALLFAR:wr[0-9]+]], #_take_far_PARM_2
-; CHECK: mov @[[CALLFAR]],
-; CHECK: add {{wr[0-9]+}}, #0x0003
-; CHECK: mov @{{wr[0-9]+}},
+; CHECK-NOT: _take_far_PARM_2
+; CHECK: inc spx, #0x4
+; CHECK: mov @dr60-0x0003,
+; CHECK: mov @dr60-0x0002,
+; CHECK: mov @dr60-0x0001,
+; CHECK: mov @dr60,
 ; CHECK: ecall _take_far
+; CHECK: dec spx, #0x4
   %r = call i8 @take_far(i8 9,
       ptr addrspace(3) inttoptr (i32 66048 to ptr addrspace(3)))
   ret i8 %r
@@ -114,18 +111,17 @@ define i8 @far_slot_top_byte(i8 %tag, ptr addrspace(3) %p) {
 
 define i8 @call_far_polluted() {
 ; CHECK-LABEL: _call_far_polluted:
+; CHECK-NOT: _far_slot_top_byte_PARM_2
 ; O0: mov wr{{[0-9]+}}, #0xaa01
 ; O0: mov {{r[0-9]+}}, #0x00
 ; O2: mov [[ZERO:r[0-9]+]], #0x00
-; CHECK: mov [[POLLUTEDSLOT:wr[0-9]+]], #_far_slot_top_byte_PARM_2
-; O2: mov @[[POLLUTEDSLOT]], [[ZERO]]
-; CHECK: add {{wr[0-9]+}}, #0x0001
-; CHECK: mov @{{wr[0-9]+}},
-; CHECK: add {{wr[0-9]+}}, #0x0002
-; CHECK: mov @{{wr[0-9]+}},
-; CHECK: add {{wr[0-9]+}}, #0x0003
-; CHECK: mov @{{wr[0-9]+}},
+; CHECK: inc spx, #0x4
+; O2: mov @dr60-0x0003, [[ZERO]]
+; CHECK: mov @dr60-0x0002,
+; CHECK: mov @dr60-0x0001,
+; CHECK: mov @dr60,
 ; CHECK: ecall _far_slot_top_byte
+; CHECK: dec spx, #0x4
   %r = call i8 @far_slot_top_byte(i8 0,
       ptr addrspace(3) inttoptr (i32 2852192771 to ptr addrspace(3)))
   ret i8 %r

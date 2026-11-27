@@ -101,10 +101,25 @@ void MCS251TargetInfo::getTargetDefines(const LangOptions &Opts,
   Builder.defineMacro("__MCS251__");
   if (IntWidth == 16)
     Builder.defineMacro("__MCS251_INT16__");
-  // WP4 A4: the C11 atomics capability is not provided (no atomic model, no
-  // lock-free operation; the MaxAtomic widths stay 0). C11 requires an
-  // implementation that does not support <stdatomic.h> operations to define
-  // this macro, so well-behaved headers can disable their atomic paths
-  // instead of reaching a rejected operation.
-  Builder.defineMacro("__STDC_NO_ATOMICS__");
+}
+
+ArrayRef<const char *> MCS251TargetInfo::getGCCRegNames() const {
+  static const char *const GCCRegNames[] = {
+      "r0",   "r1",   "r2",   "r3",   "r4",   "r5",   "r6",   "r7",
+      "r8",   "r9",   "r10",  "r11",  "r12",  "r13",  "r14",  "r15",
+      "wr0",  "wr2",  "wr4",  "wr6",  "wr8",  "wr10", "wr12", "wr14",
+      "wr16", "wr18", "wr20", "wr22", "wr24", "wr26", "wr28", "wr30",
+      "dr0",  "dr4",  "dr8",  "dr12", "dr16", "dr20", "dr24", "dr28",
+      "dr56", "dr60", "a",    "b",    "dpl",  "dph",  "dptr", "dpxl",
+      "psw",
+  };
+  return llvm::ArrayRef(GCCRegNames);
+}
+
+ArrayRef<TargetInfo::GCCRegAlias> MCS251TargetInfo::getGCCRegAliases() const {
+  static const TargetInfo::GCCRegAlias GCCRegAliases[] = {
+      {{"dpx"}, "dr56"},
+      {{"spx"}, "dr60"},
+  };
+  return llvm::ArrayRef(GCCRegAliases);
 }

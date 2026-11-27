@@ -47,14 +47,13 @@ public:
     HasMustTail = false;
     UserLabelPrefix = "_";
 
-    // WP4 A4: no atomic model is implemented for this target, so the
-    // lock-free capability queries must never answer affirmatively. Both
-    // widths are pinned to 0 explicitly (they already default to 0; this is
-    // the documented lock, not an accident): every atomic width is larger
-    // than the max lock-free width, so __atomic_always_lock_free and
-    // __atomic_is_lock_free answer "no", and an _Atomic operation would be
-    // a non-lock-free operation rather than a silent lock-free claim.
-    MaxAtomicPromoteWidth = MaxAtomicInlineWidth = 0;
+    // Single-core MCU atomics: 1-, 2-, and 4-byte atomic operations lower
+    // inline via hardware EA (IE.7, bit 0xAF) interrupt-disable critical
+    // sections (jbc 0xAF / setb 0xAF), while larger aggregates lower to
+    // generic __atomic_* runtime libcalls. Keep MaxAtomicPromoteWidth = 0 so
+    // _Atomic(T) preserves MCS-251's native 1-byte global/struct alignment.
+    MaxAtomicPromoteWidth = 0;
+    MaxAtomicInlineWidth = 32;
 
     // The no-flag default is xsmall/v2. Compatibility is available only when
     // a caller explicitly supplies the legacy layout contract.
@@ -116,6 +115,16 @@ public:
   // caps -fexperimental-max-bitint-width, which otherwise defaults to 128.
   bool hasBitIntType() const override { return true; }
   size_t getMaxBitIntWidth() const override { return 32; }
+
+  // Single-core EA critical sections operate safely on byte-aligned 1/2/4-byte
+  // objects without requiring natural alignment promotion.
+  bool hasBuiltinAtomic(uint64_t AtomicSizeInBits,
+                        uint64_t AlignmentInBits) const override {
+    return AlignmentInBits >= getCharWidth() &&
+           AtomicSizeInBits <= getMaxAtomicInlineWidth() &&
+           (AtomicSizeInBits <= getCharWidth() ||
+            llvm::isPowerOf2_64(AtomicSizeInBits / getCharWidth()));
+  }
 
   uint64_t getPointerWidthV(LangAS AS) const override {
     unsigned TargetAS = getTargetAddressSpace(AS);
@@ -221,12 +230,18 @@ public:
   // Function target attributes cannot change a translation unit's C model.
   bool isValidFeatureName(StringRef Feature) const override { return false; }
   bool allowsLargerPreferedTypeAlignment() const override { return false; }
-  ArrayRef<const char *> getGCCRegNames() const override { return {}; }
-  ArrayRef<GCCRegAlias> getGCCRegAliases() const override { return {}; }
+  ArrayRef<const char *> getGCCRegNames() const override;
+  ArrayRef<GCCRegAlias> getGCCRegAliases() const override;
   bool validateAsmConstraint(const char *&Name,
                              ConstraintInfo &Info) const override {
-    // Target-specific inline assembly constraints are not yet a C interface.
-    return false;
+    switch (*Name) {
+    case 'a':
+    case 'b':
+      Info.setAllowsRegister();
+      return true;
+    default:
+      return false;
+    }
   }
   std::string_view getClobbers() const override { return ""; }
   BuiltinVaListKind getBuiltinVaListKind() const override {

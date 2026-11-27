@@ -141,14 +141,14 @@ define i32 @ret_shape(i32 %x) {
 ; ASM2-NEXT: mov dr4, dr12
 ; ASM2-NEXT: mov 0xed, #0x2d
 ; ASM2-COUNT-270: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ; ASM2-NEXT: clr 0x90
-; The epilogue reads the dr12 snapshot (not the live dr4 lanes).
-; ASM2-NEXT: mov dpl, r15
-; ASM2-NEXT: mov dph, r14
-; ASM2-NEXT: mov b, r13
-; ASM2-NEXT: mov a, r12
-; ASM2-NEXT: eret
+; The epilogue reads the in-window snapshot (dr0 or dr12, never live dr4 lanes).
+; ASM2-NEXT: mov dpl, r{{3|15}}
+; ASM2-NEXT: mov dph, r{{2|14}}
+; ASM2-NEXT: mov b, r{{1|13}}
+; ASM2-NEXT: mov a, r{{0|12}}
+; ASM2: eret
 entry:
   call void @llvm.mcs251.bit.set(i32 144)
   %r = call i32 @llvm.mcs251.tfpu.sin(i32 %x)
@@ -180,13 +180,13 @@ define i32 @bin_shape(i32 %x, i32 %y) {
 ; ASM2: mov dr0, dr12
 ; ASM2-NEXT: mov 0xed, #0x1e
 ; ASM2-COUNT-34: nop
-; ASM2-NEXT: mov dr12, dr4
+; ASM2-NEXT: mov dr{{0|12}}, dr4
 ; ASM2-NEXT: clr 0x90
-; ASM2-NEXT: mov dpl, r15
-; ASM2-NEXT: mov dph, r14
-; ASM2-NEXT: mov b, r13
-; ASM2-NEXT: mov a, r12
-; (the PARM_2 stack frame is torn down before the return)
+; ASM2-NEXT: mov dpl, r{{3|15}}
+; ASM2-NEXT: mov dph, r{{2|14}}
+; ASM2-NEXT: mov b, r{{1|13}}
+; ASM2-NEXT: mov a, r{{0|12}}
+; (stack frame + CSR restore before return)
 ; ASM2: dec spx, #0x4
 ; ASM2: eret
 entry:

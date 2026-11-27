@@ -2,6 +2,8 @@
 // RUN: bash %t/check.sh %clang %t
 // RUN: FileCheck %s --check-prefix=WEAK < %t/weak.O0.err
 // RUN: FileCheck %s --check-prefix=WEAK < %t/weak.Oz.err
+// RUN: FileCheck %s --check-prefix=GOTO < %t/goto.O0.err
+// RUN: FileCheck %s --check-prefix=GOTO < %t/goto.Oz.err
 // RUN: FileCheck %s --check-prefix=I64 --implicit-check-not='PLEASE submit' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' --implicit-check-not='crash backtrace' < %t/i64.O0.err
 // RUN: FileCheck %s --check-prefix=I64 --implicit-check-not='PLEASE submit' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' --implicit-check-not='crash backtrace' < %t/i64.O2.err
 // RUN: FileCheck %s --check-prefix=BITINT --implicit-check-not='PLEASE submit' --implicit-check-not='Stack dump' --implicit-check-not='PLEASE ATTACH' --implicit-check-not='crash backtrace' < %t/bitint.O0.err
@@ -20,17 +22,22 @@
 // exact status 1 (or 0 for the positive control), no artifact, and no crash
 // text in the captured stderr.
 
-// WEAK-COUNT-1: error:
-// WEAK: weak function definitions are not supported on MCS251
+// WEAK-COUNT-1: error
+// WEAK: weak/COMDAT function 'wf' requires ELF object output
 // WEAK-NOT: PLEASE submit
 // WEAK-NOT: Stack dump
 // WEAK-NOT: PLEASE ATTACH
+// GOTO-COUNT-1: error:
+// GOTO: computed goto (indirect 'goto *') is not supported on MCS251
+// GOTO-NOT: PLEASE submit
+// GOTO-NOT: Stack dump
+// GOTO-NOT: PLEASE ATTACH
 // I64-COUNT-1: error:
 // I64: MCS251 contract violation: i64 integer arithmetic is not yet implemented
 // I64-NOT: PLEASE submit
 // I64-NOT: Stack dump
 // I64-NOT: PLEASE ATTACH
-// BITINT-COUNT-1: fatal error: error in backend: MCS251: arguments must be unsplit i8/i16/i32 scalars
+// BITINT-COUNT-1: fatal error: error in backend: MCS251: arguments must be i8/i16/i32/f32/i1 scalars, ordinary pointers, or supported aggregates
 // BITINT-NOT: PLEASE submit
 // BITINT-NOT: Stack dump
 // BITINT-NOT: PLEASE ATTACH
@@ -71,7 +78,8 @@ expect_reject() { # $1 = label, $2 = src, $3 = clang args..., log = $T/$1.err
 }
 
 for opt in O0 O1 O2 Os Oz; do
-  expect_reject "weak.$opt" "$T/weak.c" "-$opt"
+  expect_reject "weak.$opt" "$T/weak.c" "-$opt" "-mllvm" "-mcs251-object-format=rel"
+  expect_reject "goto.$opt" "$T/goto.c" "-$opt"
 done
 for opt in O0 O2; do
   expect_reject "i64.$opt" "$T/i64.c" "-$opt"
@@ -113,6 +121,9 @@ exit $rc
 
 //--- weak.c
 __attribute__((weak)) int wf(void) { return 1; }
+
+//--- goto.c
+void cg(void **tab) { goto *tab[0]; }
 
 //--- i64.c
 volatile unsigned long long a = 2, b = 3;

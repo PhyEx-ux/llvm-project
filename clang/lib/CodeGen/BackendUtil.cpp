@@ -1861,8 +1861,29 @@ void clang::emitBackendOutput(CompilerInstance &CI, CodeGenOptions &CGOpts,
         K == llvm::codegenoptions::FullDebugInfo ||
         K == llvm::codegenoptions::UnusedTypeInfo;
     if (SourceDebugRequest) {
-      Diags.Report(diag::err_fe_mcs251_debug_unsupported);
-      return;
+      bool SupportsDwarf = false;
+      if (Action == Backend_EmitObj || Action == Backend_EmitLL ||
+          Action == Backend_EmitBC) {
+        SupportsDwarf = true;
+        const auto &LLVMArgs = CI.getFrontendOpts().LLVMArgs;
+        for (size_t I = 0; I < LLVMArgs.size(); ++I) {
+          if (LLVMArgs[I] == "-mcs251-object-format=rel")
+            SupportsDwarf = false;
+          else if (LLVMArgs[I] == "-mcs251-object-format=elf")
+            SupportsDwarf = true;
+          else if (LLVMArgs[I] == "-mcs251-object-format" &&
+                   I + 1 < LLVMArgs.size()) {
+            if (LLVMArgs[I + 1] == "rel")
+              SupportsDwarf = false;
+            else if (LLVMArgs[I + 1] == "elf")
+              SupportsDwarf = true;
+          }
+        }
+      }
+      if (!SupportsDwarf) {
+        Diags.Report(diag::err_fe_mcs251_debug_unsupported);
+        return;
+      }
     }
   }
 

@@ -1,23 +1,12 @@
 // RUN: %clang_cc1 -triple mcs251-unknown-none -std=c11 -fsyntax-only -Wno-deprecated-non-prototype -verify %s
 //
-// G2 B-S1 (design draft G2-VARIADIC-DESIGN-draft.md R3, §6 B-S1 + §4.4
-// N16-N18): the frozen Sema gates of the B1 static-slot variadic ABI.
-//
-//  - N16/C1: an indirect variadic call (function pointer whose type contains
-//    `...`) is rejected regardless of the argument count;
-//  - N17/A: a call passing more than the fixed six variadic arguments is a
-//    compile-time hard error (prototype form: args minus fixed params;
-//    unprototyped form: args minus the register-channel first argument);
-//  - N18/D1+D2: an argument in a variadic position, or a va_arg target type,
-//    must not be in the frozen rejection set (aggregate/union, integers
-//    wider than 32 bits, pointers into non-ordinary address spaces).
-//
-// The diagnostic messages are frozen verbatim; this file pins every one of
-// them character-for-character. bit-in-variadic-signature stays with the
-// separate P09 N13 family (regression anchor at the bottom). The llc
-// backstops (C2/D3) and the va_list/va_arg lowering are B-S2 and are NOT
-// exercised here. -Wno-deprecated-non-prototype keeps the unprototyped-cap
-// cases focused on the frozen G2 gates (the deprecation is orthogonal).
+// Stack-based reentrant variadic ABI Sema gates:
+//  - Multi-argument indirect calls, indirect variadic calls, arbitrary variadic
+//    argument counts (>6), and struct/union variadic arguments + va_arg are
+//    supported by the stack-based ABI.
+//  - Still rejected: integers wider than 32 bits (`long long`) and pointers
+//    into non-ordinary address spaces (AS5/AS7) in variadic argument or va_arg
+//    positions, plus `__bit` in fixed variadic signatures (N13).
 
 // ---------------------------------------------------------------------------
 // Positive controls: the allowed set must stay accepted at the Sema layer.
@@ -58,13 +47,10 @@ void ok_arrays_decay_to_ordinary_ptrs(int a0[2]) {
 }
 
 typedef int (*fixedfp)(int, int);
-void indirect_fixed_now_rejected(void) {
+void indirect_fixed_supported(void) {
   fixedfp fp = 0;
-  // WP4 A7 (EC1): an indirect call with two or more arguments has no ABI on
-  // MCS251 (the static continuation slots are named after the callee), so a
-  // non-variadic multi-argument indirect call is rejected as well. Only the
-  // zero/one-argument indirect forms stay supported.
-  fp(1, 2); // expected-error {{multi-argument indirect calls are not supported on MCS251}}
+  // Multi-argument indirect calls are supported under the stack-based ABI.
+  fp(1, 2);
 }
 
 void ok_vaarg_reads(int count, ...) {
@@ -79,70 +65,59 @@ void ok_vaarg_reads(int count, ...) {
 }
 
 // ---------------------------------------------------------------------------
-// [1] N17/A, prototype form: Args.size() - NumParams > 6.
+// [1] More than 6 variadic arguments are now accepted (stack-based ABI).
 // ---------------------------------------------------------------------------
 
 void cap_7_variadic_args(void) {
-  // expected-error@+1 {{MCS251 variadic call exceeds the fixed 6-slot variadic ABI cap (7 variadic arguments given)}}
   vsum(1, 1, 2, 3, 4, 5, 6, 7);
 }
 
 void cap_8_variadic_args(void) {
-  // expected-error@+1 {{MCS251 variadic call exceeds the fixed 6-slot variadic ABI cap (8 variadic arguments given)}}
   vsum(0, 1, 2, 3, 4, 5, 6, 7, 8);
 }
 
 // ---------------------------------------------------------------------------
-// [2] N17/A, unprototyped form: Args.size() - 1 > 6.
+// [2] Unprototyped calls with >7 arguments are now accepted.
 // ---------------------------------------------------------------------------
 
 int noproto();
 
 void cap_noproto_boundary_ok(void) {
-  // Seven arguments: the first occupies the register channel, the remaining
-  // six exactly fill the continuation slots.
   noproto(1, 2, 3, 4, 5, 6, 7);
 }
 
 void cap_noproto_8_args(void) {
-  // expected-error@+1 {{MCS251 variadic call exceeds the fixed 6-slot variadic ABI cap (7 variadic arguments given)}}
   noproto(1, 2, 3, 4, 5, 6, 7, 8);
 }
 
 // ---------------------------------------------------------------------------
-// [3] N16/C1: indirect variadic calls, rejected regardless of arg count.
+// [3] Indirect variadic calls are now accepted (stack-based ABI).
 // ---------------------------------------------------------------------------
 
 typedef int (*vfuncptr)(int, ...);
 
 void indirect_zero_variadic_args(void) {
   vfuncptr vp = 0;
-  // expected-error@+1 {{MCS251 variadic call form 'indirect' is not supported (static slots require a named callee)}}
   (*vp)(1);
 }
 
 void indirect_one_variadic_arg(void) {
   vfuncptr vp = 0;
-  // expected-error@+1 {{MCS251 variadic call form 'indirect' is not supported (static slots require a named callee)}}
   vp(1, 2);
 }
 
 void indirect_many_args(void) {
   vfuncptr vp = 0;
-  // Even a call that would also breach the cap reports C1: the indirect
-  // form is the frozen first gate.
-  // expected-error@+1 {{MCS251 variadic call form 'indirect' is not supported (static slots require a named callee)}}
   vp(1, 2, 3, 4, 5, 6, 7, 8);
 }
 
 void indirect_through_typeof(void) {
   __typeof__(vsum) *dp = vsum;
-  // expected-error@+1 {{MCS251 variadic call form 'indirect' is not supported (static slots require a named callee)}}
   dp(1, 2);
 }
 
 // ---------------------------------------------------------------------------
-// [4] N18/D1: aggregate/union variadic arguments (direct prototype call).
+// [4] Aggregate/union variadic arguments are now accepted (byval on stack).
 // ---------------------------------------------------------------------------
 
 struct S { int a; };
@@ -150,19 +125,19 @@ union U { int a; float f; };
 
 void agg_variadic_arg(void) {
   struct S s = {1};
-  vsum(1, s); // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
+  vsum(1, s);
 }
 
 void union_variadic_arg(void) {
   union U u = {1};
-  vsum(1, u); // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
+  vsum(1, u);
 }
 
-// Each offending variadic position is diagnosed on its own.
-void two_rejected_args(void) {
+// The struct argument is accepted; only the i64 (`long long`) argument fails.
+void two_args_one_rejected(void) {
   struct S s = {1};
   long long v = 1;
-  vsum(1, s, v); // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}} expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
+  vsum(1, s, v); // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
 }
 
 // ---------------------------------------------------------------------------
@@ -206,8 +181,8 @@ typedef __attribute__((address_space(7))) int *as7ptr;
 void vaarg_rejected_targets(int count, ...) {
   __builtin_va_list ap;
   __builtin_va_start(ap, count);
-  __builtin_va_arg(ap, struct S); // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
-  __builtin_va_arg(ap, union U);  // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
+  (void)__builtin_va_arg(ap, struct S);
+  (void)__builtin_va_arg(ap, union U);
   __builtin_va_arg(ap, long long); // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
   __builtin_va_arg(ap, as7ptr);   // expected-error {{MCS251 variadic argument must be a promoted scalar (i8/i16/i32/f32) or ordinary data pointer}}
   __builtin_va_end(ap);

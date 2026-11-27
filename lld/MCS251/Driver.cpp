@@ -7,7 +7,9 @@
 // arithmetic belong to LinkerCore.cpp, which has no flavor-driver dependency.
 //===----------------------------------------------------------------------===//
 
+#include "LTO.h"
 #include "LinkerCore.h"
+#include "LinkerScript.h"
 #include "PlacementReport.h"
 #include "lld/Common/Driver.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -15,11 +17,15 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/Support/Allocator.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
+#include "llvm/Support/StringSaver.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <array>
@@ -71,10 +77,13 @@ struct FlavorOptions {
   // again, the matrix would already cover every one of them instead of the
   // final element alone.
   std::vector<std::string> PreemptionConfigPaths;
+  std::vector<std::string> ResponseFilePaths;
+  std::vector<std::string> ScriptPaths;
   // Tracked so the verifier receives exactly the window numbers the link was
   // given, and never a default the user did not ask for.
   bool EdataEndGiven = false;
   bool IramSizeGiven = false;
+  unsigned LtoOptLevel = 2;
 };
 
 struct Segment {
@@ -283,8 +292,15 @@ bool buildExecutable(const LinkerResult &Result, bool KeepSymbols,
     Names.insert(Names.end(), S2.bytes_begin(), S2.bytes_end());
     Names.push_back(0);
   }
+  std::vector<uint32_t> DebugNameOffsets;
+  DebugNameOffsets.reserve(Result.DebugSections.size());
+  for (const auto &D : Result.DebugSections) {
+    DebugNameOffsets.push_back(Names.size());
+    Names.insert(Names.end(), D.Name.begin(), D.Name.end());
+    Names.push_back(0);
+  }
   // G11-D2: the positioning carrier's name is APPENDED to the .shstrtab name
-  // tail (after .symtab when a symbol table exists), so a plain link adds
+  // tail (after .symtab and any .debug_* sections), so a plain link adds
   // nothing at all -- not even the name string (design §6.3).
   uint32_t PositionsName = 0;
   const bool EmitPositions = Positions != nullptr && !Positions->empty();
@@ -308,6 +324,21 @@ bool buildExecutable(const LinkerResult &Result, bool KeepSymbols,
     DataOffset += uint64_t(Syms.size()) * 16;
     DataOffset = (DataOffset + 3) & ~uint64_t(3);
   }
+  // Trailing non-ALLOC DWARF .debug_* payloads (outside PT_LOAD and before
+  // .mcs251.placement.positions).
+  std::vector<uint32_t> DebugOffsets;
+  DebugOffsets.reserve(Result.DebugSections.size());
+  for (const auto &D : Result.DebugSections) {
+    const uint32_t Align = std::max<uint32_t>(1, D.Align);
+    const uint64_t Pad = (Align - (DataOffset % Align)) % Align;
+    DataOffset += Pad;
+    if (DataOffset + D.Data.size() > 0xffffffff)
+      return fail(Err, "ET_EXEC output is too large");
+    DebugOffsets.push_back(static_cast<uint32_t>(DataOffset));
+    DataOffset += D.Data.size();
+  }
+  if (!Result.DebugSections.empty())
+    DataOffset = (DataOffset + 3) & ~uint64_t(3);
   // G11-D2: the positioning NOTE data sits after every existing non-load
   // datum and before the section header table, zero padded to a 4-byte file
   // offset; it never shares file bytes with any other content (design §6.3).
@@ -320,10 +351,10 @@ bool buildExecutable(const LinkerResult &Result, bool KeepSymbols,
     DataOffset += Positions->size();
   }
   uint64_t Shoff = DataOffset;
-  // null + sparse load sections + names (+ .strtab + .symtab)
+  // null + sparse load sections + names (+ .strtab + .symtab) (+ .debug_*)
   // (+ .mcs251.placement.positions)
-  uint64_t Shnum =
-      Segments.size() + 2 + (EmitSyms ? 2u : 0) + (EmitPositions ? 1u : 0);
+  uint64_t Shnum = Segments.size() + 2 + (EmitSyms ? 2u : 0) +
+                   Result.DebugSections.size() + (EmitPositions ? 1u : 0);
   // G11-D2 (design §3.6): re-verify the non-extended section-numbering
   // capability after the section count grew; never assume the old bound.
   if (Shnum > 0xffff)
@@ -342,7 +373,7 @@ bool buildExecutable(const LinkerResult &Result, bool KeepSymbols,
   append32be(ELF, Result.Entry);              // HOME area start per E3 policy.
   append32be(ELF, EhdrSize);                  // e_phoff
   append32be(ELF, static_cast<uint32_t>(Shoff));
-  append32be(ELF, EF_MCS251_ABI_V1);
+  append32be(ELF, Result.OutputEFlags);
   append16be(ELF, EhdrSize);
   append16be(ELF, PhdrSize);
   append16be(ELF, Segments.size());
@@ -375,6 +406,11 @@ bool buildExecutable(const LinkerResult &Result, bool KeepSymbols,
       ELF.push_back(0);                         // st_other
       append16be(ELF, S.Shndx);
     }
+  }
+  for (size_t I = 0; I != Result.DebugSections.size(); ++I) {
+    ELF.resize(DebugOffsets[I], 0);
+    const auto &D = Result.DebugSections[I];
+    ELF.insert(ELF.end(), D.Data.begin(), D.Data.end());
   }
   if (EmitPositions) {
     ELF.resize(PositionsOffset, 0);
@@ -422,6 +458,18 @@ bool buildExecutable(const LinkerResult &Result, bool KeepSymbols,
     append32be(ELF, FirstGlobal);             // sh_info -> first global
     append32be(ELF, 4);                       // sh_addralign
     append32be(ELF, 16);                      // sh_entsize
+  }
+  for (size_t I = 0; I != Result.DebugSections.size(); ++I) {
+    const auto &D = Result.DebugSections[I];
+    append32be(ELF, DebugNameOffsets[I]);
+    append32be(ELF, 1);                       // SHT_PROGBITS
+    append32be(ELF, 0); append32be(ELF, 0);   // sh_flags=0 (non-ALLOC), sh_addr=0
+    append32be(ELF, DebugOffsets[I]);
+    append32be(ELF, D.Data.size());
+    append32be(ELF, 0);                       // sh_link
+    append32be(ELF, 0);                       // sh_info
+    append32be(ELF, std::max<uint32_t>(1, D.Align));
+    append32be(ELF, 0);                       // sh_entsize
   }
   // G11-D2 (design §3.1): the positioning carrier's section header is the
   // LAST header.  Frozen shape: SHT_NOTE, flags 0, sh_addr 0, link/info 0,
@@ -794,10 +842,16 @@ bool sameFilePath(StringRef A, StringRef B) {
 // (contract §1/§4.3).  Captured BEFORE `Options.Core` is moved into linkCore;
 // the verifier treats all of it as a description of what was linked, never as
 // ground truth -- it re-reads every artifact.
+struct AuditObject {
+  std::string Path;
+  std::optional<uint64_t> ArchiveOffset;
+};
+
 struct AuditContext {
-  std::vector<std::string> Objects;   // Complete link input set, in order.
+  std::vector<AuditObject> Objects;   // Complete loaded object set, in order.
   std::vector<std::string> Manifests; // Every manifest actually consumed.
   std::vector<std::string> WindowArgs;
+  bool GcSections = false;
 };
 
 // G11-D: locate the verifier binary.  It ships next to this lld (LLD installs
@@ -839,8 +893,14 @@ bool runPlacementVerifier(const AuditContext &Audit, StringRef Elf,
   Args.push_back(("--elf=" + Elf).str());
   Args.push_back(("--report=" + Report).str());
   Args.push_back(("--link-map=" + Map).str());
-  for (const std::string &O : Audit.Objects)
-    Args.push_back("--object=" + O);
+  for (const AuditObject &O : Audit.Objects) {
+    if (O.ArchiveOffset)
+      Args.push_back("--archive-member-offset=" +
+                     std::to_string(*O.ArchiveOffset));
+    Args.push_back("--object=" + O.Path);
+  }
+  if (Audit.GcSections)
+    Args.push_back("--gc-sections");
   for (const std::string &M : Audit.Manifests)
     Args.push_back("--placement-manifest=" + M);
   for (const std::string &W : Audit.WindowArgs)
@@ -875,7 +935,17 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
   uint32_t FlashSize = 0;
   bool FlashBaseGiven = false;
   bool FlashSizeGiven = false;
+  bool XdataSizeGiven = false;
   bool ReportGiven = false;
+  bool WholeArchive = false;
+  std::vector<std::string> LibSearchDirs;
+  std::vector<std::string> ScriptArgs;
+  struct PendingInput {
+    std::string Name;
+    bool IsLib;
+    bool WholeArchive;
+  };
+  std::vector<PendingInput> RawInputs;
   // R4-4: the --print-input rejection below keys on whether the OPTION was
   // given, not on whether the parsed pair set is non-empty -- a contract file
   // holding only comments still names a contract the user asked to have
@@ -896,6 +966,10 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
     };
     if (A == "--print-input") {
       O.Core.PrintInput = true;
+    } else if (A == "--whole-archive") {
+      WholeArchive = true;
+    } else if (A == "--no-whole-archive") {
+      WholeArchive = false;
     } else if (A == "--stack-gate") {
       O.Core.EnableStackGate = true;
     } else if (A == "--no-stack-gate") {
@@ -930,6 +1004,17 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
       // certification recipes) fails the link on any unknown fact.
       O.Core.IsrReentrancyCoverageRequire =
           A == "--isr-reentrancy-coverage=require";
+    } else if (A == "--no-auto-isr-preemption") {
+      O.Core.AutoIsrPreemption = false;
+    } else if (auto V = take("--isr-priority")) {
+      size_t Eq = V->find('=');
+      if (Eq == StringRef::npos)
+        return fail(Err, "invalid --isr-priority (expected <sym|slot>=<0..3>)");
+      StringRef Target = V->take_front(Eq);
+      auto Pri = number(V->drop_front(Eq + 1));
+      if (Target.empty() || !Pri || *Pri > 3)
+        return fail(Err, "invalid --isr-priority (expected <sym|slot>=<0..3>)");
+      O.Core.IsrPriorities.push_back({Target.str(), static_cast<uint8_t>(*Pri)});
     } else if (A.starts_with("--isr-preemption-config=")) {
       // E1: the external preemption contract.  The shell reads and
       // syntax-validates the board input here; the core only checks every
@@ -1030,6 +1115,76 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
       // SHA256 of the linked ELF and the map) pin the exact output bytes, so
       // traceability output must be an explicit opt-in.
       O.Core.KeepSymbols = true;
+    } else if (A == "-s" || A == "--strip-all") {
+      O.Core.KeepSymbols = false;
+    } else if (A == "-T" || A.starts_with("-T") || A == "--script" ||
+               A.starts_with("--script=")) {
+      StringRef Path;
+      if (A == "-T" || A == "--script") {
+        if (++I == Args.size())
+          return fail(Err, "missing argument to " + A);
+        Path = Args[I];
+      } else if (A.starts_with("-T")) {
+        Path = A.drop_front(2);
+      } else {
+        Path = A.drop_front(strlen("--script="));
+      }
+      if (Path.empty())
+        return fail(Err, "invalid -T/--script: expected a non-empty file path");
+      ScriptArgs.push_back(Path.str());
+    } else if (A == "-L" || A.starts_with("-L")) {
+      StringRef Dir = A.substr(2);
+      if (Dir.empty()) {
+        if (++I == Args.size())
+          return fail(Err, "missing argument to -L");
+        Dir = Args[I];
+      }
+      if (Dir.empty())
+        return fail(Err, "invalid -L: expected a non-empty directory");
+      LibSearchDirs.push_back(Dir.str());
+    } else if (A == "-l" || A.starts_with("-l")) {
+      StringRef Lib = A.substr(2);
+      if (Lib.empty()) {
+        if (++I == Args.size())
+          return fail(Err, "missing argument to -l");
+        Lib = Args[I];
+      }
+      if (Lib.empty())
+        return fail(Err, "invalid -l: expected a non-empty library name");
+      RawInputs.push_back({Lib.str(), /*IsLib=*/true, WholeArchive});
+    } else if (A == "--lto-O0" || A == "-plugin-opt=O0") {
+      O.LtoOptLevel = 0;
+    } else if (A == "--lto-O1" || A == "-plugin-opt=O1") {
+      O.LtoOptLevel = 1;
+    } else if (A == "--lto-O2" || A == "-plugin-opt=O2") {
+      O.LtoOptLevel = 2;
+    } else if (A == "--lto-O3" || A == "-plugin-opt=O3") {
+      O.LtoOptLevel = 3;
+    } else if (A.starts_with("-plugin-opt=")) {
+      // Accept harmless LTO plugin-opt directives forwarded by drivers.
+    } else if (A == "--gc-sections") {
+      O.Core.GcSections = true;
+    } else if (A == "--no-gc-sections") {
+      O.Core.GcSections = false;
+    } else if (A == "--print-gc-sections") {
+      O.Core.PrintGcSections = true;
+    } else if (auto V = take("-u")) {
+      if (V->empty())
+        return fail(Err, "invalid -u: expected a non-empty symbol name");
+      O.Core.UndefinedRoots.push_back(V->str());
+    } else if (auto V = take("--undefined")) {
+      if (V->empty())
+        return fail(Err,
+                    "invalid --undefined: expected a non-empty symbol name");
+      O.Core.UndefinedRoots.push_back(V->str());
+    } else if (auto V = take("-e")) {
+      if (V->empty())
+        return fail(Err, "invalid -e: expected a non-empty symbol name");
+      O.Core.EntrySymbol = V->str();
+    } else if (auto V = take("--entry")) {
+      if (V->empty())
+        return fail(Err, "invalid --entry: expected a non-empty symbol name");
+      O.Core.EntrySymbol = V->str();
     } else if (A == "--verify-placement") {
       // G11-D (contract §1): link, then verify the ACTUAL serialized ELF and
       // report with the independent child process.  Implies KeepSymbols (the
@@ -1058,8 +1213,9 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
     } else if (auto V = take("--map")) {
       O.Map = V->str();
     } else if (auto V = take("--map-json")) {
-      (void)V;
-      return fail(Err, "--map-json is not implemented");
+      if (V->empty())
+        return fail(Err, "invalid --map-json: expected a non-empty file path");
+      O.MapJSON = V->str();
     } else if (auto V = take("--edata-end")) {
       auto N = number(*V);
       if (!N || *N > 0xffff)
@@ -1085,6 +1241,7 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
       if (!N || *N == 0 || uint64_t(*N) > 0x1000000)
         return fail(Err, "invalid --xdata-size (expected 1..0x1000000)");
       O.Core.XdataSize = *N;
+      XdataSizeGiven = true;
     } else if (auto V = take("--flash-base")) {
       // Flash window start, a plain 24-bit address. No board-model knowledge
       // lives here; the build layer supplies the number (E.5 red line).
@@ -1177,7 +1334,7 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
         return fail(Err, "invalid --reserve-data");
       auto Start = number(V->take_front(Comma));
       auto Size = number(V->drop_front(Comma + 1));
-      if (!Start || !Size || *Start + *Size > 0x10000)
+      if (!Start || !Size || uint64_t(*Start) + uint64_t(*Size) > 0x10000)
         return fail(Err, "invalid --reserve-data");
       O.Core.ReservedData.push_back({*Start, *Start + *Size});
     } else if (A == "--oformat=ihex" || A == "--oformat") {
@@ -1185,9 +1342,15 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
     } else if (A == "--help") {
       Out << "mcs251-lld [--stack-gate] [--isr-reentrancy[=off|warn|error]] "
              "[--isr-reentrancy-coverage=allow|require] "
-             "[--isr-preemption-config=<path>] [--link-facts=<path>] "
+             "[--isr-preemption-config=<path>] [--isr-priority=<sym|slot>=<0..3>] "
+             "[--no-auto-isr-preemption] [--link-facts=<path>] "
              "[--keep-symbols] [--placement-report=<path>] "
-             "[--verify-placement] [options] file...\n"
+             "[--verify-placement] [--whole-archive] [--no-whole-archive] "
+             "[--gc-sections] [--no-gc-sections] [--print-gc-sections] "
+             "[-T <script>] [--script=<path>] [--map=<path>] "
+             "[--map-json=<path>] [@<response-file>] "
+             "[-u <sym>] [-e <sym>] "
+             "[options] file...\n"
              "  --isr-preemption-config: one 'preempt <isrA> <isrB>' pair per "
              "line; it declares the two registered ISRs able to interleave "
              "with each other (not a directed/causal priority graph).  The "
@@ -1208,8 +1371,94 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
     } else if (A.starts_with('-')) {
       return fail(Err, "unknown option " + A);
     } else {
-      O.Core.Inputs.push_back(A.str());
+      RawInputs.push_back({A.str(), /*IsLib=*/false, WholeArchive});
     }
+  }
+  // Parse and merge GNU-style linker scripts (-T / --script). Explicit CLI
+  // flags always take precedence over script defaults.
+  if (!ScriptArgs.empty()) {
+    ParsedLinkerScript Script;
+    for (const std::string &SP : ScriptArgs)
+      if (!parseLinkerScriptFile(SP, Script, Err))
+        return false;
+    for (const std::string &F : Script.LoadedFiles)
+      O.ScriptPaths.push_back(F);
+    if (!FlashBaseGiven && !FlashSizeGiven && Script.FlashBase &&
+        Script.FlashSize) {
+      FlashBase = *Script.FlashBase;
+      FlashSize = *Script.FlashSize;
+      FlashBaseGiven = true;
+      FlashSizeGiven = true;
+    }
+    if (!O.IramSizeGiven && Script.IramSize) {
+      O.Core.IramSize = *Script.IramSize;
+      O.IramSizeGiven = true;
+    }
+    if (!O.EdataEndGiven && Script.EdataEnd) {
+      O.Core.EdataEnd = *Script.EdataEnd;
+      O.EdataEndGiven = true;
+    }
+    if (!XdataSizeGiven && Script.XdataSize) {
+      O.Core.XdataSize = *Script.XdataSize;
+      XdataSizeGiven = true;
+    }
+    if (O.Core.EntrySymbol.empty() && Script.EntrySymbol)
+      O.Core.EntrySymbol = *Script.EntrySymbol;
+    for (const auto &AS : Script.AreaStarts) {
+      bool Exists = llvm::any_of(O.Core.AreaStarts,
+                                 [&](const auto &P) { return P.first == AS.first; });
+      if (!Exists)
+        O.Core.AreaStarts.push_back(AS);
+    }
+    for (const Range &R : Script.ReservedData)
+      O.Core.ReservedData.push_back(R);
+    for (const std::string &Dir : Script.SearchDirs)
+      LibSearchDirs.push_back(Dir);
+    for (const std::string &Ext : Script.ExternSymbols)
+      O.Core.UndefinedRoots.push_back(Ext);
+    for (const std::string &Inp : Script.ExtraInputs) {
+      if (StringRef(Inp).starts_with("-l") && Inp.size() > 2)
+        RawInputs.push_back({Inp.substr(2), /*IsLib=*/true, /*WholeArchive=*/false});
+      else
+        RawInputs.push_back({Inp, /*IsLib=*/false, /*WholeArchive=*/false});
+    }
+    for (const std::string &Pat : Script.KeepSectionPatterns)
+      O.Core.KeepSectionPatterns.push_back(Pat);
+    for (const auto &Sym : Script.Symbols)
+      O.Core.ScriptSymbols.push_back(Sym);
+  }
+  for (const PendingInput &PI : RawInputs) {
+    if (!PI.IsLib) {
+      O.Core.Inputs.push_back(PI.Name);
+      O.Core.InputWholeArchive.push_back(PI.WholeArchive);
+      continue;
+    }
+    std::string Resolved;
+    if (StringRef(PI.Name).starts_with(":")) {
+      StringRef ExactName = StringRef(PI.Name).drop_front(1);
+      for (const std::string &Dir : LibSearchDirs) {
+        SmallString<256> Cand(Dir);
+        sys::path::append(Cand, ExactName);
+        if (sys::fs::exists(Cand)) {
+          Resolved = std::string(Cand);
+          break;
+        }
+      }
+    } else {
+      std::string LibFile = "lib" + PI.Name + ".a";
+      for (const std::string &Dir : LibSearchDirs) {
+        SmallString<256> Cand(Dir);
+        sys::path::append(Cand, LibFile);
+        if (sys::fs::exists(Cand)) {
+          Resolved = std::string(Cand);
+          break;
+        }
+      }
+    }
+    if (Resolved.empty())
+      return fail(Err, "unable to find library -l" + PI.Name);
+    O.Core.Inputs.push_back(std::move(Resolved));
+    O.Core.InputWholeArchive.push_back(PI.WholeArchive);
   }
   if (FlashBaseGiven != FlashSizeGiven)
     return fail(Err, "--flash-base and --flash-size must be given together");
@@ -1335,6 +1584,8 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
   // can never be silently dropped by combining it with another option.
   if (!O.FactsPath.empty() && O.Core.PrintInput)
     return fail(Err, "--link-facts cannot be combined with --print-input");
+  if (!O.MapJSON.empty() && O.Core.PrintInput)
+    return fail(Err, "--map-json cannot be combined with --print-input");
   // The external preemption contract names registered ISR entries, which
   // --print-input never resolves: the combination is rejected whenever the
   // OPTION was given -- including a contract file whose pair set is empty
@@ -1368,6 +1619,7 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
     };
     Add(O.Output, "output");
     Add(O.Map, "map");
+    Add(O.MapJSON, "map json");
     Add(O.FactsPath, "link facts");
     if (O.AuditReport)
       Add(O.ReportPath, "placement report");
@@ -1402,8 +1654,164 @@ bool parseArgs(ArrayRef<const char *> Args, FlavorOptions &O,
           return fail(Err, std::string("publication path conflict: ") + P.Kind +
                                " conflicts with the --isr-preemption-config "
                                "input file");
+    for (const std::string &Rsp : O.ResponseFilePaths)
+      for (const PubPath &P : Pubs)
+        if (sameFilePath(P.Path, Rsp))
+          return fail(Err, std::string("publication path conflict: ") + P.Kind +
+                               " conflicts with response file " + Rsp);
+    for (const std::string &Scr : O.ScriptPaths)
+      for (const PubPath &P : Pubs)
+        if (sameFilePath(P.Path, Scr))
+          return fail(Err, std::string("publication path conflict: ") + P.Kind +
+                               " conflicts with linker script " + Scr);
   }
   return true;
+}
+
+bool expandResponseFilesRecursive(ArrayRef<const char *> InArgs,
+                                  StringRef BaseDir, StringSaver &Saver,
+                                  SmallVectorImpl<const char *> &OutArgs,
+                                  std::vector<std::string> &ActiveStack,
+                                  std::vector<std::string> &AllRspPaths,
+                                  raw_ostream &Err) {
+  for (size_t I = 0; I != InArgs.size(); ++I) {
+    StringRef A(InArgs[I]);
+    if (I == 0 && BaseDir.empty()) {
+      OutArgs.push_back(InArgs[I]);
+      continue;
+    }
+    if (!A.starts_with("@") || A.size() == 1) {
+      OutArgs.push_back(InArgs[I]);
+      continue;
+    }
+    SmallString<256> RspPath(A.drop_front(1));
+    if (!BaseDir.empty() && sys::path::is_relative(RspPath)) {
+      SmallString<256> Joined(BaseDir);
+      sys::path::append(Joined, RspPath);
+      RspPath = Joined;
+    }
+    std::string Abs = lexicalAbsolute(RspPath);
+    for (const std::string &Active : ActiveStack)
+      if (sameFilePath(Active, Abs))
+        return fail(Err, "recursive response file inclusion: " + RspPath);
+    auto MB = MemoryBuffer::getFile(RspPath, /*IsText=*/true);
+    if (!MB)
+      return fail(Err, "cannot read response file " + RspPath);
+    AllRspPaths.push_back(Abs);
+    SmallVector<const char *, 32> Tokens;
+    cl::TokenizeGNUCommandLine((*MB)->getBuffer(), Saver, Tokens);
+    ActiveStack.push_back(Abs);
+    StringRef ChildDir = sys::path::parent_path(Abs);
+    bool OK = expandResponseFilesRecursive(Tokens, ChildDir, Saver, OutArgs,
+                                           ActiveStack, AllRspPaths, Err);
+    ActiveStack.pop_back();
+    if (!OK)
+      return false;
+  }
+  return true;
+}
+
+void serializeMapJson(const LinkerResult &Result, bool KeepSymbols,
+                      raw_ostream &OS) {
+  json::OStream J(OS, /*IndentSize=*/2);
+  const LinkerResult::MapData &M = Result.MapInfo;
+  auto SpaceName = [](uint8_t S) -> StringRef {
+    if (S == 2)
+      return "CODE";
+    if (S == 1)
+      return "XDATA";
+    return "DATA";
+  };
+  static const char *CovStates[] = {"undeclared", "unchecked", "open", "closed"};
+  J.object([&] {
+    J.attribute("version", 1);
+    J.attribute("e_flags", int64_t(Result.OutputEFlags));
+    J.attribute("entry", int64_t(Result.Entry));
+    J.attributeObject("areas", [&] {
+      for (const auto &P : M.SynthSymbols)
+        J.attribute(P.first, int64_t(P.second));
+    });
+    J.attributeArray("sections", [&] {
+      for (const auto &S : M.Sections) {
+        J.object([&] {
+          J.attribute("file", S.File);
+          J.attribute("name", S.Name);
+          J.attribute("region", S.Region);
+          J.attribute("space", SpaceName(S.Space));
+          J.attribute("address", int64_t(S.Address));
+          J.attribute("size", int64_t(S.Size));
+          J.attribute("flags", int64_t(S.Flags));
+        });
+      }
+    });
+    J.attributeArray("symbols", [&] {
+      if (KeepSymbols) {
+        for (const OutputSymbol &Sym : Result.Symbols) {
+          J.object([&] {
+            J.attribute("name", Sym.Name);
+            J.attribute("address", int64_t(Sym.Address));
+            J.attribute("size", int64_t(Sym.Size));
+            J.attribute("type", int64_t(Sym.Type));
+            J.attribute("bind", int64_t(Sym.Bind));
+            J.attribute("synthetic", Sym.Synth);
+          });
+        }
+      }
+    });
+    J.attributeObject("stack", [&] {
+      J.attribute("requested", M.StackRequested);
+      J.attribute("high", int64_t(M.StackH));
+      J.attribute("spx", int64_t(M.StackSpx));
+      J.attribute("capacity", int64_t(M.StackCapacity));
+      J.attribute("edata_end", int64_t(M.EdataEnd));
+      J.attribute("iram_size", int64_t(M.IramSize));
+    });
+    J.attributeObject("flash_gate", [&] {
+      J.attribute("enabled", M.FlashGate);
+      J.attribute("base", int64_t(M.FlashBase));
+      J.attribute("size", int64_t(M.FlashSize));
+    });
+    J.attribute("xdata_size", int64_t(M.XdataSize));
+    J.attributeArray("bits", [&] {
+      for (const auto &B : M.Bits) {
+        J.object([&] {
+          J.attribute("name", B.Name);
+          J.attribute("bit_address", int64_t(B.BitAddr));
+          J.attribute("sfr", B.IsSfr);
+          J.attribute("automatic", B.Automatic);
+          J.attribute("byte_address", int64_t(B.ByteAddr));
+          J.attribute("bit_index", int64_t(B.Index));
+          J.attribute("init", B.Init);
+        });
+      }
+    });
+    J.attributeObject("reentrancy", [&] {
+      const auto &R = Result.Reentrancy;
+      J.attribute("version", int64_t(R.Version));
+      J.attribute("coverage", CovStates[R.CoverageState & 3]);
+      J.attribute("registered_isrs", int64_t(R.RegisteredIsrs));
+      J.attribute("functions", int64_t(R.Functions));
+      J.attribute("slots", int64_t(R.Slots));
+      J.attribute("conflicts", int64_t(R.Conflicts.size()));
+    });
+    if (!Result.IsrPriorities.empty()) {
+      J.attributeArray("isr_priorities", [&] {
+        for (const auto &P : Result.IsrPriorities) {
+          J.object([&] {
+            J.attribute("slot", int64_t(P.Slot));
+            J.attribute("name", P.Name);
+            J.attribute("priority", int64_t(P.Priority));
+            J.attribute("source", P.Source);
+          });
+        }
+      });
+      J.attributeObject("isr_priority_sfrs", [&] {
+        for (const auto &KV : Result.IsrPrioritySfrs)
+          J.attribute(KV.first, int64_t(KV.second));
+      });
+    }
+  });
+  OS << '\n';
 }
 
 // E2 (WP3 feed): serialize the versioned link-facts interface.  Line grammar
@@ -1443,6 +1851,11 @@ void serializeLinkFacts(const LinkerResult &Result, raw_ostream &OS) {
   for (const auto &I : F.Isrs)
     OS << "isr slot=" << I.Slot << " entry=" << ID(I.Entry) << " name "
        << I.Name << "\n";
+  for (const auto &P : Result.IsrPriorities)
+    OS << "isr_priority slot=" << P.Slot << " pri=" << unsigned(P.Priority)
+       << " src=" << P.Source << " name " << P.Name << "\n";
+  for (const auto &S : Result.IsrPrioritySfrs)
+    OS << "isr_priority_sfr " << S.first << "=" << H(S.second) << "\n";
   for (const auto &E : F.Edges)
     OS << "edge " << ID(E.From) << " -> " << ID(E.To)
        << " evidence=" << unsigned(E.Evidence) << "\n";
@@ -1614,8 +2027,18 @@ static bool publishTransaction(std::vector<Publication> &Pubs, raw_ostream &Err)
 bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
           bool ExitEarly, bool DisableOutput) {
   (void)ExitEarly;
+  BumpPtrAllocator RspAlloc;
+  StringSaver RspSaver(RspAlloc);
+  SmallVector<const char *, 64> ExpandedArgs;
+  std::vector<std::string> ActiveRspStack;
+  std::vector<std::string> RspPaths;
+  if (!expandResponseFilesRecursive(Args, /*BaseDir=*/"", RspSaver,
+                                    ExpandedArgs, ActiveRspStack, RspPaths,
+                                    Err))
+    return false;
   FlavorOptions Options;
-  if (!parseArgs(Args, Options, Out, Err))
+  Options.ResponseFilePaths = std::move(RspPaths);
+  if (!parseArgs(ExpandedArgs, Options, Out, Err))
     return false;
   if (Options.HelpOrVersion) {
     // In normal CLI mode (no LLD_IN_TEST), the dispatcher calls exitLld()
@@ -1639,8 +2062,7 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
     Options.Core.CollectPositions = true;
   AuditContext AuditCtx;
   if (Audit) {
-    for (const std::string &P : Options.Core.Inputs)
-      AuditCtx.Objects.push_back(lexicalAbsolute(P));
+    AuditCtx.GcSections = Options.Core.GcSections;
     for (const LinkerConfig::ManifestEntry &ME : Options.Core.PlacementManifest)
       if (std::find(AuditCtx.Manifests.begin(), AuditCtx.Manifests.end(),
                     ME.Path) == AuditCtx.Manifests.end())
@@ -1668,9 +2090,23 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
                                     std::to_string(P.Start) + "," +
                                     std::to_string(P.End - P.Start));
   }
+  if (!runLTOPass(Options.Core, Options.LtoOptLevel, Err))
+    return false;
+  if (Audit && !Options.Core.MemoryInputs.empty())
+    return fail(Err, "placement audit mode does not support LLVM bitcode / LTO "
+                     "inputs directly (compile to native ELF objects first)");
   LinkerResult Result;
   if (!linkCore(std::move(Options.Core), Result, Err))
     return false;
+  if (Audit) {
+    for (const LinkerResult::LoadedInputInfo &LI : Result.LoadedInputs) {
+      AuditObject AO;
+      AO.Path = lexicalAbsolute(LI.FilePath);
+      if (LI.FromArchive)
+        AO.ArchiveOffset = LI.ArchiveOffset;
+      AuditCtx.Objects.push_back(std::move(AO));
+    }
+  }
   // E2: reentrancy warnings never fail the link; they go to stderr ahead of
   // any output writing.
   if (!Result.Diagnostics.empty())
@@ -1682,6 +2118,8 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
       return fail(Err, "placement audit requires output generation");
     if (!Options.FactsPath.empty())
       return fail(Err, "--link-facts requires output generation");
+    if (!Options.MapJSON.empty())
+      return fail(Err, "--map-json requires output generation");
     return true;
   }
   if (PrintInput) {
@@ -1700,6 +2138,17 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
       P.Final = Options.Map;
       P.Kind = "map";
       P.Bytes = Result.Map;
+      Pubs.push_back(std::move(P));
+    }
+    if (!Options.MapJSON.empty()) {
+      std::string JsonText;
+      raw_string_ostream JsonOS(JsonText);
+      serializeMapJson(Result, KeepSymbols, JsonOS);
+      JsonOS.flush();
+      Publication P;
+      P.Final = Options.MapJSON;
+      P.Kind = "map json";
+      P.Bytes = std::move(JsonText);
       Pubs.push_back(std::move(P));
     }
     if (!Options.FactsPath.empty()) {
@@ -1821,6 +2270,9 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
   if (!Options.Map.empty() &&
       !probeDestination(Options.Map, "map", Err))
     return false;
+  if (!Options.MapJSON.empty() &&
+      !probeDestination(Options.MapJSON, "map json", Err))
+    return false;
   if (Options.AuditReport &&
       !probeDestination(Options.ReportPath, "placement report", Err))
     return false;
@@ -1860,6 +2312,16 @@ bool link(ArrayRef<const char *> Args, raw_ostream &Out, raw_ostream &Err,
       !AddPub(Options.Map, "map", Result.Map)) {
     CleanOwned();
     return false;
+  }
+  if (!Options.MapJSON.empty()) {
+    std::string JsonText;
+    raw_string_ostream JsonOS(JsonText);
+    serializeMapJson(Result, KeepSymbols, JsonOS);
+    JsonOS.flush();
+    if (!AddPub(Options.MapJSON, "map json", JsonText)) {
+      CleanOwned();
+      return false;
+    }
   }
   if (Options.AuditReport &&
       !AddPub(Options.ReportPath, "placement report", ReportText)) {

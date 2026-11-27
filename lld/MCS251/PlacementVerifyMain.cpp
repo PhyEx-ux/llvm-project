@@ -45,12 +45,14 @@ static std::optional<StringRef> take(ArrayRef<const char *> Args, size_t &I,
 int runPlacementVerify(ArrayRef<const char *> Args, raw_ostream &Out,
                        raw_ostream &Err) {
   Options O;
+  std::optional<uint64_t> PendingArchiveOffset;
   for (size_t I = 1; I < Args.size(); ++I) {
     StringRef A(Args[I]);
     if (A == "--help" || A == "-h") {
       Out << "mcs251-placement-verify --elf=<path> --report=<path> "
-             "[--object=<path> ...] [--placement-manifest=<path> ...] "
-             "[--link-map=<path>] [window options]\n";
+             "[--archive-member-offset=<N>] [--object=<path> ...] "
+             "[--placement-manifest=<path> ...] [--link-map=<path>] "
+             "[--gc-sections] [window options]\n";
       Out.flush();
       return 0;
     }
@@ -58,6 +60,24 @@ int runPlacementVerify(ArrayRef<const char *> Args, raw_ostream &Out,
       Out << "mcs251-placement-verify (LLVM MCS251)\n";
       Out.flush();
       return 0;
+    }
+    if (A == "--gc-sections") {
+      O.GcSections = true;
+      continue;
+    }
+    if (auto V = take(Args, I, "--archive-member-offset", A)) {
+      uint64_t Off = 0;
+      if (V->getAsInteger(0, Off)) {
+        Err << "mcs251-placement-verify: error: invalid --archive-member-offset\n";
+        return 1;
+      }
+      if (PendingArchiveOffset) {
+        Err << "mcs251-placement-verify: error: --archive-member-offset must be "
+               "followed by --object\n";
+        return 1;
+      }
+      PendingArchiveOffset = Off;
+      continue;
     }
     if (auto V = take(Args, I, "--elf", A)) {
       O.Elf = V->str();
@@ -69,6 +89,8 @@ int runPlacementVerify(ArrayRef<const char *> Args, raw_ostream &Out,
     }
     if (auto V = take(Args, I, "--object", A)) {
       O.Objects.push_back(V->str());
+      O.ObjectArchiveOffsets.push_back(PendingArchiveOffset);
+      PendingArchiveOffset.reset();
       continue;
     }
     if (auto V = take(Args, I, "--placement-manifest", A)) {
@@ -160,6 +182,11 @@ int runPlacementVerify(ArrayRef<const char *> Args, raw_ostream &Out,
       continue;
     }
     Err << "mcs251-placement-verify: error: unknown option " << A << "\n";
+    return 1;
+  }
+  if (PendingArchiveOffset) {
+    Err << "mcs251-placement-verify: error: trailing --archive-member-offset "
+           "without --object\n";
     return 1;
   }
   if (O.Elf.empty() || O.Report.empty()) {

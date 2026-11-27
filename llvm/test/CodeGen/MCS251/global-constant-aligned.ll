@@ -1,5 +1,5 @@
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs %s -o - | FileCheck %s --check-prefix=ASM
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -filetype=obj %s -o - | FileCheck %s --check-prefix=REL
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -filetype=obj -mcs251-object-format=rel %s -o - | FileCheck %s --check-prefix=REL
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -filetype=obj -mcs251-object-format=elf %s -o %t.o
 ; RUN: llvm-readobj --sections --symbols --section-data %t.o | FileCheck %s --check-prefix=ELF
 ;

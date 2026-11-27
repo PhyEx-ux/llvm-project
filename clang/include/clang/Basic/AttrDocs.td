@@ -3002,6 +3002,19 @@ internal) interrupt entries are kept and registered.
   }];
 }
 
+def MCS251ISRPriorityDocs : Documentation {
+  let Category = DocCatFunction;
+  let Heading = "mcs251_isr_priority (MCS-251)";
+  let Content = [{
+Clang supports ``__attribute__((mcs251_isr_priority(P)))`` (and
+``[[mcu::isr_priority(P)]]``) on MCS-251 interrupt functions to declare the
+hardware interrupt priority level ``P`` in ``0..3``. ``mcs251-lld`` uses
+declared priorities to automatically derive nested ISR preemption pairs for
+WP2 reentrancy verification and to synthesize the STC32G priority SFR
+initialization routine ``__mcs251_isr_priority_init``.
+  }];
+}
+
 def BPFPreserveAccessIndexDocs : Documentation {
   let Category = DocCatFunction;
   let Content = [{

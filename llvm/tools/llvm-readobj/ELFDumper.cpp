@@ -32,6 +32,7 @@
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/BinaryFormat/MCS251Attributes.h"
 #include "llvm/BinaryFormat/MCS251AttributesReader.h"
+#include "llvm/BinaryFormat/MCS251Signatures.h"
 #include "llvm/BinaryFormat/MsgPackDocument.h"
 #include "llvm/BinaryFormat/SFrame.h"
 #include "llvm/Demangle/Demangle.h"
@@ -1758,7 +1759,9 @@ constexpr auto ElfHeaderSPARCFlags =
     BUILD_ENUM_STRINGS(ElfHeaderSPARCFlagsDefs);
 
 constexpr EnumStringDef<unsigned, 2> ElfHeaderMCS251FlagsDefs[] = {
-    ENUM_ENT(EF_MCS251_ABI_V1, "ABI-v1")};
+    ENUM_ENT(EF_MCS251_ABI_V1, "ABI-v1"),
+    ENUM_ENT(EF_MCS251_ABI_V2, "ABI-v2"),
+    ENUM_ENT(EF_MCS251_BACKEND_NATIVE, "native")};
 constexpr auto ElfHeaderMCS251Flags =
     BUILD_ENUM_STRINGS(ElfHeaderMCS251FlagsDefs);
 
@@ -3062,7 +3065,7 @@ template <class ELFT> void ELFDumper<ELFT>::printMCS251Attributes() {
       continue;
     }
 
-    W.printHex("FormatVersion", FormatVersion);
+    W.printHex("FormatVersion", Contents[0]);
     if (Contents.size() < EnvelopeSize) {
       reportUniqueWarning("the " + describe(Sec) + " is smaller than the " +
                           Twine(EnvelopeSize) + "-byte envelope");
@@ -3162,11 +3165,41 @@ template <class ELFT> void ELFDumper<ELFT>::printMCS251Attributes() {
             W.printBinary("Value", AtomValue);
           }
         }
-      } else
-        W.printBinary(
-            "Value",
-            StringRef(reinterpret_cast<const char *>(R.Value.data()),
-                      R.Value.size()));
+      } else {
+        StringRef RawBytes(reinterpret_cast<const char *>(R.Value.data()),
+                           R.Value.size());
+        W.printBinary("Value", RawBytes);
+        if (R.Tag == Tag_FunctionSignatures) {
+          MCS251Signatures::Table SigTable;
+          if (Error SigErr = MCS251Signatures::decode(RawBytes, SigTable)) {
+            reportUniqueWarning("unable to decode Tag 28 function_signatures: " +
+                                toString(std::move(SigErr)));
+          } else {
+            ListScope SigsScope(W, "Signatures");
+            for (const MCS251Signatures::Record &SR : SigTable.Records) {
+              DictScope SigScope(W, "Signature");
+              W.printString("Name", SR.Name);
+              W.printString("Role", MCS251Signatures::describeRole(SR.Role));
+              W.printNumber("ParamCount", SR.ParamCount);
+              std::string BitParams;
+              for (unsigned I = 0; I != SR.ParamCount; ++I) {
+                if (MCS251Signatures::bitmapGet(SR.Bitmap, I)) {
+                  if (!BitParams.empty())
+                    BitParams += ",";
+                  BitParams += std::to_string(I);
+                }
+              }
+              W.printString("BitParams",
+                            BitParams.empty() ? std::string("none") : BitParams);
+              W.printBoolean("RetBit", SR.Ret != 0);
+              W.printString("CallABI",
+                            (Twine(unsigned(SR.CallABIMajor)) + "." +
+                             Twine(unsigned(SR.CallABIMinor)))
+                                .str());
+            }
+          }
+        }
+      }
     }
   }
 }
@@ -6547,8 +6580,24 @@ StringRef getNoteTypeName(const typename ELFT::Note &Note, unsigned ELFType) {
   };
 
   StringRef Name = Note.getName();
-  if (Name == "MCS251" && Type == ELF::NT_MCS251_ABI)
-    return "NT_MCS251_ABI (object and calling ABI)";
+  if (Name == "MCS251") {
+    if (Type == ELF::NT_MCS251_ABI) {
+      // Distinguish the fixed 32-byte v1 ABI note (.note.mcs251.abi) from
+      // G11 placement records (.mcs251.placement), which share type == 1.
+      ArrayRef<uint8_t> Desc = Note.getDesc(4);
+      const bool IsV1Abi =
+          Desc.size() == 32 && Desc[0] == 0 && Desc[1] == 0 && Desc[2] == 0 &&
+          Desc[3] == 1 && Desc[4] == 0 && Desc[5] == 0 && Desc[6] == 0 &&
+          Desc[7] == 1 && Desc[16] == 0 && Desc[17] == 0 && Desc[18] == 0xf3 &&
+          Desc[19] == 0xff;
+      return IsV1Abi ? "NT_MCS251_ABI (object and calling ABI)"
+                     : "NT_MCS251_PLACEMENT (fixed placement records)";
+    }
+    if (Type == ELF::NT_MCS251_PLACEMENT_NAMES)
+      return "NT_MCS251_PLACEMENT_NAMES (placement symbol associations)";
+    if (Type == ELF::NT_MCS251_PLACEMENT_POSITIONS)
+      return "NT_MCS251_PLACEMENT_POSITIONS (audit section positions)";
+  }
   if (Name == "GNU")
     return FindNote(GNUNoteTypes);
   if (Name == "FreeBSD") {

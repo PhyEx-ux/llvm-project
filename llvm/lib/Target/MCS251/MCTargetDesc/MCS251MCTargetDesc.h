@@ -22,6 +22,7 @@ class raw_pwrite_stream;
 namespace MCS251 {
 enum class ObjectFormat { REL, ELF };
 ObjectFormat getObjectFormat();
+bool isObjectFormatExplicit();
 } // namespace MCS251
 
 MCAsmBackend *createMCS251MCAsmBackend(MCS251::ObjectFormat Format);

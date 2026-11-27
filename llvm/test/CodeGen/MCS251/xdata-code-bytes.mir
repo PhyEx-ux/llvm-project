@@ -10,7 +10,7 @@
 # RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e60427a61847e00007a01827e10127a1183e0a5fbbe3001aa', b.hex()" %t/dpxl.bin
 # RUN: llc -mtriple=mcs251 -verify-machineinstrs -start-after=finalize-isel -mcs251-object-format=elf -filetype=obj %t/drread.mir -o %t/drread.o
 # RUN: llvm-objcopy --dump-section=.text=%t/drread.bin %t/drread.o
-# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '7e3812347a3c00ab7e3b50be5001aa', b.hex()" %t/drread.bin
+# RUN: %python -c "import pathlib,sys; b=pathlib.Path(sys.argv[1]).read_bytes(); assert b.hex() == '0bfe796ffffd797fffff7e3812347a3c00ab7e3b50be5001696ffffd697fffff1bfeaa', b.hex()" %t/drread.bin
 #
 # X2 byte-exact anchors for the two new channels (same scaffold as
 # instr-sizes.mir: the AsmPrinter ExactSizeAlways check plus

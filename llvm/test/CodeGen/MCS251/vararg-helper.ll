@@ -59,29 +59,28 @@ declare void @llvm.mcs251.vararg.halt()
 !0 = !{!"_own", i32 9, i32 0, i32 0}
 !1 = !{!"_consume2", i32 9, i32 0, i32 0}
 
-; The owner is the only function with a variadic slot area; va_start
-; anchors it on _own_PARM_2 (F=1).
-; CHECK: .globl _own_PARM_2
-; CHECK: _own_PARM_2:
-; CHECK: _own:
-; CHECK: .db 0x7e, 0x08, (_own_PARM_2) >> 8, (_own_PARM_2)
-; CHECK: .db 0x7a, 0x0c, 0x00, (_own_PARM_2) >> 16
+; Under the stack-based ABI, va_start anchors the va_list pair onto the owner's
+; incoming stack frame via SPX (0x81/0x85), with no static _PARM_ slots.
+; CHECK-LABEL: _own:
+; CHECK-NOT: _own_PARM_
+; CHECK: mov r{{[0-9]+}}, 0x81
+; CHECK: mov r{{[0-9]+}}, 0x85
+; CHECK: ecall _consume2
+; CHECK: eret
 
-; The helper forwards the pair (a pointer argument), consumes two slots,
-; and contains exactly the two halt arms of its va_arg chains.
-; CHECK: _consume2:
-; CHECK: mov dr12, #0x0015
+; The helper receives the pair pointer, consumes two entries, and lowers
+; llvm.mcs251.vararg.halt to `sjmp .`.
+; CHECK-LABEL: _consume2:
+; CHECK: mov dr{{[0-9]+}}, #0x0015
 ; CHECK: ; %h1
 ; CHECK: sjmp .
 ; CHECK: ; %l1
-; CHECK: mov dr12, #0x0015
+; CHECK: mov dr{{[0-9]+}}, #0x0015
 ; CHECK: ; %h2
 ; CHECK: sjmp .
-
-; THE identity property: no _PARM symbol of the helper exists anywhere --
-; the helper's slot reads go exclusively through the forwarded __base.
 ; CHECK-NOT: _consume2_PARM
 
-; Object: only the owner's continuation slots are defined.
-; OBJ: _own_PARM_2
-; OBJ-NOT: OBJECT GLOBAL DEFAULT {{[0-9]+}} _consume2
+; Object: no static _PARM_ slots for either owner or helper.
+; OBJ-DAG: FUNC GLOBAL DEFAULT {{[0-9]+}} _own
+; OBJ-DAG: FUNC GLOBAL DEFAULT {{[0-9]+}} _consume2
+; OBJ-NOT: _PARM_

@@ -11,11 +11,10 @@
 // out-slot writers (checked arithmetic, addc carry, frexp/sincos), and
 // wide-char copies. Loads and pure queries stay legal.
 //
-// WP4 A4/A5/A6 update: the atomic family is rejected outright on MCS251 now
-// (unified family diagnostic, clean exit), so every atomic load/store/RMW/
-// query EXCEPT the pure lock-free queries is an error regardless of the
-// destination address space. The rows below keep their CODE-store coverage
-// for the non-atomic writers; the atomic rows assert the WP4 family message.
+// C11/GNU atomic operations are supported on MCS251 (via EA critical sections),
+// so atomic loads, lock-free queries, and atomic writes to writable memory are
+// accepted, while atomic stores/RMWs/out-slots targeting __code objects stay
+// rejected with the __code-store diagnostic.
 //
 // A2 boundary: a NON-builtin external call is not checked by this builtin
 // gate. CODE pointees are implicitly const; conversion to a non-const AS0
@@ -75,11 +74,10 @@ void asm_readwrite_output(void) {
   __asm__("" : "+r"(x)); // expected-error {{cannot store to an MCS251 '__code' object}}
 }
 
-// Reads are legal for ordinary objects; atomic operations are rejected by WP4.
-int atomic_load(void) { return __atomic_load_n(&x, __ATOMIC_SEQ_CST); } // expected-error {{atomic operations (C11/GNU) are not supported on MCS251}}
+// Reads and lock-free queries on __code objects are legal.
+int atomic_load(void) { return __atomic_load_n(&x, __ATOMIC_SEQ_CST); }
 char load(unsigned i) { return a[i]; }
-// WP4 A4: the runtime lock-free query is rejected with the family message.
-int lock_free(void) { return __atomic_is_lock_free(4, &x); } // expected-error {{atomic operations (C11/GNU) are not supported on MCS251}}
+int lock_free(void) { return __atomic_is_lock_free(4, &x); }
 void asm_input_only(void) { __asm__("" :: "r"(x)); }
 
 // X1-5: the destination slot is not always argument 0. bcopy's destination
@@ -124,11 +122,11 @@ void atomic_compare_expected(void) {
 }
 // Generic-space objects everywhere: legal.
 void atomic_load_generic_out(void) {
-  __atomic_load(&g, &outg, __ATOMIC_SEQ_CST); // expected-error {{atomic operations (C11/GNU) are not supported on MCS251}}
+  __atomic_load(&g, &outg, __ATOMIC_SEQ_CST);
 }
 void atomic_compare_generic(void) {
   __atomic_compare_exchange_n(&g, &outg, 1, 0, __ATOMIC_SEQ_CST,
-                              __ATOMIC_SEQ_CST); // expected-error {{atomic operations (C11/GNU) are not supported on MCS251}}
+                              __ATOMIC_SEQ_CST);
 }
 
 //===----------------------------------------------------------------------===//
@@ -235,10 +233,10 @@ void scoped_compare_exchange_expected(void) {
 }
 // Reads across the scoped family stay legal.
 int scoped_load_n(void) {
-  return __scoped_atomic_load_n(&ci, __ATOMIC_SEQ_CST, 0); // expected-error {{atomic operations (C11/GNU) are not supported on MCS251}}
+  return __scoped_atomic_load_n(&ci, __ATOMIC_SEQ_CST, 0);
 }
 int scoped_load_out(int *d) {
-  __scoped_atomic_load(&g, d, __ATOMIC_SEQ_CST, 0); // expected-error {{atomic operations (C11/GNU) are not supported on MCS251}}
+  __scoped_atomic_load(&g, d, __ATOMIC_SEQ_CST, 0);
   return g;
 }
 // C23/K&R va_start spellings store into the va_list (argument 0), so they
@@ -279,10 +277,10 @@ void nontemporal_load_ptr(void) {
 // The CODE object is only read or untouched: legal.
 void strlcpy_from_code(char *d) { __builtin___strlcpy_chk(d, ca, 8, 8); }
 void scoped_store_from_code(char *d) {
-  __scoped_atomic_store_n((int *)d, 1, __ATOMIC_SEQ_CST, 0); // expected-error {{atomic operations (C11/GNU) are not supported on MCS251}}
+  __scoped_atomic_store_n((int *)d, 1, __ATOMIC_SEQ_CST, 0);
 }
 void scoped_max_fetch_generic(int *p) {
-  __scoped_atomic_max_fetch(p, 1, __ATOMIC_SEQ_CST, 0); // expected-error {{atomic operations (C11/GNU) are not supported on MCS251}}
+  __scoped_atomic_max_fetch(p, 1, __ATOMIC_SEQ_CST, 0);
 }
 void nontemporal_store_generic(int *p) { __builtin_nontemporal_store(1, p); }
 void strlcat_generic_dst(char *s) { __builtin___strlcat_chk(s, ca, 8, 8); }

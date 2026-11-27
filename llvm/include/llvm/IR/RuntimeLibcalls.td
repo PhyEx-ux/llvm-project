@@ -3004,7 +3004,8 @@ defset list<RuntimeLibcallImpl> MCS251ConnectedF32Libcalls = {
 def IsMCS251 : LibcallPredicate<[{TT.getArch() == Triple::mcs251}]>;
 def isMCS251 : RuntimeLibcallAvailability<(all_of IsMCS251)>;
 def MCS251SystemLibrary : SystemRuntimeLibrary<isMCS251,
-    (add mcs251_divuint, mcs251_divulong, mcs251_divsint, mcs251_divslong,
+    (add memcpy, memmove, memset,
+         mcs251_divuint, mcs251_divulong, mcs251_divsint, mcs251_divslong,
          mcs251_moduint, mcs251_modulong, mcs251_modsint, mcs251_modslong,
          MCS251ConnectedF32Libcalls)>;
 

@@ -22,8 +22,10 @@
 
 define i8 @sdiv8_probe() {
 ; CHECK-LABEL: _sdiv8_probe:
-; CHECK: __divsint_PARM_2
+; CHECK-NOT: _PARM_
+; CHECK: inc spx, #0x2
 ; CHECK: ecall __divsint
+; CHECK: dec spx, #0x2
 ; CHECK: eret
   %a = load volatile i8, ptr @a8, align 1
   %b = load volatile i8, ptr @b8, align 1
@@ -33,8 +35,10 @@ define i8 @sdiv8_probe() {
 
 define i8 @srem8_probe() {
 ; CHECK-LABEL: _srem8_probe:
-; CHECK: __modsint_PARM_2
+; CHECK-NOT: _PARM_
+; CHECK: inc spx, #0x2
 ; CHECK: ecall __modsint
+; CHECK: dec spx, #0x2
 ; CHECK: eret
   %a = load volatile i8, ptr @a8, align 1
   %b = load volatile i8, ptr @b8, align 1
@@ -44,8 +48,10 @@ define i8 @srem8_probe() {
 
 define i8 @urem8_probe() {
 ; CHECK-LABEL: _urem8_probe:
-; CHECK: __moduint_PARM_2
+; CHECK-NOT: _PARM_
+; CHECK: inc spx, #0x2
 ; CHECK: ecall __moduint
+; CHECK: dec spx, #0x2
 ; CHECK: eret
   %a = load volatile i8, ptr @a8, align 1
   %b = load volatile i8, ptr @b8, align 1
@@ -60,8 +66,10 @@ define i8 @urem8_probe() {
 ; the volatile global, never as an IR constant, to keep the node alive.
 define i8 @sdiv8_extreme() {
 ; CHECK-LABEL: _sdiv8_extreme:
-; CHECK: __divsint_PARM_2
+; CHECK-NOT: _PARM_
+; CHECK: inc spx, #0x2
 ; CHECK: ecall __divsint
+; CHECK: dec spx, #0x2
 ; CHECK: eret
   %a = load volatile i8, ptr @a8, align 1   ; -128 at runtime
   %m = load volatile i8, ptr @c8, align 1   ; -1 at runtime

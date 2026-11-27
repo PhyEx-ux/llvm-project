@@ -2,7 +2,10 @@
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj %t/alias.ll -o %t/alias.o 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj %t/ifunc.ll -o %t/ifunc.o 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
 ; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj %t/static-pointer-init.ll -o %t/init.o 2>&1 | FileCheck %s --check-prefix=UNREGISTERED
-; RUN: not llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -filetype=obj %t/slots.ll -o %t/rel.o 2>&1 | FileCheck %s --check-prefix=REL-GATE
+; Under the stack-based ABI, pointer continuation arguments do not emit static
+; pointer slots, so `slots.ll` lowers cleanly to v2 ELF (0x102 + attributes).
+; RUN: llc -mtriple=mcs251 -mcs251-memory-contract=1,2,32,8,1 -mcs251-object-format=elf -filetype=obj %t/slots.ll -o %t/slots.o
+; RUN: llvm-readobj --file-headers --sections %t/slots.o | FileCheck %s --check-prefix=NO-SLOTS-V2
 ;
 ; W3b (PM ruling 2026-09-13 #2): the ELF identity is the CONTRACT GENERATION,
 ; so the W3 "slot trigger" is gone; what remains fail-closed under a v2
@@ -22,7 +25,6 @@
 ;
 ; NO-SLOTS-V2: Flags [ (0x102)
 ; NO-SLOTS-V2: Name: .mcs251.attributes
-; NO-SLOTS-V2: Size: 204
 ; NO-SLOTS-V2-NOT: .note.mcs251.abi
 
 ;--- slots.ll

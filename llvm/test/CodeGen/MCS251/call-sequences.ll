@@ -1,7 +1,7 @@
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -stop-after=finalize-isel %s -o - | FileCheck %s --check-prefix=MIR
 ; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -stop-after=finalize-isel %s -o - | FileCheck %s --check-prefix=MIR
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj %s -o %t.O0.rel
-; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj %s -o %t.O2.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O0 -filetype=obj -mcs251-object-format=rel %s -o %t.O0.rel
+; RUN: llc -mtriple=mcs251 -verify-machineinstrs -O2 -filetype=obj -mcs251-object-format=rel %s -o %t.O2.rel
 
 ; Independent libcalls begin on the entry chain. CALLSEQ (even with no stack
 ; arguments) must prevent both static-parameter setups preceding the first
@@ -9,86 +9,61 @@
 ; instead of b/c+a/b at -O2. Check stores INSIDE each complete call sequence.
 define i32 @div_twice(i32 %a, i32 %b, i32 %c) {
 ; MIR-LABEL: name: div_twice
-; MIR: ADJCALLSTACKDOWN 0, 0
-; MIR: MOV8mrP
+; MIR: ADJCALLSTACKDOWN 4, 0
+; MIR: MOV8mrS $dr60,
 ; MIR: ECALL &{{_+}}divulong
-; MIR: ADJCALLSTACKUP 0, 0
-; MIR: ADJCALLSTACKDOWN 0, 0
-; MIR: MOV8mrP
+; MIR: ADJCALLSTACKUP 4, 0
+; MIR: ADJCALLSTACKDOWN 4, 0
+; MIR: MOV8mrS $dr60,
 ; MIR: ECALL &{{_+}}divulong
-; MIR: ADJCALLSTACKUP 0, 0
+; MIR: ADJCALLSTACKUP 4, 0
   %x = udiv i32 %a, %b
   %y = udiv i32 %b, %c
   %z = add i32 %x, %y
   ret i32 %z
 }
 
-; The signed/remainder libcalls (division design v4 §8.8): sdiv+srem and
-; udiv+urem pairs in one function lower as two independent libcalls. The
-; srem/urem operand feeds on the first call's result, which fixes the call
-; order across schedules (the remaining scheduling freedom -- where the
-; MOVADDR32 slot-address materialisation sits, and any copies/loads around
-; it -- is preserved: no NOT below forbids MOVADDR32, MOV8rmP or COPY).
-; The slot address is materialised by MOVADDR32 on the slot symbol; the
-; i16 store reuses that single base for both byte stores (Disp 0 = hi,
-; Disp 1 = lo). Every pair of adjacent positive matches below carries a
-; NOT set: apart from the explicitly expected stores, calls and CALLSEQ
-; boundaries, no ECALL, no MOV8mrP and no extra CALLSEQ edge may appear in
-; any checked segment, including the pre-window region and the function
-; tail after the last UP.
 define i16 @sdiv_srem_pair(i16 %a, i16 %b, i16 %c) {
 ; MIR-LABEL: name: sdiv_srem_pair
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: ADJCALLSTACKDOWN 0, 0
+; MIR-NOT: MOV8mrS
+; MIR: ADJCALLSTACKDOWN 2, 0
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: %[[AS:[0-9]+]]:{{[a-z0-9]+}} = MOVADDR32 &{{[^ ]*}}divsint_PARM_2
+; MIR: MOV8mrS $dr60, -1,
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: MOV8mrP %[[AS]], 0,
+; MIR: MOV8mrS $dr60, 0,
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: MOV8mrP %[[AS]], 1,
-; MIR-NOT: ECALL
-; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
+; MIR-NOT: MOV8mrS
 ; MIR: ECALL &{{_+}}divsint
 ; MIR-NOT: ECALL
-; MIR-NOT: MOV8mrP
+; MIR-NOT: MOV8mrS
 ; MIR-NOT: ADJCALLSTACKDOWN
-; MIR: ADJCALLSTACKUP 0, 0
+; MIR: ADJCALLSTACKUP 2, 0
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: ADJCALLSTACKDOWN 0, 0
+; MIR-NOT: MOV8mrS
+; MIR: ADJCALLSTACKDOWN 2, 0
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: %[[MS:[0-9]+]]:{{[a-z0-9]+}} = MOVADDR32 &{{[^ ]*}}modsint_PARM_2
+; MIR: MOV8mrS $dr60, -1,
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: MOV8mrP %[[MS]], 0,
+; MIR: MOV8mrS $dr60, 0,
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: MOV8mrP %[[MS]], 1,
-; MIR-NOT: ECALL
-; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
+; MIR-NOT: MOV8mrS
 ; MIR: ECALL &{{_+}}modsint
 ; MIR-NOT: ECALL
-; MIR-NOT: MOV8mrP
+; MIR-NOT: MOV8mrS
 ; MIR-NOT: ADJCALLSTACKDOWN
-; MIR: ADJCALLSTACKUP 0, 0
+; MIR: ADJCALLSTACKUP 2, 0
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
+; MIR-NOT: MOV8mrS
   %q = sdiv i16 %a, %b
   %r = srem i16 %q, %c
   %sum = add i16 %q, %r
@@ -100,55 +75,43 @@ define i16 @udiv_urem_pair(i16 %a, i16 %b, i16 %c) {
 ; MIR-LABEL: name: udiv_urem_pair
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: ADJCALLSTACKDOWN 0, 0
+; MIR-NOT: MOV8mrS
+; MIR: ADJCALLSTACKDOWN 2, 0
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: %[[AU:[0-9]+]]:{{[a-z0-9]+}} = MOVADDR32 &{{[^ ]*}}divuint_PARM_2
+; MIR: MOV8mrS $dr60, -1,
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: MOV8mrP %[[AU]], 0,
+; MIR: MOV8mrS $dr60, 0,
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: MOV8mrP %[[AU]], 1,
-; MIR-NOT: ECALL
-; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
+; MIR-NOT: MOV8mrS
 ; MIR: ECALL &{{_+}}divuint
 ; MIR-NOT: ECALL
-; MIR-NOT: MOV8mrP
+; MIR-NOT: MOV8mrS
 ; MIR-NOT: ADJCALLSTACKDOWN
-; MIR: ADJCALLSTACKUP 0, 0
+; MIR: ADJCALLSTACKUP 2, 0
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: ADJCALLSTACKDOWN 0, 0
+; MIR-NOT: MOV8mrS
+; MIR: ADJCALLSTACKDOWN 2, 0
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: %[[MU:[0-9]+]]:{{[a-z0-9]+}} = MOVADDR32 &{{[^ ]*}}moduint_PARM_2
+; MIR: MOV8mrS $dr60, -1,
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: MOV8mrP %[[MU]], 0,
+; MIR: MOV8mrS $dr60, 0,
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
-; MIR: MOV8mrP %[[MU]], 1,
-; MIR-NOT: ECALL
-; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
+; MIR-NOT: MOV8mrS
 ; MIR: ECALL &{{_+}}moduint
 ; MIR-NOT: ECALL
-; MIR-NOT: MOV8mrP
+; MIR-NOT: MOV8mrS
 ; MIR-NOT: ADJCALLSTACKDOWN
-; MIR: ADJCALLSTACKUP 0, 0
+; MIR: ADJCALLSTACKUP 2, 0
 ; MIR-NOT: ECALL
 ; MIR-NOT: ADJCALLSTACK
-; MIR-NOT: MOV8mrP
+; MIR-NOT: MOV8mrS
   %q = udiv i16 %a, %b
   %r = urem i16 %q, %c
   %sum = add i16 %q, %r
@@ -161,14 +124,14 @@ define i16 @udiv_urem_pair(i16 %a, i16 %b, i16 %c) {
 declare i32 @pair(i32, i32) noinline nounwind memory(none)
 define i32 @user_twice(i32 %a, i32 %b, i32 %c) {
 ; MIR-LABEL: name: user_twice
-; MIR: ADJCALLSTACKDOWN 0, 0
-; MIR: MOV8mrP
+; MIR: ADJCALLSTACKDOWN 4, 0
+; MIR: MOV8mrS $dr60,
 ; MIR: ECALL @pair
-; MIR: ADJCALLSTACKUP 0, 0
-; MIR: ADJCALLSTACKDOWN 0, 0
-; MIR: MOV8mrP
+; MIR: ADJCALLSTACKUP 4, 0
+; MIR: ADJCALLSTACKDOWN 4, 0
+; MIR: MOV8mrS $dr60,
 ; MIR: ECALL @pair
-; MIR: ADJCALLSTACKUP 0, 0
+; MIR: ADJCALLSTACKUP 4, 0
   %x = call i32 @pair(i32 %a, i32 %b)
   %y = call i32 @pair(i32 %b, i32 %c)
   %z = add i32 %x, %y

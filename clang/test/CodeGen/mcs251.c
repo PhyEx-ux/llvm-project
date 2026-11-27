@@ -9,10 +9,10 @@
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -ffreestanding -O2 -S -o - %s | FileCheck %s --check-prefix=ASM
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -target-feature +int16 -ffreestanding -O2 -S -o - %s | FileCheck %s --check-prefix=ASM
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -ffreestanding -emit-llvm -o %t.compat.ll %s
-// WP4 C1: an effective cc1-side debug request is rejected (the object
-// writers emit no source-level debug info). The fixture above no longer
-// uses -debug-info-kind=limited; the rejection is pinned here instead.
-// RUN: not %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -ffreestanding -debug-info-kind=limited -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=MCS251-DEBUG-REJECT
+// WP4 C1: ELF object output is now the default and supports DWARF -g, while
+// legacy REL mode (-mllvm -mcs251-object-format=rel) still rejects source
+// debug requests fail-closed.
+// RUN: not %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,1,32,8,1 -mllvm -mcs251-object-format=rel -ffreestanding -debug-info-kind=limited -emit-llvm -o /dev/null %s 2>&1 | FileCheck %s --check-prefix=MCS251-DEBUG-REJECT
 // RUN: not %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,32,8,1 -fdynamic-debugging -emit-llvm -o - -x ir %t.compat.ll 2>&1 | FileCheck %s --check-prefix=DYNDBG-CONFLICT
 // RUN: %clang_cc1 -triple mcs251-unknown-none -round-trip-args -Rround-trip-cc1-args -ffreestanding -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=MEMORY-CC1-DEFAULT --implicit-check-not=error:
 // RUN: %clang_cc1 -triple mcs251-unknown-none -mcs251-memory-contract=1,2,16,8,1 -round-trip-args -Rround-trip-cc1-args -ffreestanding -fsyntax-only -x c /dev/null 2>&1 | FileCheck %s --check-prefix=MEMORY-ROUNDTRIP-ON --implicit-check-not=error:

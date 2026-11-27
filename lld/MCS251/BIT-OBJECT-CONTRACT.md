@@ -1,12 +1,12 @@
 # MCS251 `bit` object ELF input contract (lld-frozen, v1)
 
-Status: **frozen lld-side input contract**, 2026-09-10. Owned by the lld stream.
+Status: **frozen lld-side input contract** (updated for HEAD). Owned by the lld stream.
 This document freezes what `lld/MCS251` accepts as the ELF encoding of persistent
-`bit` objects and how it allocates their slots. It is the lld counterpart of
-`BIT-TASK-BREAKDOWN.md` cards BT12/BT13/BT14 (lld reader/allocator/init) and of
-`BIT-FIRST-CLASS-INCREMENT.md` §3. The backend stream must emit exactly this
-shape; the relocation numbers are an lld-local extension until BT00 registers
-them in the public header (see §6).
+`bit` objects and how it allocates their slots (see also
+`docs/mcs251/04-lld-linker-and-safety.md`). Both `R_MCS251_BIT_REF` (10) and
+`R_MCS251_BITADDR8` (11) are now registered in `llvm/include/llvm/BinaryFormat/ELFRelocs/MCS251.def`,
+and the BT14 bit-aware CRT profile (`crt-bit.yaml`, `.mcs251.bitprofile`, `BITINIT`
+3-byte mask-RMW table) is implemented alongside the legacy S1 `XINIT` path below.
 
 ## 1. Address model (normative)
 
@@ -39,10 +39,11 @@ Consequences enforced here:
   pool does not re-reserve the byte.
 - An automatic bit object in a byte that is not pool-covered makes lld reserve
   that byte, excluding it from DSEG/OSEG/ISEG/SSEG and from ordinary RAM.
-- The old IRQ CRT unconditionally clears all 16 pool bytes and then applies
-  XINIT; that is the S1 "owned 16B, all-zero" subset. Preserving an *external*
-  owner's neighbouring bits needs the BT14 `crt-bit.yaml` profile and is out of
-  scope here (lld carries the ownership metadata it will need).
+- The legacy IRQ CRT unconditionally clears all 16 pool bytes and then applies
+  XINIT (S1 "owned 16B, all-zero" subset). To preserve an *external* owner's
+  neighbouring bits, use the implemented **BT14 `crt-bit.yaml` profile**
+  (`.mcs251.bitprofile` + `--area-start=BITINIT` + lld-synthesized 3-byte
+  mask-RMW `.mcs251.bittable` consumed by `__mcs251_bit_init`).
 
 ## 3. Section: `.mcs251.bit`
 
@@ -80,8 +81,8 @@ names the defining symbol, which resolves to the single definition.
 ## 4. Relocations
 
 Two bit relocations, both rejected on ordinary ALLOC sections unless stated.
-The numbers `10`/`11` are lld-local constants (`LinkerCore.cpp`); BT00 owns
-registering the public `R_MCS251_*` names in `ELFRelocs/MCS251.def`.
+Both `R_MCS251_BIT_REF` (10) and `R_MCS251_BITADDR8` (11) are registered in
+`llvm/include/llvm/BinaryFormat/ELFRelocs/MCS251.def` and recognized by `llvm-readobj`.
 
 ### 4.1 `R_MCS251_BIT_REF` (type 10, width 0)
 
@@ -169,12 +170,9 @@ which makes the result byte-reproducible for a fixed command line.
 
 ## 6. Relocation numbering note
 
-`ELFRelocs/MCS251.def` allocates 0..9 today (`9 = R_MCS251_ISR_REF`). The bit
-relocations are frozen here as `10` (`BIT_REF`) and `11` (`BITADDR8`), matching
-the BT13 card's two-relocation model. The lld parser accepts the raw numeric
-types, so the backend can emit them immediately; `llvm-readobj` prints
-`Unknown (10/11)` until BT00 registers the public names. Registering them is an
-`llvm/**` change owned by the backend stream — not made here.
+`llvm/include/llvm/BinaryFormat/ELFRelocs/MCS251.def` registers relocations `0..11`,
+including `10` (`R_MCS251_BIT_REF`) and `11` (`R_MCS251_BITADDR8`), so both the
+backend emitter and `llvm-readobj` use the public names directly.
 
 ## 7. Initialization (CRT wiring)
 

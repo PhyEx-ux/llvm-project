@@ -162,10 +162,10 @@ endforeach()
 #       （mcs251_printf_float.o 提供，S3 拆分）。与 mcs251_msb32 同为
 #       "运行时族内对象在链接期闭合"的精确符号；对不在 printf 家族
 #       闭包内的模块同样只是符号级放行，不放宽类型/intrinsic 红线。
-set(_allow_desc "mcs251_msb32(精确), putchar/out_char/out_str/out_float(精确, G13a-S3 printf 族跨 TU 提供者), llvm.{lifetime.start,lifetime.end,umax,abs,ucmp,fshl,fshr}(前缀+重载后缀)")
+set(_allow_desc "mcs251_msb32(精确), putchar/out_char/out_str/out_float(精确, G13a-S3 printf 族跨 TU 提供者), llvm.{lifetime.start,lifetime.end,umax,abs,ucmp,fshl,fshr,va_start,va_end,va_copy,mcs251.ea.save.disable,mcs251.ea.restore,mcs251.atomic.fence}(前缀+重载后缀)")
 # b/c/d 白名单：全名相等或 intrinsic 正则
 set(_sym_allow_exact "mcs251_msb32;putchar;out_char;out_str;out_float")
-set(_intr_re "^llvm\\.(lifetime\\.start|lifetime\\.end|umax|abs|ucmp|fshl|fshr)(\\.[A-Za-z0-9]+)*$")
+set(_intr_re "^llvm\\.(lifetime\\.start|lifetime\\.end|umax|abs|ucmp|fshl|fshr|va_start|va_end|va_copy|mcs251\\.ea\\.save\\.disable|mcs251\\.ea\\.restore|mcs251\\.atomic\\.fence)(\\.[A-Za-z0-9]+)*$")
 # 模块内定义的符号：define 行（函数）+ 行首 @name = 行（全局定义）
 set(_defined "")
 string(REGEX MATCHALL "define[^${NL}]*" _deflines "${CODE}")
@@ -293,6 +293,10 @@ mcs251rt_add_module(mcs251_bitutil.c O0
 # libc 模块：-O0 管道（-O2 导致 PC-rel branch out of range）
 mcs251rt_add_module(mcs251_libc.c O0
   "${MCS251RT_SRC_DIR}/mcs251_libc.h")
+
+# 通用 C11/GNU 原子运行时（EA 临界区）：-O0 管道
+mcs251rt_add_module(mcs251_atomic.c O0
+  -ffreestanding -fno-builtin)
 
 # G13a-S2 切片模块（G13A-CODE-DESIGN-draft.md rev-2 §3-S2 / PM D4）：
 # strlen 自 mcs251_libc.c 原样拆出为独立 TU（对象级按需闭包的最小粒度；
